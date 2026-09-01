@@ -202,3 +202,15 @@ evidence that the game is rendered in 2D (see that doc's correction note).
   face table strides, texture block) as plate-comment addenda on
   `Actor3D_TransformAndSubmitModel` and `RoomGeometry_TransformAndSort`; see
   [`../docs/MODEL_FORMAT.md`](../docs/MODEL_FORMAT.md).
+
+- **`parse_model_resource.py`** — parser/verifier for the actual on-disk 3D
+  model archive, `system/apps/6r51/models.idx` + `models.huge` in the game
+  install tree (found separately from `6r51.app`'s code section — this is
+  real game asset data, not something extracted from the binary). Decodes
+  every entry and checks the format reconstructed in
+  [`../docs/MODEL_FORMAT.md`](../docs/MODEL_FORMAT.md) against real bytes.
+
+  ```
+  python tools/parse_model_resource.py <models.idx> <models.huge> --verify
+  python tools/parse_model_resource.py <models.idx> <models.huge> --dump <entryIndex>
+  ```

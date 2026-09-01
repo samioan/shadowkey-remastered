@@ -262,12 +262,27 @@ Prioritization, driven by the port goal rather than raw coverage:
       header byte, cross-validating the reconstruction. Full writeup:
       [`MODEL_FORMAT.md`](MODEL_FORMAT.md).
 
+- [x] Found the actual on-disk 3D model archive and verified
+      `MODEL_FORMAT.md`'s reconstruction against it byte-for-byte:
+      `system/apps/6r51/models.idx` + `models.huge` in the game install
+      tree (found separately from `6r51.app` — real asset data, not
+      extracted from the binary). `models.idx` is a flat `(offset, size)`
+      index into `models.huge`'s 237 model resources; decoded and
+      cross-checked every invariant (header field roles, `H5==H2*3`, every
+      vertex/UV index in every face table, the texture-block offset
+      formula) against all 226 non-empty entries with **zero failures**.
+      Also found (not yet pursued) `azra.sta` and 21-per-zone files
+      (`.zon`/`.zmp`/`.pal`/etc.) that likely reference these models by
+      the same index for level/entity placement. Full writeup + new tool
+      (`tools/parse_model_resource.py`):
+      [`MODEL_FORMAT.md`](MODEL_FORMAT.md).
+
 Next: the ~9 unexamined `Poly3D_RasterizeTextured` blend-mode variants, what
 sets `engine+0x62c` on room transitions, the `engine+0xbe0f`/`0x5c4` fade-LUT
-compositing path, and locating an actual on-disk model/texture resource file
-to verify `MODEL_FORMAT.md`'s layout against real bytes (no such file found
-yet — only the *consumer* code has been examined). See `RENDERER_3D.md`'s and
-`MODEL_FORMAT.md`'s open follow-ups.
+compositing path, and whether the per-zone `.zon`/`.zmp`/etc. files reference
+`models.huge` by this same index (how a room's `+0x54` model pointer gets
+populated on zone load). See `RENDERER_3D.md`'s and `MODEL_FORMAT.md`'s open
+follow-ups.
 
 ## Open questions
 

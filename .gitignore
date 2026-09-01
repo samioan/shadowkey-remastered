@@ -12,6 +12,7 @@
 !/tools/fingerprint_compiler.py
 !/tools/parse_symbian_lib.py
 !/tools/resolve_import_names.py
+!/tools/parse_model_resource.py
 
 # --- Ghidra project (regenerable from the .app via tools/e32image.py + analyzeHeadless) ---
 # Recursive (**) because pyghidra's open_program(), if nested_project_location
