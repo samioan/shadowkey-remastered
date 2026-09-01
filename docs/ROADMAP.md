@@ -312,21 +312,36 @@ Prioritization, driven by the port goal rather than raw coverage:
 - [x] Resolved what sets `engine+0x62c` on room transitions: **nothing**
       does — it's a single 0x160-byte room-render-state object allocated
       exactly once in `GameEngine_ctor` (`RoomRenderState_ctor`) and never
-      reassigned; `GameEngine_InitLevel` overwrites its fields in place
-      from `<zone>.zon` on every level load, rather than swapping the
-      pointer or indexing into the separate `engine+0x5464` room-list
-      array. Full writeup:
-      [`RENDERER_3D.md`](RENDERER_3D.md#open-follow-ups). Also ruled out an
-      `"InitLevel Pre/Post LUA"` debug-marker lead as a real Lua scripting
-      layer — traced both bracketed regions and found ordinary
-      constant-loading/4-way-buffer-split code, not a Lua interpreter; "LUA"
-      appears to be an unrelated internal debug-phase tag name.
+      reassigned; `GameEngine_InitLevel` overwrites its fields in place on
+      every level load, rather than swapping the pointer or indexing into
+      the separate `engine+0x5464` room-list array.
+
+- [x] Found a **second, zlib-compressed per-zone file loader**
+      (`WholeFile_Load`, 0x1002778c — 4-byte decompressed-size header + a
+      raw zlib stream, verified against a real file) feeding 6 more
+      per-zone extensions, and used it to **correct** the `engine+0x62c`
+      entry above: the room-render object's model pointer comes from
+      **`<zone>.zsk`**, not `.zon` as first written — verified by
+      decompressing a real `azra.zsk` and confirming its header decodes
+      exactly per `MODEL_FORMAT.md`'s spec (`H0=7`, `H6=1`, `H5==H2*3`).
+      So the zone's actual walkable dungeon geometry is an ordinary
+      `MODEL_FORMAT.md`-format model, just zlib-compressed and loaded
+      directly per-zone instead of through the `models.idx` archive. Also
+      found `.zfg` (→ `engine+0x5c4`, resolving the fade-LUT open item) and
+      traced a "bullseye" AI-navigation-looking subsystem
+      (`Bullseye_Init`/`Bullseye_InitMap`/`.zcp`/`calc_lights`) along the
+      way. This also fully explains the `"InitLevel Pre/Post LUA"` debug
+      markers noted earlier: they bracket the `.zlu` file's load — "LUA" is
+      short for `.zlu`, not a Lua scripting layer (a real dead end, just
+      now correctly attributed instead of merely ruled out). Full writeup:
+      [`ZONE_FORMAT.md`](ZONE_FORMAT.md#compressed-per-zone-files-and-where-the-actual-room-geometry-comes-from).
 
 Next: the ~9 unexamined `Poly3D_RasterizeTextured` blend-mode variants, the
-`engine+0xbe0f`/`0x5c4` fade-LUT compositing path, the `.sur`/`.zon`/`.pth`
-record field layouts, `entities.txt`'s unidentified `thirdField`, and
-`azra.sta`'s still-unidentified format. See `RENDERER_3D.md`'s,
-`MODEL_FORMAT.md`'s, and `ZONE_FORMAT.md`'s open follow-ups.
+`.sur`/`.zon`/`.pth`/`.ztx`/`.zmp`/`.zlu`/`.zcp` record/content field
+layouts, `entities.txt`'s unidentified `thirdField`, and `azra.sta`'s
+still-unidentified format (confirmed not the `.zcp`/"bullseye" file). See
+`RENDERER_3D.md`'s, `MODEL_FORMAT.md`'s, and `ZONE_FORMAT.md`'s open
+follow-ups.
 
 ## Open questions
 

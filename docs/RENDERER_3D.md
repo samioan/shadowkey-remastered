@@ -250,16 +250,20 @@ the screen once per frame.
   `engine+0x62c` is a single 0x160/352-byte room-render-state object,
   allocated exactly **once** in `GameEngine_ctor` (`new(0x160)` +
   constructor call at 0x10067898) and never reassigned again. Room
-  transitions instead **overwrite its fields in place** —
-  `GameEngine_InitLevel` sets `(*(engine+0x62c))+0x54` (the model pointer),
-  `+0x5e`, `+0xa8`, `+0xb2`, `+0xb6` etc. straight from the freshly-loaded
-  `<zone>.zon` room record every time a level loads (see
-  `ZONE_FORMAT.md`). So there's exactly one live "current room" render
-  object per engine instance, reused for whichever room is active — not an
-  index into the `engine+0x5464` room-definition array from `.zon` (that
-  array holds the zone's *room list*; `engine+0x62c` holds the *rendering
-  state* for whichever one is currently being drawn). The room model's
-  on-disk format is now fully solved too, see `MODEL_FORMAT.md`.
+  transitions instead **overwrite its fields in place** — `GameEngine_
+  InitLevel` sets `(*(engine+0x62c))+0x54` (the model pointer) straight
+  from the freshly-loaded **`<zone>.zsk`** file every level load. **This
+  corrects an earlier version of this note that named `.zon` here — it's
+  wrong, `.zon` populates the separate `engine+0x5464` room-*list* array
+  only; `.zsk` is what actually feeds the model pointer that
+  `RoomGeometry_TransformAndSort` renders.** See `ZONE_FORMAT.md`'s new
+  "Compressed per-zone files" section for the full correction and how this
+  was caught. So there's exactly one live "current room" render object per
+  engine instance, reused for whichever room is active — its geometry
+  comes straight from `.zsk`, decompressed and parsed as an ordinary
+  `MODEL_FORMAT.md`-format resource (**verified**: decompressing a real
+  `azra.zsk` yields a header that decodes exactly per that spec, including
+  the `H5==H2*3` invariant).
 - What `FUN_10068e0c`'s other switch cases are (it's a general screen-state
   machine; case `5` is confirmed as "render the 3D game view", cases `1` and
   `6` look like menu/list UI — not traced in this pass).

@@ -224,6 +224,11 @@ evidence that the game is rendered in 2D (see that doc's correction note).
   overwritten in place on room transitions); see
   [`../docs/RENDERER_3D.md`](../docs/RENDERER_3D.md).
 
+- `shadowkey/ghidra/scripts/pyghidra_label_compressed_zone_files.py` —
+  labels `WholeFile_Load` (the zlib-compressed per-zone file loader),
+  `Bullseye_Init`, `Bullseye_InitMap`; see
+  [`../docs/ZONE_FORMAT.md`](../docs/ZONE_FORMAT.md#compressed-per-zone-files-and-where-the-actual-room-geometry-comes-from).
+
 - **`parse_model_resource.py`** — parser/verifier for the actual on-disk 3D
   model archive, `system/apps/6r51/models.idx` + `models.huge` in the game
   install tree (found separately from `6r51.app`'s code section — this is

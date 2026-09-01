@@ -34,6 +34,12 @@ fallback). `GameEngine_InitLevel` loads them in this order:
    count × 0x48-byte (72-byte) records. **This is where a placed object's
    model gets assigned** (see below).
 
+`GameEngine_InitLevel` also loads six more per-zone files interleaved with
+the above (`.ztx`, `.zmp`, `.zlu`, `.zfg`, `.zcp`, `.zsk`) through a second,
+**zlib-compressed** loader — see "Compressed per-zone files" below, which
+covers the single most important one for rendering: `.zsk`, the zone's
+actual walkable dungeon-geometry model.
+
 ## The model-index cache: `engine+0x6b38` / `engine+0x6f38`
 
 `ZoneModelList_Load` (`FUN_10060ac0`) opens `<zone>_models.txt`, and for
@@ -174,6 +180,73 @@ possible type IDs, loaded once at boot) → `engine+0xbe34` BST → per-zone
 (populated per-zone from `<zone>_models.txt`, itself backed by
 `models.idx`/`models.huge`) → the object's `+0x54` model pointer.
 
+## Compressed per-zone files, and where the actual room geometry comes from
+
+A second per-zone file loader exists alongside the streaming
+open+`fread`-style one (`FUN_1009eb68`/`FUN_1009ec80`) used for `.ent`/
+`.pth`/`.sur`/`.zon` above: `WholeFile_Load` (`FUN_1002778c`, 0x1002778c).
+Its on-disk format, read directly from its decompiled logic: the first
+**4 bytes are the decompressed size** (`u32` LE), and everything after
+that is a **raw zlib stream** (`EZLIB__uncompress`, i.e. zlib's
+`uncompress()` — the standard 2-byte zlib header + deflate + Adler-32
+trailer, not raw deflate/gzip). **Verified against a real file**:
+`azra.zsk`'s first 4 bytes decode to `132624`, and
+`zlib.decompress(data[4:])` in Python produces exactly `132624` bytes.
+
+Six per-zone extensions go through this loader (found by resolving each
+call site's `sprintf` format-string operand — some of GCC's local-variable
+reuse in `GameEngine_InitLevel` initially led to a wrong extension for one
+of these, caught by checking the *last* assignment before each use, not
+just the first):
+
+| ext     | dest field(s)                | role |
+|---------|-------------------------------|------|
+| `.ztx`  | `engine+0x364` (+ `engine+0x360` = first byte) | zone texture archive (not decoded further) |
+| `.zmp`  | `engine+0x328`                | unidentified blob (not decoded) |
+| `.zlu`  | `engine+0x36c/0x370/0x374/0x378` (4×512-byte chunks of one 2048-byte blob) | unidentified 4-way LUT/table split; **this is what the `"InitLevel Pre/Post LUA"` debug markers actually bracket** — "LUA" is short for `.zlu`, not the Lua scripting language (see correction below) |
+| `.zfg`  | `engine+0x5c4`                | the fog/fade lookup table `CompositeSceneBufferToScreen` reads when `engine+0xbe0f` is set (`RENDERER_3D.md`'s fade-LUT open item) — "zfg" = "zone fog" |
+| `.zcp`  | `engine+0x32c`                | loaded by the "bullseye" subsystem's `load_map` step (see below) |
+| **`.zsk`** | **`(*(engine+0x62c))+0x54`** | **the current room's actual 3D model — see below, this is the important one** |
+
+### `.zsk` is the room/dungeon geometry itself, in `MODEL_FORMAT.md`'s format
+
+**This corrects an error in the first version of this doc** (and the
+matching `RENDERER_3D.md` note), which said the `engine+0x62c` room-render
+object's fields get set from `<zone>.zon`. That was wrong — caught by
+re-tracing which `sprintf`-built path actually feeds the `FUN_1002778c`
+call whose result lands in `(*(engine+0x62c))+0x54`. It's `.zsk`, not
+`.zon`. `.zon` only ever populates the separate `engine+0x5464` room-*list*
+array (positions/names for up to 40 room slots, see below); `.zsk` is a
+one-per-zone file that supplies the actual model `RoomGeometry_
+TransformAndSort` renders.
+
+**Verified directly against real game data**: decompressing `azra.zsk`
+(4-byte size header + zlib, per above) and reading its first 14 bytes as
+`MODEL_FORMAT.md`'s 7×`int16` header gives `(7, 1, 30, 168, 56, 90, 1)` —
+`H0=7` ✓, `H6=1` ✓ (both format constants), and `H5==H2*3` (`90==30*3`) ✓,
+exactly the invariant verified across all 226 `models.idx` entries. So the
+zone's big walkable dungeon geometry is stored as an ordinary
+`MODEL_FORMAT.md`-format model resource, just zlib-compressed and loaded
+directly per-zone rather than referenced through the `models.idx` archive
+— unlike every placed `.ent` object, which *does* go through the archive.
+`H1=1` (one frame, i.e. static, no vertex animation) makes sense for room
+geometry.
+
+### The "bullseye" subsystem and `.zcp`
+
+While tracing this, found debug-string brackets `"InitLevel Pre bullseye
+init"` → `Bullseye_Init` (`FUN_1001b8d4`, uses the `.sur` data loaded
+earlier) → `"...init_map"` → `Bullseye_InitMap` (`FUN_1000e840`, uses the
+`.sur` header's `local_656`/`local_658` fields) → `"...load_map"` (loads
+`<zone>.zcp` via `WholeFile_Load`, stored at `engine+0x32c`) →
+`"...calc_lights"` (`FUN_1001b964`). "Bullseye" is presumably this game's
+internal name for its AI navigation/pathfinding system (a `.zcp` "zone
+collision/pathing" map feeding both AI movement and — per the debug
+sequence ending in `calc_lights` — some lighting calculation, maybe
+line-of-sight-based). Not traced further; noted here since it explains
+what `.zcp` is for, correcting an earlier guess that `azra.sta` might be
+related to it (it isn't, see below).
+
 ## What's still open
 
 - `thirdField` (`entities.txt`'s third `%d`, stored at descriptor `+0x10`)
@@ -183,7 +256,19 @@ possible type IDs, loaded once at boot) → `engine+0xbe34` BST → per-zone
   `object+0x5e`/"modelFlags").
 - The `.sur` (surface) and `.pth` (AI spawn/patrol path) formats — only
   their outer count+record framing was traced, not decoded field-by-field.
-- `.zon`'s 0x48-byte room record layout (only the count/stride was traced).
-- `azra.sta`'s format (see `MODEL_FORMAT.md`) — still unpursued.
-- What the `InitLevel Pre/Post LUA` debug markers in `GameEngine_InitLevel`
-  imply — a second scripting layer alongside SimKin? Not investigated.
+- `.zon`'s 0x48-byte room record layout — partially decoded: a
+  `strcpy`-copied 64-byte name plus 4×`u16` header fields that land at the
+  room slot's `+0x30/+0x34/+0x38/+0x3c` (two of them computed as `<a value
+  from .sur's header> - <raw field>`, suggesting a reverse/from-the-end
+  index rather than a direct one) — semantic meaning of those 4 fields not
+  pinned down (room connectivity/neighbor indices? light or texture
+  references?).
+- `.ztx`/`.zmp`/`.zlu`/`.zcp`'s decompressed contents — only their loader
+  and destination field are known, not decoded field-by-field.
+- `azra.sta`'s format — still unidentified. Confirmed **not** related to
+  the "bullseye" pathfinding chain (that's `.zcp`) and **not** loaded via
+  either per-zone loader traced here (no `"%s\%s.sta"` format string
+  exists anywhere in the binary) — it may be a level-editor-only artifact
+  never read by the shipped game. Five literal (non-templated) `"azra"`
+  strings exist in the binary with no resolvable references, an
+  unexplained loose end.
