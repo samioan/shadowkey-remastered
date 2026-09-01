@@ -21,8 +21,10 @@ fallback). `GameEngine_InitLevel` loads them in this order:
 1. **`<zone>_models.txt`** (ASCII text, one line per model slot) — the list
    of which of the 237 `models.idx` entries this zone actually uses. Loaded
    by `ZoneModelList_Load` (`FUN_10060ac0`, 0x10060ac0).
-2. **`<zone>.sur`** — small `u8` count + count×8-byte records (surface/
-   material data, not pursued further here).
+2. **`<zone>.sur`** — small `u8` count + count×8-byte records; the count
+   and buffer's exact loader-context/engine field locations are now
+   pinned (forwarded into the "bullseye" lighting subsystem, see below),
+   but no consumer of individual record bytes was found.
 3. **`<zone>.zon`** — room definitions: `u16` count → `engine+0x5460`, then
    count × 0x48-byte (72-byte) room records into `engine+0x5464`, stride
    0x84 (132 bytes) per room slot. **Record layout now fully decoded** (see
@@ -268,10 +270,10 @@ just the first):
 | ext     | dest field(s)                | role |
 |---------|-------------------------------|------|
 | `.ztx`  | `engine+0x364` (+ `engine+0x360` = first byte) | zone texture archive (not decoded further) |
-| `.zmp`  | `engine+0x328`                | zone metadata — **header partially decoded**, see below |
+| `.zmp`  | `engine+0x328`                | zone metadata — **header decoded, bulk content decoded** (a `field80`×`zmpTotal` light/nav grid, see "The 'bullseye' subsystem" below) |
 | `.zlu`  | `engine+0x36c/0x370/0x374/0x378` (4×512-byte chunks of one 2048-byte blob) | unidentified 4-way LUT/table split; **this is what the `"InitLevel Pre/Post LUA"` debug markers actually bracket** — "LUA" is short for `.zlu`, not the Lua scripting language (see correction below) |
 | `.zfg`  | `engine+0x5c4`                | the fog/fade lookup table `CompositeSceneBufferToScreen` reads when `engine+0xbe0f` is set (`RENDERER_3D.md`'s fade-LUT open item) — "zfg" = "zone fog" |
-| `.zcp`  | `engine+0x32c`                | loaded by the "bullseye" subsystem's `load_map` step (see below) |
+| `.zcp`  | `engine+0x32c`                | a small indexed table of per-cell light-level deltas for the lighting bake — **decoded**, see "The 'bullseye' subsystem" below |
 | **`.zsk`** | **`(*(engine+0x62c))+0x54`** | **the current room's actual 3D model — see below, this is the important one** |
 
 ### `.zon`'s room record, fully decoded
@@ -359,24 +361,99 @@ directly per-zone rather than referenced through the `models.idx` archive
 `H1=1` (one frame, i.e. static, no vertex animation) makes sense for room
 geometry.
 
-### The "bullseye" subsystem and `.zcp`
+### The "bullseye" subsystem: a load-time light-propagation bake, not AI pathfinding
 
-While tracing this, found debug-string brackets `"InitLevel Pre bullseye
-init"` → `Bullseye_Init` (`FUN_1001b8d4(engine, engine+0x360, engine+0x364+1,
-engine+0x380)` — i.e. the `.ztx` texture data (`engine+0x360`/`+0x364`) plus
-the `.sur` record count (`engine+0x380`, set from `.sur`'s leading `u8`
-count)) → `"...init_map"` → `Bullseye_InitMap` (`FUN_1000e840(engine,
-local_658, local_656[0], ...)` — **corrected**: those two `u16`s are the
-`.zmp` header's `field80`/`zmpTotal` fields decoded above, not `.sur`'s as
-an earlier pass of this note said) → `"...load_map"` (loads `<zone>.zcp`
-via `WholeFile_Load`, stored at `engine+0x32c`) → `"...calc_lights"`
-(`FUN_1001b964`). "Bullseye" is presumably this game's internal name for
-its AI navigation/pathfinding system (a `.zcp` "zone collision/pathing" map
-feeding both AI movement and — per the debug sequence ending in
-`calc_lights` — some lighting calculation, maybe line-of-sight-based). Not
-traced further; noted here since it explains what `.zcp` is for, correcting
-an earlier guess that `azra.sta` might be related to it (it isn't, see
-below).
+Debug-string brackets `"InitLevel Pre bullseye init"` → `Bullseye_Init`
+(`0x1001b8d4`) → `"...init_map"` → `Bullseye_InitMap` (`0x1000e840`) →
+`"...load_map"` (loads `<zone>.zcp` via `WholeFile_Load`, stored at
+`engine+0x32c`) → `"...calc_lights"` (`Bullseye_LoadZmpCells`,
+`0x1001b964`) trace a subsystem originally guessed to be AI
+navigation/pathfinding. **Fully decoding `.zmp`'s bulk content and `.zcp`
+corrects that guess**: this is a one-shot **per-zone lighting bake**
+(every function below has exactly one caller — `GameEngine_InitLevel` or
+each other — none run per-tick), not pathfinding. "Bullseye" may still be
+this subsystem's internal name (unconfirmed), but its job is torch-light
+propagation with wall-bounce, computed once at zone load.
+
+**`Bullseye_Init`** (`Bullseye_Init(engine, ztxFirstByte, ztxBuffer+1,
+surCount, surBuffer, zluChunk1, zluChunk2, zluChunk3, zluChunk4)` — 9
+arguments; the raw call-site disassembly had to be read directly because
+the decompiler only showed 4 of them, the same "extra args silently
+dropped from the C view" quirk hit earlier with `SimKinObject_FindByName`)
+just stashes all 8 loaded per-zone buffers/counts into fields on the
+engine object (`+0x6914`/`+0x6918` for `.sur`, `+0x6b1c`/`+0x6b20` for
+`.ztx`, `+0x6b24..+0x6b30` for `.zlu`'s 4 chunks) for later use. None of
+`.ztx`'s or `.zlu`'s consumers were found in this pass (their forwarding
+destinations are large-offset fields the disassembly-reference tooling
+used elsewhere in this project can't easily search for) — their contents
+remain undecoded, see "What's still open".
+
+**`Bullseye_InitMap`** (`Bullseye_InitMap(engine, field80, zmpTotal,
+&progressLog)`) takes `.zmp` header's `field80`/`zmpTotal` fields as a **2D
+grid's width/height** and allocates two arrays sized by `width*height`: a
+4-byte-per-cell array at `engine+0x6904` (zeroed, unused consumer found —
+possibly reserved/legacy) and an **8-byte-per-cell light/nav grid** at
+`engine+0x6908`, whose defaults it seeds (byte offset `+2`=0, `+3`=0x3f,
+and byte `+0` bit 0 set on every 16th cell as a placeholder waypoint
+marker — all overwritten by real data next).
+
+**`Bullseye_LoadZmpCells`** (was `FUN_1001b964`, matches the
+`"calc_lights"` debug marker) resolves **the bulk of `.zmp`'s content**:
+everything from decompressed offset `0x84` onward (right after the
+132-byte `ZmpHeader` — this is the answer to "what's the rest of `.zmp`
+for") is a **`field80` × `zmpTotal` grid of 6-byte cell records**, copied
+byte-for-byte into the first 6 bytes of each 8-byte `engine+0x6908` cell:
+
+```c
+struct ZmpCell {           // 6 bytes on disk, per grid cell
+    uint8  flags;            // bit0 = light source; bit1 = wall/obstruction
+                              //   (blocks + bounces Bullseye_PropagateLight's rays)
+    uint8  unknown0;          // not decoded
+    uint16 lightLevel;         // baseline light level, recalculated below
+    uint16 zcpIndex;            // index into .zcp's per-cell light-delta table
+};
+```
+
+**`Bullseye_BakeLighting`** (was `FUN_1000f130`) does the actual bake, in
+three passes over the `engine+0x6908` grid: (1) zero every cell's
+`lightLevel`; (2) for every cell with `flags` bit0 set (a light source),
+call `Bullseye_PropagateLight` at that cell's world position
+(`col*0x100+0x80`, `row*0x100+0x80` — the same 256-unit-per-tile 8.8
+fixed-point scale as the actor-collision/position code in
+`GRAPHICS_FORMAT.md`); (3) for every cell, look up `.zcp`'s per-cell
+entry at `zcpIndex`, add its signed delta byte (× `0x100`) to
+`lightLevel`, clamped to `[0, 0x3eff]`/saturating at `0x3f00`.
+
+**`Bullseye_PropagateLight`** (was `FUN_1000ef74`) is a real **2D ray-cast
+light-propagation-with-wall-bounce** simulation: casts rays in 256
+directions from a light-source cell using the *same* 2048-entry sin/cos
+LUT shape as `BuildRotationMatrix3x4`/the automap's rotated player marker
+(`RENDERER_3D.md`), stepping cell by cell along each ray and adding a flat
+`+0x40` to every cell's `lightLevel` it crosses (same clamp as above). A
+cell with `flags` bit1 set (wall) makes the ray **bounce** — its step
+direction sign-flips on that axis — rather than pass through; each ray
+stops once it has bounced on both axes or left the grid. This is a
+lightmap bake: torches/light sources spread illumination outward,
+reflecting off walls, computed once per zone load rather than every frame.
+
+**`.zcp`'s format, fully decoded from `Bullseye_BakeLighting`'s lookup**:
+
+```c
+struct ZcpFile {
+    uint8  entryCount;        // offset 0x00 (only byte actually read)
+    uint8  pad[3];              // offset 0x01..0x03, unread
+    ZcpEntry entries[entryCount]; // offset 0x04, stride 0x24 (36 bytes)
+};
+struct ZcpEntry {              // 36 bytes; only the first is decoded
+    int8  lightDelta;            // offset 0x00: signed, applied as delta*0x100
+    uint8 unknown[35];            // offset 0x01..0x23, not decoded
+};
+```
+
+This also resolves what `azra.sta` isn't related to: an earlier pass of
+this note guessed a link to "bullseye pathfinding" — there's no pathfinding
+here at all, just a static lighting bake, so that guess is moot (see
+`azra.sta`'s own entry below for what *is* known).
 
 ## `.stn`: per-instance trap/lockpick difficulty bindings
 
@@ -484,9 +561,28 @@ same-session re-init path that doesn't want to teleport the player.
   indices? light or texture references?) — two of them are computed as
   `zmpTotal - rawField`, a reverse/from-the-end index into something sized
   by `.zmp`'s header count, itself also not identified.
-- `.ztx`/`.zlu`/`.zcp`'s decompressed contents, and the bulk of `.zmp`'s
-  header (`unknown1`/`unknown2`, 96 of its 132 header bytes) — only their
-  loader and destination field are known, not decoded field-by-field.
+- ~~`.zcp`'s contents, and the bulk of `.zmp`'s content~~ — **resolved**,
+  see "The 'bullseye' subsystem" above: `.zmp`'s post-header bytes are a
+  `field80`×`zmpTotal` grid of 6-byte light/nav cells, `.zcp` is a small
+  indexed table of per-cell light deltas, and together with
+  `Bullseye_PropagateLight`'s ray-cast they form a one-shot per-zone
+  lighting bake. `.zmp`'s `unknown1`/`unknown2` header fields (64 of its
+  132 header bytes) are still undecoded, as is most of each `ZmpCell`
+  (`unknown0`) and `ZcpEntry` (35 of 36 bytes).
+- `.ztx`'s and `.zlu`'s decompressed contents — still open. Both get
+  loaded and forwarded into the bullseye engine object
+  (`.ztx`→`engine+0x6b1c`/`+0x6b20`, `.zlu`'s 4 chunks→`engine+0x6b24`
+  through `+0x6b30`) by `Bullseye_Init`, but no consumer of those
+  forwarded fields was found in this pass — they're likely read from
+  code this pass didn't reach (the large field offsets make them hard to
+  search for with the existing offset-grep tooling; a vtable/virtual-call
+  consumer, or one reached only via runtime dispatch, would also be
+  invisible to it).
+- `.sur`'s per-field byte meaning within its 8-byte records — the
+  container (count at a loader-context offset, `EUSER____builtin_vec_new`
+  buffer sized `count*8`, forwarded into the bullseye engine object at
+  `+0x6914`/`+0x6918`) is now precisely pinned, but no code that reads
+  individual bytes *within* one 8-byte `.sur` record was found.
 - `azra.sta`'s format — still unidentified. Confirmed **not** related to
   the "bullseye" pathfinding chain (that's `.zcp`) and **not** loaded via
   either per-zone loader traced here (no `"%s\%s.sta"` format string

@@ -277,6 +277,14 @@ evidence that the game is rendered in 2D (see that doc's correction note).
   and one structurally distinct direct-to-screen/no-depth-test variant; see
   [`../docs/RENDERER_3D.md`](../docs/RENDERER_3D.md#the-10-poly3d_rasterizetextured-variants).
 
+- `shadowkey/ghidra/scripts/pyghidra_label_bullseye_lighting.py` — renames
+  and documents the "bullseye" subsystem's three lighting-bake functions
+  (`Bullseye_LoadZmpCells`, `Bullseye_BakeLighting`,
+  `Bullseye_PropagateLight`), resolved by tracing `.zmp`'s bulk content and
+  `.zcp` to the byte level — a one-shot per-zone light-propagation bake
+  with wall-bounce, not AI pathfinding as first guessed; see
+  [`../docs/ZONE_FORMAT.md`](../docs/ZONE_FORMAT.md#the-bullseye-subsystem-a-load-time-light-propagation-bake-not-ai-pathfinding).
+
 - **`parse_model_resource.py`** — parser/verifier for the actual on-disk 3D
   model archive, `system/apps/6r51/models.idx` + `models.huge` in the game
   install tree (found separately from `6r51.app`'s code section — this is

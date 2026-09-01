@@ -410,9 +410,27 @@ Prioritization, driven by the port goal rather than raw coverage:
       `pyghidra_label_rasterizer_variants.py`. Full writeup:
       [`RENDERER_3D.md`](RENDERER_3D.md#the-10-poly3d_rasterizetextured-variants).
 
-Next: the `.sur`/`.ztx`/`.zlu`/`.zcp` record/content field layouts, the bulk
-of `.zmp`'s header, and `azra.sta`'s still-unidentified format (confirmed
-not the `.zcp`/"bullseye" file). See `MODEL_FORMAT.md`'s and
+- [x] Decoded `.zmp`'s bulk content (everything after its 132-byte header)
+      and `.zcp`, by tracing the "bullseye" subsystem's three lighting
+      functions to the byte level. **Corrects** the earlier "AI
+      navigation/pathfinding" guess for "bullseye": it's actually a
+      one-shot **per-zone lighting bake** (every function in the chain has
+      exactly one caller, none run per-tick) — `.zmp`'s post-header bytes
+      are a `field80`×`zmpTotal` grid of 6-byte light/nav cells (light-source
+      and wall/obstruction flags, a light level, an index into `.zcp`),
+      `.zcp` is a small indexed table of per-cell light deltas, and a
+      dedicated function does real 2D ray-cast light propagation with
+      wall-bounce using the same sin/cos LUT as the rotation-matrix/automap
+      code, all baked once at zone load. Also pinned `.sur`'s exact
+      count/buffer field locations (forwarded into this same subsystem) and
+      confirmed `.ztx`/`.zlu` get forwarded there too, though no consumer of
+      their contents was found this pass. Renamed/commented via
+      `pyghidra_label_bullseye_lighting.py`. Full writeup:
+      [`ZONE_FORMAT.md`](ZONE_FORMAT.md#the-bullseye-subsystem-a-load-time-light-propagation-bake-not-ai-pathfinding).
+
+Next: `.ztx`/`.zlu`'s still-undecoded contents (forwarded into the bullseye
+lighting subsystem but no consumer found), `.sur`'s per-field byte meaning,
+and `azra.sta`'s still-unidentified format. See `MODEL_FORMAT.md`'s and
 `ZONE_FORMAT.md`'s open follow-ups.
 
 ## Open questions
