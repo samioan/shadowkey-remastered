@@ -498,11 +498,26 @@ Prioritization, driven by the port goal rather than raw coverage:
       `ZcpEntry` struct and
       [`RENDERER_3D.md`](RENDERER_3D.md#the-traversal-what-decides-which-faces-get-a-dynamic-draw).
 
-Next: `SurfaceFace_RasterizeTextured_v0`–`_v2` (presumed near/fade
-siblings of `_v3`, not independently traced), the two `heightA`/`heightB`
-fields' finer sub-structure, and `.sta`'s remaining undecoded fields
-(`flags`, `unkA`/`unkB`). See `MODEL_FORMAT.md`'s, `RENDERER_3D.md`'s,
-`WORLD_MODEL.md`'s, and `ZONE_FORMAT.md`'s open follow-ups.
+- [x] Traced `SurfaceFace_RasterizeTextured_v0`/`_v1`/`_v2` in full
+      (`_v3` already was). Confirmed `_v2` (far+fade) is `_v3`'s core plus
+      the actor pipeline's fog-nibble scheme. Found the near/far split
+      here is a genuine **behavioral** difference, not just extra
+      clip-edge bookkeeping like the actor pipeline's near variants:
+      `_v0`/`_v1` (near) write every pixel of a fixed 8-wide
+      interpolation batch unconditionally — no chroma-key transparency
+      check, no per-pixel depth test — while `_v2`/`_v3` (far) gate every
+      pixel on both. Near wall segments are presumably always the
+      frontmost thing drawn there, so the engine skips both checks for
+      speed. Documented via
+      `pyghidra_label_surface_rasterizer_variants.py`. Full writeup:
+      [`RENDERER_3D.md`](RENDERER_3D.md#the-tile-grid-wallsurface-face-renderer-a-third-pipeline).
+
+Next: the two `heightA`/`heightB` fields' finer sub-structure, the `.zlu`
+chunk's secondary per-scanline/per-pixel `0x200`-byte-block offset (seen
+in all 4 `SurfaceFace_RasterizeTextured` variants, not decoded), and
+`.sta`'s remaining undecoded fields (`flags`, `unkA`/`unkB`). See
+`MODEL_FORMAT.md`'s, `RENDERER_3D.md`'s, `WORLD_MODEL.md`'s, and
+`ZONE_FORMAT.md`'s open follow-ups.
 
 ## Open questions
 

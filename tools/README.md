@@ -325,6 +325,15 @@ evidence that the game is rendered in 2D (see that doc's correction note).
   rather than sampling isolated call sites; see
   [`../docs/ZONE_FORMAT.md`](../docs/ZONE_FORMAT.md#the-bullseye-subsystem-a-load-time-light-propagation-bake-not-ai-pathfinding).
 
+- `shadowkey/ghidra/scripts/pyghidra_label_surface_rasterizer_variants.py`
+  — adds full trace comments to `SurfaceFace_RasterizeTextured_v0`/`_v1`/
+  `_v2` (`_v3` was already documented when renamed): confirms `_v2`
+  matches `_v3` plus the fog-nibble scheme, and that `_v0`/`_v1`'s near
+  variants skip the chroma-key/depth-test checks entirely — a genuine
+  behavioral split from the far variants, not just extra clip-edge
+  bookkeeping; see
+  [`../docs/RENDERER_3D.md`](../docs/RENDERER_3D.md#the-tile-grid-wallsurface-face-renderer-a-third-pipeline).
+
 - **`parse_model_resource.py`** — parser/verifier for the actual on-disk 3D
   model archive, `system/apps/6r51/models.idx` + `models.huge` in the game
   install tree (found separately from `6r51.app`'s code section — this is

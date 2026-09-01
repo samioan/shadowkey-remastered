@@ -344,10 +344,9 @@ scheme:
   per-face material byte) as an extra pointer argument.
 - **`SurfaceFace_RasterizeTextured_v0`..`_v3`** (renamed from
   `FUN_1005a9e0`/`FUN_10059970`/`FUN_1005c1a4`/`FUN_1005bbc8`) — the 4
-  dispatch targets (near+fade, near+no-fade, far+fade, far+no-fade,
-  matching the actor pipeline's near-clip/fade axes exactly). `_v3`
-  (0x1005bbc8) was traced in full and **resolves `.zlu`'s role too**: it
-  reads a `.ztx` texel as a single **byte** (not raw 16bpp — `.ztx` is
+  dispatch targets (near+fade, near+no-fade, far+fade, far+no-fade). All
+  4 now traced. `_v3` (0x1005bbc8, far+no-fade) **resolves `.zlu`'s role**:
+  it reads a `.ztx` texel as a single **byte** (not raw 16bpp — `.ztx` is
   **8bpp palettized**, unlike the actor/room pipelines' raw-16bpp
   textures), doubles it as an index, then reads the *final* 16bpp color
   out of the forwarded `.zlu` chunk at that index. So **`.zlu` is 4
@@ -355,10 +354,28 @@ scheme:
   entries each) that convert a wall texture's indexed texels into real
   color — a classic same-texture-different-palette trick for varying a
   wall's lit/dark/themed look without duplicating texture data, selected
-  per-face by 2 bits of a material byte. A secondary per-scanline/
-  per-pixel offset into adjacent 0x200-byte blocks within the chunk
-  wasn't fully decoded (likely a further distance-driven palette blend,
-  analogous to the actor pipeline's fade LUT) — see Open follow-ups.
+  per-face by 2 bits of a material byte. `_v2` (far+fade) is the same
+  core plus the actor pipeline's `engine+0x5c8` fog-nibble scheme
+  (Round E) OR'd into the color word, exactly like `Poly3D_
+  RasterizeTextured`'s fade variants.
+
+  **The near/far split here is not just clip-bookkeeping size** (unlike
+  the actor pipeline, where `_v0`'s near variant differs from `_v2`'s
+  far variant only by extra edge cases): `_v0`/`_v1` (near) write every
+  pixel of a fixed 8-wide interpolation batch **unconditionally** — no
+  chroma-key (`0x0f0f`) transparency check, no per-pixel depth test
+  against `engine+0x5b4` — while `_v2`/`_v3` (far) gate every pixel on
+  both, same as every actor/room rasterizer. Near wall segments are
+  close enough to the camera that they're presumably always the
+  frontmost thing drawn there, so the engine skips both checks for
+  speed. Near variants are still ~3.5× the far variants' code size
+  (23-25KB vs. 7-8KB decompiled) — that size comes entirely from
+  near-clip edge-case bookkeeping, not from doing more per-pixel work; if
+  anything they do *less* per pixel than their far counterparts. A
+  secondary per-scanline/per-pixel offset into adjacent `0x200`-byte
+  blocks within the `.zlu` chunk (seen in all 4 variants) wasn't fully
+  decoded (likely a further distance-driven palette blend, analogous to
+  the actor pipeline's fade LUT) — see Open follow-ups.
 
 This resolves `ZONE_FORMAT.md`'s last two open per-zone-file items
 (`.ztx`, `.zlu`) and, as a side effect, fully decodes `.sur`'s 8-byte
@@ -459,10 +476,11 @@ position.
   otherwise pinned down), byte 7 of the tile record, the `heightA`/
   `heightB` fields' precise sub-structure, and 3 trailing bytes of the
   36-byte type table remain undecoded.
-- `SurfaceFace_RasterizeTextured_v0`/`_v1`/`_v2` weren't traced in the same
-  detail as `_v3` — presumed near/fade siblings by dispatch position, not
-  independently verified line-by-line the way the 10 actor variants were
-  in "The 10 `Poly3D_RasterizeTextured` variants".
+- ~~`SurfaceFace_RasterizeTextured_v0`/`_v1`/`_v2` weren't traced~~ —
+  **resolved**, see above: all 4 confirmed (`_v2` matches `_v3` plus the
+  fade LUT; `_v0`/`_v1`'s near variants skip the chroma-key/depth-test
+  checks entirely, a genuine behavioral split, not just extra clip-edge
+  bookkeeping like the actor pipeline's near variants).
 - The secondary `param_8 + N*0x200`-style offset `SurfaceFace_
   RasterizeTextured_v3` adds before indexing into the `.zlu` palette chunk
   (interpolated per-scanline in one branch, per-pixel in another) isn't
