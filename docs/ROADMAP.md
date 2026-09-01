@@ -368,13 +368,27 @@ Prioritization, driven by the port goal rather than raw coverage:
       SimKin `resistDisarm[]` array — per-instance lockpick/trap-disarm
       difficulty. Full writeup:
       [`ZONE_FORMAT.md`](ZONE_FORMAT.md#zons-room-record-fully-decoded).
+- [x] Closed `.stn`'s last open question — where the object field it
+      overwrites is actually *read*. Re-checked `FUN_100732c8`'s raw ARM
+      disassembly (its decompiled C looked like it silently dropped its
+      2nd parameter; the asm shows it's real — forwarded through an
+      untouched register into a nested call) and then found the actual
+      consumer directly in the readable SimKin scripts: every lockable
+      object's class script (e.g. `chest_trapa.s`) declares its own
+      `resistDisarm[N]` constant, and the lockpicking minigame
+      (`menus\usepicks.s`) calls `CanDisarmTrap(GetOpener().resistDisarm)`.
+      `.stn` overwrites a specific placed instance's field with a
+      *reference* to a shared global slot instead of its class's constant
+      — explaining why e.g. `crypt1.stn` points 5 different doors at the
+      same `resistDisarm[28]`. No native-code mystery left here; the rest
+      lived in already-readable script files.
 
 Next: the ~9 unexamined `Poly3D_RasterizeTextured` blend-mode variants, the
-`.sur`/`.ztx`/`.zlu`/`.zcp` record/content field layouts and the bulk of
-`.zmp`'s header, where `.stn`'s `object+0x3c` field gets read at gameplay
-time, and `azra.sta`'s still-unidentified format (confirmed not the
-`.zcp`/"bullseye" file). See `RENDERER_3D.md`'s, `MODEL_FORMAT.md`'s, and
-`ZONE_FORMAT.md`'s open follow-ups.
+`.sur`/`.ztx`/`.zlu`/`.zcp` record/content field layouts, the bulk of
+`.zmp`'s header, `GameEngine_InitLevel`'s `param_3` (gates whether `.stn`
+loads at all), and `azra.sta`'s still-unidentified format (confirmed not
+the `.zcp`/"bullseye" file). See `RENDERER_3D.md`'s, `MODEL_FORMAT.md`'s,
+and `ZONE_FORMAT.md`'s open follow-ups.
 
 ## Open questions
 

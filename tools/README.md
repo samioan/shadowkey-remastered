@@ -242,6 +242,15 @@ evidence that the game is rendered in 2D (see that doc's correction note).
   decoded `.zon` room record and partially decoded `.zmp` header; see
   [`../docs/ZONE_FORMAT.md`](../docs/ZONE_FORMAT.md#stn-per-instance-traplockpick-difficulty-bindings).
 
+- `shadowkey/ghidra/scripts/pyghidra_dump_disasm.py <hex-addr>` — dumps a
+  function's raw ARM disassembly plus Ghidra's inferred parameter list.
+  Used when the decompiler's C view is misleading about a function's real
+  signature — e.g. it showed `FUN_100732c8` taking only one parameter, but
+  the call site clearly passed two; the raw asm proved the second argument
+  *is* real (silently forwarded through an untouched register into a
+  nested call, just never re-loaded/shown by the decompiler). See
+  [`../docs/ZONE_FORMAT.md`](../docs/ZONE_FORMAT.md#stn-per-instance-traplockpick-difficulty-bindings).
+
 - **`parse_model_resource.py`** — parser/verifier for the actual on-disk 3D
   model archive, `system/apps/6r51/models.idx` + `models.huge` in the game
   install tree (found separately from `6r51.app`'s code section — this is

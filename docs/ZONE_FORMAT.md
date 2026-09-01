@@ -398,10 +398,11 @@ struct StnRecord {
 };
 ```
 
-For each record, the game looks up a SimKin object by `name` (`FUN_100732c8`
-on `engine+0x470`, the same named-object registry used elsewhere in this
-function) and, if found, replaces that object's `+0x3c` field with a copy
-of `varRef` (logging `"Could not find %s"` if the lookup fails).
+For each record, the game looks up a SimKin object by `name`
+(`SimKinObject_FindByName`, 0x100732c8, on `engine+0x470`, the same
+named-object registry used elsewhere in this function) and, if found,
+replaces that object's `+0x3c` field with a copy of `varRef` (logging
+`"Could not find %s"` if the lookup fails).
 
 **Verified by directly parsing 4 real `.stn` files** (`dstar_e.stn`,
 `dstar_w.stn`, `crypt1.stn`, `lakvan.stn` — `azra.stn`/`twilite.stn` are
@@ -419,11 +420,27 @@ containers — the same `category` values 8/11/12 identified above) to a
 slot in a shared, global SimKin array called `resistDisarm` — i.e. **each
 door/chest instance's lockpicking/trap-disarm difficulty is looked up
 through this per-instance indirection** rather than being a fixed property
-of the entity type. Not yet traced: where `object+0x3c` (the field this
-overwrites) is actually read at gameplay time (presumably the
-lockpick/disarm minigame), and what non-zero values of
+of the entity type. Not yet traced: what non-zero values of
 `GameEngine_InitLevel`'s `param_3` actually correspond to at the call site
 level (save-game load vs. same-session zone re-entry).
+
+**Where `object+0x3c` is read, closing the loop (found directly in the
+readable SimKin scripts, no further native RE needed)**: every SimKin class
+for a lockable object (e.g. `chest_trapa.s`) declares its own field
+`resistDisarm[N]` with a small constant default (e.g. `resistDisarm[5]`).
+The lockpicking minigame's script, `menus\usepicks.s`, calls
+`GetPlayer().CanDisarmTrap(GetOpener().resistDisarm)` — i.e. it reads the
+difficulty straight off the opened object's own `resistDisarm` field. What
+`.stn` does at zone-load time (confirmed by re-reading
+`SimKinObject_FindByName`'s disassembly: its second parameter, the object
+`name`, is not dropped — it's silently forwarded through an untouched
+register into `FUN_1008fc04`, the real consumer) is overwrite that
+per-object field with
+a **reference** to a shared global array slot (`"resistDisarm[28]"`, etc.)
+instead of the class's own constant. That's why `crypt1.stn` binds all 5
+of its objects to the same `resistDisarm[28]` — multiple doors sharing one
+externally-tunable difficulty value, rather than each carrying its own
+fixed constant.
 
 ## What's still open
 
@@ -441,10 +458,11 @@ level (save-game load vs. same-session zone re-entry).
 - `.ztx`/`.zlu`/`.zcp`'s decompressed contents, and the bulk of `.zmp`'s
   header (`unknown1`/`unknown2`, 96 of its 132 header bytes) — only their
   loader and destination field are known, not decoded field-by-field.
-- `.stn`'s `object+0x3c` field — where it's actually *read* at gameplay
-  time (presumably the lockpick/disarm minigame) hasn't been traced, and
-  neither has the meaning of `GameEngine_InitLevel`'s `param_3` that gates
-  whether `.stn` loads at all.
+- `GameEngine_InitLevel`'s `param_3`, gating whether `.stn` loads at all
+  (save-game load vs. same-session zone re-entry, unconfirmed). (`.stn`'s
+  `object+0x3c` field itself is now resolved — see the `.stn` section
+  above — it's read directly in `menus\usepicks.s` via
+  `GetOpener().resistDisarm`.)
 - `azra.sta`'s format — still unidentified. Confirmed **not** related to
   the "bullseye" pathfinding chain (that's `.zcp`) and **not** loaded via
   either per-zone loader traced here (no `"%s\%s.sta"` format string
