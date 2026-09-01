@@ -516,23 +516,30 @@ Prioritization, driven by the port goal rather than raw coverage:
       never touched by any earlier round, but already named in this
       section's own prioritization as gating a playable port). Found the
       app's own key-event override, `AppUi_OfferKeyEventL`, by tracing the
-      one caller of the base-class `OfferKeyEventL` import: a flat
-      21-slot boolean "game action" array, with the N-Gage's numeric
-      keypad (`'0'`-`'9'`) as the primary control set — each digit key is
-      its own scan code, no lookup needed — plus 4 likely D-pad codes and
-      a handful of others. Also found a hidden 12-step scan-code-sequence
+      one caller of the base-class `OfferKeyEventL` import: the N-Gage's
+      numeric keypad (`'0'`-`'9'`) is the primary control set — each digit
+      key is its own scan code, no lookup needed — plus 4 likely D-pad
+      codes and a handful of others, all writing into a small object
+      (`engine+0x488`) discovered to be much richer than a flat array: a
+      current/previous button-state pair (edge detection) plus a
+      **remappable 17-action key-binding indirection table**, and a
+      constructor that tags each of 21 slots with a **Symbian
+      resource-string ID** (`0xd05`-`0xd16`) — very likely the real UI
+      label for each control, sitting in the app's compiled resource file
+      (not yet located/parsed). Also found a hidden 12-step scan-code
       Easter egg tucked into the same dispatcher. Exact `TStdScanCode`
       names weren't re-verified against a primary source (the project's
       earlier-archived SDK copy no longer exists locally, and a public
       mirror search came up short) — flagged clearly as convention, not
-      confirmed. What each action slot actually *does* in gameplay is
-      still open — `pyghidra_find_reads.py` found no direct consumer of
-      the array's offset, meaning it's likely accessed through a cached
-      pointer rather than a flat offset. Full writeup:
-      [`INPUT_HANDLING.md`](INPUT_HANDLING.md).
+      confirmed. A real tooling gap found and worked around: the object's
+      base offset (`0x488`) doesn't fit a single ARM rotated immediate, so
+      neither existing offset-search tool could find its consumers — found
+      instead by reading the neighboring functions in the binary's address
+      space directly. Full writeup: [`INPUT_HANDLING.md`](INPUT_HANDLING.md).
 
-Next: which physical key produces which scan code and what each of the 21
-action slots does in gameplay (`INPUT_HANDLING.md`'s open items), the two
+Next: locating/parsing `6r51.app`'s compiled Symbian resource file to
+resolve the `0xd05`-`0xd16` UI-label IDs to real text (`INPUT_HANDLING.md`'s
+open items), the two
 `heightA`/`heightB` fields' finer sub-structure, the `.zlu` chunk's
 secondary per-scanline/per-pixel `0x200`-byte-block offset (seen in all 4
 `SurfaceFace_RasterizeTextured` variants, not decoded), and `.sta`'s

@@ -110,16 +110,101 @@ if set, make an extra virtual call. Multiplayer-specific and tangential;
 `GAMECOMMS`/Bluetooth is already deprioritized for the port per
 `ROADMAP.md`.
 
+## The `InputState` object: not a flat array, a whole small class
+
+`engine+0x488` (the object `InputState_SetButton`/`AppUi_OfferKeyEventL`
+write into) turned out to be the base of a **much richer structure** —
+found by checking which functions sit next to `InputState_SetButton` in
+the binary's address space (small, related C++ methods are typically
+compiled contiguously) and confirmed by tracing their real callers.
+
+This also explains why `pyghidra_find_reads.py 0x488` initially found
+**zero** consumers, despite the object clearly being read every frame: the
+value `0x488` doesn't fit a single ARM rotated immediate, so the compiler
+builds `engine + 0x488` as a two-instruction split the existing offset-scan
+tooling doesn't recognize (neither a literal-pool constant nor a
+single-instruction `ADD`/`SUB` match) — a real, if narrow, tooling gap.
+Found instead by reading the neighboring functions directly.
+
+```c
+struct InputState {                    // base = engine+0x488
+    uint8  current[0x15];                // +0x00, this frame's 21 button states
+    uint8  previous[0x15];                // +0x15, last frame's states (edge detection)
+    int32  bindingOffset[0x11];            // +0x2c, 17-entry logical-action ->
+                                             //        byte-offset indirection table
+                                             //        (a REMAPPABLE key-binding scheme)
+    int32  bindingResourceId[0x15];          // +0x6c, 21-entry Symbian resource-string
+                                               //        ID per action slot (0xd05-0xd16,
+                                               //        sequential -- almost certainly
+                                               //        UI labels for a controls/options
+                                               //        menu)
+    uint8  bindingFlag[0x15];                  // +0xc0, 21-entry per-slot flag
+};
+```
+
+- **`InputState_GetButton`**/**`InputState_GetButton2`** (renamed from
+  `FUN_1001a690`/`FUN_1001a6f0`) — direct getters, byte-identical logic,
+  different call sites (exact distinction not determined). Called from
+  the already-known screen-state machine (`FUN_10068e0c`,
+  `RENDERER_3D.md`'s "general screen-state machine" open item) and the
+  per-tick load-state machine (`FUN_10069cac`, from Round D's
+  `GameEngine_InitLevel` `param_3` investigation) among others.
+- **`InputState_GetButtonPrev`** (was `FUN_1001a6dc`) — reads the
+  previous-frame mirror array, enabling "just pressed" vs. "held" edge
+  detection.
+- **`InputState_ResolveBindingOffset`** (was `FUN_1001a67c`),
+  **`InputState_SetBoundButton`** (was `FUN_1001a6c4`, called from
+  `GameTick_UpdateAndPresent` — the already-known 25Hz per-tick
+  function, `RENDER_LOOP.md`), **`InputState_GetBoundButton`**/
+  **`InputState_GetBoundButtonPrev`** (was `FUN_1001a724`/`FUN_1001a700`)
+  — a parallel set of accessors that go through the 17-entry
+  `bindingOffset` indirection table first: `this[bindingOffset[logicalId]]`
+  instead of `this[slot]` directly. This is a genuine **remappable
+  control-binding layer** — 17 logical actions (0-0x10) whose actual
+  storage slot can be reassigned at runtime, presumably backing an
+  in-game "customize controls" option.
+- **`InputState_InitDefaultBindings`** (was `FUN_1001a064`) — the
+  constructor: clears both state arrays (`InputState_ClearAll`, was
+  `FUN_1001a744`) then calls **`InputState_RegisterBinding`** (was
+  `FUN_1001a770`) 21 times with **sequential resource-string IDs
+  `0xd05`-`0xd16`** and a flag. Slots `0`-`0xf` (16 slots) each get a
+  **unique** ID and flag `1`; slots `0x10`/`0x11`/`0x12`/`0x14` get flag
+  `0` and mostly **reuse** ID `0xd15`; slot `0x13` (19) is never
+  registered at all — a gap. The flag-`0` slots are exactly the same 4
+  slots the scan-code table above marks as the alternate `engine+0x260`
+  menu-mode keys (`0xa4`/`0xa5`) plus the Backspace-mapped slot 18 and
+  the `0xa7`-mapped slot 20 — strong cross-confirmation that these are
+  **fixed system actions** (back/menu/exit, sharing one generic label),
+  while the 16 unique-ID slots are **core remappable gameplay actions**.
+
+**Each action slot very likely has a real UI label** sitting in the app's
+compiled Symbian resource file (`.rsc`, a binary resource bundle separate
+from `6r51.app`'s code) — resource IDs `0xd05`-`0xd16` are the lookup
+keys. This wasn't chased further: the giant 121-case string dispatcher
+`RENDER_LOOP.md` already found and ruled out as a render-loop candidate
+(`0x10078de4`) turned out to use small sequential case indices (0-120),
+**not** these raw resource IDs, so it's not the same lookup mechanism —
+resolving the actual label text needs locating and parsing the resource
+file itself, not attempted this pass. If found, this would give the
+human-readable name of every action directly, without needing to trace
+gameplay logic behaviorally.
+
 ## What's still open
 
 - **Which physical N-Gage key produces which scan code**, and **what each
-  of the 21 action slots actually *does* in gameplay** (move forward?
-  strafe? attack? open menu?) — not traced. `pyghidra_find_reads.py 0x488`
-  found zero direct consumers, meaning whatever reads the action-state
-  array likely caches `engine+0x488` in a local/member pointer first
-  rather than re-deriving the offset each time — the next step would be
-  tracing that cache point (probably in the game's per-tick update
-  function) rather than a flat offset search.
+  of the 16 core action slots actually *does* in gameplay** (move
+  forward? strafe? attack?) — not traced behaviorally. The likely faster
+  path is now the resource-string route above (get the real UI label per
+  slot) rather than tracing `GameTick_UpdateAndPresent`'s full per-tick
+  logic by hand.
+- Locating and parsing `6r51.app`'s compiled Symbian resource file (the
+  `.rsc`/localized-resource bundle) to resolve resource IDs `0xd05`-`0xd16`
+  to real text — a new file-format investigation, not started.
+- The exact distinction between `InputState_GetButton` and
+  `InputState_GetButton2` (byte-identical logic, different callers).
+- What `bindingResourceId`'s repeated ID `0xd15` across 3 of the 4
+  system-action slots actually labels (a single generic "Back"/"Menu"
+  string reused across two different physical keys, or a coincidence).
 - Exact Symbian `TStdScanCode` enum values for `0x0e`/`0x0f`/`0x10`/`0x11`,
   `0x2a`, `0x85`, `0x7f`, `0xa4`/`0xa5`/`0xa7` — plausible by convention
   and structural evidence, not confirmed against a primary source this
@@ -137,5 +222,17 @@ if set, make an extra virtual call. Multiplayer-specific and tangential;
 - `AppUi_OfferKeyEventL` (0x10021fc0)
 - `InputState_SetButton` (0x1001a6b8)
 - `SecretSequence_OnComplete` (0x1001b204)
+- `InputState_GetButton` (0x1001a690)
+- `InputState_GetButton2` (0x1001a6f0)
+- `InputState_GetButtonPrev` (0x1001a6dc)
+- `InputState_ResolveBindingOffset` (0x1001a67c)
+- `InputState_SetBoundButton` (0x1001a6c4)
+- `InputState_GetBoundButton` (0x1001a724)
+- `InputState_GetBoundButtonPrev` (0x1001a700)
+- `InputState_ClearAll` (0x1001a744)
+- `InputState_RegisterBinding` (0x1001a770)
+- `InputState_InitDefaultBindings` (0x1001a064)
 
-Tool: `pyghidra_label_input_handling.py`.
+Tools: `pyghidra_label_input_handling.py`, `pyghidra_label_input_state_class.py`,
+`pyghidra_find_reads_range.py` (new — scans a whole contiguous offset range
+in one pyghidra session instead of one offset per invocation).

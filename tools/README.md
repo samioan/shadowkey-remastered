@@ -339,6 +339,22 @@ evidence that the game is rendered in 2D (see that doc's correction note).
   `InputState_SetButton`, `SecretSequence_OnComplete`), found by tracing
   the one caller of the base-class `OfferKeyEventL` import; see
   [`../docs/INPUT_HANDLING.md`](../docs/INPUT_HANDLING.md).
+- `shadowkey/ghidra/scripts/pyghidra_find_reads_range.py <hex-lo>
+  <hex-hi>` — like `pyghidra_find_reads.py` but scans a whole contiguous
+  range of byte offsets in one pyghidra session (one full-binary
+  instruction pass instead of one per offset) by matching each `LDR`/
+  `LDRB`/`LDRH` instruction's scalar operand directly rather than
+  string-matching the disassembly text.
+- `shadowkey/ghidra/scripts/pyghidra_label_input_state_class.py` —
+  renames and documents the full `InputState` object at `engine+0x488`
+  (10 functions: current/previous button-state accessors, a remappable
+  17-action binding-indirection layer, and the default-bindings
+  constructor that tags each slot with a Symbian resource-string ID),
+  found by reading the functions adjacent to `InputState_SetButton` in
+  the binary's address space rather than an offset search (the object's
+  base offset doesn't fit a single ARM immediate, so neither existing
+  offset-search tool could find its consumers); see
+  [`../docs/INPUT_HANDLING.md`](../docs/INPUT_HANDLING.md).
 
 - **`parse_model_resource.py`** — parser/verifier for the actual on-disk 3D
   model archive, `system/apps/6r51/models.idx` + `models.huge` in the game
