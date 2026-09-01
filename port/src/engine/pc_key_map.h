@@ -34,6 +34,16 @@ inline std::optional<ButtonSlot> MapPcKeyToButtonSlot(int vkCode) {
         case '0': return ButtonSlot::Key0;
         case VK_OEM_MINUS: return ButtonSlot::KeyStar;  // '-' stands in for '*'
         case VK_OEM_PLUS: return ButtonSlot::KeyHash;   // '=' stands in for '#'
+        // The N-Gage's two softkeys sit either side of the D-pad and drive
+        // context-sensitive menu actions -- mainmenu.s's own
+        // OnRightSoftkey handler (which backs out to the quit-confirm
+        // popup) confirms RightSelectionKey is "back/cancel". There's no
+        // equally direct evidence pinning down which physical key is
+        // "confirm" on this device (see INPUT_HANDLING.md's open items on
+        // the untraced "Select" logical action) -- Enter/Escape are a
+        // reasonable, clearly-a-guess PC stand-in pending that RE pass.
+        case VK_RETURN: return ButtonSlot::LeftSelectionKey;
+        case VK_ESCAPE: return ButtonSlot::RightSelectionKey;
         default: return std::nullopt;
     }
 }

@@ -54,22 +54,8 @@ if(MSVC)
   target_compile_options(simkin PRIVATE /W3)
 endif()
 
-add_executable(shadowkey_port
-  src/main.cpp
-  src/platform/win32/window.cpp
-)
-
-target_include_directories(shadowkey_port PRIVATE src)
-target_link_libraries(shadowkey_port PRIVATE simkin)
-
-if(WIN32)
-  target_compile_definitions(shadowkey_port PRIVATE UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN)
-  target_link_libraries(shadowkey_port PRIVATE user32 gdi32)
-endif()
-
-# Native binding glue shared by the milestone smoke tests (and eventually
-# shadowkey_port itself, once M4 wires menus into the real window/input
-# loop). See src/simkin_bindings/ -- one file per native binding class.
+# Native binding glue shared by shadowkey_port and the milestone smoke
+# tests. See src/simkin_bindings/ -- one file per native binding class.
 add_library(sk_bindings STATIC
   src/simkin_bindings/combo_box_executable.cpp
   src/simkin_bindings/floating_text_executable.cpp
@@ -82,6 +68,21 @@ add_library(sk_bindings STATIC
 )
 target_include_directories(sk_bindings PUBLIC src)
 target_link_libraries(sk_bindings PUBLIC simkin)
+
+add_executable(shadowkey_port
+  src/main.cpp
+  src/assets/string_table.cpp
+  src/graphics/bitmap_font.cpp
+  src/platform/win32/window.cpp
+)
+
+target_include_directories(shadowkey_port PRIVATE src)
+target_link_libraries(shadowkey_port PRIVATE sk_bindings)
+
+if(WIN32)
+  target_compile_definitions(shadowkey_port PRIVATE UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN)
+  target_link_libraries(shadowkey_port PRIVATE user32 gdi32)
+endif()
 
 # M2 milestone smoke test -- see src/tests/m2_simkin_smoke.cpp. Separate
 # console executable so it doesn't disturb the M0/M1 windowed app.

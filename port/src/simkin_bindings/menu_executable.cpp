@@ -51,6 +51,47 @@ void MenuExecutable::RunOnDisplay() {
     method(skString("OnDisplay"), args, ret, ctxt);
 }
 
+void MenuExecutable::MoveSelection(int delta) {
+    std::vector<size_t> selectableIndices;
+    for (size_t i = 0; i < m_Items.size(); ++i) {
+        if (m_Items[i].selectable) selectableIndices.push_back(i);
+    }
+    if (selectableIndices.empty()) return;
+
+    // m_SelectedItem is a 1-based index into m_Items (matching the
+    // scripts' own SetSelectedItem(1)-style convention) -- find where the
+    // current selection sits among just the selectable ones.
+    size_t currentPos = 0;
+    for (size_t i = 0; i < selectableIndices.size(); ++i) {
+        if (static_cast<int>(selectableIndices[i]) + 1 == m_SelectedItem) {
+            currentPos = i;
+            break;
+        }
+    }
+    int count = static_cast<int>(selectableIndices.size());
+    int nextPos = (static_cast<int>(currentPos) + delta % count + count) % count;
+    m_PrevSelectedItem = m_SelectedItem;
+    m_SelectedItem = static_cast<int>(selectableIndices[static_cast<size_t>(nextPos)]) + 1;
+}
+
+void MenuExecutable::ActivateSelected() {
+    if (m_SelectedItem < 1 || static_cast<size_t>(m_SelectedItem) > m_Items.size()) return;
+    const MenuItem& item = m_Items[static_cast<size_t>(m_SelectedItem - 1)];
+    if (item.selectable) TryInvoke(item.callback);
+}
+
+void MenuExecutable::TryInvoke(const std::string& handlerName) {
+    if (handlerName.empty()) return;
+    skRValueArray args;
+    skRValue ret;
+    skExecutableContext ctxt(&m_Stack.interpreter());
+    // Calls the base class directly (not this->method()) so an
+    // undefined handler name just quietly does nothing instead of
+    // spamming the soft-fail log for what's an optional hook, not an
+    // unresolved native call.
+    skScriptedExecutable::method(skString(handlerName.c_str()), args, ret, ctxt);
+}
+
 bool MenuExecutable::method(const skString& methodName, skRValueArray& args,
                              skRValue& returnValue, skExecutableContext& context) {
     if (methodName == skString("MenuBackground") && args.entries() == 1) {

@@ -52,6 +52,21 @@ public:
     // MenuStack::OpenMenu each time this menu becomes current.
     void RunOnDisplay();
 
+    // M4: host-driven navigation, called from the input/tick loop.
+    // Moves the 1-based selection to the next/previous *selectable* item
+    // (AddStaticItem rows are skipped), wrapping around either end.
+    void MoveSelection(int delta);
+    // Fires the currently selected item's script callback (e.g.
+    // "MenuNewGame"), if it has one -- same dispatch path CreateMenu's
+    // children go through, so a callback that calls OpenMenu() correctly
+    // switches MenuStack::currentMenu().
+    void ActivateSelected();
+    // Fires a named handler if the script defines one (e.g.
+    // "OnRightSoftkey" for the back/cancel softkey); no-ops silently if
+    // it doesn't, unlike method()'s normal soft-fail logging -- this is
+    // an optional hook, not an unresolved native call.
+    void TryInvoke(const std::string& handlerName);
+
     struct MenuItem {
         int textId;
         std::string callback;  // blank for AddStaticItem
@@ -59,7 +74,7 @@ public:
     };
     const std::vector<MenuItem>& items() const { return m_Items; }
     int backgroundId() const { return m_BackgroundId; }
-    int selectedItem() const { return m_SelectedItem; }
+    int selectedItem() const { return m_SelectedItem; }  // 1-based, 0 = none
 
 private:
     MenuStack& m_Stack;

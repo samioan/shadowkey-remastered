@@ -41,6 +41,10 @@ public:
     void OpenMenu(const std::string& simkinPath);
 
     MenuExecutable* currentMenu() const { return m_Current; }
+    // Used once by the host to register the root menu (mainmenu.s) as
+    // current -- it's constructed directly by the host, not via
+    // CreateMenu/OpenMenu, so MenuStack never sees it otherwise.
+    void SetCurrent(MenuExecutable* menu) { m_Current = menu; }
     PlayerExecutable& player() const { return *m_Player; }
     const std::string& scriptRoot() const { return m_ScriptRoot; }
     skInterpreter& interpreter() const { return m_Interpreter; }

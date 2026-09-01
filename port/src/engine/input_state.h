@@ -43,16 +43,36 @@ class InputState {
 public:
     InputState() { InitDefaultBindings(); }
 
-    void BeginFrame() { previous_ = current_; }
+    // No-op now -- kept so existing call sites (main.cpp's tick handler)
+    // don't need to change. See SetButton()'s comment for why edge
+    // detection moved off a per-tick current/previous snapshot.
+    void BeginFrame() {}
 
     void SetButton(ButtonSlot slot, bool down) {
-        current_[static_cast<size_t>(slot)] = down;
+        size_t i = static_cast<size_t>(slot);
+        // Latches on the actual 0->1 transition, at the moment the OS
+        // key event arrives -- NOT by diffing this tick's state against
+        // last tick's. The window's message pump (window.cpp's
+        // RunMessageLoop) drains + dispatches WM_KEYDOWN/UP continuously,
+        // independent of the ~40ms tick cadence (game_clock.h), so a
+        // press-then-release can both land (via key auto-repeat or just
+        // bad luck) *before* the next tick's snapshot ever runs --
+        // diffing current-vs-previous at tick boundaries would then see
+        // current_==previous_==true and silently miss the edge. Latching
+        // in SetButton (called directly from the key callback) instead
+        // of at tick time removes that race entirely; ConsumeJustPressed
+        // clears the latch once the tick that reads it has acted on it.
+        if (down && !current_[i]) justPressed_[i] = true;
+        current_[i] = down;
     }
 
     bool GetButton(ButtonSlot slot) const { return current_[static_cast<size_t>(slot)]; }
-    bool GetButtonPrev(ButtonSlot slot) const { return previous_[static_cast<size_t>(slot)]; }
-    bool JustPressed(ButtonSlot slot) const {
-        return GetButton(slot) && !GetButtonPrev(slot);
+    // Consumes (clears) the latch -- call at most once per slot per tick.
+    bool ConsumeJustPressed(ButtonSlot slot) {
+        size_t i = static_cast<size_t>(slot);
+        bool wasPressed = justPressed_[i];
+        justPressed_[i] = false;
+        return wasPressed;
     }
 
     // Goes through the remappable binding indirection, exactly like the
@@ -64,9 +84,9 @@ public:
         int slot = bindingOffset_[static_cast<size_t>(action)];
         return slot >= 0 && GetButton(static_cast<ButtonSlot>(slot));
     }
-    bool BoundJustPressed(Action action) const {
+    bool ConsumeBoundJustPressed(Action action) {
         int slot = bindingOffset_[static_cast<size_t>(action)];
-        return slot >= 0 && JustPressed(static_cast<ButtonSlot>(slot));
+        return slot >= 0 && ConsumeJustPressed(static_cast<ButtonSlot>(slot));
     }
 
     void Rebind(Action action, ButtonSlot slot) {
@@ -95,7 +115,7 @@ private:
     }
 
     std::array<bool, static_cast<size_t>(ButtonSlot::kCount)> current_{};
-    std::array<bool, static_cast<size_t>(ButtonSlot::kCount)> previous_{};
+    std::array<bool, static_cast<size_t>(ButtonSlot::kCount)> justPressed_{};
     std::array<int, static_cast<size_t>(Action::kCount)> bindingOffset_{};
 };
 

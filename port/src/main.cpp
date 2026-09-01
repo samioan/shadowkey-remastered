@@ -1,19 +1,96 @@
-// M0/M1: window + solid-color backbuffer (M0), a fixed 40ms tick loop and
-// keyboard-driven InputState matching the original's binding scheme (M1).
-// See C:\Users\Admin\.claude\plans\vast-wandering-summit.md for the full
-// staged plan.
-#include <algorithm>
+// M4: renders the real mainmenu.s chain (M3) to the backbuffer with a
+// placeholder bitmap font and real stringtable.eng text, and wires
+// D-pad/confirm input to move selection and fire the selected item's
+// script callback. See C:\Users\Admin\.claude\plans\vast-wandering-summit.md
+// for the full staged plan -- this is the M4 milestone target ("main menu
+// renders and is navigable").
 #include <cstdio>
+#include <memory>
+#include <string>
 
+#include "assets/string_table.h"
 #include "engine/game_clock.h"
 #include "engine/input_state.h"
 #include "engine/pc_key_map.h"
 #include "graphics/backbuffer.h"
+#include "graphics/bitmap_font.h"
 #include "platform/win32/window.h"
+#include "simkin_bindings/menu_executable.h"
+#include "simkin_bindings/menu_stack.h"
+#include "skInterpreter.h"
+#include "skParseException.h"
+#include "skRuntimeException.h"
 
-int main() {
+namespace {
+
+// Colors are placeholders -- the real palette/background-image format was
+// never RE'd (docs/GRAPHICS_FORMAT.md flags the image-cache source format
+// as unconfirmed; see the port plan's known-stubs list). Flat colors here
+// stand in for MenuBackground(id) until that's resolved.
+constexpr uint16_t kBackgroundColor = sk::PackRGB565(16, 16, 32);
+constexpr uint16_t kTextColor = sk::PackRGB565(220, 220, 220);
+constexpr uint16_t kSelectedTextColor = sk::PackRGB565(255, 220, 80);
+constexpr uint16_t kStaticTextColor = sk::PackRGB565(120, 120, 130);
+
+void RenderMenu(sk::Backbuffer& backbuffer, sk_bindings::MenuExecutable& menu,
+                 const sk::StringTable& strings) {
+    backbuffer.Fill(kBackgroundColor);
+
+    int y = 10;
+    const int lineHeight = sk::BitmapFont::kGlyphHeight + 4;
+    int itemIndex = 1;  // 1-based, matches MenuExecutable::selectedItem()
+    for (const auto& item : menu.items()) {
+        std::string text = strings.Get(item.textId);
+        bool isSelected = item.selectable && itemIndex == menu.selectedItem();
+        uint16_t color = !item.selectable ? kStaticTextColor
+                          : isSelected     ? kSelectedTextColor
+                                            : kTextColor;
+        int x = 12;
+        if (isSelected) {
+            sk::BitmapFont::DrawString(backbuffer, 2, y, ">", kSelectedTextColor);
+        }
+        sk::BitmapFont::DrawString(backbuffer, x, y, text, color);
+        y += lineHeight;
+        ++itemIndex;
+    }
+}
+
+}  // namespace
+
+int main(int argc, char** argv) {
+    const char* scriptRoot =
+        argc > 1 ? argv[1]
+                  : "The-Elder-Scrolls-Travels-Shadowkey_N-Gage_EN-FR-DE-ES-IT_USA-Europe-"
+                    "EnFrDeEsIt-26102004/system/apps/6r51";
+
+    sk::StringTable strings;
+    if (!strings.Load(std::string(scriptRoot) + "/stringtable.eng")) {
+        std::printf("shadowkey-port: failed to load stringtable.eng from %s, aborting.\n",
+                    scriptRoot);
+        return 1;
+    }
+
+    skInterpreter interpreter;
+    sk_bindings::MenuStack stack(scriptRoot, interpreter);
+
+    std::string mainMenuPath = std::string(scriptRoot) + "/mainmenu.s";
+    skExecutableContext loadCtxt(&interpreter);
+    std::unique_ptr<sk_bindings::MenuExecutable> mainMenu;
+    try {
+        mainMenu.reset(
+            new sk_bindings::MenuExecutable(skString(mainMenuPath.c_str()), loadCtxt, stack));
+        mainMenu->RunInit();
+    } catch (skParseException& e) {
+        std::printf("shadowkey-port: PARSE ERROR loading mainmenu.s: %s\n", e.toString().ptr());
+        return 2;
+    } catch (skRuntimeException& e) {
+        std::printf("shadowkey-port: RUNTIME ERROR running mainmenu.s: %s\n", e.toString().ptr());
+        return 2;
+    }
+    stack.SetCurrent(mainMenu.get());
+
     sk::Window window(sk::Backbuffer::kWidth * 3, sk::Backbuffer::kHeight * 3,
-                       L"shadowkey-port (M1 scaffold)");
+                       L"shadowkey-port (M4: main menu)");
 
     sk::InputState input;
     window.SetKeyCallback([&](int vkCode, bool down) {
@@ -25,48 +102,46 @@ int main() {
     sk::Backbuffer backbuffer;
     sk::GameClock clock;
 
-    // M1 smoke test: a small square driven by Action::MoveForward/Backward/
-    // TurnLeft/TurnRight through the *bound* action layer (not raw slots),
-    // proving the remap indirection round-trips correctly end to end, and
-    // a per-tick counter proving the 40ms cadence is real (logged every 25
-    // ticks = ~1s).
-    int markerX = sk::Backbuffer::kWidth / 2;
-    int markerY = sk::Backbuffer::kHeight / 2;
-    uint64_t tickCount = 0;
+    std::printf("shadowkey-port: M4 -- Up/Down move selection, Enter confirms, Esc goes back.\n");
 
-    std::printf("shadowkey-port: M1 -- arrow keys move the marker (through the "
-                "MoveForward/Backward/TurnLeft/TurnRight action bindings).\n");
+    sk_bindings::MenuExecutable* lastMenu = nullptr;
 
     window.RunMessageLoop([&]() {
         if (window.ShouldClose()) return;
-        if (clock.PollTick()) {
-            input.BeginFrame();
+        if (!clock.PollTick()) return;
 
-            if (input.GetBoundButton(sk::Action::TurnLeft)) markerX -= 1;
-            if (input.GetBoundButton(sk::Action::TurnRight)) markerX += 1;
-            if (input.GetBoundButton(sk::Action::MoveForward)) markerY -= 1;
-            if (input.GetBoundButton(sk::Action::MoveBackward)) markerY += 1;
-            markerX = std::max(0, std::min(sk::Backbuffer::kWidth - 1, markerX));
-            markerY = std::max(0, std::min(sk::Backbuffer::kHeight - 1, markerY));
-
-            backbuffer.Fill(sk::PackRGB565(32, 32, 48));
-            for (int dy = -2; dy <= 2; ++dy) {
-                for (int dx = -2; dx <= 2; ++dx) {
-                    backbuffer.SetPixel(markerX + dx, markerY + dy, sk::PackRGB565(255, 220, 80));
+        sk_bindings::MenuExecutable* menu = stack.currentMenu();
+        if (menu) {
+            try {
+                if (input.ConsumeJustPressed(sk::ButtonSlot::Up)) menu->MoveSelection(-1);
+                if (input.ConsumeJustPressed(sk::ButtonSlot::Down)) menu->MoveSelection(1);
+                if (input.ConsumeJustPressed(sk::ButtonSlot::LeftSelectionKey)) {
+                    menu->ActivateSelected();
                 }
+                if (input.ConsumeJustPressed(sk::ButtonSlot::RightSelectionKey)) {
+                    menu->TryInvoke("OnRightSoftkey");
+                }
+            } catch (skRuntimeException& e) {
+                std::printf("shadowkey-port: RUNTIME ERROR: %s\n", e.toString().ptr());
             }
-            window.Present(backbuffer);
-
-            ++tickCount;
-            if (tickCount % 25 == 0) {
-                std::printf("shadowkey-port: tick %llu (~%llus)\n",
-                            static_cast<unsigned long long>(tickCount),
-                            static_cast<unsigned long long>(tickCount / 25));
-            }
+            menu = stack.currentMenu();  // a callback may have opened a new one
         }
+
+        // A freshly opened menu (via OpenMenu()) starts with no selection
+        // of its own -- snap to its first selectable item, same as the
+        // root menu's one-time setup above.
+        if (menu && menu != lastMenu) {
+            menu->MoveSelection(0);
+            lastMenu = menu;
+        }
+
+        if (menu) {
+            RenderMenu(backbuffer, *menu, strings);
+        } else {
+            backbuffer.Fill(kBackgroundColor);
+        }
+        window.Present(backbuffer);
     });
 
-    std::printf("shadowkey-port: window closed cleanly after %llu ticks.\n",
-                static_cast<unsigned long long>(tickCount));
     return 0;
 }
