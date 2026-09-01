@@ -79,29 +79,80 @@
       SDK); `shadowkey/ghidra/scripts/pyghidra_label_imports.py` applies
       it, confirmed live in decompiler output.
 
-## Phase 2 — decide the decompilation strategy
+## Phase 2 — decompilation strategy: DECIDED — behavioral RE, not byte-exact
 
-Two roads, not mutually exclusive:
+**Decision: behavioral reverse-engineering** (ashen-decomp's model — recover
+function purpose/structure, produce readable C/C++, *not* byte-identical
+to the original), not byte-exact recompilation (`rac1`'s model). Not
+provisional — this is the plan going forward. Rationale:
 
-- **Byte-exact recompilation** (rac-decomp's model): only viable once the
-  exact compiler + linker + codegen flags are identified and reproducible.
-  ARM/Symbian toolchains from this era (GCC "gnupoc"/`arm-epoc-pe-gcc`, or
-  ARM ADS/RVCT `armcc`+`armlink`) are more obscure than the PS2 EE-GCC
-  chain from the prior project — expect this to take real investigation
-  before it's known to be tractable at all.
-- **Behavioral reverse-engineering** (ashen-decomp's model, for the sibling
-  N-Gage game *Ashen*): recover function purpose/structure and produce
-  readable, *not necessarily byte-identical*, C — faster to get useful
-  results, doesn't depend on finding the original toolchain.
+- **The project's actual goal is a PC port** (widescreen, uncapped/fixed
+  frame rate — see the porting discussion this roadmap grew out of), not
+  preservation-grade archival fidelity. A port needs *correct* logic it's
+  free to modify, not a binary-identical recompile — byte-exactness would
+  be solving a harder problem than the one that's actually wanted.
+- **Two different compilers, not one** (`COMPILER_TOOLCHAIN.md`): GCC for
+  ~98% of the binary, ARM RVCT/ADS for one small (~26KB) vendored library.
+  Byte-exact would mean reproducing *both* exactly — a materially harder
+  bar than `rac1`'s single, well-known PS2 GCC. The GCC side alone is
+  already the obscure, semi-lost "gnupoc"/`arm-epoc-pe-gcc` cross
+  toolchain (unlike PS2 EE-GCC, which is well-documented and has an
+  active decomp community); the RVCT/ADS side is a commercial compiler
+  building an unidentified third-party library, so even *finding* the
+  right compiler version to match against is likely unknowable, not just
+  hard.
+- **Scale**: real function count from the analyzed Ghidra project is
+  2,006, with a genuine long tail (17 functions over 4KB, one 19KB
+  monster). Byte-exact, compiler-flag-matching decompilation at this
+  scale is a months-long undertaking even with a single, well-known
+  toolchain (`rac1` took ~7-8 weeks for a comparable function count with
+  exactly that advantage) — behavioral RE is faster per function and,
+  critically, doesn't block on solving the toolchain-identification
+  problem above before any real progress can start.
 
-Pick per-function/per-subsystem rather than committing globally up front;
-revisit once Phase 1's toolchain findings are in.
+This doesn't preclude ever attempting byte-exact matching for the ~98%
+GCC-built portion specifically, if someone wants preservation-grade
+fidelity later — it's just explicitly not what Phase 3 is organized
+around, and shouldn't gate anything.
 
-## Phase 3 — function-level work
+## Phase 3 — function-level work (behavioral RE)
 
-Not planned in detail yet — depends on Phase 2's outcome. If byte-exact
-becomes viable, expect a `splat`-equivalent split/build/verify loop similar
-to `rac1/` in the prior PS2 project, adapted for E32Image instead of ELF.
+Not a `splat`-style split/build/verify loop (that's the byte-exact
+model) — instead, a per-function/per-subsystem loop of: disassemble in
+Ghidra (imports already labeled with real names where known — 319/415,
+see `IMPORT_NAMES.md`) → decompile → understand → write clean,
+independently-compilable C/C++ that reproduces the *behavior*, named
+using real Symbian class/method names wherever the mangled import names
+give them away (e.g. `EIKCORE____15CEikApplication` → this function
+constructs a `CEikApplication`) → move on. No requirement to match the
+original binary byte-for-byte, no requirement to reproduce
+compiler-specific codegen quirks.
+
+Prioritization, driven by the port goal rather than raw coverage:
+
+- **In scope early**: whatever the render loop, camera/projection setup,
+  input handling, and world/entity update logic actually are — these
+  gate a playable port and are exactly where the aspect-ratio and
+  frame-timing fixes from the original porting discussion will need to
+  land.
+- **Deprioritized**: `GAMECOMMS`/`ESOCK`/`ETEL`-driven Bluetooth
+  multiplayer code (~50 import ordinals of supporting infrastructure) —
+  skippable or stubbable for a single-player-first port.
+- **Mostly free**: SimKin-scripted game logic (dialogue, menus, a lot of
+  AI) doesn't need decompiling at all — the `.s` files are already
+  plaintext and SimKin itself is open source. Time here is better spent
+  understanding *how* `6r51.app` drives the SimKin interpreter (the 64
+  `SIMKIN` import ordinals, still unresolved to real names — see
+  `IMPORT_NAMES.md`) than decompiling engine-side glue.
+- The vendored ~26KB RVCT/ADS library (`COMPILER_TOOLCHAIN.md`) is
+  behaviorally decompilable like everything else — the two-compiler
+  finding only matters for the (now-moot) byte-exact question, not for
+  reading what the code does.
+
+Concrete next step: identify the render/game-loop entry point(s) so
+Phase 3 has a starting anchor, the same way `NewApplication` was Phase 1's
+— probably by tracing from `WS32`/`GDI`/`BITGDI` calls (window server,
+graphics) outward, now that those imports are labeled with real names.
 
 ## Open questions
 

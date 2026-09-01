@@ -51,6 +51,11 @@ toolchain is identified (GCC for the main codebase, one small
 statically-linked ARM RVCT/ADS-built library). All of it is live in the
 Ghidra project's decompiler output, not just written down in docs.
 
-Next up per [`docs/ROADMAP.md`](docs/ROADMAP.md): decide between
-byte-exact recompilation and behavioral reverse-engineering (the compiler
-finding pushes toward the latter), then start actual function-level work.
+Phase 2 is decided: **behavioral reverse-engineering**, not byte-exact
+recompilation — the project's actual goal is a PC port, and the compiler
+finding (GCC main codebase + one vendored ARM RVCT/ADS library) makes
+byte-exact matching meaningfully harder than a single-toolchain target
+for no benefit that goal needs. See
+[`docs/ROADMAP.md`](docs/ROADMAP.md#phase-2--decompilation-strategy-decided--behavioral-re-not-byte-exact)
+for the full rationale. Next: Phase 3, actual function-level work,
+starting from the render/game-loop entry points.
