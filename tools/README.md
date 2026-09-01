@@ -368,6 +368,19 @@ evidence that the game is rendered in 2D (see that doc's correction note).
   property-setter dispatchers (`SetSpellType`, `SetSprite`) that
   confirmed its role; see
   [`../docs/SIMKIN_BRIDGE.md`](../docs/SIMKIN_BRIDGE.md#simkin_atomtoint-resolved--was-the-dominant-unknown-ordinal).
+- `shadowkey/ghidra/scripts/pyghidra_list_funcs_near.py <hex-lo>
+  <hex-hi>` — lists every function in an address range with its body
+  size and distinct-caller count, to spot small sibling helper functions
+  compiled next to a known function of interest. This is how
+  `SimKinNameTrie_Lookup` was found next to `SimKinNameTrie_Insert`, by
+  matching its 28-caller count.
+- `shadowkey/ghidra/scripts/pyghidra_label_simkin_dispatch.py` — renames
+  `SimKinNameTrie_Lookup` (the read-only counterpart to
+  `SimKinNameTrie_Insert`, found via `pyghidra_list_funcs_near.py`) and
+  comments two confirmed per-class dispatcher chain links
+  (`FUN_10046328`, `FUN_1002c848`) that call it — this closes the "how
+  does a trie index reach its handler" question; see
+  [`../docs/SIMKIN_BRIDGE.md`](../docs/SIMKIN_BRIDGE.md#the-runtime-dispatch-mechanism-how-a-trie-index-reaches-its-handler).
 - `shadowkey/ghidra/scripts/pyghidra_simkin_ordinal_stats.py` — one-shot
   survey of every SIMKIN import ordinal's call-site and distinct-caller
   count, used to prioritize which ordinals matter most for the SimKin

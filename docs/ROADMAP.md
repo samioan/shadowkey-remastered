@@ -570,11 +570,25 @@ Prioritization, driven by the port goal rather than raw coverage:
       real chained property-setter dispatchers (`SetSpellType`,
       `SetSprite`) — a second, distinct dispatch layer underneath the
       trie. Full writeup: [`SIMKIN_BRIDGE.md`](SIMKIN_BRIDGE.md).
+- [x] **Closed the loop: how a resolved trie index reaches its
+      dispatcher.** Found `SimKinNameTrie_Lookup` (was `FUN_1000df3c`),
+      the read-only counterpart to `SimKinNameTrie_Insert`, compiled
+      right next to it with the same 28-caller count. Its callers are the
+      chained property-setter dispatchers from the previous round
+      (`FUN_10046328`, `FUN_1002c848`, ...) — confirming the ~28
+      registration functions and the ~28 chained dispatcher functions are
+      the *same* set, one-to-one: each of ~28 object classes gets its own
+      separate trie (root stored at its own offset in a shared registry
+      reached via a `this+0x44` backpointer), and its matching dispatcher
+      does one lookup scoped to just that trie, then `switch`es directly
+      on the resolved index into inline get/set logic. The "~700 total
+      bindings" figure is a sum across ~28 small per-class tries, not one
+      big shared one. Full writeup: [`SIMKIN_BRIDGE.md`](SIMKIN_BRIDGE.md).
 
-Next: enumerating the full ~700-entry native API surface (only 2 of ~28
-registration functions individually examined), tracing how a trie index
-actually reaches its dispatcher, the two
-`heightA`/`heightB` fields' finer sub-structure, the `.zlu` chunk's
+Next: enumerating the full ~700-entry native API surface (every name +
+index, across all ~28 per-class tries — now mechanical, not blocked),
+identifying which object each of the ~28 dispatcher classes actually is,
+the two `heightA`/`heightB` fields' finer sub-structure, the `.zlu` chunk's
 secondary per-scanline/per-pixel `0x200`-byte-block offset (seen in all 4
 `SurfaceFace_RasterizeTextured` variants, not decoded), and `.sta`'s
 remaining undecoded fields (`flags`, `unkA`/`unkB`). See `MODEL_FORMAT.md`'s,

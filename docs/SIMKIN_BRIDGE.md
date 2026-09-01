@@ -11,10 +11,12 @@ engine, not about decompiling the scripts themselves (which don't need
 decompiling — they're already plaintext, in scope to read directly per
 `shadowkey_target_scope`).
 
-The core architecture is now understood end to end (see "The real
-name-resolution mechanism" below) — this is still not a *complete*
+The core architecture is now understood end to end, registration through
+runtime dispatch (see "The real name-resolution mechanism" and "The
+runtime dispatch mechanism" below) — this is still not a *complete*
 inventory of the ~700-entry native API surface, but the "how does it
-work" question is answered.
+work" question is fully answered, both the write side (startup
+registration) and the read side (a script call resolving to a handler).
 
 ## A false start, corrected: the "name-based dead end" was a search bug
 
@@ -122,6 +124,76 @@ this pass (`SimKin_RegisterNativeBindings_1` plus the confirming example
 above); the other ~27 are un-renamed but now easy to find (same address
 cluster, same `SimKinNameTrie_Insert`-calling shape).
 
+## The runtime dispatch mechanism: how a trie index reaches its handler
+
+The previous open question — "once a script call resolves to a trie
+index, what happens next" — is now answered. Right after
+`SimKinNameTrie_Insert` in the binary's address space sits a small
+(136-byte) sibling with the *same* 28-distinct-caller count:
+**`SimKinNameTrie_Lookup`** (renamed from `FUN_1000df3c`, 0x1000df3c).
+It walks the identical node structure the same case-insensitive way, but
+read-only — no node creation. It returns `false` if any node on the path
+is missing, or if the terminal node's value is still `-1`
+(unregistered); otherwise it writes the resolved index through an
+out-param and returns `true`. This is the read counterpart to
+`SimKinNameTrie_Insert`, and it's the missing link between "a name got
+registered into a trie at startup" and "a script call by that name does
+something."
+
+Two of its 28 callers were decompiled and turn out to be **exactly the
+"chained property-setter dispatcher" functions found earlier**
+(`FUN_10046328`, the fallthrough target of the `SetSpellType` handler)
+plus its own fallthrough target (`FUN_1002c848`):
+
+```c
+// FUN_10046328 — confirmed per-class member dispatcher
+undefined4 FUN_10046328(void *this, Atom *nameAtom, ArgList *args, Atom *result, ...) {
+    wchar_t *name = nameAtom->str ? *nameAtom->str : kDefaultName;
+    int index;
+    if (!SimKinNameTrie_Lookup(*(this->registry) + 0x14dc8, name, &index))
+        return FUN_1002c848(this, nameAtom, args, result, ...);   // next class in the chain
+
+    switch (index) {               // 9 cases (0-8), inline get/set logic
+    case 2: case 6:                // SIMKIN_AtomToInt(args[0]) -> this+0x1d0 or 0x1d2
+    case 3:                        // SIMKIN_AtomToInt(args[0]) -> this+0x1b0
+    ...
+    }
+    return 1;
+}
+```
+
+`FUN_1002c848` is byte-for-byte the same shape, using its *own* separate
+trie root (`*(this->registry) + 0x14d74`, a different offset — its own
+class, not shared with `FUN_10046328`'s), and falls through to
+`FUN_1006ca90` on a miss.
+
+This resolves the whole architecture: the ~28 sibling functions that
+call `SimKinNameTrie_Insert` at startup are the *same* ~28 functions
+(one-to-one) as a chain of "class member dispatcher" functions found
+among `SimKinNameTrie_Lookup`'s callers. **Each of the ~28 classes gets
+its own separate trie**, not one shared 700-entry trie — the "~700
+total bindings" figure is a sum across ~28 small per-class tries, each
+with its root pointer stored at its own small offset (0x14cf0, 0x14d74,
+0x14dc8, ... — a tightly packed cluster, consistent with a table of
+~28 pointer-sized slots) within a shared registry object every dispatcher
+reaches via a `this+0x44` backpointer. A script call by name walks the
+dispatcher chain class by class; each class's dispatcher does one trie
+lookup scoped to just its own members, and on a match immediately
+`switch`es on the resolved index straight into inline get/set logic —
+no separate step in between. `this+0x44`, the shared backpointer every
+per-class object holds, looks like the same unified "engine" object
+established elsewhere in this project (`WORLD_MODEL.md`'s `CMap`/engine
+identity), though that's not independently confirmed for this specific
+offset — worth checking if the port work ever needs it.
+
+The earlier "SetSpellType"/"SetSprite" `wcscmp`-based handlers
+(`0x1002e434`, `0x1007ef24`) sit *ahead* of this trie-based dispatch in
+the same chain — one hardcoded name check, then fall through to the
+generic per-class trie dispatcher on a miss. Why a small number of
+members get a hardcoded fast-path check instead of just being in the
+trie like everything else is unclear (hottest properties? added after
+the trie infrastructure existed?) — not resolved, low priority.
+
 ## `SIMKIN_AtomToInt` (resolved — was the dominant unknown ordinal)
 
 **`SIMKIN_AtomToInt`** (renamed from `SIMKIN_ord185`, ordinal 185 — 523
@@ -153,23 +225,35 @@ setters* — a second dispatch layer underneath the name trie above.
 
 ## What's still open
 
-- Only 2 of ~28 SimKin native-binding-registration functions were
-  individually examined/named — the full ~700-entry API surface (every
-  name + its assigned trie index) hasn't been enumerated. Doing so would
-  need either walking the trie's insert call sites across all ~28
-  functions (mechanical, but a lot of them), or reconstructing it at
-  runtime by instrumenting/tracing the real game (out of scope for static
-  RE alone).
-- The *dispatch* half of the trie: once a script reference resolves to a
-  trie index, what actually happens next (how the index leads to the
-  right chained property-setter dispatcher, or the right method call) —
-  not traced. The property-setter chains (`SetSpellType`/`SetSprite`
-  above) were found via `SIMKIN_AtomToInt`'s caller list, not via
-  following the trie's output.
+- Only 2 of ~28 SimKin native-binding-registration functions (and their
+  matching 2 of ~28 dispatcher functions) were individually
+  examined/named — the full ~700-entry API surface (every name, its
+  assigned per-class trie index, and which of the ~28 classes it belongs
+  to) hasn't been enumerated. Doing so is now mechanical (each
+  registration function's `SimKinNameTrie_Insert` call sites give the
+  name+index pairs directly, in raw disassembly), just a lot of them —
+  the address clusters for both the registration functions
+  (`0x10010804`-`0x1001537c`) and likely a parallel cluster for the
+  dispatcher functions are already known.
+- What object each of the ~28 classes actually *is* (spell? item? actor?
+  UI menu?) — not identified for any of them beyond weak field-offset
+  guessing (e.g. `FUN_10046328`'s class touches fields at `this+0x1b0`/
+  `+0x1d0`/`+0x1d2`/`+0x1cc`/`+0x170`, consistent with something
+  spell/equipment-related given `SetSpellType` chains into it, but not
+  confirmed against a known struct).
 - `SIMKIN_ord237`/`ord101`/`ord85` — all broadly used (74-91 call sites,
-  26-34 distinct callers each) — not characterized. Possibly related to
-  the property-*getter* direction (the read counterpart to the setter
-  chains above), not confirmed.
+  26-34 distinct callers each) — still not confirmed, but `FUN_10046328`'s
+  case 0 (a getter, gated on a "has string" flag at `this+0x1d4`) gives
+  weak new hypotheses for two of them, from this line pair:
+  `SIMKIN_ord101(&outAtom, wcharPtr, wcslen(wcharPtr)); SIMKIN_ord38(result, &outAtom);`
+  — `ord101` looks like a `MakeStringAtom` variant that takes an explicit
+  length instead of relying on a NUL terminator, and `ord38` looks like
+  "store an already-built atom into the dispatcher's result out-param."
+  Case 1 calls `SIMKIN_ord85` on an atom and gets back a single byte,
+  consistent with an `AtomToBool`/`AtomToByte` reader alongside
+  `SIMKIN_AtomToInt`. None of these three are renamed — one example each
+  isn't enough confidence, and `ord237` wasn't seen in either dispatcher
+  examined this pass.
 - `SIMKIN_ord9` — a weak, unconfirmed lead: seen called from a
   destructor-shaped function (`~Class(uint aFlags)`, the classic
   GCC-old-ABI virtual-destructor signature, conditionally `delete`s
@@ -195,9 +279,16 @@ setters* — a second dispatch layer underneath the name trie above.
 - `SIMKIN_AtomToInt` (ordinal 185, 0x100a0110)
 - `SimKinNameTrie_Insert` (0x1000de50)
 - `SimKin_RegisterNativeBindings_1` (0x10011008)
+- `SimKinNameTrie_Lookup` (0x1000df3c)
+- `FUN_10046328`/`FUN_1002c848` — not renamed (class identity unknown),
+  commented as confirmed per-class dispatcher chain links
 
 Tools: `pyghidra_label_simkin_bridge.py`, `pyghidra_label_simkin_trie.py`,
-`pyghidra_label_atom_to_int.py`. Survey tool:
+`pyghidra_label_atom_to_int.py`, `pyghidra_label_simkin_dispatch.py`.
+New general-purpose tool: `pyghidra_list_funcs_near.py <hex-lo> <hex-hi>`
+(lists every function in an address range with its size and distinct
+caller count — this is how `SimKinNameTrie_Lookup` was spotted next to
+`SimKinNameTrie_Insert`, by matching caller counts). Survey tool:
 `pyghidra_simkin_ordinal_stats.py` (one-shot call-site/caller-count
 report for every SIMKIN ordinal — the source of the numbers throughout
 this doc). `pyghidra_find_string_and_refs.py` now checks both ASCII and
