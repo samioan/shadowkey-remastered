@@ -446,12 +446,34 @@ Prioritization, driven by the port goal rather than raw coverage:
       via `pyghidra_label_surface_renderer.py`. Full writeup:
       [`RENDERER_3D.md`](RENDERER_3D.md#the-tile-grid-wallsurface-face-renderer-a-third-pipeline).
 
-Next: the tile-grid traversal inside `Render3DScene` that decides which
-faces get a dynamic surface draw (per-tile flag bits not decoded),
-`SurfaceFace_RasterizeTextured_v0`–`_v2` (presumed near/fade siblings of
-`_v3`, not independently traced), and `azra.sta`'s still-unidentified
-format. See `MODEL_FORMAT.md`'s, `RENDERER_3D.md`'s, and
-`ZONE_FORMAT.md`'s open follow-ups.
+- [x] Resolved the tile-grid traversal: `Render3DScene` calls a new
+      function, `TileGrid_RaycastVisibility`, once per frame — a genuine
+      fan-raycast (150-178 rays, same sin/cos LUT as the rotation-matrix
+      code) that determines which tiles are actually visible this frame,
+      stopping at wall tiles (the same `flags` bit `Bullseye_
+      PropagateLight`'s light-bounce rays stop at) and deduplicating via a
+      newly-decoded per-tile "last visible frame" byte. `Render3DScene`
+      then walks *that* list, checking each tile's neighbors' `.zcp`
+      type-table entries for a per-direction `.sur`-index byte (`0xff` =
+      no face) to decide what to draw, gated by a camera-side check or an
+      explicit per-tile override flag. This also resolved a long-standing
+      `WORLD_MODEL.md` open item ("the actual first-person rasterizer/
+      raycaster still not located") and an object-identity question: the
+      "engine" object referenced throughout `ZONE_FORMAT.md`/
+      `RENDERER_3D.md` **is** `WORLD_MODEL.md`'s `CMap` — there's no
+      separate wrapper object. Also unified `WORLD_MODEL.md`'s
+      independently-found "36-byte tile-type table at `map+0x690c`" with
+      `ZONE_FORMAT.md`'s `.zcp` entries array — same table. Full writeup:
+      [`WORLD_MODEL.md`](WORLD_MODEL.md#per-frame-tile-visibility-raycasting-how-render3dscene-picks-which-faces-to-draw)
+      and
+      [`RENDERER_3D.md`](RENDERER_3D.md#the-traversal-what-decides-which-faces-get-a-dynamic-draw).
+
+Next: `SurfaceFace_RasterizeTextured_v0`–`_v2` (presumed near/fade
+siblings of `_v3`, not independently traced), precisely which `.zcp`
+type-table byte maps to which face direction (only 3 of ~4-6 confirmed),
+and `azra.sta`'s still-unidentified format. See `MODEL_FORMAT.md`'s,
+`RENDERER_3D.md`'s, `WORLD_MODEL.md`'s, and `ZONE_FORMAT.md`'s open
+follow-ups.
 
 ## Open questions
 

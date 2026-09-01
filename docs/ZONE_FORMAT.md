@@ -408,12 +408,24 @@ for") is a **`field80` × `zmpTotal` grid of 6-byte cell records**, copied
 byte-for-byte into the first 6 bytes of each 8-byte `engine+0x6908` cell:
 
 ```c
-struct ZmpCell {           // 6 bytes on disk, per grid cell
+struct ZmpCell {           // 6 bytes on disk, per grid cell; the in-memory
+                             // engine+0x6908 record is 8 bytes -- the last 2
+                             // (not present on disk) are runtime-only scratch
     uint8  flags;            // bit0 = light source; bit1 = wall/obstruction
-                              //   (blocks + bounces Bullseye_PropagateLight's rays)
+                              //   (blocks + bounces Bullseye_PropagateLight's
+                              //   rays AND TileGrid_RaycastVisibility's rays,
+                              //   see RENDERER_3D.md); bit3 = force-draw a
+                              //   surface face regardless of camera side
     uint8  unknown0;          // not decoded
     uint16 lightLevel;         // baseline light level, recalculated below
-    uint16 zcpIndex;            // index into .zcp's per-cell light-delta table
+    uint16 zcpIndex;            // index into .zcp's 36-byte type-table (this
+                                  // doc's ZcpEntry below, and WORLD_MODEL.md's
+                                  // "36-byte tile-type table" -- same thing)
+    uint8  visibleFrameStamp;      // runtime-only (not loaded from .zmp): last
+                                     // frame (mod 4) TileGrid_RaycastVisibility
+                                     // marked this cell visible, deduplicates
+                                     // its per-frame output list
+    uint8  unknown7;                 // runtime-only, not decoded
 };
 ```
 
@@ -447,11 +459,31 @@ struct ZcpFile {
     uint8  pad[3];              // offset 0x01..0x03, unread
     ZcpEntry entries[entryCount]; // offset 0x04, stride 0x24 (36 bytes)
 };
-struct ZcpEntry {              // 36 bytes; only the first is decoded
+struct ZcpEntry {              // 36 bytes; a few fields decoded so far
     int8  lightDelta;            // offset 0x00: signed, applied as delta*0x100
-    uint8 unknown[35];            // offset 0x01..0x23, not decoded
+    uint8 unknown[0x15];          // offset 0x01..0x15, not decoded (likely
+                                    // includes the "height" field WORLD_MODEL.md
+                                    // found via a much earlier, separate trace —
+                                    // not cross-checked against this offset yet)
+    uint8 surIndexA;                // offset 0x16: a .sur record index for one
+                                      // wall face direction (0xff = no face)
+    uint8 surIndexB;                  // offset 0x17: .sur index, another direction
+    uint8 unknown2[2];                 // offset 0x18..0x19, not decoded
+    uint8 surIndexC;                    // offset 0x1a: .sur index, another direction
+    uint8 unknown3[9];                   // offset 0x1b..0x23, not decoded (likely
+                                           // more per-direction .sur indices given
+                                           // the pattern — not confirmed)
 };
 ```
+
+**This is also `WORLD_MODEL.md`'s "36-byte tile-type table at `map+0x690c`"**
+— found independently in a much earlier round of this project, before
+`.zcp` itself was identified. `.zcp`'s entries array *is* that table;
+each per-cell tile record's `typeId`/`zcpIndex` field (see
+`Bullseye_LoadZmpCells` above) is the index into it. See `WORLD_MODEL.md`
+for the object-identity correction this unification came with, and
+`RENDERER_3D.md`'s tile-grid wall/surface-face renderer for how
+`surIndexA`/`B`/`C` get used to pick per-direction wall textures.
 
 This also resolves what `azra.sta` isn't related to: an earlier pass of
 this note guessed a link to "bullseye pathfinding" — there's no pathfinding

@@ -58,8 +58,36 @@ gameplay code as the tile-grid manager:
 - `map+0x690c` = pointer to a shared tile-*type* definition table,
   **36 bytes (0x24) per entry**, indexed by a type ID stored in each
   cell
-- `map+0x94` / `map+0x9c` = the player's current position, each an 8.8
-  fixed-point value (`>>8` recovers the tile-integer coordinate)
+- `map+0x618` = a further sub-object holding the player/camera's current
+  position and orientation, e.g. `+0x94`/`+0x9c` (position, each an 8.8
+  fixed-point value, `>>8` recovers the tile-integer coordinate); see the
+  object-identity correction right below for how this was pinned down
+  precisely.
+
+**Object-identity correction/unification (found while tracing
+`RENDERER_3D.md`'s tile-grid wall/surface-face renderer)**: this `CMap`
+object turns out to be **the exact same object every other doc in this
+project calls "`engine`"** — the one with `+0x480` (framebuffer),
+`+0x5b4`/`+0x5b8` (composite/stencil buffers), `+0xbe34` (entity BST),
+`+0x6b38` (model cache), `+0x62c` (room-render state), etc. (see
+`RENDERER_3D.md`, `ZONE_FORMAT.md`, `MODEL_FORMAT.md`). There is no
+separate wrapper object in between — `GameEngine_InitLevel`,
+`Bullseye_Init`/`Bullseye_InitMap`/`Bullseye_LoadZmpCells`/
+`Bullseye_BakeLighting`, `Render3DScene`, and `SurfaceFace_*` are all
+effectively **methods of this one `CMap`/"engine" object**, called with
+it directly as their own `param_1` — not reached through a `+0x618`
+indirection from some other object. `map+0x618` (this doc's original
+finding) is instead **`CMap`'s own field**, pointing to a smaller
+player/camera sub-object (position `+0x94`/`+0x9c`, plus orientation
+fields referenced throughout `RENDERER_3D.md`'s actor/transform code).
+Verified directly: `TileGrid_RaycastVisibility` (`FUN_1000f694`, see
+"Per-frame tile-visibility raycasting" below) reaches this object both
+as its own `param_1` *and* passes that same `param_1` into
+`Map_GetTileAt` as the `CMap*` argument — proving they're identical.
+(`GameEngine_ctor` constructing this object at `+0x618` of *its own*
+`this` still stands — that `this` is the actual Symbian application
+object, one level further out than anything else in this project has
+needed to name.)
 
 **`Map_GetTileAt(CMap*, TInt xFixed8_8, TInt yFixed8_8)`** (renamed from
 `FUN_1001b004`) is the accessor: bounds-checks x/y against width/height,
@@ -92,7 +120,10 @@ renderer" needs to reproduce), just not "the game is 2D."
 
 1. Draws some text via the font-drawing helper also used for the debug
    FPS overlay (`FUN_1008f97c`) — likely a location/HUD label.
-2. Reads the player's tile position from `CMap` (`map+0x94`/`+0x9c`).
+2. Reads the player's tile position from `CMap`'s player/camera
+   sub-object (`*(map+0x618)+0x94`/`+0x9c` — corrects an earlier version
+   of this note that wrote `map+0x94`/`+0x9c` directly; see the
+   object-identity correction above).
 3. Scans a 65×65-tile window (`-0x20..+0x20` in both axes) centered on
    the player via repeated `Map_GetTileAt` calls, and for each
    neighboring pair of tiles, looks up their tile-type's height field
@@ -109,11 +140,69 @@ name) rather than the first-person renderer itself. Left as
 `FUN_1002b430` (un-renamed, plate-comment only) pending more evidence
 either way.
 
+## Per-frame tile-visibility raycasting: how `Render3DScene` picks which faces to draw
+
+Found while resolving `RENDERER_3D.md`'s open item on the tile-grid
+wall/surface-face renderer's traversal. `Render3DScene` calls
+**`TileGrid_RaycastVisibility`** (renamed from `FUN_1000f694`, 0x1000f694)
+once per frame, before its face-drawing loop:
+
+- Casts a **fan of rays** outward from the player/camera position — the
+  ray count (150, 177, or 178) is picked by a 3-tier quality setting read
+  from `engine+0x608` (the same field elsewhere used as a `0x100`=identity
+  render-scale factor — so this looks like a detail/performance knob, not
+  a fixed constant), using the *same* 2048-entry sin/cos LUT shape as
+  `BuildRotationMatrix3x4`/the automap marker/`Bullseye_PropagateLight`.
+- Each ray steps tile-by-tile (a DDA-style march) up to a quality-tiered
+  max range (25, 93, or 172 tiles), stopping early if it reaches a tile
+  whose `flags` byte has **bit1 set (wall/obstruction)** — the *same* bit
+  `Bullseye_PropagateLight`'s light-bounce rays stop/reflect at, so one
+  "this tile is solid" bit governs both light propagation and rendering
+  visibility.
+- Every tile a ray passes through gets appended to a per-frame visible-
+  tile list (max 512 entries), **deduplicated** via a newly-decoded tile
+  record field: **byte 6**, a rotating 0–3 "last visible frame" stamp
+  compared against a frame counter at `engine+0x478` — extending the
+  8-byte tile record (previously flags/unknown0/lightLevel/typeId, see
+  `ZONE_FORMAT.md`'s `Bullseye_LoadZmpCells` finding) to 7 of its 8 bytes
+  decoded; only byte 7 remains unknown.
+- Also opportunistically sets bits in a packed bitmap reached through
+  `*(engine+0x470)+0x45c` (the SimKin object registry) — looks like a
+  "tiles the player has explored" bitmap feeding an automap reveal-as-
+  you-go mechanic, not confirmed in depth.
+
+`Render3DScene`'s main loop then walks this visible-tile list (not a
+fixed-radius or full-grid scan) and, for each tile, checks each cardinal
+neighbor's **type-table entry** (the 36-byte `.zcp`-loaded record, see
+`ZONE_FORMAT.md`) for a per-direction `.sur` index byte (different byte
+offsets confirmed for different directions/faces — `0x16`, `0x17`, `0x1a`
+seen, not all directions mapped precisely). A value of `0xff` means "no
+face here" (open space); otherwise a face gets drawn via
+`SurfaceFace_BuildAndProject` (`RENDERER_3D.md`), gated additionally by
+either the camera being on the correct side of that tile boundary (an
+implicit backface/already-passed cull) **or** the current tile's `flags`
+bit3 being set (forces the draw regardless — exact intended use, e.g.
+"always double-sided," not confirmed).
+
+This answers this doc's own long-standing open question ("the actual
+first-person rasterizer/raycaster still not located" below): it's not a
+single dedicated raycaster — it's `TileGrid_RaycastVisibility` (what's
+*visible*) feeding `SurfaceFace_BuildAndProject`/`SurfaceFace_
+ClipAndDispatch`/`SurfaceFace_RasterizeTextured_v0..v3` (how it gets
+*drawn*), on top of the `.zsk`-baked whole-room mesh for the parts that
+don't need per-tile dynamic faces. See `RENDERER_3D.md`'s "The tile-grid
+wall/surface-face renderer" section for the drawing half of this.
+
 ## Labels applied
 
 - `Map_GetTileAt` (0x1001b004)
+- `TileGrid_RaycastVisibility` (0x1000f694)
 - Addendum to `GameEngine_ctor`'s existing plate comment noting
   `engine+0x618`'s role.
+- Addendum to `Map_GetTileAt`'s comment documenting the CMap/"engine"
+  object-identity unification above.
+- Addendum to `Bullseye_LoadZmpCells`'s comment documenting the extended
+  tile-record layout (byte 6).
 
 New reusable script: `shadowkey/ghidra/scripts/pyghidra_find_reads.py
 <hex-offset>` — like `pyghidra_find_field_writes.py` but for `LDR`
@@ -124,13 +213,29 @@ pointer) rather than every function that sets it. This is how
 
 ## Open follow-ups
 
-- What `FUN_1002b430`'s tile-height-difference scan actually produces
-  (automap vs. visibility) — not confirmed.
-- The actual first-person rasterizer/raycaster still not located. Given
-  the world is now confirmed tile-based, worth searching next from a
-  different angle: what reads a tile's *texture*/*wall* fields (as
-  opposed to the height field already seen) out of the 36-byte
-  type-table, or what iterates `Map_GetTileAt` results into actual
-  pixel writes into the backbuffer.
-- The 36-byte tile-type table's and 8-byte per-cell tile's exact field
-  layouts are unconfirmed beyond the one height field found so far.
+- ~~What `FUN_1002b430`'s tile-height-difference scan actually
+  produces~~ — still genuinely unconfirmed (automap vs. something else),
+  but now better-contextualized: it's clearly **not** the first-person
+  visibility system, since that's `TileGrid_RaycastVisibility` (resolved
+  above) — a 150-178-ray fan out to 25-172 tiles, structurally nothing
+  like `FUN_1002b430`'s 65×65 full-window scan.
+- ~~The actual first-person rasterizer/raycaster still not located~~ —
+  **resolved**, see "Per-frame tile-visibility raycasting" above and
+  `RENDERER_3D.md`'s tile-grid wall/surface-face renderer section.
+- ~~What reads a tile's *texture*/*wall* fields... out of the 36-byte
+  type-table~~ — **largely resolved**: `Render3DScene`'s traversal reads
+  per-direction `.sur`-index bytes out of it (`0x16`/`0x17`/`0x1a`
+  confirmed, other directions/faces not individually mapped) to pick
+  wall textures — see "Per-frame tile-visibility raycasting" above. The
+  *height* field's exact offset (this doc's original find) is still not
+  cross-referenced against these newer offsets.
+- The 36-byte tile-type table's (`.zcp`, see `ZONE_FORMAT.md`) and 8-byte
+  per-cell tile's field layouts are now **mostly** decoded: the tile
+  record is flags(bit0=light source/bit1=wall/bit3=force-draw-face)/
+  unknown0/lightLevel/typeId/visibleFrameStamp — 7 of 8 bytes; the
+  36-byte type entry has lightDelta(byte 0) and several per-direction
+  `.sur`-index bytes (0x16/0x17/0x1a — not all 4-6 faces individually
+  pinned) plus the original height field (offset within it not
+  cross-checked against these). Remaining unknowns: tile byte 7, most of
+  the type entry's other ~30 bytes, and precisely which byte serves which
+  compass direction/face.

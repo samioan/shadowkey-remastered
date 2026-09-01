@@ -309,6 +309,14 @@ evidence that the game is rendered in 2D (see that doc's correction note).
   the tools above; see
   [`../docs/RENDERER_3D.md`](../docs/RENDERER_3D.md#the-tile-grid-wallsurface-face-renderer-a-third-pipeline).
 
+- `shadowkey/ghidra/scripts/pyghidra_label_tile_visibility.py` — renames
+  `TileGrid_RaycastVisibility` (the per-frame fan-raycast that determines
+  which tiles are visible, feeding the tile-grid wall/surface-face
+  renderer) and adds addendum comments to `Map_GetTileAt` (the CMap/
+  "engine" object-identity unification) and `Bullseye_LoadZmpCells` (the
+  extended tile-record layout); see
+  [`../docs/WORLD_MODEL.md`](../docs/WORLD_MODEL.md#per-frame-tile-visibility-raycasting-how-render3dscene-picks-which-faces-to-draw).
+
 - **`parse_model_resource.py`** — parser/verifier for the actual on-disk 3D
   model archive, `system/apps/6r51/models.idx` + `models.huge` in the game
   install tree (found separately from `6r51.app`'s code section — this is

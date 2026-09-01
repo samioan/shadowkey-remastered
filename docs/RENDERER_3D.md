@@ -364,9 +364,38 @@ This resolves `ZONE_FORMAT.md`'s last two open per-zone-file items
 (`.ztx`, `.zlu`) and, as a side effect, fully decodes `.sur`'s 8-byte
 record (previously only its count+stride framing was known) and finds the
 first consumer of the `engine+0x6904` array `Bullseye_InitMap` allocates.
-The traversal that calls `SurfaceFace_BuildAndProject` itself — exactly
-which tile-grid faces get one of these dynamic draws vs. relying purely on
-`.zsk`'s baked mesh — wasn't traced in this pass; see Open follow-ups.
+
+### The traversal: what decides which faces get a dynamic draw
+
+Full writeup and the tile-record/type-table field layout live in
+`WORLD_MODEL.md`'s "Per-frame tile-visibility raycasting" section
+(this is fundamentally a tile-grid question, and that doc already owns
+`Map_GetTileAt`/the tile record/the type table) — summary:
+
+1. **`TileGrid_RaycastVisibility`** (renamed from `FUN_1000f694`,
+   0x1000f694), called once per frame from `Render3DScene` before its
+   face-drawing loop, casts a fan of rays (150/177/178, by a quality
+   setting) from the camera using the same sin/cos LUT as
+   `BuildRotationMatrix3x4`, stepping tile by tile until a wall tile
+   (`flags` bit1 — the *same* bit `Bullseye_PropagateLight`'s light rays
+   stop at) blocks it or it runs out of range (25/93/172 tiles,
+   quality-tiered). Every tile crossed gets deduplicated (a newly-decoded
+   per-tile "last visible frame" byte) into a per-frame visible-tile list.
+2. `Render3DScene`'s main loop walks *that list* (not a fixed-radius or
+   full-grid scan) and, per tile, checks each cardinal neighbor's 36-byte
+   `.zcp` type-table entry for a per-direction `.sur`-index byte (`0x16`/
+   `0x17`/`0x1a` confirmed at different call sites, not all directions
+   individually mapped); `0xff` means no face there. When a face is
+   defined, it still only draws if the camera is on the correct side of
+   that tile boundary (an implicit backface/already-passed cull) **or**
+   the tile's `flags` bit3 forces it regardless (exact intended use not
+   confirmed — plausibly "always double-sided").
+
+So the wall/surface pipeline isn't drawing every tile boundary every
+frame — it's gated by (a) a genuine visibility raycast and (b) a
+per-direction "does this tile-type even have a face here" check baked
+into the shared `.zcp` type table, with a small explicit override for
+tiles that need a face regardless of camera position.
 
 ## Labels applied (surface/wall-face renderer)
 
@@ -412,10 +441,14 @@ which tile-grid faces get one of these dynamic draws vs. relying purely on
   see above) but its actual **contents** (what darkness/color curve it
   encodes) haven't been dumped from a real binary/asset — worth doing if a
   PC port wants to preserve the torchlight falloff look.
-- The tile-grid traversal inside `Render3DScene` that decides *which* faces
-  get a dynamic `SurfaceFace_BuildAndProject` draw (vs. relying purely on
-  `.zsk`'s baked room mesh) wasn't traced — it reads per-tile bit flags
-  (`&2`/`&4`/`&8` seen gating branches) whose meaning isn't decoded.
+- ~~The tile-grid traversal inside `Render3DScene` that decides *which*
+  faces get a dynamic draw~~ — **resolved**, see "The traversal: what
+  decides which faces get a dynamic draw" above and `WORLD_MODEL.md`'s
+  "Per-frame tile-visibility raycasting". `flags` bit0/bit1/bit3 are now
+  known (light source / wall / force-draw); bit2 and byte 7 of the tile
+  record, and most of the 36-byte type table, remain undecoded, as does
+  exactly which byte offset maps to which of the (at least 4, likely 6)
+  face directions.
 - `SurfaceFace_RasterizeTextured_v0`/`_v1`/`_v2` weren't traced in the same
   detail as `_v3` — presumed near/fade siblings by dispatch position, not
   independently verified line-by-line the way the 10 actor variants were
