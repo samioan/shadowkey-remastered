@@ -67,11 +67,27 @@ if(WIN32)
   target_link_libraries(shadowkey_port PRIVATE user32 gdi32)
 endif()
 
-# M2 milestone smoke test -- see src/tests/m2_simkin_smoke.cpp. Separate
-# console executable so it doesn't disturb the M0/M1 windowed app.
-add_executable(simkin_m2_smoke
-  src/tests/m2_simkin_smoke.cpp
+# Native binding glue shared by the milestone smoke tests (and eventually
+# shadowkey_port itself, once M4 wires menus into the real window/input
+# loop). See src/simkin_bindings/ -- one file per native binding class.
+add_library(sk_bindings STATIC
+  src/simkin_bindings/combo_box_executable.cpp
+  src/simkin_bindings/floating_text_executable.cpp
+  src/simkin_bindings/menu_executable.cpp
+  src/simkin_bindings/menu_stack.cpp
+  src/simkin_bindings/native_binding_common.cpp
+  src/simkin_bindings/player_executable.cpp
+  src/simkin_bindings/popup_menu_executable.cpp
   src/simkin_bindings/test_armor_executable.cpp
 )
-target_include_directories(simkin_m2_smoke PRIVATE src)
-target_link_libraries(simkin_m2_smoke PRIVATE simkin)
+target_include_directories(sk_bindings PUBLIC src)
+target_link_libraries(sk_bindings PUBLIC simkin)
+
+# M2 milestone smoke test -- see src/tests/m2_simkin_smoke.cpp. Separate
+# console executable so it doesn't disturb the M0/M1 windowed app.
+add_executable(simkin_m2_smoke src/tests/m2_simkin_smoke.cpp)
+target_link_libraries(simkin_m2_smoke PRIVATE sk_bindings)
+
+# M3 milestone smoke test -- see src/tests/m3_mainmenu_smoke.cpp.
+add_executable(simkin_m3_smoke src/tests/m3_mainmenu_smoke.cpp)
+target_link_libraries(simkin_m3_smoke PRIVATE sk_bindings)
