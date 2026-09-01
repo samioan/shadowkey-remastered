@@ -292,12 +292,12 @@ other caller, `FUN_10057890`.
 
 **Bottom line**: Shadowkey has **one 3D model format and one clip/perspective
 core** (`BuildRotationMatrix3x4`, `ComposeTransform3x4`, `Poly3D_ClipAgainstPlane`)
-shared by two renderers built on top of it — an actor renderer (immediate
+shared by three renderers built on top of it — an actor renderer (immediate
 per-face dispatch, 10 rasterizer variants split by near-clip/fog/stencil-ID
-needs) and a room renderer (whole-model transform + depth-bucket sort, one
-rasterizer variant)
-— both writing into one shared intermediate buffer that gets composited to
-the screen once per frame.
+needs), a room renderer (whole-model transform + depth-bucket sort, one
+rasterizer variant), and a tile-grid wall/surface-face renderer (see below,
+4 more rasterizer variants) — all writing into one shared intermediate
+buffer that gets composited to the screen once per frame.
 
 ## Labels applied (room/wall renderer)
 
@@ -306,6 +306,76 @@ the screen once per frame.
 - `RoomFace_ClipAndDispatch` (0x10056aa0)
 - `RoomFace_RasterizeTextured` (0x10055f38)
 - `CompositeSceneBufferToScreen` (0x1005dfe0)
+
+## The tile-grid wall/surface-face renderer: a third pipeline
+
+Found while chasing what `.ztx`/`.zlu` (`ZONE_FORMAT.md`) actually contain.
+`Render3DScene` has a large (~500-line) block, not traced in full here,
+that walks the level's tile grid (the same 2D grid `Map_GetTileAt`
+indexes, per `WORLD_MODEL.md`) looking for tile-adjacent faces that need
+their own draw call — distinct from both the actor pipeline above and the
+`.zsk`-baked whole-room mesh (`RoomGeometry_TransformAndSort`). Each such
+face is drawn by a **third, parallel rasterizer family** that reuses the
+same clip core but has its own dispatcher and its own texture/color
+scheme:
+
+- **`SurfaceFace_BuildAndProject`** (renamed from `FUN_1005d784`,
+  0x1005d784) — called once per exposed tile face from `Render3DScene`'s
+  traversal. Takes a `.sur` record index (the per-face "surface" — see
+  `ZONE_FORMAT.md` for the now-fully-decoded 8-byte record: U/V bit-shift
+  scale, U/V offset, a flags byte, a clamped surface/texture index),
+  builds a quad's 4 corner UVs from those fields (also sampling the
+  `engine+0x6904` grid `Bullseye_InitMap` allocates — the first consumer
+  found for that array, previously an open item), perspective-projects
+  them with the **exact same formula and per-frame scratch pool**
+  (`engine+0xc5c`/`+0xc60`) as `Poly3D_ClipAgainstPlane`, then calls
+  `SurfaceFace_ClipAndDispatch` once per triangle.
+- **`SurfaceFace_ClipAndDispatch`** (renamed from `FUN_1005d074`,
+  0x1005d074) — clips via `Poly3D_ClipAgainstPlane` (the *third* caller of
+  that routine, alongside the actor and room pipelines — strong evidence
+  all three are siblings on one shared core), then dispatches to one of 4
+  rasterizer variants by (near vs. far vertex depth) × (the same
+  `engine+0xbe0f` fade flag the actor pipeline uses). Passes
+  `*(engine+0x6b20) + surfaceIndex*0x4000` as the texture pointer — this
+  is **`.ztx`'s role, fully resolved**: a flat wall-texture atlas, one
+  `0x4000`-byte (16384-byte) slot per surface index. It also forwards one
+  of **`.zlu`'s 4 selected 512-byte chunks** (`engine+0x6b24 +
+  2-bit-selector*4`, the selector taken from bits 4-5 of the caller's
+  per-face material byte) as an extra pointer argument.
+- **`SurfaceFace_RasterizeTextured_v0`..`_v3`** (renamed from
+  `FUN_1005a9e0`/`FUN_10059970`/`FUN_1005c1a4`/`FUN_1005bbc8`) — the 4
+  dispatch targets (near+fade, near+no-fade, far+fade, far+no-fade,
+  matching the actor pipeline's near-clip/fade axes exactly). `_v3`
+  (0x1005bbc8) was traced in full and **resolves `.zlu`'s role too**: it
+  reads a `.ztx` texel as a single **byte** (not raw 16bpp — `.ztx` is
+  **8bpp palettized**, unlike the actor/room pipelines' raw-16bpp
+  textures), doubles it as an index, then reads the *final* 16bpp color
+  out of the forwarded `.zlu` chunk at that index. So **`.zlu` is 4
+  selectable 256-color palettes** (512 bytes = 256×2-byte RGB565-ish
+  entries each) that convert a wall texture's indexed texels into real
+  color — a classic same-texture-different-palette trick for varying a
+  wall's lit/dark/themed look without duplicating texture data, selected
+  per-face by 2 bits of a material byte. A secondary per-scanline/
+  per-pixel offset into adjacent 0x200-byte blocks within the chunk
+  wasn't fully decoded (likely a further distance-driven palette blend,
+  analogous to the actor pipeline's fade LUT) — see Open follow-ups.
+
+This resolves `ZONE_FORMAT.md`'s last two open per-zone-file items
+(`.ztx`, `.zlu`) and, as a side effect, fully decodes `.sur`'s 8-byte
+record (previously only its count+stride framing was known) and finds the
+first consumer of the `engine+0x6904` array `Bullseye_InitMap` allocates.
+The traversal that calls `SurfaceFace_BuildAndProject` itself — exactly
+which tile-grid faces get one of these dynamic draws vs. relying purely on
+`.zsk`'s baked mesh — wasn't traced in this pass; see Open follow-ups.
+
+## Labels applied (surface/wall-face renderer)
+
+- `SurfaceFace_BuildAndProject` (0x1005d784)
+- `SurfaceFace_ClipAndDispatch` (0x1005d074)
+- `SurfaceFace_RasterizeTextured_v0` (0x1005a9e0)
+- `SurfaceFace_RasterizeTextured_v1` (0x10059970)
+- `SurfaceFace_RasterizeTextured_v2` (0x1005c1a4)
+- `SurfaceFace_RasterizeTextured_v3` (0x1005bbc8)
 
 ## Open follow-ups
 
@@ -342,3 +412,16 @@ the screen once per frame.
   see above) but its actual **contents** (what darkness/color curve it
   encodes) haven't been dumped from a real binary/asset — worth doing if a
   PC port wants to preserve the torchlight falloff look.
+- The tile-grid traversal inside `Render3DScene` that decides *which* faces
+  get a dynamic `SurfaceFace_BuildAndProject` draw (vs. relying purely on
+  `.zsk`'s baked room mesh) wasn't traced — it reads per-tile bit flags
+  (`&2`/`&4`/`&8` seen gating branches) whose meaning isn't decoded.
+- `SurfaceFace_RasterizeTextured_v0`/`_v1`/`_v2` weren't traced in the same
+  detail as `_v3` — presumed near/fade siblings by dispatch position, not
+  independently verified line-by-line the way the 10 actor variants were
+  in "The 10 `Poly3D_RasterizeTextured` variants".
+- The secondary `param_8 + N*0x200`-style offset `SurfaceFace_
+  RasterizeTextured_v3` adds before indexing into the `.zlu` palette chunk
+  (interpolated per-scanline in one branch, per-pixel in another) isn't
+  decoded — plausibly a further distance-driven palette blend, but
+  unconfirmed.

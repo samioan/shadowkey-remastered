@@ -285,6 +285,30 @@ evidence that the game is rendered in 2D (see that doc's correction note).
   with wall-bounce, not AI pathfinding as first guessed; see
   [`../docs/ZONE_FORMAT.md`](../docs/ZONE_FORMAT.md#the-bullseye-subsystem-a-load-time-light-propagation-bake-not-ai-pathfinding).
 
+- `shadowkey/ghidra/scripts/pyghidra_find_literal_pool_offset.py
+  <hex-offset> [<hex-offset> ...]` — finds consumers of an object field
+  whose offset gets built from a PC-relative literal-pool constant (a
+  32-bit word embedded in the code, `ldr rX,[<addr>]`) rather than a
+  direct immediate; scans memory for the constant, then follows the
+  reference manager to every instruction that loads it. Came up empty for
+  the offsets chased in this pass — see the sibling tool below for why.
+- `shadowkey/ghidra/scripts/pyghidra_find_split_offset.py <hex-immediate>
+  [<hex-immediate> ...]` — finds consumers of a large (>0xfff) object
+  offset built by splitting it into a big rotated-immediate `ADD`/`SUB`
+  (e.g. `add r3,rBase,#0x6b00`) followed by a small immediate `LDR`/`STR`,
+  which neither `pyghidra_find_reads.py` (single-instruction immediate
+  match) nor the literal-pool tool above can see. Scans every `ADD`/`SUB`
+  in the binary for a matching scalar immediate operand and prints
+  surrounding instructions. This is what finally located `.ztx`/`.zlu`/
+  `.sur`'s real consumer; see
+  [`../docs/RENDERER_3D.md`](../docs/RENDERER_3D.md#the-tile-grid-wallsurface-face-renderer-a-third-pipeline).
+- `shadowkey/ghidra/scripts/pyghidra_label_surface_renderer.py` — renames
+  and documents the tile-grid wall/surface-face renderer (6 functions:
+  `SurfaceFace_BuildAndProject`, `SurfaceFace_ClipAndDispatch`, and 4
+  `SurfaceFace_RasterizeTextured_v0`–`_v3` rasterizer variants) found by
+  the tools above; see
+  [`../docs/RENDERER_3D.md`](../docs/RENDERER_3D.md#the-tile-grid-wallsurface-face-renderer-a-third-pipeline).
+
 - **`parse_model_resource.py`** — parser/verifier for the actual on-disk 3D
   model archive, `system/apps/6r51/models.idx` + `models.huge` in the game
   install tree (found separately from `6r51.app`'s code section — this is

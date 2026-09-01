@@ -428,9 +428,29 @@ Prioritization, driven by the port goal rather than raw coverage:
       `pyghidra_label_bullseye_lighting.py`. Full writeup:
       [`ZONE_FORMAT.md`](ZONE_FORMAT.md#the-bullseye-subsystem-a-load-time-light-propagation-bake-not-ai-pathfinding).
 
-Next: `.ztx`/`.zlu`'s still-undecoded contents (forwarded into the bullseye
-lighting subsystem but no consumer found), `.sur`'s per-field byte meaning,
-and `azra.sta`'s still-unidentified format. See `MODEL_FORMAT.md`'s and
+- [x] Resolved `.ztx`/`.zlu`/`.sur` by finding their real consumer — a
+      previously-unknown **third 3D rendering pipeline**: a tile-grid
+      wall/surface-face renderer inside `Render3DScene`, parallel to the
+      actor pipeline and the `.zsk`-baked room mesh, reusing the same
+      `Poly3D_ClipAgainstPlane` clip core and near-clip/fade dispatch axes.
+      `.sur` is a per-face material record (UV scale/offset, flags, a
+      texture index) — its 8-byte layout is now fully decoded. `.ztx` is a
+      flat, **8bpp-palettized** wall-texture atlas (one `0x4000`-byte slot
+      per `.sur` texture index). `.zlu` is **4 selectable 256-color
+      palettes** that convert `.ztx`'s indexed texels into real 16bpp
+      color — resolving the "unidentified 4-way LUT/table split" guess and
+      matching the `"InitLevel Pre/Post LUA"` debug markers. Needed a new
+      tool (`pyghidra_find_split_offset.py`) since the consuming code
+      builds the large object-field offset via a split rotated-immediate
+      ADD, invisible to the existing offset-grep tooling. Renamed/commented
+      via `pyghidra_label_surface_renderer.py`. Full writeup:
+      [`RENDERER_3D.md`](RENDERER_3D.md#the-tile-grid-wallsurface-face-renderer-a-third-pipeline).
+
+Next: the tile-grid traversal inside `Render3DScene` that decides which
+faces get a dynamic surface draw (per-tile flag bits not decoded),
+`SurfaceFace_RasterizeTextured_v0`–`_v2` (presumed near/fade siblings of
+`_v3`, not independently traced), and `azra.sta`'s still-unidentified
+format. See `MODEL_FORMAT.md`'s, `RENDERER_3D.md`'s, and
 `ZONE_FORMAT.md`'s open follow-ups.
 
 ## Open questions

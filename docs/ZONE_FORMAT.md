@@ -21,10 +21,11 @@ fallback). `GameEngine_InitLevel` loads them in this order:
 1. **`<zone>_models.txt`** (ASCII text, one line per model slot) — the list
    of which of the 237 `models.idx` entries this zone actually uses. Loaded
    by `ZoneModelList_Load` (`FUN_10060ac0`, 0x10060ac0).
-2. **`<zone>.sur`** — small `u8` count + count×8-byte records; the count
-   and buffer's exact loader-context/engine field locations are now
-   pinned (forwarded into the "bullseye" lighting subsystem, see below),
-   but no consumer of individual record bytes was found.
+2. **`<zone>.sur`** — small `u8` count + count×8-byte records. **Fully
+   decoded** (see "The tile-grid wall/surface-face renderer" below,
+   `RENDERER_3D.md`): each record describes one selectable wall-face
+   "surface" — UV scale (as bit-shifts), UV origin offset, a flags byte
+   (flip U/flip V/disable), and a clamped texture-slot index into `.ztx`.
 3. **`<zone>.zon`** — room definitions: `u16` count → `engine+0x5460`, then
    count × 0x48-byte (72-byte) room records into `engine+0x5464`, stride
    0x84 (132 bytes) per room slot. **Record layout now fully decoded** (see
@@ -269,9 +270,9 @@ just the first):
 
 | ext     | dest field(s)                | role |
 |---------|-------------------------------|------|
-| `.ztx`  | `engine+0x364` (+ `engine+0x360` = first byte) | zone texture archive (not decoded further) |
+| `.ztx`  | `engine+0x364` (+ `engine+0x360` = first byte); forwarded to `engine+0x6b1c`/`+0x6b20` | the wall-texture atlas — **decoded**: a flat array of `0x4000`-byte (16384-byte), **8bpp-palettized** texture slots, one per `.sur` surface index. See "The tile-grid wall/surface-face renderer", `RENDERER_3D.md` |
 | `.zmp`  | `engine+0x328`                | zone metadata — **header decoded, bulk content decoded** (a `field80`×`zmpTotal` light/nav grid, see "The 'bullseye' subsystem" below) |
-| `.zlu`  | `engine+0x36c/0x370/0x374/0x378` (4×512-byte chunks of one 2048-byte blob) | unidentified 4-way LUT/table split; **this is what the `"InitLevel Pre/Post LUA"` debug markers actually bracket** — "LUA" is short for `.zlu`, not the Lua scripting language (see correction below) |
+| `.zlu`  | `engine+0x36c/0x370/0x374/0x378` (4×512-byte chunks of one 2048-byte blob); forwarded to `engine+0x6b24..+0x6b30` | **decoded**: 4 selectable 256-color palettes (512 bytes = 256×2-byte entries) that convert `.ztx`'s indexed wall texels into real 16bpp color, selected per-face by 2 bits of a material byte. **This is what the `"InitLevel Pre/Post LUA"` debug markers actually bracket** — "LUA" is short for `.zlu`, not the Lua scripting language (see correction below). See "The tile-grid wall/surface-face renderer", `RENDERER_3D.md` |
 | `.zfg`  | `engine+0x5c4`                | the fog/fade lookup table `CompositeSceneBufferToScreen` reads when `engine+0xbe0f` is set (`RENDERER_3D.md`'s fade-LUT open item) — "zfg" = "zone fog" |
 | `.zcp`  | `engine+0x32c`                | a small indexed table of per-cell light-level deltas for the lighting bake — **decoded**, see "The 'bullseye' subsystem" below |
 | **`.zsk`** | **`(*(engine+0x62c))+0x54`** | **the current room's actual 3D model — see below, this is the important one** |
@@ -382,17 +383,19 @@ the decompiler only showed 4 of them, the same "extra args silently
 dropped from the C view" quirk hit earlier with `SimKinObject_FindByName`)
 just stashes all 8 loaded per-zone buffers/counts into fields on the
 engine object (`+0x6914`/`+0x6918` for `.sur`, `+0x6b1c`/`+0x6b20` for
-`.ztx`, `+0x6b24..+0x6b30` for `.zlu`'s 4 chunks) for later use. None of
-`.ztx`'s or `.zlu`'s consumers were found in this pass (their forwarding
-destinations are large-offset fields the disassembly-reference tooling
-used elsewhere in this project can't easily search for) — their contents
-remain undecoded, see "What's still open".
+`.ztx`, `+0x6b24..+0x6b30` for `.zlu`'s 4 chunks) for later use. **All
+three are consumed by the tile-grid wall/surface-face renderer** — see
+[`RENDERER_3D.md`](RENDERER_3D.md#the-tile-grid-wallsurface-face-renderer-a-third-pipeline)
+for the full decode (`.sur`'s record layout, `.ztx` as a palettized
+texture atlas, `.zlu` as 4 selectable palettes).
 
 **`Bullseye_InitMap`** (`Bullseye_InitMap(engine, field80, zmpTotal,
 &progressLog)`) takes `.zmp` header's `field80`/`zmpTotal` fields as a **2D
 grid's width/height** and allocates two arrays sized by `width*height`: a
-4-byte-per-cell array at `engine+0x6904` (zeroed, unused consumer found —
-possibly reserved/legacy) and an **8-byte-per-cell light/nav grid** at
+4-byte-per-cell array at `engine+0x6904` (zeroed here; its first consumer
+turned out to be `SurfaceFace_BuildAndProject`, part of the tile-grid
+wall/surface-face renderer — see `RENDERER_3D.md`) and an **8-byte-per-cell
+light/nav grid** at
 `engine+0x6908`, whose defaults it seeds (byte offset `+2`=0, `+3`=0x3f,
 and byte `+0` bit 0 set on every 16th cell as a placeholder waypoint
 marker — all overwritten by real data next).
@@ -569,20 +572,20 @@ same-session re-init path that doesn't want to teleport the player.
   lighting bake. `.zmp`'s `unknown1`/`unknown2` header fields (64 of its
   132 header bytes) are still undecoded, as is most of each `ZmpCell`
   (`unknown0`) and `ZcpEntry` (35 of 36 bytes).
-- `.ztx`'s and `.zlu`'s decompressed contents — still open. Both get
-  loaded and forwarded into the bullseye engine object
-  (`.ztx`→`engine+0x6b1c`/`+0x6b20`, `.zlu`'s 4 chunks→`engine+0x6b24`
-  through `+0x6b30`) by `Bullseye_Init`, but no consumer of those
-  forwarded fields was found in this pass — they're likely read from
-  code this pass didn't reach (the large field offsets make them hard to
-  search for with the existing offset-grep tooling; a vtable/virtual-call
-  consumer, or one reached only via runtime dispatch, would also be
-  invisible to it).
-- `.sur`'s per-field byte meaning within its 8-byte records — the
-  container (count at a loader-context offset, `EUSER____builtin_vec_new`
-  buffer sized `count*8`, forwarded into the bullseye engine object at
-  `+0x6914`/`+0x6918`) is now precisely pinned, but no code that reads
-  individual bytes *within* one 8-byte `.sur` record was found.
+- ~~`.ztx`'s and `.zlu`'s decompressed contents~~ / ~~`.sur`'s per-field
+  byte meaning~~ — **resolved**: all three turned out to belong to a
+  previously-unknown **third 3D rendering pipeline** (a tile-grid
+  wall/surface-face renderer, parallel to the actor pipeline and the
+  `.zsk`-baked room mesh), found by tracing `Bullseye_Init`'s forwarded
+  fields to their actual consumer. `.sur` is a per-face material record
+  (UV scale/offset, flags, a texture index); `.ztx` is a flat, 8bpp-
+  palettized wall-texture atlas indexed by that texture index; `.zlu` is
+  4 selectable 256-color palettes that convert `.ztx`'s indices to real
+  color. Full writeup, including why the earlier offset-grep tooling
+  missed the consumer (the offset is built via a split rotated-immediate
+  ADD, not a literal-pool constant or a single 12-bit LDR immediate —
+  needed a new search tool, `pyghidra_find_split_offset.py`):
+  [`RENDERER_3D.md`](RENDERER_3D.md#the-tile-grid-wallsurface-face-renderer-a-third-pipeline).
 - `azra.sta`'s format — still unidentified. Confirmed **not** related to
   the "bullseye" pathfinding chain (that's `.zcp`) and **not** loaded via
   either per-zone loader traced here (no `"%s\%s.sta"` format string
