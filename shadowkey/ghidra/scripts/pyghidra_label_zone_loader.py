@@ -66,6 +66,22 @@ LABELS = {
         "docs/ZONE_FORMAT.md for how a placed .ent object's +0x54 model\n"
         "pointer is resolved through this.",
     ),
+    0x10068854: (
+        "EntityTypeConfig_Load",
+        "Loads the single global z:\\system\\apps\\6R51\\entities.txt (NOT\n"
+        "per-zone -- only caller is GameEngine_FirstTickBootstrap, i.e. one-\n"
+        "time engine startup). Each line 'typeId modelArchiveIndex thirdField\n"
+        "name' (sscanf '%d %d %d %254s') becomes a 0x94-byte\n"
+        "EntityTypeDescriptor, inserted into the engine+0xbe34 BST via\n"
+        "EntityTypeDescriptor_Insert, keyed by typeId. See docs/ZONE_FORMAT.md.",
+    ),
+    0x1008C22C: (
+        "EntityTypeDescriptor_Insert",
+        "Ordered binary-search-tree insert keyed by typeId (allocates an\n"
+        "0x18-byte node: tag@+4, key@+8, data@+0xc, left@+0x10, right@+0x14).\n"
+        "This is entities.txt's insert side of the engine+0xbe34 tree that\n"
+        "EntityTypeDescriptor_Lookup walks -- see docs/ZONE_FORMAT.md.",
+    ),
 }
 
 pyghidra.start(install_dir=GHIDRA_INSTALL_DIR)

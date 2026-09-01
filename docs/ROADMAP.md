@@ -295,12 +295,26 @@ Prioritization, driven by the port goal rather than raw coverage:
       a literal animation-frame counter). Full writeup:
       [`ZONE_FORMAT.md`](ZONE_FORMAT.md).
 
+- [x] Found where `engine+0xbe34`'s type-descriptor BST itself comes from:
+      a single **global** file, `z:\system\apps\6R51\entities.txt`, loaded
+      exactly once at boot by `EntityTypeConfig_Load` (0x10068854, whose
+      only caller is `GameEngine_FirstTickBootstrap` — not per-zone).
+      Each line (`typeId modelArchiveIndex thirdField name`) becomes a
+      148-byte descriptor inserted into the BST by
+      `EntityTypeDescriptor_Insert` (0x1008c22c), whose node layout
+      matches `EntityTypeDescriptor_Lookup` exactly — closing the entity
+      → model resolution chain end-to-end: `entities.txt` → `engine+0xbe34`
+      BST → `.ent` record's `typeId` → descriptor's `modelArchiveIndex` →
+      `engine+0x6b38[modelArchiveIndex]` (per-zone `_models.txt`) →
+      object's `+0x54`. Full writeup:
+      [`ZONE_FORMAT.md`](ZONE_FORMAT.md#where-the-type-descriptor-tree-itself-comes-from-entitiestxt).
+
 Next: the ~9 unexamined `Poly3D_RasterizeTextured` blend-mode variants, what
 sets `engine+0x62c` on room transitions, the `engine+0xbe0f`/`0x5c4` fade-LUT
-compositing path, the `.sur`/`.zon`/`.pth` record field layouts, where
-`engine+0xbe34`'s type-descriptor BST itself gets populated from, and
-`azra.sta`'s still-unidentified format. See `RENDERER_3D.md`'s,
-`MODEL_FORMAT.md`'s, and `ZONE_FORMAT.md`'s open follow-ups.
+compositing path, the `.sur`/`.zon`/`.pth` record field layouts,
+`entities.txt`'s unidentified `thirdField`, and `azra.sta`'s still-
+unidentified format. See `RENDERER_3D.md`'s, `MODEL_FORMAT.md`'s, and
+`ZONE_FORMAT.md`'s open follow-ups.
 
 ## Open questions
 

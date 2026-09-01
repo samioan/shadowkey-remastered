@@ -136,12 +136,48 @@ the type descriptor exactly as traced here. The per-model *animation* frame
 (for the MD2-style vertex table within one model resource) is the unrelated
 `actor+0x70` field documented in `MODEL_FORMAT.md`.
 
+## Where the type-descriptor tree itself comes from: `entities.txt`
+
+`engine+0xbe34`'s BST isn't per-zone data — it's built **once, at game
+startup**, from a single global file: `z:\system\apps\6R51\entities.txt`.
+Loaded by `EntityTypeConfig_Load` (`FUN_10068854`, 0x10068854), whose
+**only caller is `GameEngine_FirstTickBootstrap`** (the one-time engine
+init function documented in `RENDER_LOOP.md`) — confirming it's global,
+not reloaded on zone transitions.
+
+`EntityTypeConfig_Load` reads the whole file into memory, splits it on
+`'\n'`, and for each non-empty line parses `sscanf(line, "%d %d %d %254s",
+&typeId, &modelArchiveIndex, &thirdField, name)`. For every `typeId < 7000`
+it allocates a 148-byte (`0x94`) descriptor:
+
+```c
+struct EntityTypeDescriptor {       // offset  size
+    // +0..+7: unused/vtable-ish (not set here)
+    int32 typeId;                    // 0x08    4   == the sscanf'd key
+    int32 modelArchiveIndex;          // 0x0c    4   == models.idx index (see above)
+    int32 thirdField;                  // 0x10    4   meaning not decoded
+    char  name[128];                    // 0x14  128  (strncpy'd, max 0x7f bytes + NUL)
+};                                             // struct itself is 0x94 = 148 bytes
+```
+
+...then calls `EntityTypeDescriptor_Insert` (`FUN_1008c22c`, 0x1008c22c) to
+insert it into the `engine+0xbe34` BST, keyed by `typeId`. That insert
+function's node layout (`EUSER____builtin_new(0x18)`, node = `{tag@+4,
+key@+8, data@+0xc, left@+0x10, right@+0x14}`, ordered insert comparing
+`node->key`) is the exact BST `EntityTypeDescriptor_Lookup` walks — this is
+the definitive confirmation, not just a plausible match.
+
+So the full chain, start to finish, is: `entities.txt` (global, ~7000
+possible type IDs, loaded once at boot) → `engine+0xbe34` BST → per-zone
+`<zone>.ent` records reference a `typeId` → `EntityTypeDescriptor_Lookup`
+→ descriptor's `modelArchiveIndex` → `engine+0x6b38[modelArchiveIndex]`
+(populated per-zone from `<zone>_models.txt`, itself backed by
+`models.idx`/`models.huge`) → the object's `+0x54` model pointer.
+
 ## What's still open
 
-- The exact binary-search-tree *construction* for `engine+0xbe34` (where
-  type descriptors and their model-archive-index field get populated from —
-  presumably a global, not-per-zone, `.txt`/binary config listing every
-  entity type in the game; not yet located).
+- `thirdField` (`entities.txt`'s third `%d`, stored at descriptor `+0x10`)
+  — meaning not decoded (category? default HP? AI behavior ID?).
 - Precise field semantics of the `.ent` record's four `u16` fields at
   `0x0c` (rotation? scale? at least one, `local_75c`, is confirmed used as
   `object+0x5e`/"modelFlags").
@@ -149,3 +185,5 @@ the type descriptor exactly as traced here. The per-model *animation* frame
   their outer count+record framing was traced, not decoded field-by-field.
 - `.zon`'s 0x48-byte room record layout (only the count/stride was traced).
 - `azra.sta`'s format (see `MODEL_FORMAT.md`) — still unpursued.
+- What the `InitLevel Pre/Post LUA` debug markers in `GameEngine_InitLevel`
+  imply — a second scripting layer alongside SimKin? Not investigated.
