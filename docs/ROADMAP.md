@@ -248,11 +248,26 @@ Prioritization, driven by the port goal rather than raw coverage:
       fade/lighting LUT pass). Full writeup:
       [`RENDERER_3D.md`](RENDERER_3D.md#the-roomwall-geometry-renderer).
 
-Next: the ~9 unexamined `Poly3D_RasterizeTextured` blend-mode variants, the
-3D model resource file format itself (vertex/face/texture-atlas container,
-shared by rooms and actors), what sets `engine+0x62c` on room transitions,
-and the `engine+0xbe0f`/`0x5c4` fade-LUT compositing path. See
-`RENDERER_3D.md`'s open follow-ups.
+- [x] Reconstructed the on-disk 3D model resource format (`actor+0x54`/
+      `room+0x54`) by reading every byte-level field access in
+      `Actor3D_TransformAndSubmitModel` and `RoomGeometry_TransformAndSort`:
+      a 12-byte header (frame count, verts/frame, UV count, face count),
+      then a multi-frame vertex-position table (Quake-MD2-style vertex
+      animation — face/UV topology shared across frames, only positions
+      vary), a UV-coordinate table, a 12-byte/6-`int16` textured-triangle
+      face table, and a raw (uncompressed) 16bpp texture block with
+      power-of-two dimensions and multiple "skin" color variants selected
+      per-actor-instance (rooms always use variant 0). The two independent
+      call sites compute the identical texture-offset formula from the same
+      header byte, cross-validating the reconstruction. Full writeup:
+      [`MODEL_FORMAT.md`](MODEL_FORMAT.md).
+
+Next: the ~9 unexamined `Poly3D_RasterizeTextured` blend-mode variants, what
+sets `engine+0x62c` on room transitions, the `engine+0xbe0f`/`0x5c4` fade-LUT
+compositing path, and locating an actual on-disk model/texture resource file
+to verify `MODEL_FORMAT.md`'s layout against real bytes (no such file found
+yet — only the *consumer* code has been examined). See `RENDERER_3D.md`'s and
+`MODEL_FORMAT.md`'s open follow-ups.
 
 ## Open questions
 

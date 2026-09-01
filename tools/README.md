@@ -197,3 +197,8 @@ evidence that the game is rendered in 2D (see that doc's correction note).
   rasterizer) plus the per-frame `Render3DScene` entry point and the
   `engine+0x5b4` intermediate-buffer compositor; see
   [`../docs/RENDERER_3D.md`](../docs/RENDERER_3D.md#the-roomwall-geometry-renderer).
+- `shadowkey/ghidra/scripts/pyghidra_label_model_format.py` — appends the
+  reconstructed on-disk 3D model resource format (header layout, vertex/UV/
+  face table strides, texture block) as plate-comment addenda on
+  `Actor3D_TransformAndSubmitModel` and `RoomGeometry_TransformAndSort`; see
+  [`../docs/MODEL_FORMAT.md`](../docs/MODEL_FORMAT.md).
