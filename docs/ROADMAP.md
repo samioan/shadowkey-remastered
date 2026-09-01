@@ -584,10 +584,21 @@ Prioritization, driven by the port goal rather than raw coverage:
       on the resolved index into inline get/set logic. The "~700 total
       bindings" figure is a sum across ~28 small per-class tries, not one
       big shared one. Full writeup: [`SIMKIN_BRIDGE.md`](SIMKIN_BRIDGE.md).
+- [x] **Enumerated the full SimKin native API surface**: 702
+      (name -> index) bindings across all 28 classes, each correlated to
+      its registration + dispatcher function pair by trie-root offset.
+      Every class gets a hypothesized identity read off its member-name
+      cluster (`Weapon`, `Monster`, `Item`, `Player/GameState`, several
+      UI-widget classes, ...) — two independently confirmed
+      (`GameEngine` root via `ConfigKeysMenu`/`ConfigKeysDefault`; `Spell`
+      via `SetSpellType`'s fallthrough target), the rest not verified
+      against a real struct. Full table + data file:
+      [`SIMKIN_NATIVE_API.md`](SIMKIN_NATIVE_API.md).
 
-Next: enumerating the full ~700-entry native API surface (every name +
-index, across all ~28 per-class tries — now mechanical, not blocked),
-identifying which object each of the ~28 dispatcher classes actually is,
+Next: cross-checking the real `.s` script corpus against the 702-entry
+table to validate the class hypotheses and find which bindings actually
+matter for a minimal port (pure script-reading, no RE), identifying
+which object each of the 28 classes actually is beyond name-guessing,
 the two `heightA`/`heightB` fields' finer sub-structure, the `.zlu` chunk's
 secondary per-scanline/per-pixel `0x200`-byte-block offset (seen in all 4
 `SurfaceFace_RasterizeTextured` variants, not decoded), and `.sta`'s

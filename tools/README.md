@@ -381,6 +381,17 @@ evidence that the game is rendered in 2D (see that doc's correction note).
   (`FUN_10046328`, `FUN_1002c848`) that call it — this closes the "how
   does a trie index reach its handler" question; see
   [`../docs/SIMKIN_BRIDGE.md`](../docs/SIMKIN_BRIDGE.md#the-runtime-dispatch-mechanism-how-a-trie-index-reaches-its-handler).
+- `shadowkey/ghidra/scripts/pyghidra_enumerate_simkin_bindings.py` —
+  decompiles all 28 registration + 28 dispatcher functions in full,
+  regexes out every `SimKinNameTrie_Insert(root, name, index)` call,
+  resolves each `DAT_xxx` literal-pool symbol to its UTF-16LE string
+  (following pointer indirection — watch for `Data.getValue()` on such a
+  symbol returning a Ghidra `Scalar`, not a plain int; needs
+  `.getUnsignedValue()`), and correlates registration functions to
+  dispatcher functions by matching trie-root offset. Writes
+  `shadowkey/simkin_native_bindings.json` (702 bindings across 28
+  classes — committed on purpose, see the `.gitignore` note next to it);
+  see [`../docs/SIMKIN_NATIVE_API.md`](../docs/SIMKIN_NATIVE_API.md).
 - `shadowkey/ghidra/scripts/pyghidra_simkin_ordinal_stats.py` — one-shot
   survey of every SIMKIN import ordinal's call-site and distinct-caller
   count, used to prioritize which ordinals matter most for the SimKin

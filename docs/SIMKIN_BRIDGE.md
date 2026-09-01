@@ -13,10 +13,10 @@ decompiling — they're already plaintext, in scope to read directly per
 
 The core architecture is now understood end to end, registration through
 runtime dispatch (see "The real name-resolution mechanism" and "The
-runtime dispatch mechanism" below) — this is still not a *complete*
-inventory of the ~700-entry native API surface, but the "how does it
-work" question is fully answered, both the write side (startup
-registration) and the read side (a script call resolving to a handler).
+runtime dispatch mechanism" below), **and the full ~700-entry native API
+surface is now enumerated** — see
+[`SIMKIN_NATIVE_API.md`](SIMKIN_NATIVE_API.md) for the complete
+702-binding, 28-class table (not duplicated here).
 
 ## A false start, corrected: the "name-based dead end" was a search bug
 
@@ -225,22 +225,17 @@ setters* — a second dispatch layer underneath the name trie above.
 
 ## What's still open
 
-- Only 2 of ~28 SimKin native-binding-registration functions (and their
-  matching 2 of ~28 dispatcher functions) were individually
-  examined/named — the full ~700-entry API surface (every name, its
-  assigned per-class trie index, and which of the ~28 classes it belongs
-  to) hasn't been enumerated. Doing so is now mechanical (each
-  registration function's `SimKinNameTrie_Insert` call sites give the
-  name+index pairs directly, in raw disassembly), just a lot of them —
-  the address clusters for both the registration functions
-  (`0x10010804`-`0x1001537c`) and likely a parallel cluster for the
-  dispatcher functions are already known.
+- ~~Only 2 of ~28 registration/dispatcher functions individually
+  examined; the full ~700-entry API surface not enumerated~~ **done** —
+  all 28 classes, 702 bindings, enumerated and correlated. See
+  [`SIMKIN_NATIVE_API.md`](SIMKIN_NATIVE_API.md).
 - What object each of the ~28 classes actually *is* (spell? item? actor?
-  UI menu?) — not identified for any of them beyond weak field-offset
-  guessing (e.g. `FUN_10046328`'s class touches fields at `this+0x1b0`/
-  `+0x1d0`/`+0x1d2`/`+0x1cc`/`+0x170`, consistent with something
-  spell/equipment-related given `SetSpellType` chains into it, but not
-  confirmed against a known struct).
+  UI menu?) — `SIMKIN_NATIVE_API.md` has a hypothesized name for each,
+  read from its member-name cluster (e.g. `Weapon`, `Monster`, `Item`,
+  `Player/GameState`), but only 2 of the 28 are confirmed against
+  anything beyond that (the GameEngine root, via `ConfigKeysMenu`/
+  `ConfigKeysDefault`; Spell, via `SetSpellType`'s fallthrough target).
+  None are confirmed against a real struct/vtable.
 - `SIMKIN_ord237`/`ord101`/`ord85` — all broadly used (74-91 call sites,
   26-34 distinct callers each) — still not confirmed, but `FUN_10046328`'s
   case 0 (a getter, gated on a "has string" flag at `this+0x1d4`) gives
@@ -264,12 +259,10 @@ setters* — a second dispatch layer underneath the name trie above.
   going further, or whether behavioral tracing (as done here) is
   sufficient for port purposes without needing the real names.
 - No attempt yet to map which specific native functions a real script
-  like `configkeys.s` actually needs (`SetPrevMenu`, `MenuBackground`,
-  `AddFloatingTextJustify`, `CreatePopupMenu`, `OpenMenu`, `ClearMenu`,
-  `Quit`, and dozens more across the full `.s` corpus) against the ~700
-  registered names — that cross-check (just reading the scripts, no RE
-  needed) would usefully validate the ~700 count and identify which
-  bindings actually matter for a minimal port.
+  like `configkeys.s` actually needs against the now-real 702-entry list
+  in `SIMKIN_NATIVE_API.md` — that cross-check (just reading the scripts,
+  no RE needed) would validate the class hypotheses there and identify
+  which bindings actually matter for a minimal port. Not done yet.
 
 ## Labels applied
 
@@ -284,7 +277,9 @@ setters* — a second dispatch layer underneath the name trie above.
   commented as confirmed per-class dispatcher chain links
 
 Tools: `pyghidra_label_simkin_bridge.py`, `pyghidra_label_simkin_trie.py`,
-`pyghidra_label_atom_to_int.py`, `pyghidra_label_simkin_dispatch.py`.
+`pyghidra_label_atom_to_int.py`, `pyghidra_label_simkin_dispatch.py`,
+`pyghidra_enumerate_simkin_bindings.py` (full 702-binding/28-class
+enumeration, see [`SIMKIN_NATIVE_API.md`](SIMKIN_NATIVE_API.md)).
 New general-purpose tool: `pyghidra_list_funcs_near.py <hex-lo> <hex-hi>`
 (lists every function in an address range with its size and distinct
 caller count — this is how `SimKinNameTrie_Lookup` was spotted next to

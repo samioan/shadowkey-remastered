@@ -36,6 +36,13 @@
 # The SDK itself (third-party, copyrighted install media) is never
 # downloaded into this repo -- it lives outside it, path documented in
 # that same doc, re-fetch it there if the table ever needs regenerating.
+#
+# Same reasoning for shadowkey/simkin_native_bindings.json: a derived
+# table of compiled-in SimKin native API identifiers (method/property
+# names the game's own code exposes to its own scripts), regenerable
+# from the Ghidra project via
+# shadowkey/ghidra/scripts/pyghidra_enumerate_simkin_bindings.py. See
+# docs/SIMKIN_NATIVE_API.md.
 
 # --- Python ---
 __pycache__/
