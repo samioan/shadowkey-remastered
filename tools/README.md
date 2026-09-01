@@ -353,6 +353,21 @@ evidence that the game is rendered in 2D (see that doc's correction note).
   `6r51.app` — they don't, a concrete lead for how the SimKin native
   bridge actually dispatches; see
   [`../docs/INPUT_HANDLING.md`](../docs/INPUT_HANDLING.md).
+- `shadowkey/ghidra/scripts/pyghidra_simkin_ordinal_stats.py` — one-shot
+  survey of every SIMKIN import ordinal's call-site and distinct-caller
+  count, used to prioritize which ordinals matter most for the SimKin
+  native bridge (found `ord185` at 523 call sites, by far the busiest
+  unresolved one); see
+  [`../docs/SIMKIN_BRIDGE.md`](../docs/SIMKIN_BRIDGE.md).
+- `shadowkey/ghidra/scripts/pyghidra_label_simkin_bridge.py` — renames
+  and documents `SIMKIN_MakeIntAtom`/`MakeStringAtom`/`RegisterConstant`
+  (ordinals 42/43/60), the confirmed part of the SimKin constant-exposure
+  mechanism; see
+  [`../docs/SIMKIN_BRIDGE.md`](../docs/SIMKIN_BRIDGE.md).
+- `shadowkey/ghidra/scripts/pyghidra_comment_ipt_constants.py` — adds an
+  addendum comment to `GameEngine_FirstTickBootstrap` documenting the
+  `IPT_Weapon`/`IPT_Spell`/`IPT_Misc`/`IPT_Armor` example that established
+  what those 3 ordinals do.
 - `shadowkey/ghidra/scripts/pyghidra_label_input_state_class.py` —
   renames and documents the full `InputState` object at `engine+0x488`
   (10 functions: current/previous button-state accessors, a remappable

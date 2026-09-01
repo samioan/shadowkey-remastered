@@ -545,15 +545,34 @@ Prioritization, driven by the port goal rather than raw coverage:
       reading the neighboring functions in the binary's address space
       directly. Full writeup: [`INPUT_HANDLING.md`](INPUT_HANDLING.md).
 
-Next: the SimKin native-function bridge itself (per the port-scoping
-discussion below — the hashed/indexed dispatch lead from
-`INPUT_HANDLING.md` is the concrete starting point), the two
+- [x] **Started the SimKin native bridge** (per the port-scoping
+      discussion below). First-pass scoping, not a full resolution.
+      Confirmed 3 of ~35 resolvable SIMKIN ordinals: `SIMKIN_MakeIntAtom`/
+      `MakeStringAtom` (build a script-visible value from a literal
+      int/string) and `SIMKIN_RegisterConstant` (bind a name to a value
+      with the interpreter) — verified with a real example,
+      `GameEngine_FirstTickBootstrap` registering an item-category enum
+      (`IPT_Weapon=1`, `IPT_Spell=2`, etc.). Surveyed every SIMKIN
+      ordinal's call-site/caller count (new tool,
+      `pyghidra_simkin_ordinal_stats.py`) and found the single highest-
+      priority next target: ordinal 185, with 523 call sites across 34
+      callers — dwarfing every other ordinal (the next-busiest confirmed
+      one has 143) — not characterized at all yet, but almost certainly
+      either the native-calls-into-script or script-calls-into-native
+      dispatcher. Also found an unconfirmed lead for how native
+      *functions* (not just constants) get exposed: a multi-vtable
+      object-construction pattern (ordinal 22) whose own callers are only
+      reachable indirectly, not via a direct reference search. Full
+      writeup: [`SIMKIN_BRIDGE.md`](SIMKIN_BRIDGE.md).
+
+Next: `SIMKIN_ord185` (`SIMKIN_BRIDGE.md`'s clear top priority — by far
+the most-used unresolved ordinal), the two
 `heightA`/`heightB` fields' finer sub-structure, the `.zlu` chunk's
 secondary per-scanline/per-pixel `0x200`-byte-block offset (seen in all 4
 `SurfaceFace_RasterizeTextured` variants, not decoded), and `.sta`'s
 remaining undecoded fields (`flags`, `unkA`/`unkB`). See `MODEL_FORMAT.md`'s,
-`RENDERER_3D.md`'s, `WORLD_MODEL.md`'s, `ZONE_FORMAT.md`'s, and
-`INPUT_HANDLING.md`'s open follow-ups.
+`RENDERER_3D.md`'s, `WORLD_MODEL.md`'s, `ZONE_FORMAT.md`'s,
+`INPUT_HANDLING.md`'s, and `SIMKIN_BRIDGE.md`'s open follow-ups.
 
 ## Open questions
 
