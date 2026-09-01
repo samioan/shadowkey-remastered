@@ -8,7 +8,9 @@
 // C:\Users\Admin\.claude\plans\vast-wandering-summit.md for the original
 // M0-M4 plan; M5 continues past it in the same "deepen the menu chain"
 // direction the user chose.
+#include <cmath>
 #include <cstdio>
+#include <memory>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -20,6 +22,8 @@
 #include "graphics/backbuffer.h"
 #include "graphics/bitmap_font.h"
 #include "platform/win32/window.h"
+#include "render3d/camera.h"
+#include "render3d/zone_renderer.h"
 #include "simkin_bindings/combo_box_executable.h"
 #include "simkin_bindings/floating_sprite_executable.h"
 #include "simkin_bindings/menu_executable.h"
@@ -30,6 +34,7 @@
 #include "skInterpreter.h"
 #include "skParseException.h"
 #include "skRuntimeException.h"
+#include "world/zone.h"
 
 namespace {
 
@@ -219,7 +224,7 @@ int main(int argc, char** argv) {
     }
 
     sk::Window window(sk::Backbuffer::kWidth * 3, sk::Backbuffer::kHeight * 3,
-                       L"shadowkey-port (M5: character creation + save/load)");
+                       L"shadowkey-port (M6: 3D zone renderer)");
 
     sk::InputState input;
     window.SetKeyCallback([&](int vkCode, bool down) {
@@ -244,11 +249,23 @@ int main(int argc, char** argv) {
     sk::GameClock clock;
 
     std::printf(
-        "shadowkey-port: M5 -- Up/Down move selection, Left/Right cycle combo values or "
+        "shadowkey-port: menus -- Up/Down move selection, Left/Right cycle combo values or "
         "navigate horizontal screens, Enter confirms, Esc goes back.\n");
+    std::printf(
+        "shadowkey-port: New Game/Load Game enter the 3D zone (M6) -- Up/Down walk, "
+        "Left/Right turn, Esc returns to the main menu.\n");
 
     sk_bindings::MenuExecutable* lastMenu = nullptr;
     int creditsScroll = 0;
+
+    // M6: the 3D zone renderer, entered when a menu calls NewGame()/
+    // LoadGame() (see MenuStack::RequestGameStart()). Free-fly, no
+    // collision -- see render3d/zone_renderer.h for what this milestone
+    // does and doesn't reproduce from the real engine.
+    std::unique_ptr<sk::Zone> gameZone;
+    sk::Camera gameCamera;
+    sk::ZoneRenderer zoneRenderer;
+    bool inGame = false;
 
     window.RunMessageLoop([&]() {
         if (window.ShouldClose()) return;
@@ -257,6 +274,49 @@ int main(int argc, char** argv) {
         if (stack.quitRequested()) {
             window.Close();
             return;
+        }
+
+        if (stack.gameStartRequested()) {
+            stack.ClearGameStartRequest();
+            auto zone = std::make_unique<sk::Zone>();
+            if (zone->Load(scriptRoot, stack.requestedZone())) {
+                gameZone = std::move(zone);
+                gameCamera.x = static_cast<float>(gameZone->playerStartX);
+                gameCamera.y = static_cast<float>(gameZone->playerStartY);
+                gameCamera.z = static_cast<float>(gameZone->playerStartZ) + 128.0f;
+                gameCamera.yaw = 0.0f;
+                gameCamera.fovY = 1.2f;
+                inGame = true;
+            } else {
+                std::printf("shadowkey-port: failed to load zone '%s', staying in menu\n",
+                            stack.requestedZone().c_str());
+            }
+        }
+
+        if (inGame && gameZone) {
+            // Esc returns to the main menu (no in-game pause menu exists
+            // yet); everything else is free-fly movement, no collision.
+            if (input.ConsumeJustPressed(sk::ButtonSlot::RightSelectionKey)) {
+                inGame = false;
+            } else {
+                constexpr float kMoveSpeed = 40.0f;    // world units/tick (256 units/tile)
+                constexpr float kTurnSpeed = 0.06f;    // radians/tick
+                if (input.GetButton(sk::ButtonSlot::Left)) gameCamera.yaw -= kTurnSpeed;
+                if (input.GetButton(sk::ButtonSlot::Right)) gameCamera.yaw += kTurnSpeed;
+                float dx = std::cos(gameCamera.yaw) * kMoveSpeed;
+                float dy = std::sin(gameCamera.yaw) * kMoveSpeed;
+                if (input.GetButton(sk::ButtonSlot::Up)) {
+                    gameCamera.x += dx;
+                    gameCamera.y += dy;
+                }
+                if (input.GetButton(sk::ButtonSlot::Down)) {
+                    gameCamera.x -= dx;
+                    gameCamera.y -= dy;
+                }
+                zoneRenderer.Render(backbuffer, *gameZone, gameCamera);
+                window.Present(backbuffer);
+                return;
+            }
         }
 
         if (stack.creditsActive()) {

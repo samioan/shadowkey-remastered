@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(shadowkey_port CXX)
+project(shadowkey_port CXX C)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -73,6 +73,32 @@ add_library(sk_bindings STATIC
 target_include_directories(sk_bindings PUBLIC src)
 target_link_libraries(sk_bindings PUBLIC simkin)
 
+# --- Vendored puff (zlib's reference inflate, zlib license, see
+# third_party/puff/PROVENANCE.md) -- decompresses the zlib-wrapped
+# per-zone files (.ztx/.zmp/.zlu/.zfg/.zcp/.zsk, docs/ZONE_FORMAT.md). ---
+add_library(puff STATIC third_party/puff/puff.c)
+target_include_directories(puff PUBLIC third_party/puff)
+if(MSVC)
+  target_compile_options(puff PRIVATE /W3)
+endif()
+
+# World/zone loading + the tile-grid wall renderer -- see src/world/ and
+# src/render3d/.
+add_library(sk_world STATIC
+  src/assets/zone_file.cpp
+  src/world/zone.cpp
+)
+target_include_directories(sk_world PUBLIC src)
+target_link_libraries(sk_world PUBLIC puff)
+
+# A from-scratch (not fixed-point-exact) software renderer for the
+# tile-grid wall/floor/ceiling geometry -- see src/render3d/zone_renderer.h.
+add_library(sk_render3d STATIC
+  src/render3d/zone_renderer.cpp
+)
+target_include_directories(sk_render3d PUBLIC src)
+target_link_libraries(sk_render3d PUBLIC sk_world)
+
 add_executable(shadowkey_port
   src/main.cpp
   src/assets/string_table.cpp
@@ -81,7 +107,7 @@ add_executable(shadowkey_port
 )
 
 target_include_directories(shadowkey_port PRIVATE src)
-target_link_libraries(shadowkey_port PRIVATE sk_bindings)
+target_link_libraries(shadowkey_port PRIVATE sk_bindings sk_render3d)
 
 if(WIN32)
   target_compile_definitions(shadowkey_port PRIVATE UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN)
@@ -96,3 +122,10 @@ target_link_libraries(simkin_m2_smoke PRIVATE sk_bindings)
 # M3 milestone smoke test -- see src/tests/m3_mainmenu_smoke.cpp.
 add_executable(simkin_m3_smoke src/tests/m3_mainmenu_smoke.cpp)
 target_link_libraries(simkin_m3_smoke PRIVATE sk_bindings)
+
+# M6 milestone smoke tests -- see src/tests/m6_zone_*_smoke.cpp.
+add_executable(zone_load_smoke src/tests/m6_zone_load_smoke.cpp)
+target_link_libraries(zone_load_smoke PRIVATE sk_world)
+
+add_executable(zone_render_smoke src/tests/m6_zone_render_smoke.cpp)
+target_link_libraries(zone_render_smoke PRIVATE sk_render3d)

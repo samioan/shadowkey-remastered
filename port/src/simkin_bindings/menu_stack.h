@@ -81,6 +81,21 @@ public:
     void RequestQuit() { m_QuitRequested = true; }
     bool quitRequested() const { return m_QuitRequested; }
 
+    // Set by MenuExecutable's NewGame()/LoadGame() handlers -- main.cpp
+    // checks this each tick and, when set, switches from menu mode into
+    // the 3D zone renderer (render3d/zone_renderer.h). Only "azra" (the
+    // tutorial zone, and the only one this milestone's loader has been
+    // verified against) is wired up for now; LoadGame() requests the
+    // same zone since there's no real save-file format to read a
+    // different one from yet.
+    void RequestGameStart(std::string zoneName) {
+        m_GameStartRequested = true;
+        m_RequestedZone = std::move(zoneName);
+    }
+    bool gameStartRequested() const { return m_GameStartRequested; }
+    const std::string& requestedZone() const { return m_RequestedZone; }
+    void ClearGameStartRequest() { m_GameStartRequested = false; }
+
     // Native-only "screen" (ShowCredits() has no script-side handler
     // anywhere in the corpus -- see credits.txt right next to the .s
     // files) -- main.cpp checks creditsActive() before rendering the
@@ -105,6 +120,8 @@ private:
     bool m_QuitRequested = false;
     bool m_CreditsActive = false;
     std::vector<std::string> m_CreditsLines;
+    bool m_GameStartRequested = false;
+    std::string m_RequestedZone;
 };
 
 }  // namespace sk_bindings

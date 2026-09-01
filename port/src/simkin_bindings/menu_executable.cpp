@@ -283,12 +283,15 @@ bool MenuExecutable::method(const skString& methodName, skRValueArray& args,
         return true;
     }
     if (methodName == skString("LoadGame") && args.entries() == 1) {
-        std::printf("  [Menu] LoadGame(%d) -- would enter gameplay here (not implemented yet)\n",
-                    args[0].intValue());
+        // No real save-file format exists to read a different zone/player
+        // state from yet (M5's save system is in-memory only) -- this
+        // just re-enters the same tutorial zone LoadGame() would in a
+        // real fresh save.
+        m_Stack.RequestGameStart("azra");
         return true;
     }
     if (methodName == skString("NewGame") && args.entries() == 0) {
-        std::printf("  [Menu] NewGame() -- would enter gameplay here (not implemented yet)\n");
+        m_Stack.RequestGameStart("azra");
         return true;
     }
     if (methodName == skString("NewGameHook") && args.entries() == 0) {

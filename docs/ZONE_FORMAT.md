@@ -290,9 +290,9 @@ just the first):
 |---------|-------------------------------|------|
 | `.ztx`  | `engine+0x364` (+ `engine+0x360` = first byte); forwarded to `engine+0x6b1c`/`+0x6b20` | the wall-texture atlas — **decoded**: a flat array of `0x4000`-byte (16384-byte), **8bpp-palettized** texture slots, one per `.sur` surface index. See "The tile-grid wall/surface-face renderer", `RENDERER_3D.md` |
 | `.zmp`  | `engine+0x328`                | zone metadata — **header decoded, bulk content decoded** (a `field80`×`zmpTotal` light/nav grid, see "The 'bullseye' subsystem" below) |
-| `.zlu`  | `engine+0x36c/0x370/0x374/0x378` (4×512-byte chunks of one 2048-byte blob); forwarded to `engine+0x6b24..+0x6b30` | **decoded**: 4 selectable 256-color palettes (512 bytes = 256×2-byte entries) that convert `.ztx`'s indexed wall texels into real 16bpp color, selected per-face by 2 bits of a material byte. **This is what the `"InitLevel Pre/Post LUA"` debug markers actually bracket** — "LUA" is short for `.zlu`, not the Lua scripting language (see correction below). See "The tile-grid wall/surface-face renderer", `RENDERER_3D.md` |
+| `.zlu`  | `engine+0x36c/0x370/0x374/0x378` (4×512-byte chunks of one 2048-byte blob); forwarded to `engine+0x6b24..+0x6b30` | **decoded**: 4 selectable 256-color palettes (512 bytes = 256×2-byte entries) that convert `.ztx`'s indexed wall texels into real 16bpp color, selected per-face by 2 bits of a material byte. **This is what the `"InitLevel Pre/Post LUA"` debug markers actually bracket** — "LUA" is short for `.zlu`, not the Lua scripting language (see correction below). See "The tile-grid wall/surface-face renderer", `RENDERER_3D.md`. **Two corrections (port scaffold session)**: (1) a real `azra.zlu` decompresses to 131072 bytes = **64** 2048-byte blobs, not one — `Bullseye_Init`'s 4 forwarded chunk pointers are one fixed set stashed once at zone load (matching this doc's description), but the port's own renderer, needing a *per-surface* palette instead, empirically picks the blob at `(surfaceTextureIndex % 64) * 2048` and always its chunk 0; this works well against real data (see below) but isn't independently confirmed to be the original's exact per-face selection rule. (2) each 16-bit palette entry is **4-bit-per-channel** (`0x0RGB`, matching `GRAPHICS_FORMAT.md`'s framebuffer format exactly — confirmed by real `.zlu` bytes: `0xfff`/white, `0xf0f`/magenta chroma-key literal present in every chunk), not RGB565 as this doc's "256×2-byte entries" phrasing could be misread to imply — an RGB565 read of real data produces garish cyan/blue nonsense, an RGB444 read of the exact same bytes against a real `.ztx` texture produces an unmistakable, correctly-shaded wood-plank floor texture. |
 | `.zfg`  | `engine+0x5c4`                | the fog/fade lookup table `CompositeSceneBufferToScreen` reads when `engine+0xbe0f` is set (`RENDERER_3D.md`'s fade-LUT open item) — "zfg" = "zone fog" |
-| `.zcp`  | `engine+0x32c`                | a small indexed table of per-cell light-level deltas for the lighting bake — **decoded**, see "The 'bullseye' subsystem" below |
+| `.zcp`  | `engine+0x32c`                | a small indexed table of per-cell light-level deltas for the lighting bake — **decoded**, see "The 'bullseye' subsystem" below. **Correction (port scaffold session)**: its entry count is a `u32`, not the `u8` originally guessed — see the full note where `ZcpFile`/`ZcpEntry` are defined below. |
 | **`.zsk`** | **`(*(engine+0x62c))+0x54`** | **the current room's actual 3D model — see below, this is the important one** |
 
 ### `.zon`'s room record, fully decoded
@@ -471,10 +471,22 @@ reflecting off walls, computed once per zone load rather than every frame.
 
 **`.zcp`'s format, fully decoded from `Bullseye_BakeLighting`'s lookup**:
 
+**Correction (port scaffold session, `port/src/world/zone.cpp`)**: `entryCount`
+is a **`u32`** at offset 0, not the `u8` this doc originally guessed from a
+partial decompile. Verified directly against real `azra.zcp`: the file's
+decompressed size is exactly `4 + 36*11828` bytes, and its `.zmp` cells'
+`zcpIndex` values go up to `11827` — both consistent only with a 4-byte
+count (`azra.zcp`'s first 4 bytes decode to `11828` as a `u32 LE`; reading
+only the first byte gives a nonsensical `52`, `1876` bytes short of the
+real file). So `.zcp` isn't a small deduplicated "tile type palette" as
+the entry-count-52 reading implied — it's a much larger per-placed-tile
+(or similar granularity) table, one entry per `zcpIndex` a `.zmp` cell can
+reference, not one per distinct *type*. `pad[3]` doesn't exist either;
+those 3 bytes are the rest of the same `u32`.
+
 ```c
 struct ZcpFile {
-    uint8  entryCount;        // offset 0x00 (only byte actually read)
-    uint8  pad[3];              // offset 0x01..0x03, unread
+    uint32 entryCount;              // offset 0x00
     ZcpEntry entries[entryCount]; // offset 0x04, stride 0x24 (36 bytes)
 };
 struct ZcpEntry {                  // 36 bytes -- now fully mapped
