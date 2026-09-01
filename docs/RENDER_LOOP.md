@@ -107,14 +107,101 @@ same pattern as `pyghidra_label_imports.py`):
 - `GameTick_UpdateAndPresent` (0x1002256c)
 - `PresentFrame_BlitAndComputeFPS` (0x10022898)
 
+## Follow-up: the engine object graph (update 2026-09-01)
+
+Traced the two per-tick vtable calls all the way to their concrete
+targets and constructors. Correction up front: the "likely
+`Update()`/`Render()`" guess above turned out to be wrong — see below.
+
+### The chain, one level deeper
+
+`GameTick_UpdateAndPresent`'s fast-path vtable calls are:
+`engine = *(appview+0x30)`, `sub = *(engine+0x28)`, then call through
+`*(sub+4)` (the object's *secondary* vtable pointer — this class uses
+GCC-style multiple inheritance, primary vtable at `sub+0`, secondary at
+`sub+4`) at byte offsets `+0x1c` and `+0x24`.
+
+`engine` (at `appview+0x30`) is the central engine/world object —
+**`GameEngine_ctor`** (0x1000fa7c), a hefty ~85.5KB (`0x14e14`-byte)
+allocation. It's `new`'d exactly once, in
+**`GameEngine_FirstTickBootstrap`** (0x10023ad0, formerly `FUN_10023ad0`
+— renamed, it's the "called once on the real first tick" function
+already noted above). That same bootstrap function also:
+
+- `new`s and binds a **SimKin interpreter instance** at `engine+0x3a0`
+  (`SIMKIN_ord20`), then registers ~50 named script bindings
+  (`SIMKIN_ord42`/`ord43`/`ord60` call triples, each passing a small
+  index + a `DAT_` string constant) — this is concretely *how*
+  `6r51.app` drives SimKin (an open question in `ROADMAP.md`). Worth
+  dumping those ~50 `DAT_` string constants later to get the actual
+  bound script global/function names.
+- `new`s **`ScreenModeController`** (0x1002958c) at `engine+0x28` — this
+  is `sub` above — and calls its one-time init (vtable slot `+0x10`,
+  0x100298a4) if this really is a cold start.
+
+`GameEngine_ctor` itself initializes two fixed-capacity entity arrays
+inside the engine object: **40 slots × 132 bytes** at `engine+0x5464`
+and **32 slots × 264 bytes** at `engine+0xbe54` (per-element
+constructors `FUN_1001b3a8`/`FUN_1001b448`), plus **48 SimKin-visible
+slots** at `engine+0xdfa4` (one `SIMKIN_ord22` call each). Reads like a
+scene/actor pool and a light/effect pool, both individually exposed to
+script — consistent with the roadmap's note that SimKin logic is
+"mostly free" and drives a lot of game entity behavior.
+
+### Correction: not a clean Update()/Render() split
+
+`ScreenModeController`'s per-tick vtable methods (`+0x1c` →
+`FUN_10029cb0`, `+0x24` → `FUN_1002a6d4`) are **not** a simple
+update/render pair. Both are large state-machine dispatchers keyed off
+an internal field at `this+0x78` (values like `1`, `5`, and a checked
+range `0x1f..0x25` elsewhere), interleaved with SimKin calls
+(`SIMKIN_ord43`) and further vtable dispatch through *other* objects.
+This reads like **screen/menu/dialog mode handling** — "what is
+currently shown and what should happen this tick given that mode" — not
+3D world simulation or rasterization directly. `ScreenModeController`'s
+constructor also sets up a 12-bit-RGB color palette and a 2KB scratch
+buffer, more consistent with UI/overlay chrome than a 3D renderer.
+
+A fourth vtable slot, `+0x38` (0x1006c274), is called conditionally from
+`FUN_1002152c` on what look like pause/resume-style state transitions
+(checks `engine+0x30 → +0x28`'s state field against range `0x14..0x1a`).
+
+### Next concrete lead: the 0x1006Bxxx–0x1006Dxxx cluster
+
+The `+0x38` slot (and several nearby, not-yet-called-from-here vtable
+entries at `+0x2c`/`+0x30`/`+0x34`/`+0x40`, read directly out of
+`ScreenModeController`'s vtable at `0x100fb908`) all live in a distinct
+code region, `0x1006Bxxx`–`0x1006Dxxx`, separate from the
+`0x1002xxxx`-range "app/UI" cluster everything above lives in. This is
+also where the earlier crash/error-display function's callers
+(`FUN_1006c31c`, `FUN_1006dbec`) live. **This cluster is the strongest
+remaining lead for where the actual 3D rasterization / world-simulation
+code is** — not yet explored in depth.
+
+### Labels applied (update)
+
+Added to the Ghidra project via the same
+`pyghidra_label_render_loop.py` (now also handles comment-only, lower
+confidence entries):
+
+- `GameEngine_FirstTickBootstrap` (0x10023ad0)
+- `GameEngine_ctor` (0x1000fa7c)
+- `ScreenModeController_ctor` (0x1002958c)
+- Plate comments (not renamed — not confident enough yet) on the four
+  observed vtable call targets: 0x100298a4 (`+0x10`, one-time init),
+  0x10029cb0 (`+0x1c`), 0x1002a6d4 (`+0x24`), 0x1006c274 (`+0x38`).
+
+New script: `shadowkey/ghidra/scripts/pyghidra_read_vtable.py <DAT_addr>
+[N]` — resolves a decompiler `DAT_x` literal-pool reference to the
+actual vtable it points at and lists the first N entries as (offset,
+target address, function name if Ghidra already knows it). This is how
+`ScreenModeController`'s vtable at `0x100fb908` was found and read.
+
 ## Open follow-ups
 
-- Identify the vtable/class behind the two per-tick subsystem calls in
-  `GameTick_UpdateAndPresent` (offsets +0x24/+0x1c) — likely candidates
-  for "the" `Update()`/`Render()` split relevant to decoupling tick rate
-  from present rate.
-- `FUN_10023ad0` (called once, guarded by a first-tick flag inside
-  `GameTick_UpdateAndPresent`) looks like first-frame/one-time init, not
-  yet decompiled in depth.
-- Where does the *actual* 3D rasterization happen? Not yet located —
-  likely inside whatever the +0x24/+0x1c vtable calls dispatch to.
+- Explore the `0x1006Bxxx`–`0x1006Dxxx` cluster — best remaining lead
+  for 3D rasterization / world-simulation code.
+- Dump the ~50 SimKin script-binding `DAT_` string constants registered
+  in `GameEngine_FirstTickBootstrap` to get real script-visible names.
+- Identify the two entity pools' element structure (40×132B, 32×264B) —
+  likely actors/objects and lights/effects respectively, unconfirmed.

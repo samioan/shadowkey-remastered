@@ -166,10 +166,22 @@ Prioritization, driven by the port goal rather than raw coverage:
       localized string-table lookup (121 cases, matches the release's 5
       bundled languages), not game logic.
 
-Next: keep pulling on this thread — find what the two per-tick vtable
-calls inside `GameTick_UpdateAndPresent` actually dispatch to (candidate
-`Update()`/`Render()` split), and locate the actual 3D rasterization
-code, likely reachable from there.
+- [x] Followed the two per-tick vtable calls to their targets. **Not** a
+      clean `Update()`/`Render()` split (correcting the guess above) —
+      both dispatch into `ScreenModeController`, a ~440-byte subsystem
+      object whose methods are state-machine dispatchers over screen/
+      menu/dialog mode, interleaved with SimKin calls. Also found the
+      real central engine object (`GameEngine_ctor`, ~85.5KB, holding two
+      fixed-capacity entity pools individually exposed to SimKin) and how
+      `6r51.app` binds its SimKin interpreter instance (in
+      `GameEngine_FirstTickBootstrap`, ~50 named script bindings). Full
+      writeup, corrected hypothesis, and labels in
+      [`RENDER_LOOP.md`](RENDER_LOOP.md).
+
+Next: the `0x1006Bxxx`–`0x1006Dxxx` code cluster is now the strongest
+lead for the actual 3D rasterization / world-simulation code — several
+`ScreenModeController` vtable slots (including one confirmed call site)
+live there, separate from the app/UI cluster everything above lives in.
 
 ## Open questions
 
