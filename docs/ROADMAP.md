@@ -336,12 +336,27 @@ Prioritization, driven by the port goal rather than raw coverage:
       now correctly attributed instead of merely ruled out). Full writeup:
       [`ZONE_FORMAT.md`](ZONE_FORMAT.md#compressed-per-zone-files-and-where-the-actual-room-geometry-comes-from).
 
+- [x] Resolved `entities.txt`'s `thirdField`: traced all 17 callers of
+      `EntityTypeDescriptor_Lookup`, found the handful that read
+      descriptor `+0x10`, then verified the meaning **directly against
+      the real `entities.txt` game data** (not just code inference) by
+      tallying its third column across all ~760 lines and sampling names
+      per bucket. It's an entity **category enum**: 1=prop, 2=monster,
+      3=misc-loot, 4=weapon, 5=spell, 6=armor, 7=merchant, 8=container,
+      9=consumable, 10=trap, 11=door, 12=trapped, 14=scroll, 15=shield,
+      16=unique. Confirms the monster-death "loot bag" mechanic (spawns
+      typeId 300 = `entities.txt` line `300 30 8 !bag_loot`, category
+      8/container, then re-checks category==8 before flagging it as a
+      container) and an inventory-search special case (category 5/spell
+      queries also match category 14/scroll — spell scrolls are
+      castable). Full writeup:
+      [`ZONE_FORMAT.md`](ZONE_FORMAT.md#thirdfield-resolved-its-an-entity-category-enum).
+
 Next: the ~9 unexamined `Poly3D_RasterizeTextured` blend-mode variants, the
 `.sur`/`.zon`/`.pth`/`.ztx`/`.zmp`/`.zlu`/`.zcp` record/content field
-layouts, `entities.txt`'s unidentified `thirdField`, and `azra.sta`'s
-still-unidentified format (confirmed not the `.zcp`/"bullseye" file). See
-`RENDERER_3D.md`'s, `MODEL_FORMAT.md`'s, and `ZONE_FORMAT.md`'s open
-follow-ups.
+layouts, and `azra.sta`'s still-unidentified format (confirmed not the
+`.zcp`/"bullseye" file). See `RENDERER_3D.md`'s, `MODEL_FORMAT.md`'s, and
+`ZONE_FORMAT.md`'s open follow-ups.
 
 ## Open questions
 

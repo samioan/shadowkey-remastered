@@ -229,6 +229,13 @@ evidence that the game is rendered in 2D (see that doc's correction note).
   `Bullseye_Init`, `Bullseye_InitMap`; see
   [`../docs/ZONE_FORMAT.md`](../docs/ZONE_FORMAT.md#compressed-per-zone-files-and-where-the-actual-room-geometry-comes-from).
 
+- `shadowkey/ghidra/scripts/pyghidra_label_entity_category.py` — documents
+  `EntityTypeDescriptor+0x10` (`entities.txt`'s third `%d`) as an entity
+  category enum (verified against the real `entities.txt` game data, not
+  just code) and comments the loot-bag-drop and spell/scroll-matching call
+  sites that use it; see
+  [`../docs/ZONE_FORMAT.md`](../docs/ZONE_FORMAT.md#thirdfield-resolved-its-an-entity-category-enum).
+
 - **`parse_model_resource.py`** — parser/verifier for the actual on-disk 3D
   model archive, `system/apps/6r51/models.idx` + `models.huge` in the game
   install tree (found separately from `6r51.app`'s code section — this is

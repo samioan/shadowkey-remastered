@@ -161,7 +161,11 @@ struct EntityTypeDescriptor {       // offset  size
     // +0..+7: unused/vtable-ish (not set here)
     int32 typeId;                    // 0x08    4   == the sscanf'd key
     int32 modelArchiveIndex;          // 0x0c    4   == models.idx index (see above)
-    int32 thirdField;                  // 0x10    4   meaning not decoded
+    int32 category;                     // 0x10    4   entity class enum (1=prop,2=monster,
+                                         //             3=misc loot,4=weapon,5=spell,6=armor,
+                                         //             7=merchant,8=container,9=consumable,
+                                         //             10=trap,11=door,12=trapped,14=scroll,
+                                         //             15=shield,16=unique) -- see below
     char  name[128];                    // 0x14  128  (strncpy'd, max 0x7f bytes + NUL)
 };                                             // struct itself is 0x94 = 148 bytes
 ```
@@ -179,6 +183,57 @@ possible type IDs, loaded once at boot) → `engine+0xbe34` BST → per-zone
 → descriptor's `modelArchiveIndex` → `engine+0x6b38[modelArchiveIndex]`
 (populated per-zone from `<zone>_models.txt`, itself backed by
 `models.idx`/`models.huge`) → the object's `+0x54` model pointer.
+
+### `thirdField` resolved: it's an entity category enum
+
+Traced all 17 callers of `EntityTypeDescriptor_Lookup` and grepped for
+reads of the returned descriptor's `+0x10` field, then cross-checked the
+handful of hits **directly against the real `entities.txt` game data**
+(readable text, not just code inference) by tallying every line's third
+column and sampling the names in each bucket:
+
+| value | count | sample names |
+|-------|-------|---------------|
+| 1  | 130 | generic scenery/props (`!bottle`, `!barrel`, `!pinetree`, `!lantern`) |
+| 2  | 176 | monsters (`monsters\Azra.s`, `monsters\Bandit_Thug.s`, ...) |
+| 3  | 52  | misc loot/quest objects (`gold.s`, `bag.s`, `!shadowkey`) |
+| 4  | 83  | weapons (`dagger.s`, `weapons\iron_broadsword.s`, ...) |
+| 5  | 31  | spells, cast directly (`blaze.s`, `HealWound.s`, `spells\Weakness.s`) |
+| 6  | 89  | armor pieces (`armor\iron_cuirass.s`, ...) |
+| 7  | 9   | merchant NPCs (`monsters\Eranthos_Merchant.s`, ...) |
+| **8**  | 22  | **containers** (`!footlocker`, `!crystal`, `!bag_loot`, `!chest_loot`, `!crate_loot`, `!sack_loot`, `!jar_loot`, `!barrel_loot`) |
+| 9  | 58  | consumables (`items\bread.s`, `items\healing_potion.s`, ...) |
+| 10 | 3   | mechanical traps (`ceilingmasher.s`, `steamtrap.s`, `spiketrap.s`) |
+| 11 | 60  | doors (`door.s`, `!gatedoor`, `!ironcage`, `!twilite_3door`, ...) |
+| 12 | 4   | trapped variants of 8/11 (`!trapped_door`, `!trapped_chest`, `!crate_lootTrapped`) |
+| 14 | 7   | spell **scrolls** (`spells\IgniteScroll.s`, `spells\U_Blaze_lvl10.s`, ...) |
+| 15 | 10  | shields (`armor\Iron_Shield.s`, ...) |
+| 16 | 1   | one unique weapon (`weapons\DaedricSword.s`) |
+
+This lines up exactly with how the code uses it:
+- `FUN_1003f130` (item/inventory search, `FUN_10035a48`) matches a wanted
+  category `iVar9` against `descriptor+0x10`, **with an explicit special
+  case: `iVar9==5` (spell) also matches `descriptor+0x10==0xe` (14,
+  scroll)** — i.e. spell scrolls count as castable spells for inventory
+  lookups. Exactly what the category table above would predict.
+- `FUN_1002c3a8` (a monster's on-death handler — spawns a fixed `typeId
+  300`, which `entities.txt` line 212 confirms is `300 30 8 !bag_loot`,
+  category 8/container, at the dying actor's position) and the more
+  generic `FUN_10084438` (spawns whatever typeId is stored at the calling
+  object's `+0x2f0`) both check `descriptor+0x10 == 8` before flagging the
+  spawned object as a container (`+0x180`/`+0x181` = 1) — i.e. "loot bag
+  drops on monster death" is implemented as: spawn typeId 300, and the
+  code even re-derives "is this really a container?" from the category
+  field rather than assuming it.
+- `FUN_10005320`/`FUN_1003893c`/`FUN_1003b85c` all pass `descriptor+0x10`
+  straight through as an argument to a virtual call at `vtable+0x18` on
+  some other object (an equip/pickup dispatcher, not traced further) —
+  consistent with using category to pick equip-slot/pickup behavior
+  (weapon vs. armor vs. shield vs. consumable).
+
+So `EntityTypeDescriptor::thirdField` (renamed **`category`**) is confirmed
+as a coarse entity-class enum, not a numeric stat. `13` is unused in the
+real data (no gap in the enum's *meaning*, just no entities assigned it).
 
 ## Compressed per-zone files, and where the actual room geometry comes from
 
@@ -249,8 +304,6 @@ related to it (it isn't, see below).
 
 ## What's still open
 
-- `thirdField` (`entities.txt`'s third `%d`, stored at descriptor `+0x10`)
-  — meaning not decoded (category? default HP? AI behavior ID?).
 - Precise field semantics of the `.ent` record's four `u16` fields at
   `0x0c` (rotation? scale? at least one, `local_75c`, is confirmed used as
   `object+0x5e`/"modelFlags").
