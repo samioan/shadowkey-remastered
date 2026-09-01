@@ -317,6 +317,14 @@ evidence that the game is rendered in 2D (see that doc's correction note).
   extended tile-record layout); see
   [`../docs/WORLD_MODEL.md`](../docs/WORLD_MODEL.md#per-frame-tile-visibility-raycasting-how-render3dscene-picks-which-faces-to-draw).
 
+- `shadowkey/ghidra/scripts/pyghidra_label_zcp_face_map.py` — documents
+  `Render3DScene`'s tile-grid traversal's full face-direction byte map
+  (every wall direction × 2 height bands, both ceiling bands, floor —
+  all 11 relevant bytes of the 36-byte `.zcp` type-table entry), found by
+  reading the traversal's 5 near-identical per-direction blocks in full
+  rather than sampling isolated call sites; see
+  [`../docs/ZONE_FORMAT.md`](../docs/ZONE_FORMAT.md#the-bullseye-subsystem-a-load-time-light-propagation-bake-not-ai-pathfinding).
+
 - **`parse_model_resource.py`** — parser/verifier for the actual on-disk 3D
   model archive, `system/apps/6r51/models.idx` + `models.huge` in the game
   install tree (found separately from `6r51.app`'s code section — this is

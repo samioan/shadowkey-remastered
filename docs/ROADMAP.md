@@ -484,12 +484,25 @@ Prioritization, driven by the port goal rather than raw coverage:
       `tools/parse_zone_placement.py`. Full writeup:
       [`ZONE_FORMAT.md`](ZONE_FORMAT.md#azrasta-a-leftover-level-editor-staging-file-not-a-game-format).
 
+- [x] Fully mapped the 36-byte `.zcp` type-table entry's face-direction
+      bytes by reading `Render3DScene`'s tile-grid traversal in full (5
+      near-identical blocks) instead of sampling isolated call sites as
+      an earlier pass had: `0x16`-`0x19` = east/west/south/north wall
+      lower band, `0x1a`-`0x1d` = the same 4 directions' upper band (a
+      second stacked wall segment for stepped floor/ceiling heights),
+      `0x1e`/`0x1f` = two ceiling bands, `0x20` = floor. Also found a 5th
+      meaningful tile `flags` bit (bit6, selects which of two height
+      fields gates ceiling banding). Documented via
+      `pyghidra_label_zcp_face_map.py`. Full writeup:
+      [`ZONE_FORMAT.md`](ZONE_FORMAT.md#the-bullseye-subsystem-a-load-time-light-propagation-bake-not-ai-pathfinding)'s
+      `ZcpEntry` struct and
+      [`RENDERER_3D.md`](RENDERER_3D.md#the-traversal-what-decides-which-faces-get-a-dynamic-draw).
+
 Next: `SurfaceFace_RasterizeTextured_v0`–`_v2` (presumed near/fade
-siblings of `_v3`, not independently traced), precisely which `.zcp`
-type-table byte maps to which face direction (only 3 of ~4-6 confirmed),
-and `.sta`'s remaining undecoded fields (`flags`, `unkA`/`unkB`). See
-`MODEL_FORMAT.md`'s, `RENDERER_3D.md`'s, `WORLD_MODEL.md`'s, and
-`ZONE_FORMAT.md`'s open follow-ups.
+siblings of `_v3`, not independently traced), the two `heightA`/`heightB`
+fields' finer sub-structure, and `.sta`'s remaining undecoded fields
+(`flags`, `unkA`/`unkB`). See `MODEL_FORMAT.md`'s, `RENDERER_3D.md`'s,
+`WORLD_MODEL.md`'s, and `ZONE_FORMAT.md`'s open follow-ups.
 
 ## Open questions
 

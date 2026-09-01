@@ -472,22 +472,59 @@ struct ZcpFile {
     uint8  pad[3];              // offset 0x01..0x03, unread
     ZcpEntry entries[entryCount]; // offset 0x04, stride 0x24 (36 bytes)
 };
-struct ZcpEntry {              // 36 bytes; a few fields decoded so far
-    int8  lightDelta;            // offset 0x00: signed, applied as delta*0x100
-    uint8 unknown[0x15];          // offset 0x01..0x15, not decoded (likely
-                                    // includes the "height" field WORLD_MODEL.md
-                                    // found via a much earlier, separate trace —
-                                    // not cross-checked against this offset yet)
-    uint8 surIndexA;                // offset 0x16: a .sur record index for one
-                                      // wall face direction (0xff = no face)
-    uint8 surIndexB;                  // offset 0x17: .sur index, another direction
-    uint8 unknown2[2];                 // offset 0x18..0x19, not decoded
-    uint8 surIndexC;                    // offset 0x1a: .sur index, another direction
-    uint8 unknown3[9];                   // offset 0x1b..0x23, not decoded (likely
-                                           // more per-direction .sur indices given
-                                           // the pattern — not confirmed)
+struct ZcpEntry {                  // 36 bytes -- now (almost) fully mapped
+    int8   lightDelta;               // 0x00: signed, applied as delta*0x100
+    uint8  unknown0[3];                // 0x01..0x03, not decoded
+    uint16 heightA;                      // 0x04: a height/corner value (u16,
+                                           // read alongside heightB below to pick
+                                           // which of two ceiling texture indices
+                                           // to use, and independently as one of
+                                           // several vertex-height inputs to
+                                           // SurfaceFace_BuildAndProject's UV math
+                                           // for every direction below)
+    uint8  unknown1[14];                   // 0x06..0x13, more height/corner-ish
+                                             // data used the same way (not
+                                             // individually decoded byte-by-byte)
+    uint16 heightB;                          // 0x14: paired with heightA above
+    uint8  surIndexE_lo;                       // 0x16: EAST wall, lower band --
+                                                 // also the "does this tile have
+                                                 // an east wall at all" gate
+                                                 // (0xff = no face)
+    uint8  surIndexW_lo;                        // 0x17: WEST wall, lower band
+    uint8  surIndexS_lo;                        // 0x18: SOUTH wall, lower band
+    uint8  surIndexN_lo;                        // 0x19: NORTH wall, lower band
+    uint8  surIndexE_hi;                        // 0x1a: EAST wall, upper band
+    uint8  surIndexW_hi;                        // 0x1b: WEST wall, upper band
+    uint8  surIndexS_hi;                        // 0x1c: SOUTH wall, upper band
+    uint8  surIndexN_hi;                        // 0x1d: NORTH wall, upper band
+    uint8  surIndexCeilingA;                    // 0x1e: ceiling, band A
+    uint8  surIndexCeilingB;                    // 0x1f: ceiling, band B
+    uint8  surIndexFloor;                       // 0x20: floor
+    uint8  unknown2[3];                        // 0x21..0x23, not decoded
 };
 ```
+
+**Every face-direction `.sur`-index byte pinned down**, resolved by fully
+reading `Render3DScene`'s tile-grid traversal (`RENDERER_3D.md`'s "The
+traversal" section) rather than sampling isolated snippets as an earlier
+pass of this doc did. The traversal is five near-identical blocks, one
+per direction, each reading its `.sur` index from the *neighboring*
+tile's type entry (current tile's own entry for floor/ceiling), gated by
+either a camera-position-vs-tile-edge check or the tile's `flags` bit3
+override, exactly as described in `RENDERER_3D.md`. Each wall direction
+actually fires up to **two** draws ("lower band"/"upper band" — likely a
+stepped-height wall segment when the neighbor's floor/ceiling height
+differs from the current tile's), selected by comparing `heightA`/
+`heightB`-derived vertex data between the two tiles; ceiling similarly
+picks between two texture indices based on comparing a height field
+against the camera's eye-height field (`*(camera+0x618)+0x224`, itself
+`playerZ + a fixed eye-height offset`, set in `GameEngine_InitLevel`'s
+player-start code). Floor has just one texture index and one call. Tile
+`flags` bit6 (`0x40`) additionally selects which of the two height
+fields (`heightA`/`heightB`) to compare for ceiling banding — a fifth
+`flags` bit now identified, alongside bit0 (light source), bit1 (wall),
+bit3 (force-draw), and bit2 (used in the floor gate, `flags & 4`, role
+not pinned down beyond "also forces a draw").
 
 **This is also `WORLD_MODEL.md`'s "36-byte tile-type table at `map+0x690c`"**
 — found independently in a much earlier round of this project, before

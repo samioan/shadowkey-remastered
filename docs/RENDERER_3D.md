@@ -382,20 +382,27 @@ Full writeup and the tile-record/type-table field layout live in
    quality-tiered). Every tile crossed gets deduplicated (a newly-decoded
    per-tile "last visible frame" byte) into a per-frame visible-tile list.
 2. `Render3DScene`'s main loop walks *that list* (not a fixed-radius or
-   full-grid scan) and, per tile, checks each cardinal neighbor's 36-byte
-   `.zcp` type-table entry for a per-direction `.sur`-index byte (`0x16`/
-   `0x17`/`0x1a` confirmed at different call sites, not all directions
-   individually mapped); `0xff` means no face there. When a face is
-   defined, it still only draws if the camera is on the correct side of
-   that tile boundary (an implicit backface/already-passed cull) **or**
-   the tile's `flags` bit3 forces it regardless (exact intended use not
-   confirmed — plausibly "always double-sided").
+   full-grid scan) and, per tile, checks the relevant neighbor's 36-byte
+   `.zcp` type-table entry for a per-direction `.sur`-index byte —
+   **every direction now mapped**, see `ZONE_FORMAT.md`'s `ZcpEntry`
+   struct: `0x16`-`0x19` = east/west/south/north wall, lower height band;
+   `0x1a`-`0x1d` = the same four directions' upper band (walls can draw
+   up to two stacked segments, e.g. for a stepped floor/ceiling height
+   difference with a neighbor); `0x1e`/`0x1f` = two ceiling bands
+   (selected by a height comparison against the camera's eye-height field
+   and a `flags` bit); `0x20` = floor (single band). `0xff` in any of
+   these means no face there. When a face is defined, it still only draws
+   if the camera is on the correct side of that tile boundary (an
+   implicit backface/already-passed cull) **or** the tile's `flags` bit3
+   forces it regardless (exact intended use not confirmed — plausibly
+   "always double-sided").
 
 So the wall/surface pipeline isn't drawing every tile boundary every
 frame — it's gated by (a) a genuine visibility raycast and (b) a
-per-direction "does this tile-type even have a face here" check baked
-into the shared `.zcp` type table, with a small explicit override for
-tiles that need a face regardless of camera position.
+per-direction, per-height-band "does this tile-type even have a face
+here" check baked into the shared `.zcp` type table, with a small
+explicit override for tiles that need a face regardless of camera
+position.
 
 ## Labels applied (surface/wall-face renderer)
 
@@ -442,13 +449,16 @@ tiles that need a face regardless of camera position.
   encodes) haven't been dumped from a real binary/asset — worth doing if a
   PC port wants to preserve the torchlight falloff look.
 - ~~The tile-grid traversal inside `Render3DScene` that decides *which*
-  faces get a dynamic draw~~ — **resolved**, see "The traversal: what
-  decides which faces get a dynamic draw" above and `WORLD_MODEL.md`'s
-  "Per-frame tile-visibility raycasting". `flags` bit0/bit1/bit3 are now
-  known (light source / wall / force-draw); bit2 and byte 7 of the tile
-  record, and most of the 36-byte type table, remain undecoded, as does
-  exactly which byte offset maps to which of the (at least 4, likely 6)
-  face directions.
+  faces get a dynamic draw~~ / ~~exactly which `.zcp` byte maps to which
+  face direction~~ — **both resolved**, see "The traversal: what decides
+  which faces get a dynamic draw" above and `ZONE_FORMAT.md`'s `ZcpEntry`
+  struct: every wall direction (×2 height bands), both ceiling bands, and
+  floor now mapped to a specific byte offset. `flags` bit0/bit1/bit3/bit6
+  are now known (light source / wall / force-draw / ceiling-band select);
+  bit2's exact role (also forces a floor draw, per the traversal, but not
+  otherwise pinned down), byte 7 of the tile record, the `heightA`/
+  `heightB` fields' precise sub-structure, and 3 trailing bytes of the
+  36-byte type table remain undecoded.
 - `SurfaceFace_RasterizeTextured_v0`/`_v1`/`_v2` weren't traced in the same
   detail as `_v3` — presumed near/fade siblings by dispatch position, not
   independently verified line-by-line the way the 10 actor variants were

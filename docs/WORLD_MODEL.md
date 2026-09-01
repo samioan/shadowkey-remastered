@@ -174,9 +174,10 @@ once per frame, before its face-drawing loop:
 `Render3DScene`'s main loop then walks this visible-tile list (not a
 fixed-radius or full-grid scan) and, for each tile, checks each cardinal
 neighbor's **type-table entry** (the 36-byte `.zcp`-loaded record, see
-`ZONE_FORMAT.md`) for a per-direction `.sur` index byte (different byte
-offsets confirmed for different directions/faces — `0x16`, `0x17`, `0x1a`
-seen, not all directions mapped precisely). A value of `0xff` means "no
+`ZONE_FORMAT.md`) for a per-direction `.sur` index byte — **every
+direction now mapped to a specific byte offset**, including a second
+"upper band" per wall direction and two ceiling bands (see
+`ZONE_FORMAT.md`'s `ZcpEntry` struct). A value of `0xff` means "no
 face here" (open space); otherwise a face gets drawn via
 `SurfaceFace_BuildAndProject` (`RENDERER_3D.md`), gated additionally by
 either the camera being on the correct side of that tile boundary (an
@@ -223,19 +224,22 @@ pointer) rather than every function that sets it. This is how
   **resolved**, see "Per-frame tile-visibility raycasting" above and
   `RENDERER_3D.md`'s tile-grid wall/surface-face renderer section.
 - ~~What reads a tile's *texture*/*wall* fields... out of the 36-byte
-  type-table~~ — **largely resolved**: `Render3DScene`'s traversal reads
-  per-direction `.sur`-index bytes out of it (`0x16`/`0x17`/`0x1a`
-  confirmed, other directions/faces not individually mapped) to pick
-  wall textures — see "Per-frame tile-visibility raycasting" above. The
-  *height* field's exact offset (this doc's original find) is still not
-  cross-referenced against these newer offsets.
+  type-table~~ — **resolved**: `Render3DScene`'s traversal reads a
+  per-direction `.sur`-index byte for every wall direction (×2 height
+  bands each), both ceiling bands, and floor — every relevant byte from
+  `0x16` to `0x20` mapped, see `ZONE_FORMAT.md`'s `ZcpEntry` struct. The
+  *height* field this doc originally found is now understood to be (at
+  least) two `u16`s at `0x04`/`0x14` (`heightA`/`heightB`), used both for
+  wall-band selection and per-vertex UV math — not broken down to
+  individual corner/sub-field precision.
 - The 36-byte tile-type table's (`.zcp`, see `ZONE_FORMAT.md`) and 8-byte
-  per-cell tile's field layouts are now **mostly** decoded: the tile
-  record is flags(bit0=light source/bit1=wall/bit3=force-draw-face)/
+  per-cell tile's field layouts are now decoded for everything this
+  project's traced code actually reads: the tile record is
+  flags(bit0=light source/bit1=wall/bit2=?/bit3=force-draw-face)/
   unknown0/lightLevel/typeId/visibleFrameStamp — 7 of 8 bytes; the
-  36-byte type entry has lightDelta(byte 0) and several per-direction
-  `.sur`-index bytes (0x16/0x17/0x1a — not all 4-6 faces individually
-  pinned) plus the original height field (offset within it not
-  cross-checked against these). Remaining unknowns: tile byte 7, most of
-  the type entry's other ~30 bytes, and precisely which byte serves which
-  compass direction/face.
+  36-byte type entry has lightDelta(0x00), two height fields
+  (0x04/0x14), 11 per-direction `.sur`-index bytes (0x16-0x20, every
+  wall/ceiling/floor face mapped), and 3 trailing unknown bytes
+  (0x21-0x23). Remaining unknowns: tile byte 7, the height fields'
+  finer sub-structure (individual corners?), and those 3 trailing
+  bytes.
