@@ -117,7 +117,9 @@ For each record:
   `x`/`y`/`z` and the rotation fields straight into the player object at
   `engine+0x618` (a `CBase`-derived object, offsets `+0x94/+0x9c/+0xa4` for
   position, `+0xa8/+0xb2/+0xb6` for orientation) instead of creating a new
-  entity.
+  entity, but **only if `GameEngine_InitLevel`'s `param_3` is non-zero**
+  (`if (param_3 != 0) { ...write position... }`, otherwise this whole block
+  is skipped and the player keeps whatever position they already had).
 - **`typeId > 1`**: looks up a **type descriptor** for `typeId` in a binary
   search tree rooted at `engine+0xbe34` via `EntityTypeDescriptor_Lookup`
   (`FUN_1008c1cc`, 0x1008c1cc — a plain BST: node = `{..,key@+8,
@@ -442,6 +444,33 @@ of its objects to the same `resistDisarm[28]` — multiple doors sharing one
 externally-tunable difficulty value, rather than each carrying its own
 fixed constant.
 
+### `GameEngine_InitLevel`'s `param_3`: full entry vs. partial reload
+
+Traced its sole call chain end to end:
+`GameEngine_InitLevel` ← `FUN_10027d0c` (new thread's entry point) ←
+`FUN_10027d44` (spawns that thread) ← two call sites,
+`FUN_10019780` (passes literal `1`, itself gated by its own caller's flag)
+and `FUN_10069cac` — a per-tick state-machine function (`switch` on a
+`LoadState`-looking field) whose `case 3` (`case 10` always uses `0`) picks
+`1` or `0` depending on a busy-check (`FUN_1000db04`) against another
+subsystem. The exact trigger for choosing `0` vs `1` at that call site
+wasn't pinned down further — but **what the two values *do* inside
+`GameEngine_InitLevel` is unambiguous**, since both of `param_3`'s uses are
+inside `GameEngine_InitLevel` itself, not caller-side:
+
+- `param_3 != 0` → the `.ent` player-start record (`typeId == 1`) writes
+  the player's position/orientation (see above) **and** `.stn` loads at
+  all (rebinding lock/trap difficulty overrides).
+- `param_3 == 0` → both are skipped: the player keeps their current
+  position, and no `.stn` overrides are (re)applied.
+
+So `param_3` distinguishes **a full/fresh zone entry** (place the player
+at the zone's designated start point, apply per-instance lock-difficulty
+bindings) from **a lighter reload of the same zone's data** where the
+player's live position and any already-applied `.stn` overrides should be
+left alone — consistent with, e.g., reloading a save vs. some other
+same-session re-init path that doesn't want to teleport the player.
+
 ## What's still open
 
 - Precise field semantics of the `.ent` record's four `u16` fields at
@@ -458,11 +487,6 @@ fixed constant.
 - `.ztx`/`.zlu`/`.zcp`'s decompressed contents, and the bulk of `.zmp`'s
   header (`unknown1`/`unknown2`, 96 of its 132 header bytes) — only their
   loader and destination field are known, not decoded field-by-field.
-- `GameEngine_InitLevel`'s `param_3`, gating whether `.stn` loads at all
-  (save-game load vs. same-session zone re-entry, unconfirmed). (`.stn`'s
-  `object+0x3c` field itself is now resolved — see the `.stn` section
-  above — it's read directly in `menus\usepicks.s` via
-  `GetOpener().resistDisarm`.)
 - `azra.sta`'s format — still unidentified. Confirmed **not** related to
   the "bullseye" pathfinding chain (that's `.zcp`) and **not** loaded via
   either per-zone loader traced here (no `"%s\%s.sta"` format string

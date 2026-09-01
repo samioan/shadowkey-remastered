@@ -382,11 +382,21 @@ Prioritization, driven by the port goal rather than raw coverage:
       — explaining why e.g. `crypt1.stn` points 5 different doors at the
       same `resistDisarm[28]`. No native-code mystery left here; the rest
       lived in already-readable script files.
+- [x] Resolved `GameEngine_InitLevel`'s `param_3`. Traced its only call
+      chain end to end (`FUN_10027d0c` thread entry ← `FUN_10027d44`
+      thread-spawn ← `FUN_10019780`/`FUN_10069cac`, a per-tick load-state
+      machine) and both of its use sites inside `GameEngine_InitLevel`
+      itself: non-zero means a **full/fresh zone entry** — reset the
+      player's position from the `.ent` player-start record *and* load
+      `.stn`'s difficulty overrides — zero means a **lighter reload** that
+      leaves the player's current position and any already-applied `.stn`
+      overrides alone. Renamed/commented via
+      `pyghidra_label_initlevel_param3.py`. Full writeup:
+      [`ZONE_FORMAT.md`](ZONE_FORMAT.md#gameengine_initlevels-param_3-full-entry-vs-partial-reload).
 
 Next: the ~9 unexamined `Poly3D_RasterizeTextured` blend-mode variants, the
 `.sur`/`.ztx`/`.zlu`/`.zcp` record/content field layouts, the bulk of
-`.zmp`'s header, `GameEngine_InitLevel`'s `param_3` (gates whether `.stn`
-loads at all), and `azra.sta`'s still-unidentified format (confirmed not
+`.zmp`'s header, and `azra.sta`'s still-unidentified format (confirmed not
 the `.zcp`/"bullseye" file). See `RENDERER_3D.md`'s, `MODEL_FORMAT.md`'s,
 and `ZONE_FORMAT.md`'s open follow-ups.
 

@@ -251,6 +251,18 @@ evidence that the game is rendered in 2D (see that doc's correction note).
   nested call, just never re-loaded/shown by the decompiler). See
   [`../docs/ZONE_FORMAT.md`](../docs/ZONE_FORMAT.md#stn-per-instance-traplockpick-difficulty-bindings).
 
+- `shadowkey/ghidra/scripts/pyghidra_label_stn_lookup.py` — renames
+  `FUN_100732c8` to `SimKinObject_FindByName` and documents its real (but
+  decompiler-obscured) 2-parameter signature; see
+  [`../docs/ZONE_FORMAT.md`](../docs/ZONE_FORMAT.md#stn-per-instance-traplockpick-difficulty-bindings).
+
+- `shadowkey/ghidra/scripts/pyghidra_label_initlevel_param3.py` —
+  documents `GameEngine_InitLevel`'s `param_3` (traced via its full call
+  chain plus both of its use sites): non-zero means a full/fresh zone
+  entry (reset the player's position, load `.stn`'s difficulty overrides),
+  zero means a lighter reload that leaves both alone; see
+  [`../docs/ZONE_FORMAT.md`](../docs/ZONE_FORMAT.md#gameengine_initlevels-param_3-full-entry-vs-partial-reload).
+
 - **`parse_model_resource.py`** — parser/verifier for the actual on-disk 3D
   model archive, `system/apps/6r51/models.idx` + `models.huge` in the game
   install tree (found separately from `6r51.app`'s code section — this is
