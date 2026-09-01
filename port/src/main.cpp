@@ -1,12 +1,17 @@
-// M4: renders the real mainmenu.s chain (M3) to the backbuffer with a
-// placeholder bitmap font and real stringtable.eng text, and wires
-// D-pad/confirm input to move selection and fire the selected item's
-// script callback. See C:\Users\Admin\.claude\plans\vast-wandering-summit.md
-// for the full staged plan -- this is the M4 milestone target ("main menu
-// renders and is navigable").
+// M5: deepens the menu chain from M4's main-menu-only milestone --
+// New Game -> character creation (choose character/race/portrait, name
+// entry) is now playable end to end through the menus, plus Load/Save/
+// Delete (a simulated in-memory save system, no real save-file format
+// RE'd) and Credits (a native-only screen reading credits.txt directly,
+// with no script-side handler in the whole corpus) and the Quit
+// confirmation popup actually closing the app. See
+// C:\Users\Admin\.claude\plans\vast-wandering-summit.md for the original
+// M0-M4 plan; M5 continues past it in the same "deepen the menu chain"
+// direction the user chose.
 #include <cstdio>
-#include <memory>
+#include <sstream>
 #include <string>
+#include <vector>
 
 #include "assets/string_table.h"
 #include "engine/game_clock.h"
@@ -15,8 +20,13 @@
 #include "graphics/backbuffer.h"
 #include "graphics/bitmap_font.h"
 #include "platform/win32/window.h"
+#include "simkin_bindings/combo_box_executable.h"
+#include "simkin_bindings/floating_sprite_executable.h"
 #include "simkin_bindings/menu_executable.h"
 #include "simkin_bindings/menu_stack.h"
+#include "simkin_bindings/player_executable.h"
+#include "simkin_bindings/popup_menu_executable.h"
+#include "simkin_bindings/text_area_executable.h"
 #include "skInterpreter.h"
 #include "skParseException.h"
 #include "skRuntimeException.h"
@@ -31,27 +41,145 @@ constexpr uint16_t kBackgroundColor = sk::PackRGB565(16, 16, 32);
 constexpr uint16_t kTextColor = sk::PackRGB565(220, 220, 220);
 constexpr uint16_t kSelectedTextColor = sk::PackRGB565(255, 220, 80);
 constexpr uint16_t kStaticTextColor = sk::PackRGB565(120, 120, 130);
+constexpr uint16_t kTitleColor = sk::PackRGB565(140, 180, 255);
+constexpr uint16_t kPopupBgColor = sk::PackRGB565(40, 40, 60);
+constexpr uint16_t kPopupBorderColor = sk::PackRGB565(90, 90, 130);
+
+// Word-wraps `text` at `maxChars` per line, drawing each line starting at
+// (x,y). Returns the number of lines drawn, so callers can advance their
+// own layout cursor by that many line-heights.
+int DrawWrappedText(sk::Backbuffer& bb, int x, int y, const std::string& text, int maxChars,
+                     uint16_t color) {
+    if (maxChars <= 0) maxChars = 27;
+    const int lineHeight = sk::BitmapFont::kGlyphHeight + 3;
+    std::vector<std::string> lines;
+    std::string current;
+    std::istringstream words(text);
+    std::string word;
+    while (words >> word) {
+        std::string candidate = current.empty() ? word : current + " " + word;
+        if (static_cast<int>(candidate.size()) > maxChars && !current.empty()) {
+            lines.push_back(current);
+            current = word;
+        } else {
+            current = candidate;
+        }
+    }
+    if (!current.empty() || lines.empty()) lines.push_back(current);
+    for (size_t i = 0; i < lines.size(); ++i) {
+        sk::BitmapFont::DrawString(bb, x, y + static_cast<int>(i) * lineHeight, lines[i], color);
+    }
+    return static_cast<int>(lines.size());
+}
+
+// "ChooseMale" -> "Male", "ChooseFemale" -> "Female" -- strips the
+// convention these callbacks use; falls back to the raw name otherwise.
+// Real portrait sprites are out of scope here (see
+// FloatingSpriteExecutable's header comment), so this text label stands
+// in for the picker entirely.
+std::string SpriteLabel(const std::string& callback) {
+    const std::string prefix = "Choose";
+    if (callback.size() > prefix.size() && callback.compare(0, prefix.size(), prefix) == 0) {
+        return callback.substr(prefix.size());
+    }
+    return callback;
+}
+
+void RenderPopup(sk::Backbuffer& backbuffer, sk_bindings::PopupMenuExecutable& popup,
+                  const sk::StringTable& strings) {
+    int x0 = 10, y0 = 60, x1 = sk::Backbuffer::kWidth - 10, y1 = 150;
+    for (int y = y0; y < y1; ++y) {
+        for (int x = x0; x < x1; ++x) {
+            bool border = (x == x0 || x == x1 - 1 || y == y0 || y == y1 - 1);
+            backbuffer.SetPixel(x, y, border ? kPopupBorderColor : kPopupBgColor);
+        }
+    }
+    int y = y0 + 6;
+    int itemIndex = 1;
+    for (const auto& item : popup.items()) {
+        bool hasCallback = !item.callback.empty();
+        bool isSelected = hasCallback && itemIndex == popup.selectedItem();
+        uint16_t color = isSelected ? kSelectedTextColor : kTextColor;
+        int lines = DrawWrappedText(backbuffer, x0 + 6, y, strings.Get(item.textId), 22, color);
+        y += lines * (sk::BitmapFont::kGlyphHeight + 3) + 2;
+        if (hasCallback) ++itemIndex;
+    }
+}
 
 void RenderMenu(sk::Backbuffer& backbuffer, sk_bindings::MenuExecutable& menu,
-                 const sk::StringTable& strings) {
+                 sk_bindings::PlayerExecutable& player, const sk::StringTable& strings) {
+    using RowKind = sk_bindings::MenuExecutable::RowKind;
     backbuffer.Fill(kBackgroundColor);
 
-    int y = 10;
+    int y = 8;
     const int lineHeight = sk::BitmapFont::kGlyphHeight + 4;
-    int itemIndex = 1;  // 1-based, matches MenuExecutable::selectedItem()
-    for (const auto& item : menu.items()) {
-        std::string text = strings.Get(item.textId);
-        bool isSelected = item.selectable && itemIndex == menu.selectedItem();
-        uint16_t color = !item.selectable ? kStaticTextColor
-                          : isSelected     ? kSelectedTextColor
-                                            : kTextColor;
-        int x = 12;
-        if (isSelected) {
-            sk::BitmapFont::DrawString(backbuffer, 2, y, ">", kSelectedTextColor);
+
+    if (menu.titleTextId() >= 0) {
+        sk::BitmapFont::DrawString(backbuffer, 4, y, strings.Get(menu.titleTextId()), kTitleColor);
+        y += lineHeight + 2;
+    }
+
+    int itemIndex = 1;
+    for (const auto& row : menu.rows()) {
+        bool isSelected = row.selectable && itemIndex == menu.selectedItem();
+        uint16_t color = !row.selectable      ? kStaticTextColor
+                          : isSelected         ? kSelectedTextColor
+                                                : kTextColor;
+        if (isSelected) sk::BitmapFont::DrawString(backbuffer, 2, y, ">", kSelectedTextColor);
+
+        switch (row.kind) {
+            case RowKind::MenuItem:
+            case RowKind::StaticItem:
+                sk::BitmapFont::DrawString(backbuffer, 12, y, strings.Get(row.textId), color);
+                y += lineHeight;
+                break;
+            case RowKind::ComboBox: {
+                auto* combo = static_cast<sk_bindings::ComboBoxExecutable*>(row.widget.get());
+                int value = combo->currentOptionValue();
+                std::string label = value >= 0 ? ("< " + strings.Get(value) + " >") : "< -- >";
+                sk::BitmapFont::DrawString(backbuffer, 12, y, label, color);
+                y += lineHeight;
+                break;
+            }
+            case RowKind::TextArea: {
+                auto* textArea = static_cast<sk_bindings::TextAreaExecutable*>(row.widget.get());
+                int lines = DrawWrappedText(backbuffer, 12, y, strings.Get(row.textId),
+                                             textArea->textWidth(), color);
+                y += lines * lineHeight;
+                break;
+            }
+            case RowKind::FloatingSprite: {
+                auto* sprite = static_cast<sk_bindings::FloatingSpriteExecutable*>(row.widget.get());
+                std::string label = "[ " + SpriteLabel(sprite->callback()) + " ]";
+                sk::BitmapFont::DrawString(backbuffer, 12, y, label, color);
+                y += lineHeight;
+                break;
+            }
+            case RowKind::TextEntry: {
+                std::string label = "NAME: " + player.charNameBuffer() + "_";
+                sk::BitmapFont::DrawString(backbuffer, 12, y, label, kSelectedTextColor);
+                y += lineHeight;
+                break;
+            }
         }
-        sk::BitmapFont::DrawString(backbuffer, x, y, text, color);
+        if (row.selectable) ++itemIndex;
+    }
+
+    if (auto* popup = menu.activePopup()) {
+        RenderPopup(backbuffer, *popup, strings);
+    }
+}
+
+void RenderCredits(sk::Backbuffer& backbuffer, const std::vector<std::string>& lines,
+                    int scrollOffset) {
+    backbuffer.Fill(kBackgroundColor);
+    const int lineHeight = sk::BitmapFont::kGlyphHeight + 4;
+    int y = 8;
+    int maxLines = sk::Backbuffer::kHeight / lineHeight;
+    for (int i = 0; i < maxLines && (scrollOffset + i) < static_cast<int>(lines.size()); ++i) {
+        sk::BitmapFont::DrawString(backbuffer, 4, y, lines[static_cast<size_t>(scrollOffset + i)],
+                                    kTextColor);
         y += lineHeight;
-        ++itemIndex;
     }
 }
 
@@ -74,12 +202,14 @@ int main(int argc, char** argv) {
     sk_bindings::MenuStack stack(scriptRoot, interpreter);
 
     std::string mainMenuPath = std::string(scriptRoot) + "/mainmenu.s";
-    skExecutableContext loadCtxt(&interpreter);
-    std::unique_ptr<sk_bindings::MenuExecutable> mainMenu;
     try {
-        mainMenu.reset(
-            new sk_bindings::MenuExecutable(skString(mainMenuPath.c_str()), loadCtxt, stack));
-        mainMenu->RunInit();
+        // Registered under "MainMenu" -- the exact string every "back to
+        // main menu" handler across the corpus (SaveGameMenuBack,
+        // LoadGameMenuBack, OptionsBack, newgamemenu.s's MenuQuit, ...)
+        // passes to OpenMenu(). Without this, each of those would
+        // silently construct and switch to a *new*, separate MenuStack-
+        // owned instance instead of coming back to this same one.
+        stack.CreateRootMenu("MainMenu", mainMenuPath);
     } catch (skParseException& e) {
         std::printf("shadowkey-port: PARSE ERROR loading mainmenu.s: %s\n", e.toString().ptr());
         return 2;
@@ -87,10 +217,9 @@ int main(int argc, char** argv) {
         std::printf("shadowkey-port: RUNTIME ERROR running mainmenu.s: %s\n", e.toString().ptr());
         return 2;
     }
-    stack.SetCurrent(mainMenu.get());
 
     sk::Window window(sk::Backbuffer::kWidth * 3, sk::Backbuffer::kHeight * 3,
-                       L"shadowkey-port (M4: main menu)");
+                       L"shadowkey-port (M5: character creation + save/load)");
 
     sk::InputState input;
     window.SetKeyCallback([&](int vkCode, bool down) {
@@ -98,28 +227,105 @@ int main(int argc, char** argv) {
             input.SetButton(*slot, down);
         }
     });
+    window.SetCharCallback([&](wchar_t ch) {
+        sk_bindings::MenuExecutable* menu = stack.currentMenu();
+        if (!menu || !menu->textEntryActive()) return;
+        if (ch == 0x08) {
+            stack.player().BackspaceCharName();
+        } else if (ch >= 0x20 && ch < 0x7F && stack.player().charNameBuffer().size() < 20) {
+            stack.player().AppendCharNameChar(static_cast<char>(ch));
+        }
+        // 0x0D (Enter) is handled in the tick loop below, not here --
+        // it needs to fire a script callback, which the char callback
+        // (running off the message pump, not the tick loop) shouldn't do.
+    });
 
     sk::Backbuffer backbuffer;
     sk::GameClock clock;
 
-    std::printf("shadowkey-port: M4 -- Up/Down move selection, Enter confirms, Esc goes back.\n");
+    std::printf(
+        "shadowkey-port: M5 -- Up/Down move selection, Left/Right cycle combo values or "
+        "navigate horizontal screens, Enter confirms, Esc goes back.\n");
 
     sk_bindings::MenuExecutable* lastMenu = nullptr;
+    int creditsScroll = 0;
 
     window.RunMessageLoop([&]() {
         if (window.ShouldClose()) return;
         if (!clock.PollTick()) return;
 
+        if (stack.quitRequested()) {
+            window.Close();
+            return;
+        }
+
+        if (stack.creditsActive()) {
+            if (input.ConsumeJustPressed(sk::ButtonSlot::Up) && creditsScroll > 0) --creditsScroll;
+            if (input.ConsumeJustPressed(sk::ButtonSlot::Down)) ++creditsScroll;
+            if (input.ConsumeJustPressed(sk::ButtonSlot::LeftSelectionKey) ||
+                input.ConsumeJustPressed(sk::ButtonSlot::RightSelectionKey)) {
+                stack.CloseCredits();
+                creditsScroll = 0;
+            }
+            RenderCredits(backbuffer, stack.creditsLines(), creditsScroll);
+            window.Present(backbuffer);
+            return;
+        }
+
         sk_bindings::MenuExecutable* menu = stack.currentMenu();
         if (menu) {
             try {
-                if (input.ConsumeJustPressed(sk::ButtonSlot::Up)) menu->MoveSelection(-1);
-                if (input.ConsumeJustPressed(sk::ButtonSlot::Down)) menu->MoveSelection(1);
-                if (input.ConsumeJustPressed(sk::ButtonSlot::LeftSelectionKey)) {
-                    menu->ActivateSelected();
-                }
-                if (input.ConsumeJustPressed(sk::ButtonSlot::RightSelectionKey)) {
-                    menu->TryInvoke("OnRightSoftkey");
+                if (sk_bindings::PopupMenuExecutable* popup = menu->activePopup()) {
+                    // A visible confirmation popup captures input ahead of
+                    // the underlying menu's own row navigation.
+                    if (input.ConsumeJustPressed(sk::ButtonSlot::Up)) popup->MoveSelection(-1);
+                    if (input.ConsumeJustPressed(sk::ButtonSlot::Down)) popup->MoveSelection(1);
+                    if (input.ConsumeJustPressed(sk::ButtonSlot::LeftSelectionKey)) {
+                        popup->ActivateSelected();
+                    }
+                    if (input.ConsumeJustPressed(sk::ButtonSlot::RightSelectionKey)) {
+                        popup->GoBack();
+                    }
+                } else if (menu->textEntryActive()) {
+                    // Typed characters land via SetCharCallback above; here
+                    // just the two control actions matter -- confirm and
+                    // back. The corpus spells the back handler both
+                    // "OnRightSoftkey" and "OnRightSoftKey" depending on
+                    // the file (a genuine authoring inconsistency in the
+                    // original scripts, not something to "fix") --
+                    // TryInvoke no-ops silently on whichever name a given
+                    // screen doesn't define, so trying both is harmless.
+                    if (input.ConsumeJustPressed(sk::ButtonSlot::LeftSelectionKey)) {
+                        menu->TryInvoke("Done");
+                    }
+                    if (input.ConsumeJustPressed(sk::ButtonSlot::RightSelectionKey)) {
+                        menu->TryInvoke("OnRightSoftkey");
+                        menu->TryInvoke("OnRightSoftKey");
+                    }
+                } else {
+                    if (input.ConsumeJustPressed(sk::ButtonSlot::Up)) menu->MoveSelection(-1);
+                    if (input.ConsumeJustPressed(sk::ButtonSlot::Down)) menu->MoveSelection(1);
+                    if (menu->useHoriz()) {
+                        // Portrait/name-entry-style screens: Left/Right
+                        // navigate rows instead of cycling a combo (there
+                        // isn't one on these screens anyway).
+                        if (input.ConsumeJustPressed(sk::ButtonSlot::Left)) menu->MoveSelection(-1);
+                        if (input.ConsumeJustPressed(sk::ButtonSlot::Right)) menu->MoveSelection(1);
+                    } else {
+                        if (input.ConsumeJustPressed(sk::ButtonSlot::Left)) {
+                            menu->CycleSelectedCombo(-1);
+                        }
+                        if (input.ConsumeJustPressed(sk::ButtonSlot::Right)) {
+                            menu->CycleSelectedCombo(1);
+                        }
+                    }
+                    if (input.ConsumeJustPressed(sk::ButtonSlot::LeftSelectionKey)) {
+                        menu->ActivateSelected();
+                    }
+                    if (input.ConsumeJustPressed(sk::ButtonSlot::RightSelectionKey)) {
+                        menu->TryInvoke("OnRightSoftkey");
+                        menu->TryInvoke("OnRightSoftKey");
+                    }
                 }
             } catch (skRuntimeException& e) {
                 std::printf("shadowkey-port: RUNTIME ERROR: %s\n", e.toString().ptr());
@@ -128,15 +334,14 @@ int main(int argc, char** argv) {
         }
 
         // A freshly opened menu (via OpenMenu()) starts with no selection
-        // of its own -- snap to its first selectable item, same as the
-        // root menu's one-time setup above.
+        // of its own -- snap to its first selectable row.
         if (menu && menu != lastMenu) {
             menu->MoveSelection(0);
             lastMenu = menu;
         }
 
         if (menu) {
-            RenderMenu(backbuffer, *menu, strings);
+            RenderMenu(backbuffer, *menu, stack.player(), strings);
         } else {
             backbuffer.Fill(kBackgroundColor);
         }

@@ -24,6 +24,7 @@ struct Window::Impl {
     bool closed = false;
     Rgb565BitmapInfo bmi{};
     Window::KeyCallback keyCallback;
+    Window::CharCallback charCallback;
 };
 
 namespace {
@@ -42,6 +43,11 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         case WM_KEYUP:
             if (impl && impl->keyCallback) {
                 impl->keyCallback(static_cast<int>(wParam), msg == WM_KEYDOWN);
+            }
+            return 0;
+        case WM_CHAR:
+            if (impl && impl->charCallback) {
+                impl->charCallback(static_cast<wchar_t>(wParam));
             }
             return 0;
         default:
@@ -103,6 +109,14 @@ Window::~Window() {
 
 void Window::SetKeyCallback(KeyCallback callback) {
     impl_->keyCallback = std::move(callback);
+}
+
+void Window::SetCharCallback(CharCallback callback) {
+    impl_->charCallback = std::move(callback);
+}
+
+void Window::Close() {
+    if (impl_->hwnd) PostMessageW(impl_->hwnd, WM_CLOSE, 0, 0);
 }
 
 void Window::RunMessageLoop(const IdleCallback& onIdle) {

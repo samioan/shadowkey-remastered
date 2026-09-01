@@ -20,11 +20,33 @@ public:
                 skExecutableContext& context) override;
 
     int selection() const { return m_Selection; }
+    // The AddOption() value at the current selection (a string-table id
+    // for e.g. race names, a raw game-side id for e.g. class ids -- see
+    // RenderMenu()'s comment on why it's rendered as-is either way), or
+    // -1 if no options were ever added.
+    int currentOptionValue() const {
+        return m_Selection >= 0 && static_cast<size_t>(m_Selection) < m_Options.size()
+                   ? m_Options[static_cast<size_t>(m_Selection)]
+                   : -1;
+    }
+    const std::string& onChangeCallback() const { return m_OnChangeCallback; }
+    const std::string& onEnterCallback() const { return m_OnEnterCallback; }
+
+    // Host-driven navigation (main.cpp's Left/Right on a selected combo
+    // row) -- wraps at either end. Does NOT fire onChangeCallback itself;
+    // the caller (MenuExecutable::CycleSelectedCombo) does that, since
+    // only it can dispatch a method call back into the owning script.
+    void CycleSelection(int delta) {
+        if (m_Options.empty()) return;
+        int count = static_cast<int>(m_Options.size());
+        m_Selection = (m_Selection + delta % count + count) % count;
+    }
 
 private:
     int m_X, m_Y;
     int m_Width = 0;
     bool m_Numerical = false;
+    std::string m_OnChangeCallback;
     std::string m_OnEnterCallback;
     std::vector<int> m_Options;
     int m_Selection = 0;

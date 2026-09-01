@@ -1,0 +1,31 @@
+#pragma once
+
+// Shared by native widgets that need to reach back into the MenuRow that
+// owns them (currently just MenuItemHandle and TextAreaExecutable, for
+// their .SetSelectable(bool) method) -- holds an index, not a pointer,
+// since MenuExecutable::rows() is a std::vector and push_back on a later
+// AddXxx() call can reallocate and invalidate any pointer taken into it
+// earlier. An index stays valid across that.
+
+#include <cstddef>
+
+namespace sk_bindings {
+
+class MenuExecutable;
+
+class RowOwnerRef {
+protected:
+    RowOwnerRef(MenuExecutable& owner, size_t rowIndex) : m_Owner(owner), m_RowIndex(rowIndex) {}
+
+    // Defined in row_owner_ref.cpp, which includes menu_executable.h --
+    // kept out of this header to avoid MenuExecutable.h <-> widget-header
+    // include cycles (menu_executable.h includes the widget headers to
+    // construct them).
+    void SetRowSelectable(bool selectable);
+    void SetRowTextId(int textId);
+
+    MenuExecutable& m_Owner;
+    size_t m_RowIndex;
+};
+
+}  // namespace sk_bindings

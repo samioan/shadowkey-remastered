@@ -26,6 +26,10 @@ bool ComboBoxExecutable::method(const skString& methodName, skRValueArray& args,
         m_OnEnterCallback = ToStdString(args[0].str());
         return true;
     }
+    if (methodName == skString("SetCallback") && args.entries() == 1) {
+        m_OnChangeCallback = ToStdString(args[0].str());
+        return true;
+    }
     if (methodName == skString("GetSelection") && args.entries() == 0) {
         returnValue = skRValue(m_Selection);
         return true;

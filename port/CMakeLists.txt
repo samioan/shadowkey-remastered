@@ -58,13 +58,17 @@ endif()
 # tests. See src/simkin_bindings/ -- one file per native binding class.
 add_library(sk_bindings STATIC
   src/simkin_bindings/combo_box_executable.cpp
+  src/simkin_bindings/floating_sprite_executable.cpp
   src/simkin_bindings/floating_text_executable.cpp
   src/simkin_bindings/menu_executable.cpp
+  src/simkin_bindings/menu_item_handle.cpp
   src/simkin_bindings/menu_stack.cpp
   src/simkin_bindings/native_binding_common.cpp
   src/simkin_bindings/player_executable.cpp
   src/simkin_bindings/popup_menu_executable.cpp
+  src/simkin_bindings/row_owner_ref.cpp
   src/simkin_bindings/test_armor_executable.cpp
+  src/simkin_bindings/text_area_executable.cpp
 )
 target_include_directories(sk_bindings PUBLIC src)
 target_link_libraries(sk_bindings PUBLIC simkin)

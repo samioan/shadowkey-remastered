@@ -26,16 +26,14 @@ int main(int argc, char** argv) {
 
     try {
         std::string mainMenuPath = std::string(scriptRoot) + "/mainmenu.s";
-        skExecutableContext loadCtxt(&interpreter);
-        sk_bindings::MenuExecutable mainMenu(skString(mainMenuPath.c_str()), loadCtxt, stack);
-        mainMenu.RunInit();
+        sk_bindings::MenuExecutable* mainMenu = stack.CreateRootMenu("MainMenu", mainMenuPath);
 
         std::printf("\nshadowkey-port M3 smoke test: mainmenu.s state after Init()+OnDisplay()\n");
-        std::printf("  background id: %d\n", mainMenu.backgroundId());
-        std::printf("  %zu menu item(s):\n", mainMenu.items().size());
-        for (const auto& item : mainMenu.items()) {
-            std::printf("    textId=%-5d selectable=%-5s callback=%s\n", item.textId,
-                        item.selectable ? "true" : "false", item.callback.c_str());
+        std::printf("  background id: %d\n", mainMenu->backgroundId());
+        std::printf("  %zu row(s):\n", mainMenu->rows().size());
+        for (const auto& row : mainMenu->rows()) {
+            std::printf("    textId=%-5d selectable=%-5s callback=%s\n", row.textId,
+                        row.selectable ? "true" : "false", row.callback.c_str());
         }
         std::printf("shadowkey-port M3 smoke test: OK\n");
         return 0;

@@ -20,6 +20,15 @@ bool PlayerExecutable::method(const skString& methodName, skRValueArray& args,
     }
     if (methodName == skString("ChooseRace") && args.entries() == 1) {
         m_Race = args[0].intValue();
+        // ShowRaceInfo.s reads this back via GetTemp() -- same scratch
+        // field ShowCharacterClass.s reads after ChooseCharacter() below;
+        // whichever was picked most recently is what a following "show
+        // info about what I just picked" screen would want.
+        m_Temp = m_Race;
+        return true;
+    }
+    if (methodName == skString("GetRace") && args.entries() == 0) {
+        returnValue = skRValue(m_Race);
         return true;
     }
     if (methodName == skString("SetPortraitID") && args.entries() == 1) {
@@ -39,13 +48,22 @@ bool PlayerExecutable::method(const skString& methodName, skRValueArray& args,
         return true;
     }
     if (methodName == skString("ChooseCharacter") && args.entries() == 1) {
-        // args[0] is a class id -- creating a character with the chosen
-        // class is the last step of new-game flow.
+        // ShowCharacterClass.s reads this back via GetTemp() -- see the
+        // ChooseRace() comment above for why the same field is shared.
+        m_Temp = args[0].intValue();
         m_HasCreatedCharacter = true;
         return true;
     }
     if (methodName == skString("HasCreatedCharacter") && args.entries() == 0) {
         returnValue = skRValue(m_HasCreatedCharacter);
+        return true;
+    }
+    if (methodName == skString("GetTemp") && args.entries() == 0) {
+        returnValue = skRValue(m_Temp);
+        return true;
+    }
+    if (methodName == skString("GetCharName") && args.entries() == 0) {
+        returnValue = skRValue(skString(m_CharNameBuffer.c_str()));
         return true;
     }
     return SoftFailNativeCall("Player", methodName, args, returnValue);

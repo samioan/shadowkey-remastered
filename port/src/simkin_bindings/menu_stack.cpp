@@ -3,7 +3,9 @@
 #include <algorithm>
 #include <cctype>
 #include <cstdio>
+#include <ctime>
 #include <fstream>
+#include <sstream>
 
 #include "simkin_bindings/menu_executable.h"
 #include "simkin_bindings/player_executable.h"
@@ -77,6 +79,16 @@ MenuExecutable* MenuStack::GetOrCreateMenu(const std::string& simkinPath) {
     return raw;
 }
 
+MenuExecutable* MenuStack::CreateRootMenu(const std::string& key, const std::string& filePath) {
+    skExecutableContext loadCtxt(&m_Interpreter);
+    std::unique_ptr<MenuExecutable> menu(new MenuExecutable(skString(filePath.c_str()), loadCtxt, *this));
+    MenuExecutable* raw = menu.get();
+    m_Menus[NormalizeKey(key)] = std::move(menu);
+    m_Current = raw;
+    raw->RunInit();
+    return raw;
+}
+
 void MenuStack::OpenMenu(const std::string& simkinPath) {
     MenuExecutable* menu = GetOrCreateMenu(simkinPath);
     if (!menu) {
@@ -86,6 +98,57 @@ void MenuStack::OpenMenu(const std::string& simkinPath) {
     }
     m_Current = menu;
     menu->RunOnDisplay();
+}
+
+bool MenuStack::GameAvailableForLoad(int slot) const {
+    if (slot < 0) {
+        for (const auto& s : m_SaveSlots) {
+            if (s.used) return true;
+        }
+        return false;
+    }
+    if (slot >= kSaveSlotCount) return false;
+    return m_SaveSlots[static_cast<size_t>(slot)].used;
+}
+
+void MenuStack::ActuallySaveGame(int slot) {
+    if (slot < 0 || slot >= kSaveSlotCount) return;
+    SaveSlot& s = m_SaveSlots[static_cast<size_t>(slot)];
+    s.used = true;
+    std::time_t now = std::time(nullptr);
+    std::tm local{};
+    localtime_s(&local, &now);
+    char buf[32];
+    std::strftime(buf, sizeof(buf), "%Y-%m-%d %H:%M", &local);
+    s.timeStr = buf;
+    std::printf("  [MenuStack] saved to slot %d (%s)\n", slot, s.timeStr.c_str());
+}
+
+void MenuStack::DeleteGame(int slot) {
+    if (slot < 0 || slot >= kSaveSlotCount) return;
+    m_SaveSlots[static_cast<size_t>(slot)] = SaveSlot{};
+}
+
+void MenuStack::DeleteAllGames() {
+    for (auto& s : m_SaveSlots) s = SaveSlot{};
+}
+
+std::string MenuStack::GetSavedTimeStr(int slot) const {
+    if (slot < 0 || slot >= kSaveSlotCount) return "";
+    return m_SaveSlots[static_cast<size_t>(slot)].timeStr;
+}
+
+void MenuStack::ShowCredits() {
+    if (m_CreditsLines.empty()) {
+        std::ifstream f(m_ScriptRoot + "/credits.txt");
+        std::string line;
+        while (std::getline(f, line)) {
+            if (!line.empty() && line.back() == '\r') line.pop_back();
+            m_CreditsLines.push_back(line);
+        }
+        if (m_CreditsLines.empty()) m_CreditsLines.push_back("(credits.txt not found)");
+    }
+    m_CreditsActive = true;
 }
 
 }  // namespace sk_bindings

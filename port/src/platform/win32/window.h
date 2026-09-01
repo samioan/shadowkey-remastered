@@ -22,6 +22,12 @@ public:
     // passed through as-is (down=true again) -- callers using edge
     // detection (InputState::JustPressed) are unaffected either way.
     using KeyCallback = std::function<void(int vkCode, bool down)>;
+    // WM_CHAR delivers the actual typed character (already handling
+    // shift/caps/layout), unlike WM_KEYDOWN's raw virtual-key code --
+    // used for the name-entry screen (see MenuExecutable::OpenEditText).
+    // Includes control characters Windows folds into WM_CHAR: 0x08
+    // (backspace), 0x0D (enter).
+    using CharCallback = std::function<void(wchar_t ch)>;
 
     Window(int clientWidth, int clientHeight, const std::wstring& title);
     ~Window();
@@ -30,6 +36,12 @@ public:
     Window& operator=(const Window&) = delete;
 
     void SetKeyCallback(KeyCallback callback);
+    void SetCharCallback(CharCallback callback);
+
+    // Posts WM_CLOSE to this window, same as the user clicking the close
+    // button -- for native code (QuitGame()) that needs to end the
+    // program from outside the message-pump thread's own call stack.
+    void Close();
 
     // Runs the message pump until the window is closed. Calls onIdle every
     // time there are no pending messages (i.e. every "frame").
