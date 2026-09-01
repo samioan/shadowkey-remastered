@@ -108,11 +108,24 @@ struct EntPlacement {      // offset  size
     int32  y;                // 0x04    4
     int32  z;                // 0x08    4
     uint16 rotOrScale[4];     // 0x0c    8   (four u16 fields, exact meaning TBD)
-    int32  typeId;             // 0x14    4   entity/object type ID
-    uint8  pad[6];               // 0x18    6
-    char   name[40];               // 0x1e   40   object/instance name
-};                                       // total 0x48 = 72
+    int32  unkA;                // 0x14    4   not decoded (see azra.sta below --
+                                 //             this field round-trips into it unchanged)
+    int32  unkB;                  // 0x18    4   not decoded, near-constant filler in
+                                   //             the one file sampled so far
+    int32  typeId;                  // 0x1c    4   entity/object type ID
+    char   name[40];                  // 0x20   40   object/instance name
+};                                             // total 0x48 = 72
 ```
+
+**Corrects an earlier version of this struct** (`typeId` at `0x14`, `pad[6]`
+at `0x18`, `name` at `0x1e`) — that was wrong by 8 bytes on `typeId`/`name`
+and missed two whole `int32` fields entirely. Found and fixed by directly
+parsing a real `azra.ent` against `entities.txt`'s known `typeId` range
+(`< 7000`) while investigating `azra.sta` below: only offset `0x1c` gives
+small, sensible `typeId`-shaped values across all 282 real records (`0x14`
+gives large sign-extended-looking values instead — see `azra.sta`'s
+`unkA` field, which is exactly this). Tool:
+`tools/parse_zone_placement.py`.
 
 For each record:
 
@@ -583,6 +596,59 @@ player's live position and any already-applied `.stn` overrides should be
 left alone — consistent with, e.g., reloading a save vs. some other
 same-session re-init path that doesn't want to teleport the player.
 
+## `azra.sta`: a leftover level-editor "staging" file, not a game format
+
+Resolved not through binary RE (nothing in `6r51.app` reads `.sta` files —
+confirmed again this pass, no `"%s\%s.sta"` format string anywhere) but by
+directly parsing the real file and comparing it against `azra.ent`'s
+already-decoded entity placements — the same technique already used
+elsewhere in this project for readable SimKin scripts, applied here to a
+binary asset instead. Tool: `tools/parse_zone_placement.py`.
+
+**On-disk format**: 201 fixed 32-byte records, no header, followed by a
+4-byte trailer (`01 00 00 00` — likely a version/format tag, not a count):
+
+```c
+struct StaRecord {          // 32 bytes
+    int32  typeId;            // 0x00 -- matches .ent's typeId field
+    int32  x;                  // 0x04 -- matches .ent's x
+    int32  y;                   // 0x08 -- matches .ent's y
+    int32  z;                    // 0x0c -- matches .ent's z
+    uint16 rot[4];                 // 0x10 -- matches .ent's rotOrScale[4] exactly
+    int32  unkA;                    // 0x18 -- matches .ent's unkA field exactly
+    uint16 flags;                     // 0x1c -- 13 distinct values seen, all
+                                        //         multiples of 16, range 80..288;
+                                        //         not decoded, no clear .ent analog
+    uint16 marker;                      // 0x1e -- always 0xCCCC (every one of 201
+                                          //         records; possibly padding, or a
+                                          //         record-valid sentinel some
+                                          //         level-editor build used)
+};                                                 // 32 bytes total
+```
+
+**Verified against real `azra.ent` data**: of `.sta`'s 201 records, **188
+(93.5%)** have a position that appears somewhere in `azra.ent`'s 282
+records — and of those 188 matches, **100% match on both the rotation
+quad and the `unkA` field** (`typeId` matches 143/188, the shortfall
+fully explained by multiple `.ent` entities sharing the exact same
+position, which the position-only lookup can't disambiguate). This is
+airtight: `.sta`'s per-record fields are a strict subset of `.ent`'s own
+fields (same `x`/`y`/`z`/`rot`/`unkA`/`typeId`, just missing `.ent`'s
+`unkB` and `name`), for the overwhelming majority of records.
+
+**Conclusion**: `azra.sta` is a **leftover development-tool export of
+(a slightly earlier version of) the same entity-placement data now
+shipped as `azra.ent`** — not a distinct format the game ever reads. The
+13 unmatched records (6.5%) are consistent with entities added, moved, or
+removed in `.ent` after `.sta` was last saved. The `.sta` extension itself
+now reads naturally as "staging" — an internal level-editor working file
+saved alongside the final exported `.ent`, accidentally left in the
+shipped install image for `azra` (the first/tutorial zone) and never
+cleaned up, matching the earlier finding that no other zone has a `.sta`
+file and no code in the binary ever opens one. The 5 unresolved literal
+`"azra"` strings in the binary remain a separate, still-unexplained loose
+end (not shown to be related to `.sta` — no code path connects them).
+
 ## What's still open
 
 - Precise field semantics of the `.ent` record's four `u16` fields at
@@ -618,10 +684,10 @@ same-session re-init path that doesn't want to teleport the player.
   ADD, not a literal-pool constant or a single 12-bit LDR immediate —
   needed a new search tool, `pyghidra_find_split_offset.py`):
   [`RENDERER_3D.md`](RENDERER_3D.md#the-tile-grid-wallsurface-face-renderer-a-third-pipeline).
-- `azra.sta`'s format — still unidentified. Confirmed **not** related to
-  the "bullseye" pathfinding chain (that's `.zcp`) and **not** loaded via
-  either per-zone loader traced here (no `"%s\%s.sta"` format string
-  exists anywhere in the binary) — it may be a level-editor-only artifact
-  never read by the shipped game. Five literal (non-templated) `"azra"`
-  strings exist in the binary with no resolvable references, an
-  unexplained loose end.
+- ~~`azra.sta`'s format~~ — **resolved**, see its own section above: a
+  leftover level-editor staging export of `azra.ent`'s entity placements,
+  never read by the shipped game. The 5 literal `"azra"` strings in the
+  binary remain unexplained (not shown related to `.sta`).
+- `.sta`'s `flags` field (13 distinct values, multiples of 16 from 80 to
+  288) and `unkA`/`unkB` (both round-trip byte-for-byte between `.sta`
+  and `.ent` but neither is consumed by any traced code) are not decoded.

@@ -328,3 +328,15 @@ evidence that the game is rendered in 2D (see that doc's correction note).
   python tools/parse_model_resource.py <models.idx> <models.huge> --verify
   python tools/parse_model_resource.py <models.idx> <models.huge> --dump <entryIndex>
   ```
+
+- **`parse_zone_placement.py`** — parser/verifier for `azra.ent` and
+  `azra.sta` (both real game asset data from the install image, not
+  extracted from the binary). Confirms `.sta`'s records are a near-total
+  subset of `.ent`'s own entity placements (same position/rotation/`unkA`
+  field for 188/201 records) — the evidence behind concluding `.sta` is a
+  leftover level-editor staging export, not a format the game reads. See
+  [`../docs/ZONE_FORMAT.md`](../docs/ZONE_FORMAT.md#azrasta-a-leftover-level-editor-staging-file-not-a-game-format).
+
+  ```
+  python tools/parse_zone_placement.py <azra.ent> <azra.sta>
+  ```

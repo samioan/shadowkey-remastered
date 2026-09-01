@@ -468,12 +468,28 @@ Prioritization, driven by the port goal rather than raw coverage:
       and
       [`RENDERER_3D.md`](RENDERER_3D.md#the-traversal-what-decides-which-faces-get-a-dynamic-draw).
 
+- [x] Resolved `azra.sta` — not through binary RE (nothing in `6r51.app`
+      reads `.sta` files, reconfirmed) but by directly parsing the real
+      file and comparing it against `azra.ent`'s already-decoded entity
+      placements: 188/201 (93.5%) of `.sta`'s records share a position
+      with an `azra.ent` record, and of those, 100% also match on
+      rotation and another field, meaning `.sta`'s records are a strict
+      subset of `.ent`'s own fields. Conclusion: `azra.sta` is a leftover
+      level-editor "staging" export of the same entity data now shipped
+      as `azra.ent`, accidentally left in the install image for the
+      `azra` zone only, never wired into any loader. Along the way, found
+      and fixed a wrong byte-offset in this project's own `.ent` record
+      struct (`typeId`/`name` were off by 8 bytes; two whole `int32`
+      fields had been missed entirely). New tool:
+      `tools/parse_zone_placement.py`. Full writeup:
+      [`ZONE_FORMAT.md`](ZONE_FORMAT.md#azrasta-a-leftover-level-editor-staging-file-not-a-game-format).
+
 Next: `SurfaceFace_RasterizeTextured_v0`–`_v2` (presumed near/fade
 siblings of `_v3`, not independently traced), precisely which `.zcp`
 type-table byte maps to which face direction (only 3 of ~4-6 confirmed),
-and `azra.sta`'s still-unidentified format. See `MODEL_FORMAT.md`'s,
-`RENDERER_3D.md`'s, `WORLD_MODEL.md`'s, and `ZONE_FORMAT.md`'s open
-follow-ups.
+and `.sta`'s remaining undecoded fields (`flags`, `unkA`/`unkB`). See
+`MODEL_FORMAT.md`'s, `RENDERER_3D.md`'s, `WORLD_MODEL.md`'s, and
+`ZONE_FORMAT.md`'s open follow-ups.
 
 ## Open questions
 
