@@ -345,6 +345,14 @@ evidence that the game is rendered in 2D (see that doc's correction note).
   instruction pass instead of one per offset) by matching each `LDR`/
   `LDRB`/`LDRH` instruction's scalar operand directly rather than
   string-matching the disassembly text.
+- `shadowkey/ghidra/scripts/pyghidra_find_string_and_refs.py "Str1"
+  "Str2" ...` — searches memory for one or more literal ASCII strings and
+  lists every reference to each, plus the containing function. Used to
+  check (and rule out) whether SimKin-callable native function names
+  (e.g. `"ConfigKeysMenu"`) appear as literal strings anywhere in
+  `6r51.app` — they don't, a concrete lead for how the SimKin native
+  bridge actually dispatches; see
+  [`../docs/INPUT_HANDLING.md`](../docs/INPUT_HANDLING.md).
 - `shadowkey/ghidra/scripts/pyghidra_label_input_state_class.py` —
   renames and documents the full `InputState` object at `engine+0x488`
   (10 functions: current/previous button-state accessors, a remappable
@@ -378,4 +386,21 @@ evidence that the game is rendered in 2D (see that doc's correction note).
 
   ```
   python tools/parse_zone_placement.py <azra.ent> <azra.sta>
+  ```
+
+- **`parse_string_table.py`** — parser for the game's localized
+  string-table format (`system/apps/6r51/stringtable.eng` + 5 sibling
+  languages — real game asset data, not extracted from the binary; *not*
+  the same thing as the 52-byte Symbian `.rsc` app-registration resource
+  sitting right next to it). Verified byte-for-byte against a real
+  4082-entry file. The entry index is the resource-string ID used
+  throughout the game's native code and SimKin bindings — this is how
+  `InputState`'s per-action-slot IDs were resolved to real UI text
+  ("Left", "Move Forward", etc.); see
+  [`../docs/INPUT_HANDLING.md`](../docs/INPUT_HANDLING.md#the-full-default-control-scheme).
+
+  ```
+  python tools/parse_string_table.py <stringtable.xxx> --range 0xced 0xd17
+  python tools/parse_string_table.py <stringtable.xxx> --id 0xd05
+  python tools/parse_string_table.py <stringtable.xxx> --dump-all
   ```

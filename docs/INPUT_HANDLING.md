@@ -36,28 +36,32 @@ Symbian default-handling behavior).
 
 ### The scan-code → action-slot table
 
-| scan code | action slot | notes |
-|---|---|---|
-| `0x0e` | 0 | |
-| `0x0f` | 1 | |
-| `0x10` | 2 | + Bluetooth-conditional side effect (see below) |
-| `0x11` | 3 | + Bluetooth-conditional side effect |
-| `0x31` ('1') | 4 | |
-| `0x32` ('2') | 5 | |
-| `0x33` ('3') | 6 | |
-| `0x34` ('4') | 7 | |
-| `0x35` ('5') | 8 | + Bluetooth-conditional side effect |
-| `0x36` ('6') | 9 | |
-| `0x37` ('7') | 10 | |
-| `0x38` ('8') | 11 | |
-| `0x39` ('9') | 12 | |
-| `0x30` ('0') | 13 (`0xd`) | |
-| `0x2a` ('*') or `0x85` | 14 (`0xe`) | |
-| `0x7f` | 15 (`0xf`) | |
-| `0xa4` | 16 (`0x10`) | only when `engine+0x260 != 0` |
-| `0xa5` | 17 (`0x11`) | only when `engine+0x260 != 0` |
-| `1` | 18 (`0x12`) | |
-| `0xa7` | 20 (`0x14`) | only when `engine+0x260 == 0` |
+**Every physical key name below is now confirmed directly from the game's
+own data** (see "The `InputState` object" and "The full default control
+scheme" further down) — not guessed from Symbian convention:
+
+| scan code | action slot | key name (from game data) | notes |
+|---|---|---|---|
+| `0x0e` | 0 | Left | + Bluetooth-conditional side effect on `0x10`/`0x11` (see below) |
+| `0x0f` | 1 | Right | |
+| `0x10` | 2 | Up | + Bluetooth-conditional side effect |
+| `0x11` | 3 | Down | + Bluetooth-conditional side effect |
+| `0x31` ('1') | 4 | Key 1 | |
+| `0x32` ('2') | 5 | Key 2 | |
+| `0x33` ('3') | 6 | Key 3 | |
+| `0x34` ('4') | 7 | Key 4 | |
+| `0x35` ('5') | 8 | Key 5 | + Bluetooth-conditional side effect |
+| `0x36` ('6') | 9 | Key 6 | |
+| `0x37` ('7') | 10 | Key 7 | |
+| `0x38` ('8') | 11 | Key 8 | |
+| `0x39` ('9') | 12 | Key 9 | |
+| `0x30` ('0') | 13 (`0xd`) | Key 0 | |
+| `0x2a` ('*') or `0x85` | 14 (`0xe`) | Key * | |
+| `0x7f` | 15 (`0xf`) | Key # | not the ASCII value of `#` (`0x23`) — N-Gage's own scan code for this key |
+| `0xa4` | 16 (`0x10`) | Left Selection Key | only when `engine+0x260 != 0`; the left softkey |
+| `0xa5` | 17 (`0x11`) | Right Selection Key | only when `engine+0x260 != 0`; the right softkey |
+| `1` | 18 (`0x12`) | (reuses "Left Selection Key") | |
+| `0xa7` | 20 (`0x14`) | (reuses "Left Selection Key") | only when `engine+0x260 == 0` |
 
 **The numeric keypad digits (`0x30`-`0x39`, literally their own ASCII
 values as Symbian scan codes) are the primary game controls** — each digit
@@ -66,24 +70,19 @@ scan code *is* the character. This matches the N-Gage's well-known design:
 its unconventional "sideways" form factor and lack of a normal D-pad means
 many N-Gage games use the numeric keypad as the primary control surface.
 
-The four codes `0x0e`/`0x0f`/`0x10`/`0x11` are four **consecutive** values
-mapped to four consecutive action slots (0-3) — a strong structural signal
-they're the four D-pad/arrow directions, which in Symbian's standard
-`TStdScanCode` enum (`e32keys.h`) are conventionally
+`0x0e`/`0x0f`/`0x10`/`0x11` (Left/Right/Up/Down) match Symbian's standard
+`TStdScanCode` enum (`e32keys.h`) convention
 `EStdKeyLeftArrow`/`EStdKeyRightArrow`/`EStdKeyUpArrow`/`EStdKeyDownArrow`
-in exactly that order. **This specific enum mapping was not re-verified
-against a primary-source SDK this pass** — the Series 60 v0.9 SDK this
-project extracted earlier (`IMPORT_NAMES.md`) was downloaded to a
-session-scratchpad temp directory and no longer exists locally; a web
-search for a public mirror of `e32keys.h` didn't turn up the exact enum
-listing either. Treat the `EStdKey*` names in this doc as **well-known
-Symbian platform convention, not confirmed against this project's own
-archived source** — worth firming up by re-downloading the SDK (same
-method as `IMPORT_NAMES.md`) if exact key names matter for the port. The
-`0xa4`/`0xa5`/`0xa7` codes (only live in the alternate `engine+0x260 != 0`
-mode) fall in the range Symbian conventionally reserves for
-`EStdKeyDevice0`-`EStdKeyDeviceF` (phone-specific keys: soft keys,
-send/end-call, camera button, etc.) — same caveat applies.
+exactly, and `0xa4`/`0xa5`/`0xa7` fall in the range Symbian conventionally
+reserves for `EStdKeyDevice0`-`EStdKeyDeviceF` (phone soft keys) —
+**confirmed indirectly** by the key *names* pulled from the game's own
+string table (below), even though the exact `EStdKey*` enum identifiers
+themselves were never re-verified against a primary-source SDK this
+session (the project's earlier-archived Series 60 SDK copy no longer
+exists locally, and a public `e32keys.h` mirror search came up short —
+worth firming up by re-downloading the SDK, same method as
+`IMPORT_NAMES.md`, only if the exact enum *names* matter, since the actual
+key identities are no longer in doubt).
 
 ### A hidden cheat-code / Easter-egg system
 
@@ -133,11 +132,11 @@ struct InputState {                    // base = engine+0x488
     int32  bindingOffset[0x11];            // +0x2c, 17-entry logical-action ->
                                              //        byte-offset indirection table
                                              //        (a REMAPPABLE key-binding scheme)
-    int32  bindingResourceId[0x15];          // +0x6c, 21-entry Symbian resource-string
-                                               //        ID per action slot (0xd05-0xd16,
-                                               //        sequential -- almost certainly
-                                               //        UI labels for a controls/options
-                                               //        menu)
+    int32  bindingResourceId[0x15];          // +0x6c, 21-entry resource-string ID per
+                                               //        action slot (0xd05-0xd16,
+                                               //        sequential) -- CONFIRMED UI key
+                                               //        labels ("Left"/"Key 1"/etc.), see
+                                               //        below
     uint8  bindingFlag[0x15];                  // +0xc0, 21-entry per-slot flag
 };
 ```
@@ -177,38 +176,113 @@ struct InputState {                    // base = engine+0x488
   **fixed system actions** (back/menu/exit, sharing one generic label),
   while the 16 unique-ID slots are **core remappable gameplay actions**.
 
-**Each action slot very likely has a real UI label** sitting in the app's
-compiled Symbian resource file (`.rsc`, a binary resource bundle separate
-from `6r51.app`'s code) — resource IDs `0xd05`-`0xd16` are the lookup
-keys. This wasn't chased further: the giant 121-case string dispatcher
-`RENDER_LOOP.md` already found and ruled out as a render-loop candidate
-(`0x10078de4`) turned out to use small sequential case indices (0-120),
-**not** these raw resource IDs, so it's not the same lookup mechanism —
-resolving the actual label text needs locating and parsing the resource
-file itself, not attempted this pass. If found, this would give the
-human-readable name of every action directly, without needing to trace
-gameplay logic behaviorally.
+**Resolved**: each action slot's resource ID resolves to a real UI label,
+found not in a Symbian `.rsc` resource file (`6r51.rsc`, right next to
+`6r51.app`, turned out to be only 52 bytes — just app-registration data,
+not a string table) but in a **separate, game-specific localized string
+table** — `system/apps/6r51/stringtable.eng` (and five sibling files,
+`.euk`/`.fre`/`.ger`/`.ita`/`.spa`, matching the release's bundled
+languages). Format (verified byte-for-byte against the real 338078-byte
+`.eng` file, 4082 entries):
+
+```c
+struct StringTable {
+    uint32 count;
+    struct { uint32 charCount; uint16 text[charCount]; } entries[count];
+    // text[] is UTF-16LE, charCount includes a trailing 0x0000
+};
+```
+
+The entry index **is** the resource-string ID used throughout the game's
+native code and SimKin bindings — confirmed by reading indices
+`0xd05`-`0xd16` (`InputState`'s per-action-slot labels) directly out of a
+real file and getting back exactly the key names in the table above
+("Left", "Right", "Key 1", "Left Selection Key", etc.). This is a
+**new, independently reusable format finding** (the game's UI/dialogue
+text in general almost certainly goes through this same table, well
+beyond just controls) — not the same mechanism as the giant 121-case
+string dispatcher `RENDER_LOOP.md` already found and ruled out as a
+render-loop candidate (`0x10078de4`, small sequential case indices 0-120,
+not raw resource IDs like these). Tool: `tools/parse_string_table.py`.
+
+### The full default control scheme
+
+`FUN_1001a220` (called right after `InputState_InitDefaultBindings`
+finishes tagging all 21 slots with key-name labels) sets up the default
+**logical action → physical key** bindings for the 16 remappable core
+actions, each *also* tagged with its own resource ID
+(`0xced`-`0xd04`, sequential) — resolved the same way:
+
+| Action | Default key |
+|---|---|
+| Move Forward | Up |
+| Move Backward | Down |
+| Turn Left | Left |
+| Turn Right | Right |
+| Jump | Key 1 |
+| Look Up | Key 2 |
+| Use | Key 3 |
+| Side Step Left | Key 4 |
+| Use Right Action | Key 5 |
+| Side Step Right | Key 6 |
+| Use Left Action | Key 7 |
+| Look Down | Key 8 |
+| Map Toggle | Key 9 |
+| Cycle Right Queue | Key 0 |
+| Cycle Left Queue | Key * |
+| Character Manager | Key # |
+
+This is a complete, sensible first-person-RPG control scheme for the
+N-Gage's numeric-keypad-primary layout — D-pad for movement/turning, and
+the 0-9/*/# keys for combat, item-queue cycling (quick-swap spell/weapon
+slots), and menus.
+
+**8 more logical actions exist in the same resource-ID range but are
+*not* wired into this default-binding table** (`0xcf5` Bash, `0xcf7`
+Shoot, `0xcf8` Toggle Zoom, `0xcf9` Reload, `0xcfa` Stand/Crouch/Prone,
+`0xcfb` Next Weapon, `0xcfc` Toggle Compass, `0xd00` Select) — either
+handled through a different, not-yet-traced mechanism (fixed/
+non-remappable, context-sensitive), or genuinely unused on this
+platform/version (some read like a shooter's control set — "Shoot",
+"Reload", "Toggle Zoom" — that may not apply to Shadowkey's melee/magic
+combat, suggesting this string range might be shared with, or copied
+from, a different Vir2L N-Gage title's control scheme).
+
+Confirmed connected to a real, readable in-game UI: `configkeys.s` and
+`configkeys2.s` (SimKin scripts, `system/apps/6r51/`) implement the
+"Configure Keys" options-menu screen, calling native functions
+`ConfigKeysMenu(page)` and `ConfigKeysDefault()` that are almost
+certainly `InputState`'s binding-indirection accessors and
+`InputState_InitDefaultBindings`/`FUN_1001a220` respectively. **Checked
+directly and it's a genuine dead end for name-based tracing**: neither
+`"ConfigKeysMenu"` nor `"ConfigKeysDefault"` exists as a literal string
+anywhere in `6r51.app`'s memory image (verified the search method first
+against a known string that does resolve correctly). This means the
+SimKin native-function bridge does **not** dispatch by matching script
+call names against literal strings in the app binary — the interpreter
+(`simkin.dll`) most likely hashes function names during script
+parsing/compilation, and the native side registers by hash or by a fixed
+registration-order slot index instead (consistent with this project's
+existing characterization of `SIMKIN_ord22`/`42`/`43`/`60` as "register a
+script-visible slot/binding" — a small integer index, not a name string,
+is probably what actually crosses the native/script boundary). This is a
+useful concrete lead for whenever the SimKin bridge itself gets scoped —
+see `ROADMAP.md`'s port-scoping discussion. Tool used to check:
+`pyghidra_find_string_and_refs.py`.
 
 ## What's still open
 
-- **Which physical N-Gage key produces which scan code**, and **what each
-  of the 16 core action slots actually *does* in gameplay** (move
-  forward? strafe? attack?) — not traced behaviorally. The likely faster
-  path is now the resource-string route above (get the real UI label per
-  slot) rather than tracing `GameTick_UpdateAndPresent`'s full per-tick
-  logic by hand.
-- Locating and parsing `6r51.app`'s compiled Symbian resource file (the
-  `.rsc`/localized-resource bundle) to resolve resource IDs `0xd05`-`0xd16`
-  to real text — a new file-format investigation, not started.
+- The exact native-code identity of `ConfigKeysMenu`/`ConfigKeysDefault`
+  (the SimKin-callable functions the options menu invokes) — inferred by
+  role; name-based tracing is a dead end (see above), so pinning the exact
+  addresses would need tracing the registration-order/slot-index
+  mechanism instead.
 - The exact distinction between `InputState_GetButton` and
   `InputState_GetButton2` (byte-identical logic, different callers).
-- What `bindingResourceId`'s repeated ID `0xd15` across 3 of the 4
-  system-action slots actually labels (a single generic "Back"/"Menu"
-  string reused across two different physical keys, or a coincidence).
-- Exact Symbian `TStdScanCode` enum values for `0x0e`/`0x0f`/`0x10`/`0x11`,
-  `0x2a`, `0x85`, `0x7f`, `0xa4`/`0xa5`/`0xa7` — plausible by convention
-  and structural evidence, not confirmed against a primary source this
-  pass (see above).
+- Why 8 logical actions (Bash/Shoot/Toggle Zoom/Reload/Stand-Crouch-Prone/
+  Next Weapon/Toggle Compass/Select) aren't in the default-binding table —
+  a different binding mechanism, or genuinely dead/reused-from-elsewhere
+  content.
 - What `0x260` (the mode flag switching between the two `0xa4`/`0xa5`/
   `0xa7`-vs-`0xa7`-alone key sets) actually represents (menu open? text
   entry? a different screen state?) — not traced.
@@ -216,6 +290,10 @@ gameplay logic behaviorally.
 - Pointer/touch input (`CONE!84`, `HandlePointerBufferReadyL`) — the
   N-Gage has no touchscreen, so this import is very likely dead weight for
   this device, but wasn't checked for callers to confirm.
+- Whether the `stringtable.*` format generalizes to all of the game's UI/
+  dialogue text (very likely, given SimKin dialogue scripts reference
+  numeric-looking IDs in similar ranges elsewhere) — not surveyed broadly
+  this pass, only the specific IDs needed for controls.
 
 ## Labels applied
 
@@ -234,5 +312,7 @@ gameplay logic behaviorally.
 - `InputState_InitDefaultBindings` (0x1001a064)
 
 Tools: `pyghidra_label_input_handling.py`, `pyghidra_label_input_state_class.py`,
-`pyghidra_find_reads_range.py` (new — scans a whole contiguous offset range
-in one pyghidra session instead of one offset per invocation).
+`pyghidra_find_reads_range.py` (scans a whole contiguous offset range in one
+pyghidra session instead of one offset per invocation),
+`tools/parse_string_table.py` (parses the `stringtable.*` localized
+string-table format, real game asset data).

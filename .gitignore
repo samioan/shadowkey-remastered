@@ -14,6 +14,7 @@
 !/tools/resolve_import_names.py
 !/tools/parse_model_resource.py
 !/tools/parse_zone_placement.py
+!/tools/parse_string_table.py
 
 # --- Ghidra project (regenerable from the .app via tools/e32image.py + analyzeHeadless) ---
 # Recursive (**) because pyghidra's open_program(), if nested_project_location
