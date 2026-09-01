@@ -346,13 +346,28 @@ evidence that the game is rendered in 2D (see that doc's correction note).
   `LDRB`/`LDRH` instruction's scalar operand directly rather than
   string-matching the disassembly text.
 - `shadowkey/ghidra/scripts/pyghidra_find_string_and_refs.py "Str1"
-  "Str2" ...` — searches memory for one or more literal ASCII strings and
-  lists every reference to each, plus the containing function. Used to
-  check (and rule out) whether SimKin-callable native function names
-  (e.g. `"ConfigKeysMenu"`) appear as literal strings anywhere in
-  `6r51.app` — they don't, a concrete lead for how the SimKin native
-  bridge actually dispatches; see
-  [`../docs/INPUT_HANDLING.md`](../docs/INPUT_HANDLING.md).
+  "Str2" ...` — searches memory for one or more literal strings (both
+  ASCII **and UTF-16LE** — an earlier ASCII-only version of this script
+  produced a false "not found" for SimKin-callable native function names
+  like `"ConfigKeysMenu"`, since those are stored UTF-16LE; fixed after
+  the fact once that was discovered) and lists every reference to each,
+  plus the containing function. This is what led to finding the real
+  SimKin name-resolution trie; see
+  [`../docs/SIMKIN_BRIDGE.md`](../docs/SIMKIN_BRIDGE.md).
+- `shadowkey/ghidra/scripts/pyghidra_label_simkin_trie.py` — renames and
+  documents the real SimKin name-resolution mechanism:
+  `SimKinNameTrie_Insert` (a hand-rolled case-insensitive trie, 703 total
+  call sites) and `SimKin_RegisterNativeBindings_1` (one of ~28 sibling
+  functions, all called from `GameEngine_ctor`, that populate it — this
+  one confirmed via real examples, `"ConfigKeysDefault"`/
+  `"ConfigKeysMenu"`); see
+  [`../docs/SIMKIN_BRIDGE.md`](../docs/SIMKIN_BRIDGE.md#the-real-name-resolution-mechanism-a-hand-rolled-trie-700-entries).
+- `shadowkey/ghidra/scripts/pyghidra_label_atom_to_int.py` — renames
+  `SIMKIN_AtomToInt` (was ordinal 185, the single busiest unresolved
+  SIMKIN ordinal at 523 call sites) and comments two real chained
+  property-setter dispatchers (`SetSpellType`, `SetSprite`) that
+  confirmed its role; see
+  [`../docs/SIMKIN_BRIDGE.md`](../docs/SIMKIN_BRIDGE.md#simkin_atomtoint-resolved--was-the-dominant-unknown-ordinal).
 - `shadowkey/ghidra/scripts/pyghidra_simkin_ordinal_stats.py` — one-shot
   survey of every SIMKIN import ordinal's call-site and distinct-caller
   count, used to prioritize which ordinals matter most for the SimKin

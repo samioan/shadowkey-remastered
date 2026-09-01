@@ -546,27 +546,34 @@ Prioritization, driven by the port goal rather than raw coverage:
       directly. Full writeup: [`INPUT_HANDLING.md`](INPUT_HANDLING.md).
 
 - [x] **Started the SimKin native bridge** (per the port-scoping
-      discussion below). First-pass scoping, not a full resolution.
-      Confirmed 3 of ~35 resolvable SIMKIN ordinals: `SIMKIN_MakeIntAtom`/
-      `MakeStringAtom` (build a script-visible value from a literal
-      int/string) and `SIMKIN_RegisterConstant` (bind a name to a value
-      with the interpreter) — verified with a real example,
-      `GameEngine_FirstTickBootstrap` registering an item-category enum
-      (`IPT_Weapon=1`, `IPT_Spell=2`, etc.). Surveyed every SIMKIN
-      ordinal's call-site/caller count (new tool,
-      `pyghidra_simkin_ordinal_stats.py`) and found the single highest-
-      priority next target: ordinal 185, with 523 call sites across 34
-      callers — dwarfing every other ordinal (the next-busiest confirmed
-      one has 143) — not characterized at all yet, but almost certainly
-      either the native-calls-into-script or script-calls-into-native
-      dispatcher. Also found an unconfirmed lead for how native
-      *functions* (not just constants) get exposed: a multi-vtable
-      object-construction pattern (ordinal 22) whose own callers are only
-      reachable indirectly, not via a direct reference search. Full
-      writeup: [`SIMKIN_BRIDGE.md`](SIMKIN_BRIDGE.md).
+      discussion below). Confirmed `SIMKIN_MakeIntAtom`/`MakeStringAtom`/
+      `RegisterConstant` (build+bind a named constant, e.g.
+      `IPT_Weapon=1`) and surveyed every ordinal's usage
+      (`pyghidra_simkin_ordinal_stats.py`) to find the top target:
+      ordinal 185, with 523 call sites, dwarfing everything else.
+- [x] **Resolved `SIMKIN_ord185` and the real name-resolution
+      mechanism** — the single biggest find of this thread. A prior
+      round's "native function names never appear as literal strings in
+      `6r51.app`" conclusion turned out to be a **search bug**: it only
+      checked ASCII, but these strings are UTF-16LE. Re-checking with both
+      encodings immediately found `"ConfigKeysMenu"`/`"ConfigKeysDefault"`,
+      both referenced from the same function — a hand-rolled
+      **case-insensitive trie (prefix tree)**, `SimKinNameTrie_Insert`,
+      that maps every script-visible native binding name to a small
+      sequential integer index. **703 total call sites** to it, across
+      ~28 sibling registration functions all called from
+      `GameEngine_ctor` — i.e. the game's entire SimKin-visible native API
+      surface is on the order of **~700 bindings**, resolved through one
+      shared trie rather than string comparison at call time. This also
+      resolved `SIMKIN_ord185` itself (renamed `SIMKIN_AtomToInt`):
+      extracts a native int from a SimKin argument, confirmed via two
+      real chained property-setter dispatchers (`SetSpellType`,
+      `SetSprite`) — a second, distinct dispatch layer underneath the
+      trie. Full writeup: [`SIMKIN_BRIDGE.md`](SIMKIN_BRIDGE.md).
 
-Next: `SIMKIN_ord185` (`SIMKIN_BRIDGE.md`'s clear top priority — by far
-the most-used unresolved ordinal), the two
+Next: enumerating the full ~700-entry native API surface (only 2 of ~28
+registration functions individually examined), tracing how a trie index
+actually reaches its dispatcher, the two
 `heightA`/`heightB` fields' finer sub-structure, the `.zlu` chunk's
 secondary per-scanline/per-pixel `0x200`-byte-block offset (seen in all 4
 `SurfaceFace_RasterizeTextured` variants, not decoded), and `.sta`'s

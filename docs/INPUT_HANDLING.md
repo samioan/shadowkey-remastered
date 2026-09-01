@@ -253,30 +253,24 @@ Confirmed connected to a real, readable in-game UI: `configkeys.s` and
 "Configure Keys" options-menu screen, calling native functions
 `ConfigKeysMenu(page)` and `ConfigKeysDefault()` that are almost
 certainly `InputState`'s binding-indirection accessors and
-`InputState_InitDefaultBindings`/`FUN_1001a220` respectively. **Checked
-directly and it's a genuine dead end for name-based tracing**: neither
-`"ConfigKeysMenu"` nor `"ConfigKeysDefault"` exists as a literal string
-anywhere in `6r51.app`'s memory image (verified the search method first
-against a known string that does resolve correctly). This means the
-SimKin native-function bridge does **not** dispatch by matching script
-call names against literal strings in the app binary — the interpreter
-(`simkin.dll`) most likely hashes function names during script
-parsing/compilation, and the native side registers by hash or by a fixed
-registration-order slot index instead (consistent with this project's
-existing characterization of `SIMKIN_ord22`/`42`/`43`/`60` as "register a
-script-visible slot/binding" — a small integer index, not a name string,
-is probably what actually crosses the native/script boundary). This is a
-useful concrete lead for whenever the SimKin bridge itself gets scoped —
-see `ROADMAP.md`'s port-scoping discussion. Tool used to check:
-`pyghidra_find_string_and_refs.py`.
+`InputState_InitDefaultBindings`/`FUN_1001a220` respectively. **A first
+check of this (searching `6r51.app` for either name as a literal ASCII
+string) reported a false "dead end"** — both names exist, just as
+UTF-16LE, which an ASCII-only search silently misses. Re-checked with
+both encodings and found both, registered into a shared name-resolution
+trie right next to each other (`"ConfigKeysDefault"`→index `0x11`,
+`"ConfigKeysMenu"`→index `0x12`) — **this fully resolved the SimKin
+native-function bridge's real mechanism**, see
+[`SIMKIN_BRIDGE.md`](SIMKIN_BRIDGE.md) for the complete writeup rather
+than duplicating it here.
 
 ## What's still open
 
 - The exact native-code identity of `ConfigKeysMenu`/`ConfigKeysDefault`
-  (the SimKin-callable functions the options menu invokes) — inferred by
-  role; name-based tracing is a dead end (see above), so pinning the exact
-  addresses would need tracing the registration-order/slot-index
-  mechanism instead.
+  themselves (as opposed to the registration mechanism that names them,
+  now resolved in `SIMKIN_BRIDGE.md`) — inferred by role, not
+  independently confirmed by tracing the trie's dispatch output to a
+  specific handler function.
 - The exact distinction between `InputState_GetButton` and
   `InputState_GetButton2` (byte-identical logic, different callers).
 - Why 8 logical actions (Bash/Shoot/Toggle Zoom/Reload/Stand-Crouch-Prone/

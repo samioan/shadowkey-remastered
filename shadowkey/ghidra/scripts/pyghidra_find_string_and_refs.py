@@ -1,7 +1,14 @@
 """
-Search memory for one or more ASCII string literals, print their
-addresses, and list every reference to each found string's address
-plus the containing function.
+Search memory for one or more string literals -- both ASCII and
+UTF-16LE encodings -- print their addresses, and list every reference
+to each found string's address plus the containing function.
+
+IMPORTANT: many of this binary's script-visible name strings (SimKin
+method/property names, e.g. "SetSpellType") are stored as UTF-16LE, not
+ASCII -- an ASCII-only search silently misses them. An earlier version
+of this script was ASCII-only and produced a false "not found" for
+SimKin native method names as a result; see docs/SIMKIN_BRIDGE.md's
+"ord185" section for how that got caught and corrected.
 
 Run from repo root:
   python shadowkey/ghidra/scripts/pyghidra_find_string_and_refs.py "Str1" "Str2" ...
@@ -35,27 +42,30 @@ with pyghidra.open_program(
     ref_mgr = program.getReferenceManager()
 
     for target in TARGETS:
-        pattern = target.encode("ascii")
-        print(f"\n=== searching for ASCII {target!r} ===")
-        found_any = False
-        addr = memory.getMinAddress()
-        max_addr = memory.getMaxAddress()
-        while addr is not None and addr <= max_addr:
-            found = memory.findBytes(addr, pattern, None, True, None)
-            if found is None:
-                break
-            found_any = True
-            print(f"  string at {found}")
-            refs = ref_mgr.getReferencesTo(found)
-            for ref in refs:
-                from_addr = ref.getFromAddress()
-                rfunc = fm.getFunctionContaining(from_addr)
-                print(f"    ref from {from_addr} in {rfunc.getName() if rfunc else '???'}")
-            try:
-                addr = found.add(1)
-            except Exception:
-                break
-        if not found_any:
-            print("  (not found)")
+        for label, pattern in (
+            ("ASCII", target.encode("ascii")),
+            ("UTF-16LE", target.encode("utf-16-le")),
+        ):
+            print(f"\n=== searching for {label} {target!r} ===")
+            found_any = False
+            addr = memory.getMinAddress()
+            max_addr = memory.getMaxAddress()
+            while addr is not None and addr <= max_addr:
+                found = memory.findBytes(addr, pattern, None, True, None)
+                if found is None:
+                    break
+                found_any = True
+                print(f"  string at {found}")
+                refs = ref_mgr.getReferencesTo(found)
+                for ref in refs:
+                    from_addr = ref.getFromAddress()
+                    rfunc = fm.getFunctionContaining(from_addr)
+                    print(f"    ref from {from_addr} in {rfunc.getName() if rfunc else '???'}")
+                try:
+                    addr = found.add(1)
+                except Exception:
+                    break
+            if not found_any:
+                print("  (not found)")
 
 print("\ndone")
