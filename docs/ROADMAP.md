@@ -208,11 +208,33 @@ Prioritization, driven by the port goal rather than raw coverage:
       positions, bounding radii, per-tile-type collision behavior). Full
       writeup: [`GRAPHICS_FORMAT.md`](GRAPHICS_FORMAT.md).
 
-Next: the actual first-person 3D wall/floor/ceiling renderer is still
-not located, though it almost certainly builds on `Blit_RLESprite` or a
-sibling primitive. See `GRAPHICS_FORMAT.md`'s open follow-ups for the
-next search angles (the two still-unidentified `FUN_1006bee8`/
-`FUN_1006be58` helpers, or hunting for a perspective-divide operation).
+- [x] Checked `FUN_1006bee8`/`FUN_1006be58` (the outline/placeholder-box
+      helpers from `GRAPHICS_FORMAT.md`) — both are trivial flat-color
+      horizontal/vertical line fills (no texture, no per-column height).
+      Ruled out as renderer candidates; moved to the other search angle
+      (hunt for a division/reciprocal operation).
+
+- [x] Found that angle: widened the `engine+0x480` framebuffer-pointer
+      read-site search, which surfaced a **full perspective-correct
+      textured 3D polygon pipeline** — Euler rotation matrix construction,
+      matrix composition, Sutherland-Hodgman polygon clipping, a real
+      `EUSER____divsi3` perspective divide, and scanline rasterizers using
+      1/z reciprocal-table texture mapping. This is strong, direct
+      confirmation that Shadowkey renders true 3D geometry (not sprites).
+      **Caveat**: every caller traced renders an actor/entity 3D model
+      (NPCs, monsters, attached items/weapons, keyframe animation) — none
+      touch `Map_GetTileAt` or tile data, so it's still unconfirmed whether
+      the static dungeon walls/floors/ceilings use this same pipeline or a
+      separate one. Full writeup: [`RENDERER_3D.md`](RENDERER_3D.md). Also
+      re-confirmed the earlier automap hypothesis for `FUN_1002b430` (2x2
+      px/tile top-down map with a rotated player-direction marker driven by
+      the same sin/cos LUT shape) while investigating.
+
+Next: confirm whether static wall/floor/ceiling geometry goes through
+`Poly3D_ClipAndDispatch`/`Actor3D_TransformAndSubmitModel` too (e.g. via a
+per-tile-type model table analogous to the per-frame animation table at
+`engine+0x6b38`), or find the separate renderer if not. See
+`RENDERER_3D.md`'s open follow-ups.
 
 ## Open questions
 

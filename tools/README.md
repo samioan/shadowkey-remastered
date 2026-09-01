@@ -174,5 +174,20 @@ present).
   virtual call targets straight out of the binary's data section.
 
 See [`../docs/WORLD_MODEL.md`](../docs/WORLD_MODEL.md) for what these
-found: the game world is a 2D tile grid (not open 3D geometry), with a
-single ubiquitous `Map_GetTileAt` accessor.
+found: level layout/collision data is a 2D tile grid, with a single
+ubiquitous `Map_GetTileAt` accessor — this is about level *data*, not
+evidence that the game is rendered in 2D (see that doc's correction note).
+
+- `shadowkey/ghidra/scripts/pyghidra_label_world_model.py` — labels
+  `Map_GetTileAt` and appends an addendum comment to `GameEngine_ctor`.
+- `shadowkey/ghidra/scripts/pyghidra_label_graphics.py` — labels
+  `Blit_RLESprite` and its two traced call sites; see
+  [`../docs/GRAPHICS_FORMAT.md`](../docs/GRAPHICS_FORMAT.md).
+- `shadowkey/ghidra/scripts/pyghidra_find_callers.py <hex-addr>` — prints
+  every distinct function that calls a given address (name + size);
+  general-purpose caller-graph tracing, used to walk up from the 3D
+  polygon pipeline to its callers.
+- `shadowkey/ghidra/scripts/pyghidra_label_renderer3d.py` — labels the
+  actor/entity 3D polygon rendering pipeline (rotation matrix, clip,
+  dispatch, one rasterizer variant); see
+  [`../docs/RENDERER_3D.md`](../docs/RENDERER_3D.md).
