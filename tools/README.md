@@ -236,6 +236,12 @@ evidence that the game is rendered in 2D (see that doc's correction note).
   sites that use it; see
   [`../docs/ZONE_FORMAT.md`](../docs/ZONE_FORMAT.md#thirdfield-resolved-its-an-entity-category-enum).
 
+- `shadowkey/ghidra/scripts/pyghidra_label_stn.py` — documents the newly
+  found `.stn` per-zone file (loaded conditionally, binds named lockable
+  objects to a global `resistDisarm[]` SimKin array slot) plus the fully
+  decoded `.zon` room record and partially decoded `.zmp` header; see
+  [`../docs/ZONE_FORMAT.md`](../docs/ZONE_FORMAT.md#stn-per-instance-traplockpick-difficulty-bindings).
+
 - **`parse_model_resource.py`** — parser/verifier for the actual on-disk 3D
   model archive, `system/apps/6r51/models.idx` + `models.huge` in the game
   install tree (found separately from `6r51.app`'s code section — this is

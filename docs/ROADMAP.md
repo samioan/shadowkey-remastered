@@ -352,9 +352,27 @@ Prioritization, driven by the port goal rather than raw coverage:
       castable). Full writeup:
       [`ZONE_FORMAT.md`](ZONE_FORMAT.md#thirdfield-resolved-its-an-entity-category-enum).
 
+- [x] Fully decoded `.zon`'s room record (4×`u16` header fields at
+      `0x00/0x02/0x04/0x06`, exact byte offsets pinned via the decompiler's
+      declared local-variable sizes, not just guessed from stack deltas),
+      partially decoded `.zmp`'s 132-byte header (first 32 bytes are the
+      zone's SimKin level-script base name, used to build `<name>.s`,
+      loaded via `SIMKIN_ord59` — the first concrete binary-to-script link
+      found; a `u16` at `+0x82` is shared between `.zon`'s field conversion
+      and `Bullseye_InitMap`), and corrected an earlier note that
+      attributed two `Bullseye_InitMap` fields to `.sur` — they're actually
+      `.zmp`'s. Also found an **8th per-zone file, `.stn`** ("skTreeNodes"),
+      missed earlier because it loads conditionally rather than always:
+      parsed 4 real `.stn` files directly and found every record binds a
+      named lockable object (a door or container) to a slot in a global
+      SimKin `resistDisarm[]` array — per-instance lockpick/trap-disarm
+      difficulty. Full writeup:
+      [`ZONE_FORMAT.md`](ZONE_FORMAT.md#zons-room-record-fully-decoded).
+
 Next: the ~9 unexamined `Poly3D_RasterizeTextured` blend-mode variants, the
-`.sur`/`.zon`/`.pth`/`.ztx`/`.zmp`/`.zlu`/`.zcp` record/content field
-layouts, and `azra.sta`'s still-unidentified format (confirmed not the
+`.sur`/`.ztx`/`.zlu`/`.zcp` record/content field layouts and the bulk of
+`.zmp`'s header, where `.stn`'s `object+0x3c` field gets read at gameplay
+time, and `azra.sta`'s still-unidentified format (confirmed not the
 `.zcp`/"bullseye" file). See `RENDERER_3D.md`'s, `MODEL_FORMAT.md`'s, and
 `ZONE_FORMAT.md`'s open follow-ups.
 

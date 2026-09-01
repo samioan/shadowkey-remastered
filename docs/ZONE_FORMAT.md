@@ -25,7 +25,9 @@ fallback). `GameEngine_InitLevel` loads them in this order:
    material data, not pursued further here).
 3. **`<zone>.zon`** — room definitions: `u16` count → `engine+0x5460`, then
    count × 0x48-byte (72-byte) room records into `engine+0x5464`, stride
-   0x84 (132 bytes) per room slot.
+   0x84 (132 bytes) per room slot. **Record layout now fully decoded** (see
+   below): four `u16` header fields at `+0x00/+0x02/+0x04/+0x06` followed by
+   a 64-byte name at `+0x08`.
 4. **`<zone>.pth`** — AI monster spawn + patrol-path data: `u16` count, then
    per-monster a 0x44-byte (68-byte) header record (creates an object via
    `FUN_1001ae8c`) followed by a variable-length list of 8-byte waypoint
@@ -33,6 +35,13 @@ fallback). `GameEngine_InitLevel` loads them in this order:
 5. **`<zone>.ent`** — static/dynamic **entity placement**: `u32` count, then
    count × 0x48-byte (72-byte) records. **This is where a placed object's
    model gets assigned** (see below).
+6. **`<zone>.stn`** — loaded *conditionally* (only when `GameEngine_InitLevel`'s
+   third parameter is set — likely "reloading a zone visited earlier this
+   session" rather than a fresh first visit) during the "Init scripts" /
+   "Done init scripts" phase. Fully decoded and verified against real data
+   — see its own section below: it's a small table binding specific named
+   zone objects (mostly locked doors/containers) into a global SimKin
+   `resistDisarm[]` array, i.e. **per-instance lockpick/trap difficulty**.
 
 `GameEngine_InitLevel` also loads six more per-zone files interleaved with
 the above (`.ztx`, `.zmp`, `.zlu`, `.zfg`, `.zcp`, `.zsk`) through a second,
@@ -257,11 +266,72 @@ just the first):
 | ext     | dest field(s)                | role |
 |---------|-------------------------------|------|
 | `.ztx`  | `engine+0x364` (+ `engine+0x360` = first byte) | zone texture archive (not decoded further) |
-| `.zmp`  | `engine+0x328`                | unidentified blob (not decoded) |
+| `.zmp`  | `engine+0x328`                | zone metadata — **header partially decoded**, see below |
 | `.zlu`  | `engine+0x36c/0x370/0x374/0x378` (4×512-byte chunks of one 2048-byte blob) | unidentified 4-way LUT/table split; **this is what the `"InitLevel Pre/Post LUA"` debug markers actually bracket** — "LUA" is short for `.zlu`, not the Lua scripting language (see correction below) |
 | `.zfg`  | `engine+0x5c4`                | the fog/fade lookup table `CompositeSceneBufferToScreen` reads when `engine+0xbe0f` is set (`RENDERER_3D.md`'s fade-LUT open item) — "zfg" = "zone fog" |
 | `.zcp`  | `engine+0x32c`                | loaded by the "bullseye" subsystem's `load_map` step (see below) |
 | **`.zsk`** | **`(*(engine+0x62c))+0x54`** | **the current room's actual 3D model — see below, this is the important one** |
+
+### `.zon`'s room record, fully decoded
+
+`GameEngine_InitLevel`'s per-room read (`FUN_1009ec80(&local_724, 0x48, 1,
+handle)`, one 0x48/72-byte record per room) fills three stack locals whose
+declared types pin down the exact byte layout: `uint local_724` (4 bytes),
+`undefined2 local_720` (2 bytes), `ushort uStack_71e` (2 bytes) — i.e. the
+record's first 8 bytes are **four consecutive `u16` fields**, followed by a
+64-byte name (`strcpy`'d straight into the room slot, already known):
+
+```c
+struct ZonRoomRecord {          // offset  size
+    uint16 fieldA;               // 0x00    2   -> room slot +0x30, stored as-is
+    uint16 fieldB;                // 0x02    2   -> room slot +0x34, stored as (zmpTotal - fieldB)
+    uint16 fieldC;                 // 0x04    2   -> room slot +0x38, stored as-is
+    uint16 fieldD;                  // 0x06    2   -> room slot +0x3c, stored as (zmpTotal - fieldD)
+    char   name[64];                  // 0x08   64   room name (strcpy'd)
+};                                             // 0x48 = 72 bytes total
+```
+
+`zmpTotal` is a `u16` read out of the *already-loaded* `.zmp` file's header
+(decompressed offset `0x82`, see the `.zmp` header layout right below) —
+i.e. two of the four per-room fields aren't stored as absolute values on
+disk, they're stored as "distance from a shared total", and get converted
+back to absolute indices at load time using a count that lives in a
+*different* file. That's a strong signal `fieldB`/`fieldD` index into some
+zone-wide array sized by `zmpTotal` (portal/neighbor list? texture-atlas
+range? light index?) allocated from the end, while `fieldA`/`fieldC` are
+plain forward indices/counts into something else — consistent with the
+struct but the arrays being indexed aren't identified yet.
+
+### `.zmp`'s header, partially decoded
+
+`.zmp` (compressed, loaded right after `.ztx`, bracketed by debug markers
+`"InitLevel Post Textures"`/`"InitLevel Pre Zones"`) turned out not to be
+fully opaque — its first bytes are read into 5 chunks immediately after
+load:
+
+```c
+struct ZmpHeader {              // decompressed offset  size
+    char   scriptName[32];       // 0x00                  32   see below
+    uint8  unknown1[32];          // 0x20                  32   not decoded
+    uint8  unknown2[64];           // 0x40                  64   not decoded
+    uint16 field80;                 // 0x80                   2  passed to Bullseye_InitMap
+    uint16 zmpTotal;                 // 0x82                   2  passed to Bullseye_InitMap
+                                      //                          AND used by .zon's fieldB/fieldD above
+};                                                // 0x84 = 132 bytes header (rest of file unexamined)
+```
+
+**`scriptName` is the big find**: those first 32 bytes get passed straight
+into an `sprintf("%s\%s.s", zonePath, scriptName)` call whose result is
+handed to `SIMKIN_ord59` (a SimKin engine ordinal — "load/run script" by
+context) a few lines later. So **`.zmp`'s header names the zone's SimKin
+level script** (its `.s` file, part of the SimKin scripting layer already
+known from `.s` files in the install tree) — the very first concrete link
+found between the compiled binary's zone-loading code and which specific
+script file gets run for a given zone, beyond just "scripts exist".
+`field80`/`zmpTotal` are consumed by `Bullseye_Init`/`Bullseye_InitMap`
+(the AI-navigation-looking subsystem, see below) as well as by `.zon`'s
+record conversion above — so whatever `zmpTotal` counts, it's shared
+between the pathfinding system and the room list.
 
 ### `.zsk` is the room/dungeon geometry itself, in `MODEL_FORMAT.md`'s format
 
@@ -290,17 +360,70 @@ geometry.
 ### The "bullseye" subsystem and `.zcp`
 
 While tracing this, found debug-string brackets `"InitLevel Pre bullseye
-init"` → `Bullseye_Init` (`FUN_1001b8d4`, uses the `.sur` data loaded
-earlier) → `"...init_map"` → `Bullseye_InitMap` (`FUN_1000e840`, uses the
-`.sur` header's `local_656`/`local_658` fields) → `"...load_map"` (loads
-`<zone>.zcp` via `WholeFile_Load`, stored at `engine+0x32c`) →
-`"...calc_lights"` (`FUN_1001b964`). "Bullseye" is presumably this game's
-internal name for its AI navigation/pathfinding system (a `.zcp` "zone
-collision/pathing" map feeding both AI movement and — per the debug
-sequence ending in `calc_lights` — some lighting calculation, maybe
-line-of-sight-based). Not traced further; noted here since it explains
-what `.zcp` is for, correcting an earlier guess that `azra.sta` might be
-related to it (it isn't, see below).
+init"` → `Bullseye_Init` (`FUN_1001b8d4(engine, engine+0x360, engine+0x364+1,
+engine+0x380)` — i.e. the `.ztx` texture data (`engine+0x360`/`+0x364`) plus
+the `.sur` record count (`engine+0x380`, set from `.sur`'s leading `u8`
+count)) → `"...init_map"` → `Bullseye_InitMap` (`FUN_1000e840(engine,
+local_658, local_656[0], ...)` — **corrected**: those two `u16`s are the
+`.zmp` header's `field80`/`zmpTotal` fields decoded above, not `.sur`'s as
+an earlier pass of this note said) → `"...load_map"` (loads `<zone>.zcp`
+via `WholeFile_Load`, stored at `engine+0x32c`) → `"...calc_lights"`
+(`FUN_1001b964`). "Bullseye" is presumably this game's internal name for
+its AI navigation/pathfinding system (a `.zcp` "zone collision/pathing" map
+feeding both AI movement and — per the debug sequence ending in
+`calc_lights` — some lighting calculation, maybe line-of-sight-based). Not
+traced further; noted here since it explains what `.zcp` is for, correcting
+an earlier guess that `azra.sta` might be related to it (it isn't, see
+below).
+
+## `.stn`: per-instance trap/lockpick difficulty bindings
+
+An **eighth per-zone file**, missed in earlier passes because it's loaded
+*conditionally* (only when `GameEngine_InitLevel`'s third parameter is
+non-zero — most likely "this zone was already visited earlier this play
+session" rather than a first-time load) rather than unconditionally like
+the other seven. Found via its debug-marker bracket, `"InitLevel Pre
+skTreeNodes"` — "sk" = SimKin, so "SimKin Tree Nodes" — right before the
+`"Init scripts"`/`"Done init scripts"` phase.
+
+On-disk format (plain, uncompressed, streaming-read via
+`FUN_1009eb68`/`FUN_1009ec80` like `.sur`/`.zon`/`.pth`/`.ent`): a `u16`
+record count, then per record two Pascal-style strings (`u16` length +
+that many bytes, no NUL on disk):
+
+```c
+struct StnRecord {
+    uint16 varRefLen; char varRef[varRefLen];   // e.g. "resistDisarm[20]"
+    uint16 nameLen;   char name[nameLen];        // e.g. "Chest02"
+};
+```
+
+For each record, the game looks up a SimKin object by `name` (`FUN_100732c8`
+on `engine+0x470`, the same named-object registry used elsewhere in this
+function) and, if found, replaces that object's `+0x3c` field with a copy
+of `varRef` (logging `"Could not find %s"` if the lookup fails).
+
+**Verified by directly parsing 4 real `.stn` files** (`dstar_e.stn`,
+`dstar_w.stn`, `crypt1.stn`, `lakvan.stn` — `azra.stn`/`twilite.stn` are
+empty, count 0): every single record's `varRef` is `"resistDisarm[N]"` for
+some integer `N`, and every `name` is a short object identifier that's
+either a door (`door1`..`door5`, `sdoor1`, `lakdoor`) or matches the
+`Chest0N` naming used by `entities.txt`'s container-category objects (see
+`thirdField`/category above). E.g. `crypt1.stn`: 5 records, all
+`"resistDisarm[28]" -> doorN`; `dstar_e.stn`: 17 records, mostly
+`"resistDisarm[17]"` against various short names plus 3 chests at
+`resistDisarm[16]/[20]/[25]`.
+
+So `.stn` binds specific named lockable objects (doors, trapped/lockable
+containers — the same `category` values 8/11/12 identified above) to a
+slot in a shared, global SimKin array called `resistDisarm` — i.e. **each
+door/chest instance's lockpicking/trap-disarm difficulty is looked up
+through this per-instance indirection** rather than being a fixed property
+of the entity type. Not yet traced: where `object+0x3c` (the field this
+overwrites) is actually read at gameplay time (presumably the
+lockpick/disarm minigame), and what non-zero values of
+`GameEngine_InitLevel`'s `param_3` actually correspond to at the call site
+level (save-game load vs. same-session zone re-entry).
 
 ## What's still open
 
@@ -309,15 +432,19 @@ related to it (it isn't, see below).
   `object+0x5e`/"modelFlags").
 - The `.sur` (surface) and `.pth` (AI spawn/patrol path) formats — only
   their outer count+record framing was traced, not decoded field-by-field.
-- `.zon`'s 0x48-byte room record layout — partially decoded: a
-  `strcpy`-copied 64-byte name plus 4×`u16` header fields that land at the
-  room slot's `+0x30/+0x34/+0x38/+0x3c` (two of them computed as `<a value
-  from .sur's header> - <raw field>`, suggesting a reverse/from-the-end
-  index rather than a direct one) — semantic meaning of those 4 fields not
-  pinned down (room connectivity/neighbor indices? light or texture
-  references?).
-- `.ztx`/`.zmp`/`.zlu`/`.zcp`'s decompressed contents — only their loader
-  and destination field are known, not decoded field-by-field.
+- `.zon`'s room record byte layout is now fully decoded (4×`u16` at
+  `0x00/0x02/0x04/0x06` + 64-byte name, see above) but the **semantic**
+  meaning of the 4 fields is still open (room connectivity/neighbor
+  indices? light or texture references?) — two of them are computed as
+  `zmpTotal - rawField`, a reverse/from-the-end index into something sized
+  by `.zmp`'s header count, itself also not identified.
+- `.ztx`/`.zlu`/`.zcp`'s decompressed contents, and the bulk of `.zmp`'s
+  header (`unknown1`/`unknown2`, 96 of its 132 header bytes) — only their
+  loader and destination field are known, not decoded field-by-field.
+- `.stn`'s `object+0x3c` field — where it's actually *read* at gameplay
+  time (presumably the lockpick/disarm minigame) hasn't been traced, and
+  neither has the meaning of `GameEngine_InitLevel`'s `param_3` that gates
+  whether `.stn` loads at all.
 - `azra.sta`'s format — still unidentified. Confirmed **not** related to
   the "bullseye" pathfinding chain (that's `.zcp`) and **not** loaded via
   either per-zone loader traced here (no `"%s\%s.sta"` format string
