@@ -194,12 +194,25 @@ Prioritization, driven by the port goal rather than raw coverage:
       (Bluetooth multiplayer) subsystem, not world-related. Full
       writeup: [`WORLD_MODEL.md`](WORLD_MODEL.md).
 
-Next: the actual first-person 3D rasterizer still isn't located. Now
-that the level-data grid is confirmed, the better search angle is
-probably: what reads a tile-type's *texture/wall* fields (found so far:
-only a height field) out of the 36-byte type table, or what turns
-`Map_GetTileAt` results into actual pixel writes in the backbuffer. See
-`WORLD_MODEL.md`'s open follow-ups.
+- [x] Followed the "turn tile data into pixels" lead. Found the actual
+      low-level 2D graphics primitives (screen format: 176x208, 16bpp,
+      352-byte stride; a paletted, run-length/segment-encoded sprite
+      format with a magenta colorkey and an optional 50%-blend mode;
+      the core `Blit_RLESprite` compositing function) — but the specific
+      call sites traced (`DrawEntitySpriteWithOutline`,
+      `DrawListItemIconAndLabel`) turned out to be HUD/menu/inventory
+      icon rendering, not the first-person 3D view. Also found (and
+      ruled out as renderer candidates) the binary's largest functions
+      — huge SimKin native-function dispatch tables — and confirmed
+      actor movement/collision against the tile grid (fixed-point 8.8
+      positions, bounding radii, per-tile-type collision behavior). Full
+      writeup: [`GRAPHICS_FORMAT.md`](GRAPHICS_FORMAT.md).
+
+Next: the actual first-person 3D wall/floor/ceiling renderer is still
+not located, though it almost certainly builds on `Blit_RLESprite` or a
+sibling primitive. See `GRAPHICS_FORMAT.md`'s open follow-ups for the
+next search angles (the two still-unidentified `FUN_1006bee8`/
+`FUN_1006be58` helpers, or hunting for a perspective-divide operation).
 
 ## Open questions
 
