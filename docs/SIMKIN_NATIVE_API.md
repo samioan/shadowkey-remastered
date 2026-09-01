@@ -132,22 +132,193 @@ A few worth calling out:
   a base/derived split, or a different script-callable "view" of the
   same native object) — not resolved further this pass.
 
+## Cross-checked against the real `.s` script corpus
+
+Per the open item above ("the reverse direction... hasn't been
+cross-checked"): done, pure script-reading over all 1,535 real `.s` files
+(`system/apps/6r51/**/*.s`), no RE. Method: parse every bare `Name(...)`
+call (the implicit-self call a script makes into its own native class) and
+every `Factory().Method(...)` call (a call on an object returned by a
+factory-style function like `GetPlayer()`), then compare the resulting
+name-sets against each class's binding vocabulary. Tool:
+[`../shadowkey/ghidra/scripts/analyze_simkin_script_corpus.py`](../shadowkey/ghidra/scripts/analyze_simkin_script_corpus.py)
+(plain Python, no Ghidra needed — re-runnable any time `.s` files or
+`simkin_native_bindings.json` change).
+
+Raw overlap *counts* are biased toward the biggest classes (root's 115
+bindings out-overlap everything by sheer size), so the real signal is
+**recall against each class's own small vocabulary** — what fraction of a
+class's *own* binding names show up anywhere in a given script bucket —
+via the Dice coefficient, not raw counts.
+
+**Directory-hint validation** (scripts under `armor/`, `weapons/`,
+`items/`, `monsters/`, `spells/`, `menus/` — names that already strongly
+imply a type by construction) **confirms 5 of the 6 hypothesized classes
+outright**, each by a wide margin over every other class:
+
+| directory | files | best-match class | recall of class's own vocab |
+|---|---|---|---|
+| `armor/` | 86 | **Armor** | 3/6 (50%) |
+| `weapons/` | 77 | **Weapon** (+ Weapon-damage mixin) | Weapon 6/24 (25%), mixin 4/6 (67%) |
+| `items/` | 73 | **Item** | 9/26 (35%) |
+| `monsters/` | 143 | **Monster (AI)** | 29/55 (53%) |
+| `spells/` | 34 | **Spell** | 5/9 (56%) |
+| `menus/` | 24 | see correction below | — |
+
+**Weapon confirmation refines the mixin hypothesis** rather than just
+confirming it: ordinary `weapons/*.s` scripts hit the small
+**Weapon-damage mixin** (`SetDamageMin`/`SetDamageMax`/`AddDamageBonus`, 6
+members) far harder (67% of its own vocab) than the full **Weapon** class
+(`SetBow`/`SetCrossbow`/`SetClipSize`/`SetFireRate`/`SetReloadFrames`, 24
+members, only 25%) — i.e. the damage-mixin trie is the one nearly every
+weapon script actually needs, while the bulk of `0x14d44`'s 24 members are
+for the minority of weapons that are actual ranged firearms (bows/
+crossbows). Consistent with, not contradicting, the base/derived-split
+guess already on file.
+
+**Correction: `menus/` scripts are not instances of "Menu (generic)"
+(`0x14cfc`).** A menu script's own *bare* calls (`AddMenuItem`,
+`MenuBackground`, `ClearMenu`, `ConfigKeysMenu`, ...) land overwhelmingly
+on **GameEngine (root)** (34% of root's own 115-member vocab, the single
+largest contributor) and secondarily **Menu-stack manager**
+(`CreateMenu`/`OpenMenu`/`SetPrevMenu`/`Quit`, 80% of its 5 members) — not
+on `0x14cfc` (only 21%, and note `0x14cfc`'s own member is `AddItem`,
+*not* `AddMenuItem` — a real name, not a near-miss). But the *objects a
+menu script gets back* from calls like `AddMenuItem(...)`,
+`AddFloatingTextJustify(...)`, `AddComboBox(...)` — i.e. every
+`var.Method(...)` call where `var` was assigned from one of those — line
+up with **both** `0x14cfc` (`SetSelectedItem`, `SetBack`, `SetBackground`,
+`AddItem`, `ClearMenu`) **and Widget (UI base)** `0x14d20`
+(`SetFontNum`, `SetSelectable`, `SetLocalizedText`, `SetVisible`,
+`IsVisible`) exactly. So both hypothesized classes are real — `0x14cfc`
+just isn't the menu script's own class, it's (one of) the class(es) of the
+**per-item widget objects a menu script creates and configures**, same
+role as `0x14d20`.
+
+**Factory-call return-type identification** (what native class does
+`GetXxx()` return, read from the methods real scripts call on its
+result) — only `GetPlayer()`, `GetOwner()`, `GetOpener()` are used this
+way (`Name().Method()`) enough times in the corpus to be conclusive:
+
+- **`GetOwner()` → Character stats (`0x14db0`), high confidence**: 12 of
+  13 distinct methods called on its result (`PlaySound`, `AddEffect`,
+  `SetFatigue`/`GetFatigue`, `SetHealth`/`GetHealth`,
+  `SetMagicka`/`GetMagicka`, `SetSpellEffect`, `SetBlindness`,
+  `GetMaxFatigue`/`GetMaxHealth`) are Character-stats bindings (92% of the
+  call-set) — i.e. "the owner of this item/spell" resolves to a
+  Character-stats-typed object (the wielding creature's stat block), not
+  a generic Object/Entity.
+- **`GetPlayer()` → a composite of Player/GameState (`0x14dbc`) +
+  Character stats (`0x14db0`)**: of 147 distinct methods called on its
+  result, 45% match Player/GameState's own vocab and 36% match Character
+  stats' — together 81% of the call-set, the residual 19% likely other
+  small classes' members reused by name. Consistent with "the player" all
+  being one object exposing both its game-progress state (quests, gold,
+  inventory) and its own Character-stats block.
+- **`GetOpener()` is only ~55% native** (12 of 22 distinct methods called
+  on it match a native binding — weakly, `Object/Entity (world base)` and
+  `Collection`, no single class dominates). The other ~45%
+  (`MagicDamage`, `OpenChest`, `LockPicked`, `UseKey`, `GetLoot`,
+  `LootChest`, ...) are **not native bindings at all** — they're
+  script-level event-handler names declared directly inside the specific
+  placed object's own `.s` class script (verified: `LockPicked[`,
+  `UseKey[`, `OpenDoor[`, `MagicDamage[` are real handler declarations in
+  `lockeddoor*.s`/`chest_trap*.s`/door-puzzle scripts throughout the
+  corpus). So `GetOpener()` returns a generic native Object/Entity, and
+  most of what looks like its "API" is actually **SimKin-to-SimKin
+  dispatch into that object's own script**, not something a minimal port
+  needs to implement natively at all — the engine just needs the generic
+  named-dispatch mechanism SimKin itself provides. This is a concrete,
+  positive answer to "which bindings actually matter for a minimal port":
+  a meaningful chunk of what reads as "native API surface" per-object is
+  actually pure script, already fully readable, requiring no C++
+  reimplementation.
+
+**Used-vs-dead bindings**: matching binding *names* (ambiguous where a
+name is reused across classes, tracked separately below) against every
+identifier the corpus calls, **408 of 648 unique binding names (63%) are
+attested somewhere in the real script corpus**; 240 never appear as a call
+in any `.s` file. Per-class attested/total counts (a rough proxy for "how
+much of this class's surface actually matters for a script-driven port",
+not proof the rest is unreachable — reflection/string-built call names
+wouldn't show up in a straight text scan):
+
+| class | attested / total |
+|---|---|
+| Dropdown/slider widget | 6/6 (100%) |
+| Menu-stack manager | 5/5 (100%) |
+| Store/shop menu | 9/9 (100%) |
+| Spell-damage mixin | 4/4 (100%) |
+| Door/trap trigger | 9/10 (90%) |
+| Spell | 8/9 (89%) |
+| Collection | 7/8 (88%) |
+| Character-manager menu | 20/23 (87%) |
+| Table/grid widget | 12/14 (86%) |
+| Menu (generic) | 12/14 (86%) |
+| Player/GameState | 69/86 (80%) |
+| Action-queue HUD | 4/5 (80%) |
+| Widget (UI base) | 11/14 (79%) |
+| Character stats | 63/85 (74%) |
+| Item | 19/26 (73%) |
+| Weapon-damage mixin | 4/6 (67%) |
+| Armor | 4/6 (67%) |
+| Monster (AI) | 35/55 (64%) |
+| GameEngine (root) | 73/115 (63%) |
+| Icon/sprite widget | 5/8 (62%) |
+| Object/Entity (world base) | 35/57 (61%) |
+| Encounter spawner | 3/5 (60%) |
+| Zone effects | 4/8 (50%) |
+| Zone/Level | 18/41 (44%) |
+| Sprite-attach mixin | 2/6 (33%) |
+| Weapon | 6/24 (25%) |
+| Actor (AI movement) | 7/44 (16%) |
+| Camera/player-feedback | 1/9 (11%) |
+
+Full per-class *unused* name lists (the complement of the table above) are
+written to
+[`../shadowkey/simkin_bindings_unused_in_scripts.json`](../shadowkey/simkin_bindings_unused_in_scripts.json)
+by the same tool. Two classes stand out as low-recall despite being
+"in scope early" per the roadmap's port priorities — **Actor (AI
+movement)** (16%) and **Weapon** (25%, see the mixin note above) — worth
+remembering if a future pass needs to decide what native movement/weapon
+logic a port actually has to reimplement versus what's dead weight.
+
+**43 reused binding names, and which of them are actually called in real
+scripts** (an ambiguity that matters in practice, not just in the abstract
+— e.g. a script calling `SetHealth` could mean either `Monster (AI)` or
+`Character stats`, resolved at runtime by which object it's called on,
+not by the name alone): 34 of the 43 reused names are attested in the
+corpus at least once; full list in the tool's output. Names like
+`OpenMenu` (5-way reused), `ClearMenu`/`Quit`/`SetSelectable` (3-4 ways)
+are exactly the ones the `menus/` correction above already explains — they
+span the root, the menu-stack manager, and the generic-menu/widget
+classes because a menu script's calls really do span all of them.
+
 ## What's still open
 
 - None of the 28 hypothesized class identities are confirmed against a
-  real C++ class/vtable — they're read purely from member-name clusters.
-  Good enough to navigate by, not to cite as fact.
+  real C++ class/vtable — they're read purely from member-name clusters
+  (now cross-checked against real script usage, above, which is strong
+  supporting evidence for 5-7 of them but still not a struct/vtable
+  confirmation).
 - Why some classes split into a "mixin" and a "main" pair (Weapon/
   weapon-damage, Spell/spell-damage) instead of registering as one — not
   investigated; could be base/derived class registration happening at
-  two different constructor levels.
-- The reverse direction — which native class each `.s` script actually
-  talks to for a given call — hasn't been cross-checked against the
-  real script corpus. Doing that (grep every `.s` file for a call name,
-  look it up in `simkin_native_bindings.json`) would validate the class
-  hypotheses above and is pure script-reading, no RE needed.
+  two different constructor levels. The corpus cross-check above is
+  consistent with a base/derived split for Weapon specifically (ordinary
+  weapons lean on the mixin, bows/crossbows need the full class) but
+  doesn't prove the mechanism.
 - The one call site (703 counted, 702 resolved) whose name didn't
   resolve — not tracked down.
+- `GetOpener()`'s ~45% non-native call surface (above) suggests other
+  factory calls (`GetTarget`, whatever spawns/returns a `Monster (AI)` or
+  `Spell` instance, etc.) likely have the same native/script split, but
+  only `GetPlayer`/`GetOwner`/`GetOpener` had enough `Factory().Method()`
+  call sites in the corpus to analyze this way — not checked further.
+- The remaining 20 or so classes/factories with no directory-hint or
+  factory-call signal (e.g. Door/trap trigger, Camera/player-feedback,
+  Collection, the various small UI-widget classes) still have no
+  corpus-based confirmation, just the original member-name-cluster guess.
 
 ## Labels applied / tools
 

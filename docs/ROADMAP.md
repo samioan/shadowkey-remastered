@@ -595,11 +595,46 @@ Prioritization, driven by the port goal rather than raw coverage:
       against a real struct. Full table + data file:
       [`SIMKIN_NATIVE_API.md`](SIMKIN_NATIVE_API.md).
 
-Next: cross-checking the real `.s` script corpus against the 702-entry
-table to validate the class hypotheses and find which bindings actually
-matter for a minimal port (pure script-reading, no RE), identifying
-which object each of the 28 classes actually is beyond name-guessing,
-the two `heightA`/`heightB` fields' finer sub-structure, the `.zlu` chunk's
+- [x] **Cross-checked the real `.s` script corpus (1,535 files) against
+      the 702-entry table** — pure script-reading, no RE. Parsed every
+      script's bare (implicit-self) calls and every `Factory().Method()`
+      call, then compared name-sets against each class's vocabulary
+      (Dice coefficient, not raw overlap — raw counts are biased toward
+      the biggest classes). Directory-hint scripts (`armor/`, `weapons/`,
+      `items/`, `monsters/`, `spells/`) **confirm 5 class identities
+      outright** (Armor, Weapon, Item, Monster (AI), and Spell again,
+      independent of the earlier `SetSpellType`-fallthrough confirmation),
+      on top of the already-confirmed GameEngine root. Also found:
+      **`GetOwner()` resolves to
+      Character stats** (92% of its call-set), **`GetPlayer()` to a
+      composite of Player/GameState + Character stats** (81% combined),
+      and a genuine **correction** — `menus/*.s` scripts' own bare calls
+      belong to GameEngine (root) + Menu-stack manager, not the
+      hypothesized "Menu (generic)" class; that class (plus Widget (UI
+      base)) turns out to back the *per-item widget objects* a menu
+      script creates (`AddMenuItem(...)`'s return value, etc.), not the
+      script itself — both hypotheses were right, just attached to the
+      wrong object. Concrete answer to "which bindings matter for a
+      minimal port": **408/648 (63%) of unique binding names are
+      attested in real scripts**; per-class attested/total plus a written
+      unused-name list
+      (`shadowkey/simkin_bindings_unused_in_scripts.json`) show Actor (AI
+      movement) (16%) and Weapon (25%, see mixin note) as the two
+      "in-scope-early" classes with the most seemingly-dead surface. Also
+      found that **`GetOpener()`'s call surface is only ~55% native** —
+      the rest (`LockPicked`, `UseKey`, `OpenChest`, `MagicDamage`, ...)
+      are plain SimKin-to-SimKin dispatch into the specific placed
+      object's *own* `.s` class script (verified: those are real handler
+      declarations in `lockeddoor*.s`/`chest_trap*.s`), not native
+      bindings a port needs to reimplement in C++ at all. New tool:
+      `shadowkey/ghidra/scripts/analyze_simkin_script_corpus.py` (plain
+      Python, no Ghidra). Full writeup:
+      [`SIMKIN_NATIVE_API.md`](SIMKIN_NATIVE_API.md#cross-checked-against-the-real-s-script-corpus).
+
+Next: identifying which object the ~20 still-unconfirmed of the 28
+classes actually are (no directory-hint or factory-call signal reached
+them this pass — Door/trap trigger, Camera/player-feedback, Collection,
+the small UI-widget classes, ...), the two `heightA`/`heightB` fields' finer sub-structure, the `.zlu` chunk's
 secondary per-scanline/per-pixel `0x200`-byte-block offset (seen in all 4
 `SurfaceFace_RasterizeTextured` variants, not decoded), and `.sta`'s
 remaining undecoded fields (`flags`, `unkA`/`unkB`). See `MODEL_FORMAT.md`'s,

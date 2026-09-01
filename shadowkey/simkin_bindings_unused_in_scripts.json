@@ -1,0 +1,369 @@
+{
+  "0x14ccc": {
+    "name": "Door/trap trigger",
+    "unused": [
+      "SetDoor"
+    ]
+  },
+  "0x14ce4": {
+    "name": "Table/grid widget",
+    "unused": [
+      "AddRows",
+      "AddText"
+    ]
+  },
+  "0x14cf0": {
+    "name": "GameEngine (root)",
+    "unused": [
+      "CanSaveGame",
+      "ConfigKeySelected",
+      "CycleLanguage",
+      "GetConfigPage",
+      "GetCurrentGunChoice",
+      "GetCurrentGunSprite",
+      "GetDifficulty",
+      "GetSavedName",
+      "GetVersionNumber",
+      "GetViewportHeight",
+      "GetViewportWidth",
+      "HostGunChoiceReady",
+      "HostOptions",
+      "JoinGunChoiceReady",
+      "MPEndGame",
+      "MPIsHost",
+      "MPNextFriendlyFire",
+      "MPNextGameType",
+      "MPNextKillsToWin",
+      "MPNextMap",
+      "MPNextRepeatMap",
+      "MPRescan",
+      "MPToggleKillcam",
+      "MPUseKillcam",
+      "MultiplayerHost",
+      "MultiplayerSlave",
+      "NextGunChoice",
+      "NextNationality",
+      "OverlapPopupMenu",
+      "Redefine",
+      "RestartJoinTimeout",
+      "ReturnToGame",
+      "SaveGame",
+      "SetAmbientSound",
+      "SetConfigPage",
+      "SetCurrentGunString",
+      "SetCurrentNationalityString",
+      "SetDifficulty",
+      "SetHostOptions",
+      "SetSelectedTextColor",
+      "SetStaticTextColor",
+      "SetTextColor"
+    ]
+  },
+  "0x14cfc": {
+    "name": "Menu (generic)",
+    "unused": [
+      "PosByWidget",
+      "SetVOffset"
+    ]
+  },
+  "0x14d08": {
+    "name": "Object/Entity (world base)",
+    "unused": [
+      "AddRotationPitch",
+      "AddRotationRoll",
+      "CreateSound",
+      "CreateSprite",
+      "Distance",
+      "DoFireExplosionEffect",
+      "IsInUse",
+      "IsNPC",
+      "MountFlak88",
+      "MountGun",
+      "SetEntityDamage",
+      "SetEntityHealth",
+      "SetRadius",
+      "SetRadius2",
+      "SetRotationPitch",
+      "SetRotationRoll",
+      "SetVelocity",
+      "StopDelay",
+      "StopSound",
+      "TraceInt",
+      "TurnToEntity",
+      "TurnToLocation"
+    ]
+  },
+  "0x14d14": {
+    "name": "Sprite-attach mixin",
+    "unused": [
+      "AttachEffect",
+      "GetSpriteAttach",
+      "SetAmbient",
+      "SetSpriteAttach"
+    ]
+  },
+  "0x14d20": {
+    "name": "Widget (UI base)",
+    "unused": [
+      "GetX",
+      "GetY",
+      "SetY"
+    ]
+  },
+  "0x14d2c": {
+    "name": "Icon/sprite widget",
+    "unused": [
+      "SetActiveSprite",
+      "SetDormantSprite",
+      "SetXAdjust"
+    ]
+  },
+  "0x14d38": {
+    "name": "Zone/Level",
+    "unused": [
+      "AddTimedMessage",
+      "CreateCollection",
+      "CreateEntityID",
+      "CreateProjectile",
+      "GetCollection",
+      "GetZone",
+      "LevelDifficulty",
+      "ListenForPlayerShot",
+      "LockZone",
+      "ManualSubtitle",
+      "SaveLevelState",
+      "SetCellBlocking",
+      "SetUnload",
+      "SetVis_Default",
+      "SetVis_RayLen",
+      "SetVis_RayScan",
+      "SetVis_RayWidth",
+      "StanceDifficulty",
+      "StartTimer",
+      "TimerStart",
+      "TimerStop",
+      "ToggleSkybox",
+      "TraceInt"
+    ]
+  },
+  "0x14d44": {
+    "name": "Weapon",
+    "unused": [
+      "MakeInfinitePickup",
+      "SetAllowReload",
+      "SetCanBash",
+      "SetClipSize",
+      "SetFireRate",
+      "SetHasZoom",
+      "SetIsAutomatic",
+      "SetIsLaunched",
+      "SetIsThrown",
+      "SetNumClips",
+      "SetPickupable",
+      "SetReloadFrames",
+      "SetReloadSpeed",
+      "SetScoped",
+      "SetShootSound",
+      "SetWeaponClass",
+      "SetWeaponDamage",
+      "SetWielderMovement"
+    ]
+  },
+  "0x14d50": {
+    "name": "Collection",
+    "unused": [
+      "FindEntity"
+    ]
+  },
+  "0x14d5c": {
+    "name": "Camera/player-feedback",
+    "unused": [
+      "DamageHere",
+      "NeedsHealth",
+      "ScreenShake",
+      "SetFrozen",
+      "SetScreenShake",
+      "SetTemp",
+      "ShakeHere",
+      "TurnLeft"
+    ]
+  },
+  "0x14d68": {
+    "name": "Actor (AI movement)",
+    "unused": [
+      "ClearQueuedPaths",
+      "DeleteInventoryItemOfType",
+      "DropWeaponOnDeath",
+      "FollowPath",
+      "FollowPathCallback",
+      "FollowPathInRange",
+      "ForceNextPathNode",
+      "GetTarget",
+      "GetWalkingState",
+      "GetWeapon",
+      "GiveWeapon",
+      "IsDead",
+      "OnlyAttackPlayer",
+      "PauseFollowingPath",
+      "PutInReverse",
+      "ResumeFollowingPath",
+      "SetAttackDistance",
+      "SetCrouching",
+      "SetLineOfSight",
+      "SetProne",
+      "SetRunning",
+      "SetTarget",
+      "SetTurnSpeed",
+      "SetWalkSpeed",
+      "SetWalkToDist",
+      "SetWalking",
+      "SetWeapon",
+      "SetWeaponAttach",
+      "ShotsIgnoreWalls",
+      "ShowWeapon",
+      "StopFollowingPath",
+      "StopTurnTo",
+      "StopWalkTo",
+      "TurnTo",
+      "UseAmmo",
+      "UseGravity",
+      "WalkToZone"
+    ]
+  },
+  "0x14d74": {
+    "name": "Item",
+    "unused": [
+      "GetCost",
+      "GetRating",
+      "GetShortName",
+      "GetWeight",
+      "MoveToRightQueue",
+      "SetTravel",
+      "SetWeight"
+    ]
+  },
+  "0x14d80": {
+    "name": "Weapon-damage mixin",
+    "unused": [
+      "GetDamageMax",
+      "GetDamageMin"
+    ]
+  },
+  "0x14d98": {
+    "name": "Encounter spawner",
+    "unused": [
+      "SetRespawnSeconds",
+      "SpawnEncounter"
+    ]
+  },
+  "0x14da4": {
+    "name": "Monster (AI)",
+    "unused": [
+      "Aggressive",
+      "AiActivate",
+      "AiFlee",
+      "AiPursue",
+      "AiSpellAssistTarget",
+      "AiWounded",
+      "Follow",
+      "GetAttackNoise",
+      "GetChaseRadius",
+      "GetCurrentAIPackage",
+      "GetDeathNoise",
+      "GetWimpy",
+      "GuardPlayer",
+      "IsUndead",
+      "SetAttackSpeed",
+      "SetEnemy",
+      "SetItemRequiredToHit",
+      "SetLifespan",
+      "SetParalyzed",
+      "SetState"
+    ]
+  },
+  "0x14db0": {
+    "name": "Character stats",
+    "unused": [
+      "DecrementFatigue",
+      "DecrementHealth",
+      "DecrementMagicka",
+      "GetArmorValue",
+      "GetDamageMax",
+      "GetDamageMin",
+      "GetExpWorth",
+      "GetMagicResistance",
+      "GetSpellcast",
+      "RemoveEffect",
+      "SetDiseased",
+      "SetHealthBonus",
+      "SetLeftItem",
+      "SetManaReduction",
+      "SetMaxFatigue",
+      "SetPoisoned",
+      "SetRightItem",
+      "StatSubGold",
+      "TestIntelligence",
+      "TestLuck",
+      "TestPersonality",
+      "TestWill"
+    ]
+  },
+  "0x14dbc": {
+    "name": "Player/GameState",
+    "unused": [
+      "AllQuests",
+      "DebugBots",
+      "GetItemCount",
+      "GetManaReduction",
+      "GetProduct",
+      "GetSecondaryItem",
+      "HasItemEquipped",
+      "HasMagic",
+      "IsMagicDoor",
+      "MoveToRightQueue",
+      "SetHighlightColor",
+      "SetManaReduction",
+      "SetParalyzed",
+      "SetPopupColor",
+      "SetStandardColor",
+      "TestUpdateAttributes",
+      "metrics"
+    ]
+  },
+  "0x14dc8": {
+    "name": "Spell",
+    "unused": [
+      "ConjureWeapon"
+    ]
+  },
+  "0x14dd4": {
+    "name": "Character-manager menu",
+    "unused": [
+      "AddMenuItems",
+      "DisplayLevelUp",
+      "GetZoneList"
+    ]
+  },
+  "0x14dec": {
+    "name": "Action-queue HUD",
+    "unused": [
+      "IsLeftQueue"
+    ]
+  },
+  "0x14df8": {
+    "name": "Zone effects",
+    "unused": [
+      "AddInterestPoint",
+      "ClearInterestPoints",
+      "SpawnWithinRadius",
+      "TickZones"
+    ]
+  },
+  "0x14e04": {
+    "name": "Armor",
+    "unused": [
+      "GetArmorType",
+      "GetArmorValue"
+    ]
+  }
+}
