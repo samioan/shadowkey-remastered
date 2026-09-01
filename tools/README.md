@@ -334,6 +334,12 @@ evidence that the game is rendered in 2D (see that doc's correction note).
   bookkeeping; see
   [`../docs/RENDERER_3D.md`](../docs/RENDERER_3D.md#the-tile-grid-wallsurface-face-renderer-a-third-pipeline).
 
+- `shadowkey/ghidra/scripts/pyghidra_label_input_handling.py` — renames
+  and documents the key-input dispatch chain (`AppUi_OfferKeyEventL`,
+  `InputState_SetButton`, `SecretSequence_OnComplete`), found by tracing
+  the one caller of the base-class `OfferKeyEventL` import; see
+  [`../docs/INPUT_HANDLING.md`](../docs/INPUT_HANDLING.md).
+
 - **`parse_model_resource.py`** — parser/verifier for the actual on-disk 3D
   model archive, `system/apps/6r51/models.idx` + `models.huge` in the game
   install tree (found separately from `6r51.app`'s code section — this is

@@ -512,12 +512,33 @@ Prioritization, driven by the port goal rather than raw coverage:
       `pyghidra_label_surface_rasterizer_variants.py`. Full writeup:
       [`RENDERER_3D.md`](RENDERER_3D.md#the-tile-grid-wallsurface-face-renderer-a-third-pipeline).
 
-Next: the two `heightA`/`heightB` fields' finer sub-structure, the `.zlu`
-chunk's secondary per-scanline/per-pixel `0x200`-byte-block offset (seen
-in all 4 `SurfaceFace_RasterizeTextured` variants, not decoded), and
-`.sta`'s remaining undecoded fields (`flags`, `unkA`/`unkB`). See
-`MODEL_FORMAT.md`'s, `RENDERER_3D.md`'s, `WORLD_MODEL.md`'s, and
-`ZONE_FORMAT.md`'s open follow-ups.
+- [x] Started **input handling** (per the port-scoping discussion below —
+      never touched by any earlier round, but already named in this
+      section's own prioritization as gating a playable port). Found the
+      app's own key-event override, `AppUi_OfferKeyEventL`, by tracing the
+      one caller of the base-class `OfferKeyEventL` import: a flat
+      21-slot boolean "game action" array, with the N-Gage's numeric
+      keypad (`'0'`-`'9'`) as the primary control set — each digit key is
+      its own scan code, no lookup needed — plus 4 likely D-pad codes and
+      a handful of others. Also found a hidden 12-step scan-code-sequence
+      Easter egg tucked into the same dispatcher. Exact `TStdScanCode`
+      names weren't re-verified against a primary source (the project's
+      earlier-archived SDK copy no longer exists locally, and a public
+      mirror search came up short) — flagged clearly as convention, not
+      confirmed. What each action slot actually *does* in gameplay is
+      still open — `pyghidra_find_reads.py` found no direct consumer of
+      the array's offset, meaning it's likely accessed through a cached
+      pointer rather than a flat offset. Full writeup:
+      [`INPUT_HANDLING.md`](INPUT_HANDLING.md).
+
+Next: which physical key produces which scan code and what each of the 21
+action slots does in gameplay (`INPUT_HANDLING.md`'s open items), the two
+`heightA`/`heightB` fields' finer sub-structure, the `.zlu` chunk's
+secondary per-scanline/per-pixel `0x200`-byte-block offset (seen in all 4
+`SurfaceFace_RasterizeTextured` variants, not decoded), and `.sta`'s
+remaining undecoded fields (`flags`, `unkA`/`unkB`). See `MODEL_FORMAT.md`'s,
+`RENDERER_3D.md`'s, `WORLD_MODEL.md`'s, `ZONE_FORMAT.md`'s, and
+`INPUT_HANDLING.md`'s open follow-ups.
 
 ## Open questions
 
