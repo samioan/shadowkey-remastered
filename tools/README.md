@@ -159,3 +159,20 @@ present).
 - `shadowkey/ghidra/scripts/pyghidra_label_render_loop.py` — applies the
   finding as real function names + plate comments in the Ghidra project
   (same idempotent pattern as `pyghidra_label_imports.py`).
+- `shadowkey/ghidra/scripts/pyghidra_find_field_writes.py <lo-addr>
+  <hi-addr> <hex-offset>` — scans a bounded address range for `STR`
+  instructions writing a fixed immediate byte offset to any base
+  register; used to find where an object field gets *set* when you know
+  the offset but not the setter.
+- `shadowkey/ghidra/scripts/pyghidra_find_reads.py <hex-offset>` — same
+  idea, whole-binary, for `LDR` instead of `STR`; finds every function
+  that *consumes* a known field.
+- `shadowkey/ghidra/scripts/pyghidra_read_vtable.py <DAT_addr> [N]` —
+  resolves a decompiler `DAT_x` literal-pool reference to the actual
+  vtable it points at and lists the first N entries as (offset, target,
+  function name if Ghidra already knows it) — for reading GCC-old-ABI
+  virtual call targets straight out of the binary's data section.
+
+See [`../docs/WORLD_MODEL.md`](../docs/WORLD_MODEL.md) for what these
+found: the game world is a 2D tile grid (not open 3D geometry), with a
+single ubiquitous `Map_GetTileAt` accessor.

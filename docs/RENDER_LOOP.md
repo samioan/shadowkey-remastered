@@ -199,8 +199,14 @@ target address, function name if Ghidra already knows it). This is how
 
 ## Open follow-ups
 
-- Explore the `0x1006Bxxx`–`0x1006Dxxx` cluster — best remaining lead
-  for 3D rasterization / world-simulation code.
+- ~~Explore the `0x1006Bxxx`–`0x1006Dxxx` cluster~~ — done, see
+  [`WORLD_MODEL.md`](WORLD_MODEL.md). Turned out to be save/load and
+  level-transition management, not rendering — but tracing
+  `GameEngine_ctor` fully in the process found the actual World/Map
+  object (`engine+0x618`, a 2D tile grid) and its central accessor,
+  `Map_GetTileAt`, which has 30+ call sites across the binary. The
+  rasterizer itself still isn't located — `WORLD_MODEL.md`'s follow-ups
+  have the current best next-step ideas.
 - Dump the ~50 SimKin script-binding `DAT_` string constants registered
   in `GameEngine_FirstTickBootstrap` to get real script-visible names.
 - Identify the two entity pools' element structure (40×132B, 32×264B) —

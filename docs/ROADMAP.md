@@ -178,10 +178,28 @@ Prioritization, driven by the port goal rather than raw coverage:
       writeup, corrected hypothesis, and labels in
       [`RENDER_LOOP.md`](RENDER_LOOP.md).
 
-Next: the `0x1006Bxxx`–`0x1006Dxxx` code cluster is now the strongest
-lead for the actual 3D rasterization / world-simulation code — several
-`ScreenModeController` vtable slots (including one confirmed call site)
-live there, separate from the app/UI cluster everything above lives in.
+- [x] Explored the `0x1006Bxxx`–`0x1006Dxxx` cluster. It's save/load and
+      level-transition management (not rendering) — but tracing
+      `GameEngine_ctor` fully along the way found the actual World/Map
+      object: **level layout/collision data is a 2D tile grid**
+      (width/height/tile-array/tile-type-table fields, an 8-byte-per-cell
+      layout, a 36-byte-per-type shared definition table), with a single
+      ubiquitous accessor (`Map_GetTileAt`, 30+ call sites across the
+      binary). This is about level *data*, not rendering — Shadowkey is
+      a real-time first-person 3D dungeon crawler (like Ultima
+      Underworld/Eye of the Beholder before it), and the 3D view is
+      presumably generated *from* this grid each frame, not evidence the
+      game itself is 2D (an earlier draft of this entry overclaimed
+      that). Also incidentally confirmed `engine+0x5cc` is the GAMECOMMS
+      (Bluetooth multiplayer) subsystem, not world-related. Full
+      writeup: [`WORLD_MODEL.md`](WORLD_MODEL.md).
+
+Next: the actual first-person 3D rasterizer still isn't located. Now
+that the level-data grid is confirmed, the better search angle is
+probably: what reads a tile-type's *texture/wall* fields (found so far:
+only a height field) out of the 36-byte type table, or what turns
+`Map_GetTileAt` results into actual pixel writes in the backbuffer. See
+`WORLD_MODEL.md`'s open follow-ups.
 
 ## Open questions
 
