@@ -149,10 +149,27 @@ Prioritization, driven by the port goal rather than raw coverage:
   finding only matters for the (now-moot) byte-exact question, not for
   reading what the code does.
 
-Concrete next step: identify the render/game-loop entry point(s) so
-Phase 3 has a starting anchor, the same way `NewApplication` was Phase 1's
-— probably by tracing from `WS32`/`GDI`/`BITGDI` calls (window server,
-graphics) outward, now that those imports are labeled with real names.
+- [x] Concrete next step, done: identify the render/game-loop entry
+      point(s) by tracing outward from the `WS32`/`GDI`/`BITGDI`/`FBSCLI`
+      import call sites. **Found**: a `CPeriodic` OS timer started with a
+      **hardcoded 40ms interval (25Hz)** drives a single tick callback
+      that does both simulation update *and* frame present (blit +
+      smoothed-FPS bookkeeping) in one place. This is a strong, concrete
+      lead for the porting discussion's "low fps" complaint — likely a
+      deliberate fixed-tick-rate design decision from the N-Gage
+      hardware, not a raw rendering performance ceiling, and the real
+      port fix is probably decoupling update-tick-rate from
+      present-rate rather than just changing the constant. Full chain,
+      evidence, and labeled functions in
+      [`RENDER_LOOP.md`](RENDER_LOOP.md). Also ruled out the binary's
+      single largest function (19KB) as a loop candidate — it's a
+      localized string-table lookup (121 cases, matches the release's 5
+      bundled languages), not game logic.
+
+Next: keep pulling on this thread — find what the two per-tick vtable
+calls inside `GameTick_UpdateAndPresent` actually dispatch to (candidate
+`Update()`/`Render()` split), and locate the actual 3D rasterization
+code, likely reachable from there.
 
 ## Open questions
 

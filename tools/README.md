@@ -133,3 +133,29 @@ Still needs real names for the 96 unresolved ordinals (SimKin, GameComms,
 NokiaFC, one MediaClientAudioStream ordinal) — see
 [`../docs/IMPORT_NAMES.md`](../docs/IMPORT_NAMES.md) and
 [`../docs/ROADMAP.md`](../docs/ROADMAP.md).
+
+## Finding the render/game-loop (Phase 3's first result)
+
+Same pattern, applied to a real Phase 3 question instead of imports —
+see [`../docs/RENDER_LOOP.md`](../docs/RENDER_LOOP.md) for what was
+found (a hardcoded 40ms/25Hz `CPeriodic` tick driving both update and
+present).
+
+- `shadowkey/ghidra/scripts/pyghidra_find_render_loop.py` — starting from
+  the labeled `WS32`/`GDI`/`BITGDI`/`FBSCLI` import functions, walks
+  callers two levels up and prints the graph, to spot candidate
+  loop-driver functions.
+- `shadowkey/ghidra/scripts/pyghidra_inspect_candidates.py` — given a
+  list of hardcoded addresses, prints their callers plus a short
+  decompiled snippet; used to eyeball candidates from the graph above.
+- `shadowkey/ghidra/scripts/pyghidra_dump_full.py <hex-addr>` — dumps one
+  function's full decompilation to
+  `shadowkey/extracted/decomp_<addr>.c` (gitignored, regenerable) for
+  closer reading than a snippet allows.
+- `shadowkey/ghidra/scripts/pyghidra_find_periodic.py` — finds every
+  call site of `CPeriodic::Start` and, for a given candidate callback
+  address, its `TCallBack`-style (data/param, not call) references — how
+  the 40ms/25Hz timer registration was actually located.
+- `shadowkey/ghidra/scripts/pyghidra_label_render_loop.py` — applies the
+  finding as real function names + plate comments in the Ghidra project
+  (same idempotent pattern as `pyghidra_label_imports.py`).

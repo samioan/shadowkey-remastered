@@ -25,6 +25,7 @@
 # --- Extracted/derived binary artifacts (regenerable from the baserom) ---
 /shadowkey/extracted/*.bin
 /shadowkey/extracted/*.json
+/shadowkey/extracted/*.c
 # NOTE: shadowkey/import_names.json is NOT under extracted/ and IS tracked
 # on purpose -- it's a small, derived (dll!ordinal -> mangled name) table,
 # not a copy of the SDK it was cross-referenced against. See

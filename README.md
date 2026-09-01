@@ -57,5 +57,14 @@ finding (GCC main codebase + one vendored ARM RVCT/ADS library) makes
 byte-exact matching meaningfully harder than a single-toolchain target
 for no benefit that goal needs. See
 [`docs/ROADMAP.md`](docs/ROADMAP.md#phase-2--decompilation-strategy-decided--behavioral-re-not-byte-exact)
-for the full rationale. Next: Phase 3, actual function-level work,
-starting from the render/game-loop entry points.
+for the full rationale.
+
+Phase 3 has its first concrete finding: the main game loop is a
+`CPeriodic` OS timer with a **hardcoded 40ms (25Hz) interval**, driving a
+single tick callback that does both simulation update and frame present
+together. This directly explains the porting discussion's "low fps"
+symptom — likely a fixed-tick-rate design decision rather than a raw
+performance ceiling, meaning the port fix is probably decoupling
+update-rate from present-rate. See
+[`docs/RENDER_LOOP.md`](docs/RENDER_LOOP.md) for the full call chain and
+evidence.
