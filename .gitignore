@@ -48,3 +48,11 @@
 # --- Python ---
 __pycache__/
 *.pyc
+
+# --- PC port build output (regenerable via port/build.bat / CMake) ---
+# NOTE: port/third_party/simkin/ (the vendored LGPL SimKin C++ source) is
+# NOT ignored -- unlike the proprietary Symbian SDK material in
+# IMPORT_NAMES.md's provenance notes, SimKin for C++ is genuinely
+# open-source (LGPL) and safe to redistribute in-tree. See the port
+# scaffold plan for the license/provenance rationale.
+/port/build/
