@@ -309,12 +309,24 @@ Prioritization, driven by the port goal rather than raw coverage:
       object's `+0x54`. Full writeup:
       [`ZONE_FORMAT.md`](ZONE_FORMAT.md#where-the-type-descriptor-tree-itself-comes-from-entitiestxt).
 
-Next: the ~9 unexamined `Poly3D_RasterizeTextured` blend-mode variants, what
-sets `engine+0x62c` on room transitions, the `engine+0xbe0f`/`0x5c4` fade-LUT
-compositing path, the `.sur`/`.zon`/`.pth` record field layouts,
-`entities.txt`'s unidentified `thirdField`, and `azra.sta`'s still-
-unidentified format. See `RENDERER_3D.md`'s, `MODEL_FORMAT.md`'s, and
-`ZONE_FORMAT.md`'s open follow-ups.
+- [x] Resolved what sets `engine+0x62c` on room transitions: **nothing**
+      does — it's a single 0x160-byte room-render-state object allocated
+      exactly once in `GameEngine_ctor` (`RoomRenderState_ctor`) and never
+      reassigned; `GameEngine_InitLevel` overwrites its fields in place
+      from `<zone>.zon` on every level load, rather than swapping the
+      pointer or indexing into the separate `engine+0x5464` room-list
+      array. Full writeup:
+      [`RENDERER_3D.md`](RENDERER_3D.md#open-follow-ups). Also ruled out an
+      `"InitLevel Pre/Post LUA"` debug-marker lead as a real Lua scripting
+      layer — traced both bracketed regions and found ordinary
+      constant-loading/4-way-buffer-split code, not a Lua interpreter; "LUA"
+      appears to be an unrelated internal debug-phase tag name.
+
+Next: the ~9 unexamined `Poly3D_RasterizeTextured` blend-mode variants, the
+`engine+0xbe0f`/`0x5c4` fade-LUT compositing path, the `.sur`/`.zon`/`.pth`
+record field layouts, `entities.txt`'s unidentified `thirdField`, and
+`azra.sta`'s still-unidentified format. See `RENDERER_3D.md`'s,
+`MODEL_FORMAT.md`'s, and `ZONE_FORMAT.md`'s open follow-ups.
 
 ## Open questions
 

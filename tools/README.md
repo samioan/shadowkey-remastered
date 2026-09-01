@@ -218,6 +218,12 @@ evidence that the game is rendered in 2D (see that doc's correction note).
   `ModelArchive_LoadByIndex`, and `EntityTypeDescriptor_Lookup`; see
   [`../docs/ZONE_FORMAT.md`](../docs/ZONE_FORMAT.md).
 
+- `shadowkey/ghidra/scripts/pyghidra_label_room_render_state.py` — labels
+  `RoomRenderState_ctor` and appends an addendum to `GameEngine_ctor`
+  documenting `engine+0x62c` (allocated once, never reassigned, fields
+  overwritten in place on room transitions); see
+  [`../docs/RENDERER_3D.md`](../docs/RENDERER_3D.md).
+
 - **`parse_model_resource.py`** — parser/verifier for the actual on-disk 3D
   model archive, `system/apps/6r51/models.idx` + `models.huge` in the game
   install tree (found separately from `6r51.app`'s code section — this is

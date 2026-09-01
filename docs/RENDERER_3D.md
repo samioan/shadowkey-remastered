@@ -245,10 +245,21 @@ the screen once per frame.
   unexamined — likely: opaque vs. blended, "near" (partially-clipped) vs.
   normal, and a flat/unlit variant, based on the flag bits seen selecting
   between them in `Poly3D_ClipAndDispatch`.
-- What sets `engine+0x62c` (current room pointer) on room/level transitions,
-  and what the room model resource's on-disk format looks like (presumably
-  shares a container format with actor models, per `GRAPHICS_FORMAT.md`'s
-  open question about the model resource format).
+- ~~What sets `engine+0x62c` (current room pointer) on room/level
+  transitions~~ — **resolved**: nothing "sets" it on transitions at all.
+  `engine+0x62c` is a single 0x160/352-byte room-render-state object,
+  allocated exactly **once** in `GameEngine_ctor` (`new(0x160)` +
+  constructor call at 0x10067898) and never reassigned again. Room
+  transitions instead **overwrite its fields in place** —
+  `GameEngine_InitLevel` sets `(*(engine+0x62c))+0x54` (the model pointer),
+  `+0x5e`, `+0xa8`, `+0xb2`, `+0xb6` etc. straight from the freshly-loaded
+  `<zone>.zon` room record every time a level loads (see
+  `ZONE_FORMAT.md`). So there's exactly one live "current room" render
+  object per engine instance, reused for whichever room is active — not an
+  index into the `engine+0x5464` room-definition array from `.zon` (that
+  array holds the zone's *room list*; `engine+0x62c` holds the *rendering
+  state* for whichever one is currently being drawn). The room model's
+  on-disk format is now fully solved too, see `MODEL_FORMAT.md`.
 - What `FUN_10068e0c`'s other switch cases are (it's a general screen-state
   machine; case `5` is confirmed as "render the 3D game view", cases `1` and
   `6` look like menu/list UI — not traced in this pass).
