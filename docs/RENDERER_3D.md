@@ -8,10 +8,13 @@ Shadowkey renders true 3D geometry, not sprites — directly confirming the
 mid-project correction in `WORLD_MODEL.md` (level *data* is a 2D grid; the
 *rendering* is first-person 3D).
 
-**Scope caveat**: every caller traced in this pass draws an **actor/entity's
-3D model** (NPCs, monsters, held items — see "Where this is called from"
-below). Whether the static dungeon walls/floors/ceilings go through this same
-pipeline or a separate one is still unconfirmed — see Open follow-ups.
+**Update**: the follow-up question below — do static walls/floors/ceilings use
+this same pipeline — is now answered. See "The room/wall geometry renderer"
+section near the bottom: rooms share the core clip/perspective/rasterize
+machinery but go through their own top-level entry point and rasterizer, not
+`Actor3D_TransformAndSubmitModel`/`Poly3D_ClipAndDispatch`. The scope caveat
+below describes the actor-only pipeline as it was understood before that
+follow-up.
 
 ## The pipeline, top to bottom
 
@@ -135,25 +138,114 @@ looks dedicated to *actors*, not to the static dungeon geometry.
 - `BuildRotationMatrix3x4` (0x10073a70)
 - `ComposeTransform3x4` (0x100738c4)
 
+## The room/wall geometry renderer
+
+Answering the open question above: static dungeon geometry (walls, floors,
+ceilings) is **not** rendered through `Actor3D_TransformAndSubmitModel`/
+`Poly3D_ClipAndDispatch` — every caller of those two is unambiguously
+actor-shaped (confirmed by re-checking: `Poly3D_ClipAndDispatch` has exactly
+one caller, `Actor3D_TransformAndSubmitModel`, and each of its ~10 rasterizer
+targets has exactly one caller, `Poly3D_ClipAndDispatch`). Instead, rooms have
+their **own top-level render path** that reuses the same underlying
+primitives (rotation matrix, perspective divide, Sutherland-Hodgman clip) but
+with a different structure — found by tracing `BuildRotationMatrix3x4`'s
+other caller, `FUN_10057890`.
+
+- **`RoomGeometry_TransformAndSort`** (renamed from `FUN_10057890`,
+  0x10057890) — given the current room object (`engine+0x62c`) and its 3D
+  model resource at `room+0x54` (**the exact same field offset and format** —
+  vertex list + face list + texture-atlas-cell table — as an actor's
+  `actor+0x54`, confirming rooms and actors share one generic 3D model
+  format), transforms and perspective-projects **every vertex of the whole
+  room model in one pass** (same `0x5800`/`0x6800` + `EUSER____divsi3`
+  projection formula as `Poly3D_ClipAgainstPlane`) into a fixed per-engine
+  vertex buffer (`engine+0x7738`). It then **depth-sorts every face into 64
+  Z-buckets** (`engine+0xbd88`, bucketed by `-z>>5`, clamped `0..0x3f`) and
+  walks the buckets in order, calling `RoomFace_ClipAndDispatch` once per
+  face — a classic **painter's-algorithm bucket sort**, architecturally
+  distinct from the actor pipeline's immediate per-face clip-and-dispatch
+  with no global sort (actors instead rely on the near-clip/backface tests
+  alone, since there are far fewer polygons per actor and overlap is rare).
+
+- **`RoomFace_ClipAndDispatch`** (renamed from `FUN_10056aa0`, 0x10056aa0) —
+  the room-geometry counterpart to `Poly3D_ClipAndDispatch`: clips one room
+  face against up to 4 planes by **calling `Poly3D_ClipAgainstPlane`
+  directly** (reusing the actor pipeline's clip routine verbatim — this is
+  the strongest piece of evidence the two renderers are siblings, not
+  independent implementations), repacks the surviving vertices, then always
+  calls a single dedicated rasterizer (no ~10-way variant dispatch — rooms
+  don't need the actor pipeline's blend-mode variants).
+
+- **`RoomFace_RasterizeTextured`** (renamed from `FUN_10055f38`, 0x10055f38)
+  — a dedicated scanline rasterizer, structurally similar to
+  `Poly3D_RasterizeTextured_v0` (same reciprocal-of-height-LUT edge-walking
+  technique, own copy of the LUT at `DAT_10056310`) but **simpler**: plain
+  affine per-scanline UV stepping, no 1/z perspective-correction pass —
+  because room faces were already perspective-projected per-vertex by
+  `RoomGeometry_TransformAndSort` before clipping, unlike actors whose
+  rasterizer perspective-corrects U/V per-span. Writes into `engine+0x5b4`
+  with the same `0x2c0` (704-byte) row stride as every actor rasterizer
+  variant — **confirming rooms and actors render into the same intermediate
+  buffer**, which resolves the `engine+0x5b4` question below.
+
+- **`Render3DScene`** (renamed from `FUN_100166c8`, 0x100166c8) — the
+  per-frame master entry point, called once per frame from a screen-state
+  switch statement (`FUN_10068e0c`, case `5`). Sequence: (1) if the current
+  room has a model (`engine+0x62c` → `+0x54 != 0`), calls
+  `RoomGeometry_TransformAndSort`; otherwise flat-fills `engine+0x5b4` (no
+  room loaded — a void/black screen case). (2) Renders actors via **virtual
+  dispatch through vtable offset `0x170`** — the exact same virtual slot
+  `Actor3D_TransformAndSubmitModel`'s caller `FUN_10064ffc` reads to pick a
+  pose/animation-frame model — confirming actor rendering also happens
+  inside this same per-frame function, just reached through a polymorphic
+  per-entity call rather than a direct call Ghidra's static analysis can see.
+  (3) Calls `CompositeSceneBufferToScreen` to finish the frame.
+
+- **`CompositeSceneBufferToScreen`** (renamed from `FUN_1005dfe0`, 0x1005dfe0)
+  — answers the `engine+0x5b4` question directly. The buffer is **176×208 at
+  4 bytes/pixel** (not double-width as first guessed — `0x2c0` = 704 bytes /
+  4 = 176, matching screen width exactly): the low 16 bits hold the real
+  16bpp color, the high 16 bits are a constant `0x7fff` every rasterizer ORs
+  in (padding/alignment, not a meaningful flag — both the background-fill
+  path and every draw path write the same constant). This function packs two
+  adjacent 4-byte source pixels into one 4-byte destination write, converting
+  the padded intermediate buffer down into the real 16bpp `engine+0x480`
+  screen buffer — i.e. `engine+0x5b4` exists so the software rasterizers can
+  write full 32-bit-aligned pixels (faster on ARMv4T than unaligned 16-bit
+  stores) and get packed to real 16bpp only once, at the end of the frame.
+  When a flag (`engine+0xbe0f`) is set, composite instead runs each channel
+  through a lookup table at `engine+0x5c4` — likely a fade/lighting
+  post-process (torchlight falloff, a level-transition fade, or similar).
+
+**Bottom line**: Shadowkey has **one 3D model format and one clip/perspective
+core** (`BuildRotationMatrix3x4`, `ComposeTransform3x4`, `Poly3D_ClipAgainstPlane`)
+shared by two renderers built on top of it — an actor renderer (immediate
+per-face dispatch, multiple blend-mode rasterizer variants) and a room
+renderer (whole-model transform + depth-bucket sort, one rasterizer variant)
+— both writing into one shared intermediate buffer that gets composited to
+the screen once per frame.
+
+## Labels applied (room/wall renderer)
+
+- `Render3DScene` (0x100166c8)
+- `RoomGeometry_TransformAndSort` (0x10057890)
+- `RoomFace_ClipAndDispatch` (0x10056aa0)
+- `RoomFace_RasterizeTextured` (0x10055f38)
+- `CompositeSceneBufferToScreen` (0x1005dfe0)
+
 ## Open follow-ups
 
-- **Does static dungeon geometry (walls/floors/ceilings) use this same
-  pipeline?** No caller of `Poly3D_ClipAndDispatch`/`Actor3D_TransformAndSubmitModel`
-  found so far touches `Map_GetTileAt` or tile data — all three callers are
-  actor/entity-shaped. Either walls are built into per-cell "model" resources
-  fed through the *same* `Actor3D_TransformAndSubmitModel`/vertex-list path
-  (plausible — the model format already carries an arbitrary vertex+face
-  list), or there's a still-unfound separate wall rasterizer. Worth checking:
-  does the per-engine animation-frame table at `engine+0x6b38` or a sibling
-  table hold per-*tile-type* wall models (indexed by `Map_GetTileAt`'s
-  returned tile-type byte) rather than per-actor animation frames?
 - The other ~9 `Poly3D_RasterizeTextured` variants (`FUN_10051460` etc.) are
   unexamined — likely: opaque vs. blended, "near" (partially-clipped) vs.
   normal, and a flat/unlit variant, based on the flag bits seen selecting
   between them in `Poly3D_ClipAndDispatch`.
-- Confirm what `engine+0x5b4` (the render target `Poly3D_RasterizeTextured_v0`
-  actually writes into, with a 704-byte row stride) is, and how/when it gets
-  composited into the real `engine+0x480` 176×208 framebuffer.
-- Identify the 3D model resource format read at `actor->model+0x54` (vertex
-  list, face list, texture-atlas-cell index table) — presumably decoded from
-  an on-disk asset alongside the sprite/icon format from `GRAPHICS_FORMAT.md`.
+- What sets `engine+0x62c` (current room pointer) on room/level transitions,
+  and what the room model resource's on-disk format looks like (presumably
+  shares a container format with actor models, per `GRAPHICS_FORMAT.md`'s
+  open question about the model resource format).
+- What `FUN_10068e0c`'s other switch cases are (it's a general screen-state
+  machine; case `5` is confirmed as "render the 3D game view", cases `1` and
+  `6` look like menu/list UI — not traced in this pass).
+- The `engine+0xbe0f`/`engine+0x5c4` fade/lighting lookup-table path in
+  `CompositeSceneBufferToScreen` — not traced; likely relevant to any
+  lighting/darkness effects worth preserving in a PC port.

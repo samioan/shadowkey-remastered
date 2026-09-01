@@ -230,10 +230,28 @@ Prioritization, driven by the port goal rather than raw coverage:
       px/tile top-down map with a rotated player-direction marker driven by
       the same sin/cos LUT shape) while investigating.
 
-Next: confirm whether static wall/floor/ceiling geometry goes through
-`Poly3D_ClipAndDispatch`/`Actor3D_TransformAndSubmitModel` too (e.g. via a
-per-tile-type model table analogous to the per-frame animation table at
-`engine+0x6b38`), or find the separate renderer if not. See
+- [x] Answered that question: static room geometry does **not** go through
+      `Actor3D_TransformAndSubmitModel`/`Poly3D_ClipAndDispatch` (both have
+      exactly one caller each, all actor-shaped, re-confirmed). Instead
+      rooms have their own top-level path (`RoomGeometry_TransformAndSort` →
+      `RoomFace_ClipAndDispatch` → `RoomFace_RasterizeTextured`) built on
+      the *same* model format (`room+0x54`, identical layout to
+      `actor+0x54`) and reusing `BuildRotationMatrix3x4`/
+      `ComposeTransform3x4`/`Poly3D_ClipAgainstPlane` directly, but with a
+      whole-model transform + 64-bucket depth sort (painter's algorithm)
+      instead of per-face immediate dispatch. Also found the per-frame
+      master entry point `Render3DScene` (rooms, then actors via virtual
+      dispatch, then composite) and resolved the `engine+0x5b4` mystery
+      buffer: a 176×208, 4-bytes/pixel intermediate target both renderers
+      share, packed down to the real 16bpp `engine+0x480` screen by
+      `CompositeSceneBufferToScreen` once per frame (with an optional
+      fade/lighting LUT pass). Full writeup:
+      [`RENDERER_3D.md`](RENDERER_3D.md#the-roomwall-geometry-renderer).
+
+Next: the ~9 unexamined `Poly3D_RasterizeTextured` blend-mode variants, the
+3D model resource file format itself (vertex/face/texture-atlas container,
+shared by rooms and actors), what sets `engine+0x62c` on room transitions,
+and the `engine+0xbe0f`/`0x5c4` fade-LUT compositing path. See
 `RENDERER_3D.md`'s open follow-ups.
 
 ## Open questions

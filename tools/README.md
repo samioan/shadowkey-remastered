@@ -191,3 +191,9 @@ evidence that the game is rendered in 2D (see that doc's correction note).
   actor/entity 3D polygon rendering pipeline (rotation matrix, clip,
   dispatch, one rasterizer variant); see
   [`../docs/RENDERER_3D.md`](../docs/RENDERER_3D.md).
+- `shadowkey/ghidra/scripts/pyghidra_label_renderer3d_walls.py` — labels the
+  room/wall geometry renderer (shares the actor pipeline's clip/perspective
+  core but has its own top-level transform+depth-sort, face dispatch, and
+  rasterizer) plus the per-frame `Render3DScene` entry point and the
+  `engine+0x5b4` intermediate-buffer compositor; see
+  [`../docs/RENDERER_3D.md`](../docs/RENDERER_3D.md#the-roomwall-geometry-renderer).
