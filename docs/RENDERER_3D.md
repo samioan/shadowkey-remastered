@@ -55,12 +55,12 @@ follow-up.
    clip, detected from a per-vertex Z value against a near-clip threshold at
    `engine+0xbe10`, plus further clip passes), does a **2D cross-product
    backface/winding test** on the clipped result, repacks each surviving
-   vertex's screen X/Y (`+0x14/+0x18`), texture U/V (`+0xc/+0x10`), into a
-   local array, then dispatches to **one of ~10 specialized rasterizer
-   functions** chosen by blend-mode/near-clip/shading flags (`FUN_100509a4`,
-   `FUN_10051460`, `FUN_10052044`, `FUN_10052504`, `FUN_100536f8`,
-   `FUN_10052ab8`, `FUN_1005420c`, `FUN_10054704`, `FUN_10054d04`,
-   `FUN_10055a4c` — not individually renamed yet, see Open follow-ups).
+   vertex's screen X/Y (`+0x14/+0x18`), texture U/V (`+0x1c/+0x20`), Z
+   (`+0x08`, sign-extended from the source vertex's 16-bit `+4` field) into
+   a local per-vertex record (stride `0x2c`), then dispatches to **one of
+   10 specialized rasterizer functions**, `Poly3D_RasterizeTextured_v0`
+   through `_v9` — now all individually identified, see "The 10
+   `Poly3D_RasterizeTextured` variants" below.
 
 5. **`Poly3D_ClipAgainstPlane`** (renamed from `FUN_1005c8b4`, 0x1005c8b4) —
    a Sutherland–Hodgman-style single-plane polygon clip: walks the vertex
@@ -98,10 +98,18 @@ follow-up.
    hardware FPU or divider. Output row stride into the target buffer is
    `0x2c0` (704) bytes — **not** the 352-byte/176px screen stride from
    `GRAPHICS_FORMAT.md`, and it reads from `engine+0x5b4` rather than the
-   `engine+0x480` framebuffer pointer passed in as an argument — so this
-   likely renders into a separate, wider (32bpp‑ish, or padded) intermediate
-   render target that gets composited/converted afterward, not directly into
-   the final 16bpp screen buffer. Unconfirmed; see Open follow-ups.
+   `engine+0x480` framebuffer pointer passed in as an argument — this is
+   the shared 176×208-at-4-bytes/pixel intermediate buffer, confirmed and
+   explained fully by `CompositeSceneBufferToScreen` below. Each drawn
+   pixel is gated by a **real per-pixel depth test** against that buffer's
+   existing contents (`if (newZ*0x10000 < *existingWord) { draw }`) using
+   an interpolated Z value carried in the packed vertex's `+8` field, then
+   `color | (newZ*0x10000)` is stored back — i.e. the high 16 bits of every
+   texel in this buffer are a genuine same-buffer occlusion depth, not
+   padding. Texel value `0x0f0f` is a chroma-key: skip the pixel entirely
+   (texture cutouts, e.g. foliage/grates). See "The 10
+   `Poly3D_RasterizeTextured` variants" below for how the other 9 build on
+   this.
 
 ## Where this is called from (all actor/entity rendering)
 
@@ -135,12 +143,62 @@ by a full Euler rotation, and rasterized with perspective-correct texturing.
 None of them touch `Map_GetTileAt` or any tile-grid state — this pipeline
 looks dedicated to *actors*, not to the static dungeon geometry.
 
+## The 10 `Poly3D_RasterizeTextured` variants
+
+`Poly3D_ClipAndDispatch` picks one of 10 near-identical rasterizers per
+polygon, keyed off three independent conditions, fully resolved by
+decompiling and diffing all 10 against each other:
+
+- **`bVar1`** ("near"): true if any vertex's clip-space Z was below the
+  near-clip threshold at `engine+0xbe10` — i.e. this polygon actually got
+  clipped by `Poly3D_ClipAgainstPlane`. Near variants are consistently
+  **~2.5× the code size** of their non-near counterparts (extra per-edge
+  bookkeeping for clipped polygons); the color/depth/texture logic itself is
+  otherwise identical.
+- **fade**: `*(char *)(engine+0xbe0f) != 0`. Fade variants additionally
+  compute, per vertex, `intensity = clamp(vertex[+8] * engine[+0x5c8] >> 8,
+  0, 0xffff)` — i.e. **depth scaled by a global factor** — interpolate it
+  across the polygon, and OR its top nibble into the output color word
+  before writing. `CompositeSceneBufferToScreen` then runs the *entire*
+  16-bit color+nibble word through the `engine+0x5c4` lookup table — a
+  torchlight/distance-fog effect keyed by depth, not a flat filter.
+- **stencil**: selected by `Poly3D_ClipAndDispatch`'s mode-word bit 1. The
+  mode-word parameter is repurposed from a bitmask into a literal **byte**
+  value (`param_6`), stamped into a *second* 176×208 8bpp framebuffer plane
+  at `engine+0x5b8` (stride `0xb0`) for every pixel actually drawn — an
+  object-ID/picking buffer, not alpha blending. (Renaming this the "blend"
+  family, as originally guessed, would have been wrong.)
+
+| Variant | Address | near | stencil | fade | Notes |
+|---|---|---|---|---|---|
+| `_v0` | 0x100509a4 | Y | N | N | baseline near-clip case |
+| `_v1` | 0x10051460 | Y | N | Y | |
+| `_v2` | 0x10052044 | N | N | N | **the baseline** — plain scanline/1-over-z/chroma-key/depth-test rasterizer everything else builds on |
+| `_v3` | 0x10052504 | N | N | Y | |
+| `_v4` | 0x100536f8 | Y | Y | N | |
+| `_v5` | 0x10052ab8 | Y | Y | Y | |
+| `_v6` | 0x1005420c | N | Y | N | |
+| `_v7` | 0x10054704 | N | Y | Y | |
+| `_v8` | 0x10054d04 | Y | Y | N | plus an extra forwarded parameter (`Poly3D_ClipAndDispatch`'s own `param_7`, passed when it's `!= -1`) not yet deciphered |
+| `_v9` | 0x10055a4c | — | — | — | selected by mode-word bit 0, orthogonal to the other three. Structurally distinct: writes straight into the **real** 16bpp screen buffer (`engine+0x480`, 0x160-byte stride) with an unconditional store — no depth test, no OR'd high bits — bypassing the shared padded-buffer scheme entirely. Also unconditionally stores a raw interpolated accumulator into `engine+0x5b4` at the same slot (purpose not pinned down). Likely an always-on-top / no-occlusion draw path (candidates: player's held weapon, a UI element routed through the 3D pipeline). |
+
+Every variant (`_v9` included) treats texel value `0x0f0f` as a **chroma
+key**: skip the pixel, don't draw — texture cutouts (foliage, grates, etc.),
+not real alpha blending. None of the 10 do per-pixel alpha compositing
+anywhere — "blended" was the wrong guess for what distinguishes them.
+
+Remaining open items: `_v8`'s extra parameter, and `_v9`'s second
+(unconditional, untested) write into `engine+0x5b4` — both low priority,
+the dispatch/behavior split above is otherwise fully resolved.
+
 ## Labels applied
 
 - `Actor3D_TransformAndSubmitModel` (0x10056eb0)
 - `Poly3D_ClipAndDispatch` (0x10056324)
 - `Poly3D_ClipAgainstPlane` (0x1005c8b4)
-- `Poly3D_RasterizeTextured_v0` (0x100509a4)
+- `Poly3D_RasterizeTextured_v0` through `_v9` (0x100509a4, 0x10051460,
+  0x10052044, 0x10052504, 0x100536f8, 0x10052ab8, 0x1005420c, 0x10054704,
+  0x10054d04, 0x10055a4c)
 - `BuildRotationMatrix3x4` (0x10073a70)
 - `ComposeTransform3x4` (0x100738c4)
 
@@ -211,23 +269,33 @@ other caller, `FUN_10057890`.
   — answers the `engine+0x5b4` question directly. The buffer is **176×208 at
   4 bytes/pixel** (not double-width as first guessed — `0x2c0` = 704 bytes /
   4 = 176, matching screen width exactly): the low 16 bits hold the real
-  16bpp color, the high 16 bits are a constant `0x7fff` every rasterizer ORs
-  in (padding/alignment, not a meaningful flag — both the background-fill
-  path and every draw path write the same constant). This function packs two
-  adjacent 4-byte source pixels into one 4-byte destination write, converting
-  the padded intermediate buffer down into the real 16bpp `engine+0x480`
-  screen buffer — i.e. `engine+0x5b4` exists so the software rasterizers can
-  write full 32-bit-aligned pixels (faster on ARMv4T than unaligned 16-bit
-  stores) and get packed to real 16bpp only once, at the end of the frame.
-  When a flag (`engine+0xbe0f`) is set, composite instead runs each channel
-  through a lookup table at `engine+0x5c4` — likely a fade/lighting
-  post-process (torchlight falloff, a level-transition fade, or similar).
+  16bpp color, the high 16 bits hold the per-pixel interpolated **depth**
+  value every rasterizer wrote for its same-buffer occlusion test (see the
+  variant table below — **corrects** an earlier claim in this doc that those
+  bits were a meaningless constant `0x7fff`; no `0x7fff` literal exists
+  anywhere in the rasterizer code, and the depth interpretation is confirmed
+  by tracing the packed vertex's `+8` field back to
+  `Poly3D_ClipAndDispatch`'s clip-space Z). This function masks each 32-bit
+  source word with `& 0xffff` — discarding that depth data, its job is done —
+  and packs two adjacent 4-byte source pixels into one 4-byte destination
+  write, converting the padded intermediate buffer down into the real 16bpp
+  `engine+0x480` screen buffer — i.e. `engine+0x5b4` exists so the software
+  rasterizers can write full 32-bit-aligned pixels (faster on ARMv4T than
+  unaligned 16-bit stores) *and* get a free per-pixel depth test almost for
+  free, then get packed to real 16bpp only once, at the end of the frame.
+  When a flag (`engine+0xbe0f`) is set, composite instead runs the full
+  16-bit color word (color + a fog nibble some rasterizer variants OR into
+  its top bits — see below) through a 2-byte-stride lookup table at
+  `engine+0x5c4`, indexed by that entire 16-bit word (`index = word*2`,
+  table size/exact indexing range not pinned down) — confirming the
+  torchlight/distance-fog guess.
 
 **Bottom line**: Shadowkey has **one 3D model format and one clip/perspective
 core** (`BuildRotationMatrix3x4`, `ComposeTransform3x4`, `Poly3D_ClipAgainstPlane`)
 shared by two renderers built on top of it — an actor renderer (immediate
-per-face dispatch, multiple blend-mode rasterizer variants) and a room
-renderer (whole-model transform + depth-bucket sort, one rasterizer variant)
+per-face dispatch, 10 rasterizer variants split by near-clip/fog/stencil-ID
+needs) and a room renderer (whole-model transform + depth-bucket sort, one
+rasterizer variant)
 — both writing into one shared intermediate buffer that gets composited to
 the screen once per frame.
 
@@ -241,10 +309,11 @@ the screen once per frame.
 
 ## Open follow-ups
 
-- The other ~9 `Poly3D_RasterizeTextured` variants (`FUN_10051460` etc.) are
-  unexamined — likely: opaque vs. blended, "near" (partially-clipped) vs.
-  normal, and a flat/unlit variant, based on the flag bits seen selecting
-  between them in `Poly3D_ClipAndDispatch`.
+- ~~The other ~9 `Poly3D_RasterizeTextured` variants~~ — **resolved**, see
+  "The 10 `Poly3D_RasterizeTextured` variants" above: near-clip, a
+  depth-driven fog LUT, and a stencil/object-ID buffer, not blend modes.
+  Two small leftovers: `_v8`'s extra forwarded parameter, and `_v9`'s
+  second, unconditional write into `engine+0x5b4`.
 - ~~What sets `engine+0x62c` (current room pointer) on room/level
   transitions~~ — **resolved**: nothing "sets" it on transitions at all.
   `engine+0x62c` is a single 0x160/352-byte room-render-state object,
@@ -267,6 +336,9 @@ the screen once per frame.
 - What `FUN_10068e0c`'s other switch cases are (it's a general screen-state
   machine; case `5` is confirmed as "render the 3D game view", cases `1` and
   `6` look like menu/list UI — not traced in this pass).
-- The `engine+0xbe0f`/`engine+0x5c4` fade/lighting lookup-table path in
-  `CompositeSceneBufferToScreen` — not traced; likely relevant to any
-  lighting/darkness effects worth preserving in a PC port.
+- The `engine+0xbe0f`/`engine+0x5c4` fade/lighting lookup-table path is now
+  understood structurally (a depth-driven color-remap table indexed by the
+  full color+fog-nibble word, fed by the fade-family rasterizer variants —
+  see above) but its actual **contents** (what darkness/color curve it
+  encodes) haven't been dumped from a real binary/asset — worth doing if a
+  PC port wants to preserve the torchlight falloff look.

@@ -394,11 +394,26 @@ Prioritization, driven by the port goal rather than raw coverage:
       `pyghidra_label_initlevel_param3.py`. Full writeup:
       [`ZONE_FORMAT.md`](ZONE_FORMAT.md#gameengine_initlevels-param_3-full-entry-vs-partial-reload).
 
-Next: the ~9 unexamined `Poly3D_RasterizeTextured` blend-mode variants, the
-`.sur`/`.ztx`/`.zlu`/`.zcp` record/content field layouts, the bulk of
-`.zmp`'s header, and `azra.sta`'s still-unidentified format (confirmed not
-the `.zcp`/"bullseye" file). See `RENDERER_3D.md`'s, `MODEL_FORMAT.md`'s,
-and `ZONE_FORMAT.md`'s open follow-ups.
+- [x] Resolved all 9 remaining `Poly3D_RasterizeTextured` variants (`_v1`
+      through `_v9`) by decompiling and diffing each against the already-
+      documented `_v0`. **Not** "opaque vs. blended" as guessed — the three
+      real axes are near-clip (bVar1, ~2.5x code size), a depth-driven fog
+      LUT (`engine+0xbe0f`/`+0x5c8`/`+0x5c4`, a torchlight/distance-fog
+      effect confirmed structurally), and a "stencil" family that stamps a
+      literal ID byte into a second 176x208 8bpp buffer at `engine+0x5b8`
+      (picking/object-ID, not alpha blending). Also caught and corrected a
+      wrong earlier claim in `RENDERER_3D.md`: the intermediate buffer's
+      high 16 bits are a genuine per-pixel interpolated depth value used
+      for occlusion testing, not a meaningless constant `0x7fff`. `_v9` is
+      structurally distinct — writes straight to the real screen buffer
+      with no depth test at all. Renamed/commented via
+      `pyghidra_label_rasterizer_variants.py`. Full writeup:
+      [`RENDERER_3D.md`](RENDERER_3D.md#the-10-poly3d_rasterizetextured-variants).
+
+Next: the `.sur`/`.ztx`/`.zlu`/`.zcp` record/content field layouts, the bulk
+of `.zmp`'s header, and `azra.sta`'s still-unidentified format (confirmed
+not the `.zcp`/"bullseye" file). See `MODEL_FORMAT.md`'s and
+`ZONE_FORMAT.md`'s open follow-ups.
 
 ## Open questions
 

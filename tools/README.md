@@ -263,6 +263,20 @@ evidence that the game is rendered in 2D (see that doc's correction note).
   zero means a lighter reload that leaves both alone; see
   [`../docs/ZONE_FORMAT.md`](../docs/ZONE_FORMAT.md#gameengine_initlevels-param_3-full-entry-vs-partial-reload).
 
+- `shadowkey/ghidra/scripts/pyghidra_dump_batch.py <hex-addr> [<hex-addr>
+  ...]` — like `pyghidra_dump_full.py` but decompiles several functions in
+  one pyghidra session (one Ghidra startup instead of N); used to dump all
+  9 unexamined `Poly3D_RasterizeTextured` variants at once for comparison.
+
+- `shadowkey/ghidra/scripts/pyghidra_label_rasterizer_variants.py` —
+  renames and documents the remaining 9 `Poly3D_RasterizeTextured` variants
+  (`_v1`–`_v9`, `_v0` was already named) plus the dispatch-tree logic in
+  `Poly3D_ClipAndDispatch`, resolved by decompiling and diffing all 10
+  against each other: near-clip code-size doubling, a depth-driven fog LUT,
+  a "stencil"/object-ID buffer family (not blend modes as first guessed),
+  and one structurally distinct direct-to-screen/no-depth-test variant; see
+  [`../docs/RENDERER_3D.md`](../docs/RENDERER_3D.md#the-10-poly3d_rasterizetextured-variants).
+
 - **`parse_model_resource.py`** — parser/verifier for the actual on-disk 3D
   model archive, `system/apps/6r51/models.idx` + `models.huge` in the game
   install tree (found separately from `6r51.app`'s code section — this is
