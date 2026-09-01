@@ -373,9 +373,11 @@ scheme:
   near-clip edge-case bookkeeping, not from doing more per-pixel work; if
   anything they do *less* per pixel than their far counterparts. A
   secondary per-scanline/per-pixel offset into adjacent `0x200`-byte
-  blocks within the `.zlu` chunk (seen in all 4 variants) wasn't fully
-  decoded (likely a further distance-driven palette blend, analogous to
-  the actor pipeline's fade LUT) — see Open follow-ups.
+  blocks within the `.zlu` chunk (seen in all 4 variants) is **now
+  decoded** — driven by the same per-vertex light/fog scalar the primary
+  `.zlu` lookup already uses, confirming the "further distance-driven
+  palette blend, analogous to the actor pipeline's fade LUT" guess — see
+  Open follow-ups for the full mechanism.
 
 This resolves `ZONE_FORMAT.md`'s last two open per-zone-file items
 (`.ztx`, `.zlu`) and, as a side effect, fully decodes `.sur`'s 8-byte
@@ -473,16 +475,56 @@ position.
   floor now mapped to a specific byte offset. `flags` bit0/bit1/bit3/bit6
   are now known (light source / wall / force-draw / ceiling-band select);
   bit2's exact role (also forces a floor draw, per the traversal, but not
-  otherwise pinned down), byte 7 of the tile record, the `heightA`/
-  `heightB` fields' precise sub-structure, and 3 trailing bytes of the
-  36-byte type table remain undecoded.
+  otherwise pinned down), byte 7 of the tile record, and 3 trailing bytes
+  of the 36-byte type table remain undecoded.
+- ~~The `heightA`/`heightB` fields' precise sub-structure~~ — **resolved**,
+  by decompiling `SurfaceFace_BuildAndProject` (0x1005d784) and
+  `Render3DScene`'s (0x100166c8) floor/ceiling/wall-band blocks in full and
+  matching every 16-bit read in that byte range against a specific offset.
+  What looked like "heightA + 14 undecoded bytes + heightB" is actually
+  **9 separate `int16` fields**: one standalone scalar (`0x04`, the default
+  ceiling-band comparison threshold) plus two clean 4-element corner-height
+  arrays — `floorHeight[4]` (`0x06`/`0x08`/`0x0a`/`0x0c`, the floor quad's 4
+  corners) and `ceilingHeight[4]` (`0x0e`/`0x10`/`0x12`/`0x14`, the ceiling
+  quad's 4 corners, used unchanged for both ceiling bands). The field
+  previously documented as an independent "`heightB`" turned out to just be
+  `ceilingHeight[3]` (offset `0x14`) doing double duty as the
+  ceiling-band-selection scalar when `flags` bit6 is set — not separate
+  data. Wall lower/upper bands read the relevant array cross-tile (current
+  vs. neighbor) to size their vertical extent. Full struct + prose in
+  `ZONE_FORMAT.md`'s `ZcpEntry`.
 - ~~`SurfaceFace_RasterizeTextured_v0`/`_v1`/`_v2` weren't traced~~ —
   **resolved**, see above: all 4 confirmed (`_v2` matches `_v3` plus the
   fade LUT; `_v0`/`_v1`'s near variants skip the chroma-key/depth-test
   checks entirely, a genuine behavioral split, not just extra clip-edge
   bookkeeping like the actor pipeline's near variants).
-- The secondary `param_8 + N*0x200`-style offset `SurfaceFace_
-  RasterizeTextured_v3` adds before indexing into the `.zlu` palette chunk
-  (interpolated per-scanline in one branch, per-pixel in another) isn't
-  decoded — plausibly a further distance-driven palette blend, but
-  unconfirmed.
+- ~~The secondary `param_8 + N*0x200`-style offset `SurfaceFace_
+  RasterizeTextured_v3` adds before indexing into the `.zlu` palette
+  chunk~~ — **resolved, and the original guess was right**: it's driven by
+  the *same per-vertex light/fog scalar* already established elsewhere in
+  this pipeline (the byte pair computed and clamped to `[0x400, 0x3f00]` in
+  `SurfaceFace_BuildAndProject`, at vertex offset `+6`), reached here after
+  `SurfaceFace_ClipAndDispatch` (0x1005d074) repacks each clipped vertex
+  into the rasterizer's wider interpolation record. Confirmed by tracing
+  `ClipAndDispatch`'s repacking writes (screen Y → record offset `0`,
+  screen X → `+4`, a transformed depth term → `+8`) against two of the
+  rasterizer's *other* field reads (`+0x1c`, `+0x20`) that land exactly on
+  `ClipAndDispatch`'s otherwise-unaccounted writes of the vertex's UV pair
+  (from vertex offsets `+0xc`/`+0x10`) once a consistent `+0x18` gap
+  between the record's two stack halves is assumed — the same gap places
+  the light/fog byte pair (vertex offset `+6`) exactly at the record offset
+  (`+0x18`) `_v3` reads to drive this logic, which is strong corroborating
+  evidence, not proof from a single read. Mechanism: `_v3` compares the
+  light value at the scanline's left vs. right edge; if they're close
+  (within roughly ±8.0 in the 8.8-ish fixed format), it takes a fast path —
+  one extra `0x200`-block offset for the *whole scanline*, from their
+  average masked down to the nearest `0x200` boundary; if they differ more,
+  it falls back to recomputing that offset **per pixel** by linearly
+  interpolating the light value across the scanline. Either way the result
+  is added on top of the per-face-selected `.zlu` palette pointer — i.e.
+  this is a second, finer-grained light-driven blend across the *already*
+  per-face-selected palette, on top of (not instead of) the 4-way per-face
+  palette selection documented above. Not independently re-verified by
+  decompiling `_v0`/`_v1`/`_v2` for the identical pattern this pass (all 3
+  are structurally close enough to `_v3` per the existing writeup that it's
+  a safe bet, but that's an assumption, not a separate confirmation).

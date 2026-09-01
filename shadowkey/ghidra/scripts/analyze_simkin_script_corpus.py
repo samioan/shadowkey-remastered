@@ -68,6 +68,22 @@ DIR_HINTS = {
     "menus": "Menu (generic)",
 }
 
+# Classes already confirmed (by name or offset) as of the first corpus-cross-
+# check pass - see docs/SIMKIN_NATIVE_API.md's "Cross-checked against the
+# real .s script corpus" section. Everything else is still open; the extra
+# analysis passes below focus signal-hunting on those.
+CONFIRMED_OFFSETS = {
+    "0x14cf0",  # GameEngine (root) - ConfigKeysMenu/Default
+    "0x14dc8",  # Spell - SetSpellType fallthrough + directory-hint
+    "0x14e04",  # Armor - directory-hint
+    "0x14d44",  # Weapon - directory-hint
+    "0x14d80",  # Weapon-damage mixin - directory-hint (dominant for weapons/)
+    "0x14d74",  # Item - directory-hint
+    "0x14da4",  # Monster (AI) - directory-hint
+    "0x14db0",  # Character stats - GetOwner() factory-call
+    "0x14dbc",  # Player/GameState - GetPlayer() factory-call (composite)
+}
+
 KEYWORDS = {
     "if", "else", "while", "for", "return", "true", "false", "null",
     "and", "or", "not", "new", "break", "continue",
@@ -151,6 +167,13 @@ def main():
     var_methods = defaultdict(Counter)
 
     used_names_global = Counter()
+    # name (bare, dotted-var method, or dotted-factory method) -> set of
+    # files it was seen called in, regardless of receiver shape. Used for
+    # the direct-name-search pass (unconfirmed classes' distinctive members).
+    name_call_files = defaultdict(set)
+    # var name (any local, project-wide, not just menus/) -> Counter of
+    # methods called on it.
+    var_methods_global = defaultdict(Counter)
 
     for f in files:
         rel = f.relative_to(SCRIPT_ROOT)
@@ -168,11 +191,13 @@ def main():
                 continue
             bare.add(name)
             used_names_global[name] += 1
+            name_call_files[name].add(rel)
 
         for m in DOTTED_CALL_RE.finditer(text):
             factory, method = m.group(1), m.group(2)
             factory_methods[factory][method] += 1
             used_names_global[method] += 1
+            name_call_files[method].add(rel)
 
         for m in DOTTED_PROP_RE.finditer(text):
             factory, prop = m.group(1), m.group(2)
@@ -183,7 +208,9 @@ def main():
             if var in KEYWORDS:
                 continue
             var_methods[var][method] += 1
+            var_methods_global[var][method] += 1
             used_names_global[method] += 1
+            name_call_files[method].add(rel)
 
         file_bare_calls[rel] = bare
 
@@ -299,6 +326,80 @@ def main():
         if len(owners) > 1:
             owner_names = [classes[o]["name"] for o in owners]
             print(f"  {name:28s} -> {', '.join(owner_names)}")
+
+    # ---- Report 5: every factory-call name, any count, scored only ----
+    # against still-unconfirmed classes (broadens report 2's total<2 cutoff,
+    # which was tuned for the giant root/Player/Character-stats classes and
+    # hides real signal for small unconfirmed classes where even 2-3 call
+    # sites matching most of a 5-9-member class is meaningful).
+    print("\n" + "=" * 100)
+    print("REPORT 5: EVERY FACTORY-CALL NAME vs. UNCONFIRMED CLASSES ONLY (any call count)")
+    print("=" * 100)
+    unconfirmed = {off: c for off, c in classes.items() if off not in CONFIRMED_OFFSETS}
+    for factory, methods in sorted(factory_methods.items(), key=lambda kv: -sum(kv[1].values())):
+        call_set = set(methods.keys()) | set(factory_props.get(factory, {}).keys())
+        if not call_set:
+            continue
+        scored = []
+        for off, c in unconfirmed.items():
+            inter, frac = score_overlap(call_set, c["bindings"])
+            d = dice(call_set, c["bindings"])
+            if inter > 0:
+                scored.append((d, inter, frac, c["name"]))
+        if not scored:
+            continue
+        scored.sort(reverse=True)
+        total = sum(methods.values())
+        print(f"\n{factory}()  [{total} call sites, {len(call_set)} distinct methods: "
+              f"{', '.join(sorted(call_set))[:200]}]")
+        for d, inter, frac, name in scored[:3]:
+            print(f"    dice={d:.2f}  {inter:3d}/{len(call_set)} overlap ({frac:.0%})  {name}")
+
+    # ---- Report 6: direct name search for each unconfirmed class's most ----
+    # distinctive (non-reused) members - do they appear anywhere at all,
+    # and in which files?
+    print("\n" + "=" * 100)
+    print("REPORT 6: DISTINCTIVE-MEMBER DIRECT SEARCH FOR UNCONFIRMED CLASSES")
+    print("(non-reused member names of each unconfirmed class, checked against every call")
+    print(" site found anywhere in the corpus - bare, var.Method(), or Factory().Method())")
+    print("=" * 100)
+    for off, c in unconfirmed.items():
+        distinctive = sorted(n for n in c["bindings"] if len(name_to_classes[n]) == 1)
+        hits = [(n, name_call_files.get(n, set())) for n in distinctive]
+        hits = [(n, files_) for n, files_ in hits if files_]
+        print(f"\n{c['name']} ({off}, {c['count']} members, {len(distinctive)} distinctive/non-reused):")
+        if not hits:
+            print("    NO distinctive member found as a call anywhere in the corpus - no direct signal.")
+            continue
+        for n, files_ in sorted(hits, key=lambda kv: -len(kv[1])):
+            sample = sorted(str(p) for p in files_)[:4]
+            print(f"    {n:24s} in {len(files_):3d} file(s), e.g. {', '.join(sample)}")
+
+    # ---- Report 7: project-wide local-variable receiver clustering ----
+    print("\n" + "=" * 100)
+    print("REPORT 7: PROJECT-WIDE LOCAL-VARIABLE RECEIVER CLUSTERING (var.Method() pattern)")
+    print("(which unconfirmed class's vocabulary do the METHODS CALLED ON A GIVEN VARIABLE")
+    print(" NAME cluster toward, aggregated across the whole corpus - weak per-instance signal,")
+    print(" but variable names are often reused for the same conceptual role script to script)")
+    print("=" * 100)
+    for var, methods in sorted(var_methods_global.items(), key=lambda kv: -sum(kv[1].values())):
+        total = sum(methods.values())
+        if total < 5:
+            continue
+        call_set = set(methods.keys())
+        scored = []
+        for off, c in unconfirmed.items():
+            d = dice(call_set, c["bindings"])
+            inter, frac = score_overlap(call_set, c["bindings"])
+            if inter > 0:
+                scored.append((d, inter, frac, c["name"]))
+        if not scored:
+            continue
+        scored.sort(reverse=True)
+        print(f"\n{var}  [{total} call sites, {len(call_set)} distinct methods]")
+        for d, inter, frac, name in scored[:2]:
+            print(f"    dice={d:.2f}  {inter:3d}/{len(call_set)} overlap ({frac:.0%})  {name}")
+        print(f"    methods seen: {', '.join(m for m, _ in methods.most_common(10))}")
 
 
 if __name__ == "__main__":

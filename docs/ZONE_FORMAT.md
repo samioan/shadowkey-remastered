@@ -110,8 +110,13 @@ struct EntPlacement {      // offset  size
     uint16 rotOrScale[4];     // 0x0c    8   (four u16 fields, exact meaning TBD)
     int32  unkA;                // 0x14    4   not decoded (see azra.sta below --
                                  //             this field round-trips into it unchanged)
-    int32  unkB;                  // 0x18    4   not decoded, near-constant filler in
-                                   //             the one file sampled so far
+    int32  unkB;                  // 0x18    4   a packed pair, NOT a plain int32 --
+                                   //             high u16 is always the constant
+                                   //             0xCCCC, low u16 is a per-instance
+                                   //             value (see azra.sta below: this is
+                                   //             exactly .sta's separate flags/marker
+                                   //             u16 pair, just still packed into one
+                                   //             field here instead of split)
     int32  typeId;                  // 0x1c    4   entity/object type ID
     char   name[40];                  // 0x20   40   object/instance name
 };                                             // total 0x48 = 72
@@ -472,20 +477,57 @@ struct ZcpFile {
     uint8  pad[3];              // offset 0x01..0x03, unread
     ZcpEntry entries[entryCount]; // offset 0x04, stride 0x24 (36 bytes)
 };
-struct ZcpEntry {                  // 36 bytes -- now (almost) fully mapped
+struct ZcpEntry {                  // 36 bytes -- now fully mapped
     int8   lightDelta;               // 0x00: signed, applied as delta*0x100
     uint8  unknown0[3];                // 0x01..0x03, not decoded
-    uint16 heightA;                      // 0x04: a height/corner value (u16,
-                                           // read alongside heightB below to pick
-                                           // which of two ceiling texture indices
-                                           // to use, and independently as one of
-                                           // several vertex-height inputs to
-                                           // SurfaceFace_BuildAndProject's UV math
-                                           // for every direction below)
-    uint8  unknown1[14];                   // 0x06..0x13, more height/corner-ish
-                                             // data used the same way (not
-                                             // individually decoded byte-by-byte)
-    uint16 heightB;                          // 0x14: paired with heightA above
+    int16  ceilingBandThreshold;         // 0x04 (was "heightA"): a standalone
+                                           // scalar, NOT part of either 4-corner
+                                           // array below -- read only as the
+                                           // *default* comparison threshold
+                                           // (tile `flags` bit6 clear) against
+                                           // the camera's eye-height field
+                                           // (`*(camera+0x618)+0x224`) to pick
+                                           // ceiling band A (surIndexCeilingA,
+                                           // 0x1e) vs. B (surIndexCeilingB,
+                                           // 0x1f). See below for the bit6-set
+                                           // case.
+    int16  floorHeight[4];                 // 0x06/0x08/0x0a/0x0c: the tile's 4
+                                           // corner floor heights. Read
+                                           // directly (unconditionally) as the
+                                           // floor quad's 4 corners in
+                                           // `Render3DScene`'s floor-draw
+                                           // block; also read cross-tile
+                                           // (current vs. the relevant
+                                           // neighbor) to size a wall's
+                                           // "lower band" vertical extent.
+    int16  ceilingHeight[4];               // 0x0e/0x10/0x12/0x14: the tile's 4
+                                           // corner ceiling heights. Read
+                                           // directly as the ceiling quad's 4
+                                           // corners for *both* ceiling band A
+                                           // and B (same 4 values either way --
+                                           // only the winding order and which
+                                           // `.sur` index get used differ), and
+                                           // cross-tile to size a wall's "upper
+                                           // band" extent. **`ceilingHeight[3]`
+                                           // (offset 0x14, was documented as its
+                                           // own field "heightB") turns out not
+                                           // to be independent data at all** --
+                                           // when tile `flags` bit6 is *set*,
+                                           // this same corner value is reused
+                                           // as the ceiling-band comparison
+                                           // scalar in place of
+                                           // `ceilingBandThreshold` above. So
+                                           // there's really one dedicated
+                                           // threshold field plus one reused
+                                           // corner height, not two independent
+                                           // "heightA/heightB" scalars as
+                                           // originally guessed. Confirmed by
+                                           // decompiling `SurfaceFace_
+                                           // BuildAndProject` (0x1005d784) and
+                                           // `Render3DScene`'s (0x100166c8)
+                                           // floor/ceiling/wall-band traversal
+                                           // blocks in full and matching every
+                                           // 16-bit read against these offsets.
     uint8  surIndexE_lo;                       // 0x16: EAST wall, lower band --
                                                  // also the "does this tile have
                                                  // an east wall at all" gate
@@ -512,19 +554,21 @@ per direction, each reading its `.sur` index from the *neighboring*
 tile's type entry (current tile's own entry for floor/ceiling), gated by
 either a camera-position-vs-tile-edge check or the tile's `flags` bit3
 override, exactly as described in `RENDERER_3D.md`. Each wall direction
-actually fires up to **two** draws ("lower band"/"upper band" — likely a
-stepped-height wall segment when the neighbor's floor/ceiling height
-differs from the current tile's), selected by comparing `heightA`/
-`heightB`-derived vertex data between the two tiles; ceiling similarly
-picks between two texture indices based on comparing a height field
-against the camera's eye-height field (`*(camera+0x618)+0x224`, itself
+actually fires up to **two** draws ("lower band" using `floorHeight[4]`,
+"upper band" using `ceilingHeight[4]` — a stepped-height wall segment
+when the neighbor's floor/ceiling height differs from the current tile's,
+now confirmed field-by-field above), selected by comparing the relevant
+corner-height array between the two tiles; ceiling similarly picks
+between two texture indices based on comparing `ceilingBandThreshold`
+(or, if `flags` bit6 is set, `ceilingHeight[3]` instead) against the
+camera's eye-height field (`*(camera+0x618)+0x224`, itself
 `playerZ + a fixed eye-height offset`, set in `GameEngine_InitLevel`'s
-player-start code). Floor has just one texture index and one call. Tile
-`flags` bit6 (`0x40`) additionally selects which of the two height
-fields (`heightA`/`heightB`) to compare for ceiling banding — a fifth
-`flags` bit now identified, alongside bit0 (light source), bit1 (wall),
-bit3 (force-draw), and bit2 (used in the floor gate, `flags & 4`, role
-not pinned down beyond "also forces a draw").
+player-start code). Floor has just one texture index and one call, using
+`floorHeight[4]` directly as its quad's 4 corners. Tile `flags` bit6
+(`0x40`) selects which of the two ceiling-comparison scalars above to
+use — a fifth `flags` bit now identified, alongside bit0 (light source),
+bit1 (wall), bit3 (force-draw), and bit2 (used in the floor gate,
+`flags & 4`, role not pinned down beyond "also forces a draw").
 
 **This is also `WORLD_MODEL.md`'s "36-byte tile-type table at `map+0x690c`"**
 — found independently in a much earlier round of this project, before
@@ -653,13 +697,9 @@ struct StaRecord {          // 32 bytes
     int32  z;                    // 0x0c -- matches .ent's z
     uint16 rot[4];                 // 0x10 -- matches .ent's rotOrScale[4] exactly
     int32  unkA;                    // 0x18 -- matches .ent's unkA field exactly
-    uint16 flags;                     // 0x1c -- 13 distinct values seen, all
-                                        //         multiples of 16, range 80..288;
-                                        //         not decoded, no clear .ent analog
+    uint16 flags;                     // 0x1c -- a per-instance value, see below
     uint16 marker;                      // 0x1e -- always 0xCCCC (every one of 201
-                                          //         records; possibly padding, or a
-                                          //         record-valid sentinel some
-                                          //         level-editor build used)
+                                          //         records)
 };                                                 // 32 bytes total
 ```
 
@@ -670,8 +710,57 @@ quad and the `unkA` field** (`typeId` matches 143/188, the shortfall
 fully explained by multiple `.ent` entities sharing the exact same
 position, which the position-only lookup can't disambiguate). This is
 airtight: `.sta`'s per-record fields are a strict subset of `.ent`'s own
-fields (same `x`/`y`/`z`/`rot`/`unkA`/`typeId`, just missing `.ent`'s
-`unkB` and `name`), for the overwhelming majority of records.
+fields (same `x`/`y`/`z`/`rot`/`unkA`/`typeId`), for the overwhelming
+majority of records.
+
+**`flags`/`marker` resolved: they're not missing from `.ent` at all — `.ent`'s
+`unkB` field (the one this doc previously called "not decoded, near-constant
+filler") is `.sta`'s `flags`/`marker` pair, still packed together.**
+Checked bit-for-bit against all 188 position+`unkA`-disambiguated matches:
+`.ent`'s `unkB` as a raw `uint32` is **exactly `(0xCCCC << 16) | flags`** —
+its high 16 bits are `.sta`'s `marker` constant, its low 16 bits are
+`.sta`'s `flags` value, **188/188 exact matches, zero exceptions**. So
+`.ent`'s struct comment above is corrected to describe `unkB` as this same
+packed pair rather than a plain, mostly-constant int32 — the "near-constant"
+read of an earlier pass came from only sampling `unkB`'s high half, which
+genuinely is constant (`0xCCCC`), while its low half is exactly as variable
+as `.sta`'s `flags`. Tool: `tools/analyze_sta_fields.py` (new, extends
+`tools/parse_zone_placement.py`).
+
+**`flags`'s own semantic meaning is still open**, though now much better
+characterized: always a multiple of 16 (13 distinct values across `azra.sta`'s
+201 records, range 80–288 i.e. `16×5`–`16×18`), **256 (`16×16`) by far the
+default** (179/201 = 89%), with the remaining 22 records spread across the
+other 12 values. Ruled out: it is **not** `entities.txt`'s entity-category
+enum (`ZONE_FORMAT.md`'s `thirdField`, [[shadowkey-zone-format]]) scaled by
+16 — checked `flags/16` against the real category for every record's typeId
+(both `.sta`'s own `typeId` field and, separately, the matched `.ent`
+record's `typeId`) and got **0 matches either way**, not even a majority —
+firmly rules that hypothesis out, it's not a scaled copy of the category. It
+is also **not** a function of `typeId` alone (55%, 10 of 18 distinct
+`typeId`s in `azra.sta` take more than one `flags` value across their
+instances — e.g. typeId 10, `!roof`, takes 7 different values), so it's
+genuine per-placed-instance data, not type-level metadata. The records with
+non-default `flags` skew toward small decorative props placed repeatedly
+with variation (`!barrel`, `!crate`, `!grainbag`, `!candelabra`,
+`!tradinggate`, `!gryphon`, `!roof`) — consistent with, but not proof of, a
+level-editor-only per-instance visual variation dial (e.g. a scale or
+size-class slider) that the shipped game's renderer never reads (confirmed
+separately, again, that no code in `6r51.app` opens any `.sta` file at all).
+Given `.sta` is dev-tool-only staging data with zero runtime consumers, this
+may not be resolvable further than "characterized precisely, not identified
+semantically" without an actual level-editor build to compare against.
+
+`unkA` (already known to round-trip byte-for-byte between `.sta` and `.ent`)
+is also now more precisely characterized rather than left as a bare
+"not decoded": across all 282 `.ent` records, 190 (67%) are exactly `0`
+(the default), the 92 nonzero values range symmetrically from -32384 to
+32384 with a GCD of only 2 (i.e. not a clean multiple of the game's usual
+16 or 256 fixed-point units the way `flags` is), and it is **not** a
+function of `typeId` (16 of 34 distinct `typeId`s take more than one
+`unkA` value) and does **not** equal any of the same record's own `rot[4]`
+values. No further semantic lead found this pass — still genuinely
+undecoded, just numerically bounded now.
 
 **Conclusion**: `azra.sta` is a **leftover development-tool export of
 (a slightly earlier version of) the same entity-placement data now
@@ -725,6 +814,14 @@ end (not shown to be related to `.sta` — no code path connects them).
   leftover level-editor staging export of `azra.ent`'s entity placements,
   never read by the shipped game. The 5 literal `"azra"` strings in the
   binary remain unexplained (not shown related to `.sta`).
-- `.sta`'s `flags` field (13 distinct values, multiples of 16 from 80 to
-  288) and `unkA`/`unkB` (both round-trip byte-for-byte between `.sta`
-  and `.ent` but neither is consumed by any traced code) are not decoded.
+- ~~`.sta`'s `flags`/`unkA`/`unkB` fields~~ — **`unkB` resolved**: it's not
+  a separate field at all, it's `.sta`'s own `flags`/`marker` u16 pair,
+  still packed into one `.ent` int32 (`(0xCCCC<<16)|flags`, verified
+  188/188 exact matches). `flags` itself and `unkA` are now precisely
+  characterized (value distributions, ruled out as a scaled copy of
+  `entities.txt`'s category enum or a function of `typeId`) but their
+  actual semantic meaning is still open — plausibly level-editor-only
+  per-instance metadata (e.g. a visual-variation dial) with no runtime
+  consumer to cross-reference against, since nothing in `6r51.app` reads
+  `.sta` at all. See the `azra.sta` section above and
+  `tools/analyze_sta_fields.py`.

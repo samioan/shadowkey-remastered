@@ -294,31 +294,189 @@ are exactly the ones the `menus/` correction above already explains — they
 span the root, the menu-stack manager, and the generic-menu/widget
 classes because a menu script's calls really do span all of them.
 
+## Second pass: chasing the ~20 still-unconfirmed classes
+
+A follow-up pass, still pure script-reading, pushed real signal into most
+of the classes the first pass didn't reach — mainly by tracing **which
+factory call produces which class's object**, the same technique that
+resolved `GetOwner()`/`GetPlayer()` above, extended to non-`Get`-prefixed
+factories and to directly reading real call sites instead of only
+Dice-coefficient scoring. Tooling: the same
+`analyze_simkin_script_corpus.py`, extended with three more report passes
+(every factory-call name scored against just the unconfirmed classes;
+direct corpus search for each unconfirmed class's non-reused member names,
+with file counts; project-wide local-variable receiver clustering, e.g.
+`comboBox.AddOption(...)` tallied across every script that uses a variable
+named `comboBox`).
+
+**Newly confirmed, by direct evidence (a real factory call whose result is
+immediately dotted with that class's own distinctive members):**
+
+- **Door/trap trigger (`0x14ccc`) is the return type of `Zone/Level`'s own
+  `AddTrigger(name)`.** Real example (`broken1.s`):
+  ```
+  spikeTrap = AddTrigger("spikes");
+  spikeTrap.AddEntity(1013);
+  spikeTrap.SetTrap(8, 16, 10);
+  spikeTrap.RemainActive();
+  ```
+  and `crypt1.s`/`dstar_e.s`/`erthcave.s`/`ghstpass.s`/`lothcav.s` all have
+  the same `AddTrigger(...) → .AddEntity/.SetTrap/.SetCallback/
+  .RemainActive` shape. This resolves what the class actually *is*: not
+  the door/chest object itself (ordinary placed doors are typed
+  `Object/Entity (world base)`, confirmed separately below), but a
+  **zone-scoped trap/switch controller** a zone script creates and wires
+  up to watch a tracked set of entity IDs (`AddEntity`), configure trap
+  parameters (`SetTrap`) or a kill-count callback (`SetCallback`,
+  e.g. `zombieTrigger.SetCallback("GPZombiesKilled")` in `ghstpass.s`), and
+  which can itself open a door (`OpenDoor`) or fire a damage message
+  (`ShowDamageMessage`) when sprung. `IsActive`/`RemainActive`
+  control whether it stays armed after firing once.
+- **Menu (generic) (`0x14cfc`) is the return type of GameEngine root's
+  `CreatePopupMenu(x, y, w, h, ...)`.** Confirmed by upwards of 20 real
+  call sites across `actionqueue.s`, `buysell.s`, `charactermanager.s`,
+  `configkeys.s`, `deletesavedgames.s`, `gameended.s`, `inventory.s`,
+  `loadgamemenu.s`, `mainmenu.s`, `options.s`, `savegamemenu.s`,
+  `menus/bluetooth.s`, `menus/hostgamemenu.s`, `menus/multiplayermenu.s`,
+  `removequeue.s` — every single one immediately follows with
+  `.AddItem(...)` and/or `.SetBackground()`, exactly `0x14cfc`'s own
+  vocabulary. This fully explains the `menus/`-directory correction from
+  the first pass: `CreatePopupMenu()` is the concrete factory, `Menu
+  (generic)` is unambiguously its return type.
+- **Encounter spawner (`0x14d98`) is the return type of Zone effects'
+  `AddEncounters(...)`.** Real example (`ghstpass.s`):
+  ```
+  fight12 = AddEncounters("fight12","fight12W","fight12S");
+  fight12.AddRandomSets(205, 2);
+  fight12.AddRandomSets(200, 1, 205, 1);
+  ```
+  and `lothcav.s`'s `fight41 = AddEncounters("battle41"); fight41.
+  AddRandomSets(272, 1); fight41.SetActive(false);` — same shape.
+- **Zone/Level (`0x14d38`) and Zone effects (`0x14df8`) are two chained
+  facets of the same object, exposed to every script as the bare global
+  identifier `Level`** — not obtained via any factory call at all, just
+  referenced directly by name (`Level.PlayAmbient(73,100)`,
+  `M1 = Level.GetEntity("m1")` in `azra.s`, `Level.Vignette(5)` — the
+  latter a Zone-*effects* member, called on the same `Level` reference
+  used for Zone/Level's own `GetEntity`/`PlayAmbient`). Consistent with
+  this project's established SimKin dispatch architecture (each class's
+  own trie, chained through a shared backpointer): `Level` is one object
+  whose dispatch chain includes both classes. `SetZone(1, 2000)` (another
+  Zone-effects member) is additionally reachable *bare*, no `Level.`
+  prefix needed, the same way `Random`/`GetPlayer` are bare-reachable
+  globals from the root class — i.e. `Level`'s chain is (at least
+  partly) also spliced into every script's default reachable-class set,
+  not just accessible via an explicit `Level` reference.
+- **Dropdown/slider widget (`0x14cd8`) and Table/grid widget (`0x14ce4`)**:
+  confirmed by local-variable clustering — every script-wide variable
+  named `comboBox` (45 call sites) has methods 100% covered by `0x14cd8`'s
+  6-member vocabulary (`AddOption`/`GetSelection`/`SetWidth`/
+  `SetCallback`/`SetOnEnterCallback`/`SetNumericalMode`); every `statsTable`
+  (69 call sites) is 83% covered by `0x14ce4`'s vocabulary
+  (`SetText`/`AddColumn`/`SetCallback`/`Clear`/`SetCellSpacing`/
+  `SetSelectable`).
+- **Collection (`0x14d50`)**: its distinctive members
+  (`GetFirst`/`GetNext`/`RemoveObject`/`GetDestroy`/`SetDestroy`) cluster
+  tightly in a small family of loot-menu scripts
+  (`dstar_e/thief_lootmenu.s`, `lootmenu.s`,
+  `raiders/shadowlootaxe.s`, `raiders/shadowlootmana.s`) that iterate a
+  container's contents — `AddObject` alone (177 files) is far more
+  widespread (the generic "put this item in that container" call), but
+  the iteration-shaped subset confirms `Collection` is specifically a
+  **container's item list**, walked with `GetFirst`/`GetNext` the way the
+  class's name already implied.
+- **Widget (UI base) (`0x14d20`)**: reinforced (not newly found) — its
+  most distinctive member, `SetFontNum`, appears in 59 files project-wide,
+  consistent with it being the base class of every individual UI text/
+  label object a menu script creates (same role established for `funtext`
+  in the first pass).
+
+**Weaker but real leads (some corpus signal, not conclusive):**
+
+- **Spell-damage mixin (`0x14e10`)**: `SetDormant`/`SetMagicDamage`
+  appear together in exactly 6 files — not spell scripts at all, but
+  **trapped door/chest scripts** (`delfhide/chest_trap_convo.s`,
+  `delfhide/chest_trap_gold.s`, `lockeddoor_bl.s`, `lockeddoor_dh.s`,
+  `lockeddoor_fb.s`, `lockeddoor_ha.s`). Reads as a magical trap on a
+  door/chest configuring its damage-on-trigger effect through the same
+  interface a real `Spell` would use to configure its damage — plausible
+  shared-base reuse, not confirmed against a struct.
+- **Actor (AI movement) (`0x14d68`)**: `SetInvulnerable` alone appears
+  bare-called in 147 files (monster/NPC scripts, `cheatmenu.s`, and
+  others) — real, widespread usage, but the rest of the class's 44-member
+  vocabulary (`WalkTo`, `HasItem`, `SetDead`, ...) shows up only 1-7 times
+  each, so the class is attested but its actual movement-AI core stays
+  mostly dark in the corpus (consistent with the first pass's 16% recall
+  finding — likely because pathing/AI is driven by native code per-tick,
+  not scripted per-object).
+- **Character-manager menu (`0x14dd4`)**: modestly reinforced — its
+  members cluster in HUD/menu-shaped scripts (`actionqueue.s`,
+  `inventory.s`, `charactermanager.s`, `questlog.s`, `action_queue.s`,
+  `daggerhelp.s`, `junction.s`, `starthelp.s`), consistent with the
+  existing hypothesis, no new correction.
+- **Store/shop menu (`0x14de0`)**: only ever seen in `buysell.s`/
+  `inventory.s` (2 files) — thin (it's a rare screen), but every hit is
+  its own distinctive member (`DisplayArmorMenu`, `DisplayWeaponsPage`,
+  `IsBuyMode`, ...), directionally consistent, not contradicted.
+
+**Genuinely no corpus signal found** (checked, not just unexamined):
+**Camera/player-feedback (`0x14d5c`)** — its two most combat-shaped
+distinctive members, `ScreenShake` and `DamageHere`, along with
+`SetFrozen`, **never appear anywhere in the 1,535-file corpus**, checked
+by direct literal search, not just Dice scoring; the class's only hit
+(`GetTemp`, 2 files) is weak. Either this class is driven entirely from
+native combat-resolution code with no script-level hook at all, or it's
+real but genuinely unused in shipped content — can't distinguish those
+from script-reading alone. **Icon/sprite widget (`0x14d2c`)** and **Action-
+queue HUD (`0x14dec`)** are similarly thin (1 file each,
+`charactermanager.s`) — present, not contradicted, not independently
+confirmed.
+
 ## What's still open
 
 - None of the 28 hypothesized class identities are confirmed against a
-  real C++ class/vtable — they're read purely from member-name clusters
-  (now cross-checked against real script usage, above, which is strong
-  supporting evidence for 5-7 of them but still not a struct/vtable
-  confirmation).
+  real C++ class/vtable — they're read purely from member-name clusters,
+  now cross-checked against real script usage across two passes. **17 of
+  28 now have real corpus evidence** (7 high-confidence via a direct,
+  unambiguous factory-call chain or directory-hint dominance: GameEngine
+  root, Spell, Armor, Weapon, Item, Monster (AI), Menu (generic); plus
+  Door/trap trigger, Encounter spawner, Zone/Level, Zone effects,
+  Dropdown/slider widget, Table/grid widget, Collection, Character stats,
+  Player/GameState, Widget (UI base) from the two factory/variable-
+  clustering passes above) — the rest (Object/Entity (world base),
+  Actor (AI movement), Character-manager menu, Store/shop menu,
+  Weapon-damage mixin, Spell-damage mixin, Sprite-attach mixin) have
+  weaker-but-real corpus attestation, and 3 (Camera/player-feedback,
+  Icon/sprite widget, Action-queue HUD, Menu-stack manager) remain
+  essentially just the original member-name-cluster guess. None of this
+  is a struct/vtable confirmation — it's corroborating usage evidence.
 - Why some classes split into a "mixin" and a "main" pair (Weapon/
   weapon-damage, Spell/spell-damage) instead of registering as one — not
   investigated; could be base/derived class registration happening at
   two different constructor levels. The corpus cross-check above is
   consistent with a base/derived split for Weapon specifically (ordinary
-  weapons lean on the mixin, bows/crossbows need the full class) but
-  doesn't prove the mechanism.
+  weapons lean on the mixin, bows/crossbows need the full class), and
+  with Spell-damage being reused by non-Spell objects (trapped
+  doors/chests) rather than being Spell-exclusive, but doesn't prove the
+  registration mechanism either way.
 - The one call site (703 counted, 702 resolved) whose name didn't
   resolve — not tracked down.
 - `GetOpener()`'s ~45% non-native call surface (above) suggests other
-  factory calls (`GetTarget`, whatever spawns/returns a `Monster (AI)` or
-  `Spell` instance, etc.) likely have the same native/script split, but
-  only `GetPlayer`/`GetOwner`/`GetOpener` had enough `Factory().Method()`
-  call sites in the corpus to analyze this way — not checked further.
-- The remaining 20 or so classes/factories with no directory-hint or
-  factory-call signal (e.g. Door/trap trigger, Camera/player-feedback,
-  Collection, the various small UI-widget classes) still have no
-  corpus-based confirmation, just the original member-name-cluster guess.
+  factory calls likely have the same native/script split — not checked
+  further beyond `GetPlayer`/`GetOwner`/`GetOpener` and the small-class
+  factories resolved in the second pass (`AddTrigger`, `CreatePopupMenu`,
+  `AddEncounters`).
+- Still genuinely open, checked directly and found to have no (or almost
+  no) real-script fingerprint: **Camera/player-feedback** (its
+  combat-shaped members `ScreenShake`/`DamageHere`/`SetFrozen` never
+  appear anywhere in the corpus — either purely native-driven or unused
+  in shipped content, can't tell which from script-reading alone),
+  **Icon/sprite widget**, **Action-queue HUD** (both only 1 file each),
+  and **Menu-stack manager** (not re-examined this pass, but its members
+  are all reused names shared with GameEngine root/Character-manager
+  menu — see the reused-name table above — so corpus attestation alone
+  can't disambiguate it from those without a factory-call trace like the
+  ones that resolved Door/trap trigger and Encounter spawner).
 
 ## Labels applied / tools
 

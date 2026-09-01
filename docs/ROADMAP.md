@@ -631,15 +631,86 @@ Prioritization, driven by the port goal rather than raw coverage:
       Python, no Ghidra). Full writeup:
       [`SIMKIN_NATIVE_API.md`](SIMKIN_NATIVE_API.md#cross-checked-against-the-real-s-script-corpus).
 
-Next: identifying which object the ~20 still-unconfirmed of the 28
-classes actually are (no directory-hint or factory-call signal reached
-them this pass — Door/trap trigger, Camera/player-feedback, Collection,
-the small UI-widget classes, ...), the two `heightA`/`heightB` fields' finer sub-structure, the `.zlu` chunk's
-secondary per-scanline/per-pixel `0x200`-byte-block offset (seen in all 4
-`SurfaceFace_RasterizeTextured` variants, not decoded), and `.sta`'s
-remaining undecoded fields (`flags`, `unkA`/`unkB`). See `MODEL_FORMAT.md`'s,
-`RENDERER_3D.md`'s, `WORLD_MODEL.md`'s, `ZONE_FORMAT.md`'s,
-`INPUT_HANDLING.md`'s, and `SIMKIN_BRIDGE.md`'s open follow-ups.
+- [x] **Second SimKin corpus pass: pushed signal into most of the ~20
+      still-unconfirmed classes**, mainly by tracing which factory call
+      produces which class's object (the same technique that resolved
+      `GetOwner`/`GetPlayer`), extended to non-`Get`-prefixed factories
+      and real-code-example verification instead of Dice-coefficient
+      scoring alone. **6 more classes confirmed by direct evidence**: Zone/
+      Level's own `AddTrigger(name)` returns **Door/trap trigger** (a
+      zone-scoped trap/switch controller, not the door object itself —
+      real example in `broken1.s`: `spikeTrap = AddTrigger("spikes");
+      spikeTrap.AddEntity(1013); spikeTrap.SetTrap(8,16,10);`); GameEngine
+      root's `CreatePopupMenu(...)` returns **Menu (generic)** (20+ real
+      call sites, closing the loop on the first pass's `menus/`
+      correction); Zone effects' `AddEncounters(...)` returns **Encounter
+      spawner**; **Zone/Level** and **Zone effects** turned out to be two
+      chained facets of one object every script can reference directly by
+      the bare global name `Level` (not via any factory call);
+      **Dropdown/slider widget** and **Table/grid widget** confirmed via
+      project-wide local-variable clustering (`comboBox`/`statsTable`,
+      83-100% Dice). Also found **Collection** is specifically a
+      container's walked item list (loot-menu scripts' `GetFirst`/
+      `GetNext`/`RemoveObject`), and confirmed **Camera/player-feedback**
+      has *zero* corpus signal at all (`ScreenShake`/`DamageHere`/
+      `SetFrozen` never appear anywhere in 1,535 files, checked directly)
+      — either purely native-driven or genuinely unused in shipped
+      content. **17 of 28 classes now have real corpus evidence** (7
+      high-confidence, 10 more probable-to-weak), up from 7 after the
+      first pass. Full writeup:
+      [`SIMKIN_NATIVE_API.md`](SIMKIN_NATIVE_API.md#second-pass-chasing-the-20-still-unconfirmed-classes).
+- [x] **`ZcpEntry`'s `heightA`/`heightB` sub-structure, resolved.**
+      Decompiling `SurfaceFace_BuildAndProject` and `Render3DScene`'s
+      floor/ceiling/wall-band traversal in full showed what looked like
+      "`heightA` + 14 undecoded bytes + `heightB`" is actually **9 packed
+      `int16` fields**: one standalone ceiling-band-threshold scalar
+      (`0x04`) plus two clean 4-element corner-height arrays,
+      `floorHeight[4]` (`0x06`-`0x0c`) and `ceilingHeight[4]`
+      (`0x0e`-`0x14`). The field previously called an independent
+      "`heightB`" is just `ceilingHeight[3]` doing double duty as the
+      ceiling-band comparison scalar when `flags` bit6 is set — not
+      separate data. Full struct in
+      [`ZONE_FORMAT.md`](ZONE_FORMAT.md#the-bullseye-subsystem-a-load-time-light-propagation-bake-not-ai-pathfinding).
+- [x] **The `.zlu` chunk's secondary `0x200`-byte-block offset,
+      resolved** — confirms the existing "distance-driven palette blend"
+      guess: it's driven by the same per-vertex light/fog scalar
+      `SurfaceFace_BuildAndProject` already computes and clamps, reached
+      in the rasterizer after `SurfaceFace_ClipAndDispatch` repacks each
+      clipped vertex. `_v3` compares the light value at the scanline's
+      left vs. right edge; if close, one averaged `0x200`-block offset
+      covers the whole scanline (fast path); if not, it's recomputed
+      per-pixel by linear interpolation — a second, finer light-driven
+      blend layered on top of (not instead of) the already-documented
+      4-way per-face palette selection. Full writeup:
+      [`RENDERER_3D.md`](RENDERER_3D.md#open-follow-ups).
+- [x] **`.sta`'s remaining fields, resolved/characterized.** `unkB`
+      (`.ent`'s field, previously read as "near-constant filler") turns
+      out to **not be a separate field at all** — it's `.sta`'s own
+      `flags`/`marker` `u16` pair, still packed together as one `int32`
+      (`(0xCCCC<<16)|flags`, verified 188/188 exact matches across every
+      matched record). `flags` itself is now precisely characterized
+      (13 values, all multiples of 16, 256 dominant at 89%) but **ruled
+      out** as a scaled copy of `entities.txt`'s category enum (0/188
+      matches, not even close) or a pure function of `typeId` — genuine
+      per-instance data, skewing toward small repeated decorative props,
+      consistent with (not proven to be) level-editor-only visual
+      variation with no runtime consumer, since nothing in `6r51.app`
+      reads `.sta` at all. `unkA` similarly bounded (67% exactly zero,
+      the rest symmetric -32384..32384, not a function of `typeId`) but
+      its semantic meaning stays open. New tool:
+      `tools/analyze_sta_fields.py`. Full writeup:
+      [`ZONE_FORMAT.md`](ZONE_FORMAT.md#azrasta-a-leftover-level-editor-staging-file-not-a-game-format).
+
+Next: the 11 SimKin classes still without real corpus evidence
+(Camera/player-feedback confirmed *absent* from scripts entirely; Icon/
+sprite widget, Action-queue HUD, Menu-stack manager thin-to-unexamined;
+see `SIMKIN_NATIVE_API.md`'s "What's still open"); `.zcp`'s remaining
+undecoded bits (`flags` bit2's exact role, tile-record byte 7, 3 trailing
+type-table bytes); `.sta`'s `flags`/`unkA` semantic meaning (bounded, not
+identified); `entities.txt` line field 3's (`rotOrScale[4]`) exact
+meaning. See `MODEL_FORMAT.md`'s, `RENDERER_3D.md`'s, `WORLD_MODEL.md`'s,
+`ZONE_FORMAT.md`'s, `INPUT_HANDLING.md`'s, and `SIMKIN_BRIDGE.md`'s open
+follow-ups.
 
 ## Open questions
 
