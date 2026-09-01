@@ -20,10 +20,11 @@ retail build), followed by that many `(startOffset: u32, size: u32)` pairs
 slicing directly into `models.huge`. Verified exhaustive and gap-free: every
 entry's `startOffset` equals the previous entry's `startOffset+size`, and
 the final entry's end (`4,907,880`) equals `models.huge`'s exact file size.
-Entry `236` (the last) is a zero-size sentinel. `azra.sta` (a small
-per-level file, `system/apps/6r51/azra.sta`) is a *different* format — short
-repeated ~32-byte records, most likely per-zone entity/actor placement data,
-not a 3D model — noted but not pursued here.
+Entry `236` (the last) is a zero-size sentinel. `azra.sta` (a small file
+only present for the `azra` zone, `system/apps/6r51/azra.sta`) is a
+*different* format — short repeated ~32-byte records, not a 3D model and
+(per `ZONE_FORMAT.md`) not entity placement either, since that's `.ent`'s
+job — still unidentified, noted but not pursued here.
 
 Each slice of `models.huge` selected by an index entry is one complete model
 resource, in exactly the format inferred from the code — **confirmed** by
@@ -174,9 +175,20 @@ argument) is now doubly confirmed by real bytes agreeing with both.
   `height*256` bound).
 - The unaccounted texture-header halfword (`+3`) and the trailer's exact
   size formula for multi-frame (`H1>1`) models.
-- `azra.sta`'s format (short repeated ~32-byte records — likely per-zone
-  entity/actor placement, not pursued here).
-- Whether the `.zon`/`.zmp`/`.pal`/etc. per-level files (21 of each, in
-  `system/apps/6r51/`) reference `models.huge` entries by the same index
-  used here, and how a room object's `+0x54` model pointer gets populated
-  from one of those files on zone load.
+- `azra.sta`'s format is still unresolved — but the "per-zone entity/actor
+  placement" guess below was **wrong**: that role is `.ent` (see
+  `ZONE_FORMAT.md`), and `.sta` isn't even one-per-zone (only `azra.sta`
+  exists, 21 zones exist) — its short repeated ~32-byte records are
+  something `azra`-specific instead (starting zone? save data?), not
+  pursued further.
+- ~~Whether the `.zon`/`.zmp`/`.pal`/etc. per-level files reference
+  `models.huge` entries by the same index used here, and how a room
+  object's `+0x54` model pointer gets populated from one of those files on
+  zone load~~ — **resolved**, see
+  [`ZONE_FORMAT.md`](ZONE_FORMAT.md#the-model-index-cache-engine0x6b38--engine0x6f38):
+  a per-zone `<zone>_models.txt` text file lists which `models.idx` archive
+  indices that zone uses, loaded into a flat 256-slot `engine+0x6b38` cache
+  keyed directly by archive index; placed objects from `<zone>.ent` get
+  their `+0x54` model pointer as a cache read from that array, keyed by an
+  index carried on a per-entity-type descriptor (`engine+0xbe34`, a BST
+  keyed by type ID).

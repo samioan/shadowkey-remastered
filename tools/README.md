@@ -203,6 +203,21 @@ evidence that the game is rendered in 2D (see that doc's correction note).
   `Actor3D_TransformAndSubmitModel` and `RoomGeometry_TransformAndSort`; see
   [`../docs/MODEL_FORMAT.md`](../docs/MODEL_FORMAT.md).
 
+- `shadowkey/ghidra/scripts/pyghidra_find_zone_loader.py` — finds the
+  zone/level loading function by locating xrefs to debug strings like
+  `"InitLevel Pre load_models"` and the `"%s\%s.ent"`/`.zon`/`.zmp` format
+  strings; see [`../docs/ZONE_FORMAT.md`](../docs/ZONE_FORMAT.md).
+- `shadowkey/ghidra/scripts/pyghidra_read_strings.py <hex-addr>...` —
+  resolves one or more `DAT_xxxxxxxx` literal-pool constants (as the
+  decompiler names them) to their string value, auto-following one level of
+  pointer indirection; used to pin down the exact `sprintf`/`sscanf` format
+  strings (e.g. `"%s\%s_models.txt"`, `"%d %d %d %d %s"`) behind the zone
+  loader's `DAT_` operands.
+- `shadowkey/ghidra/scripts/pyghidra_label_zone_loader.py` — labels
+  `GameEngine_InitLevel`, `ZoneModelList_Load`, `ModelArchive_Open`,
+  `ModelArchive_LoadByIndex`, and `EntityTypeDescriptor_Lookup`; see
+  [`../docs/ZONE_FORMAT.md`](../docs/ZONE_FORMAT.md).
+
 - **`parse_model_resource.py`** — parser/verifier for the actual on-disk 3D
   model archive, `system/apps/6r51/models.idx` + `models.huge` in the game
   install tree (found separately from `6r51.app`'s code section — this is

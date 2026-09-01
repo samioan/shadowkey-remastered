@@ -116,12 +116,18 @@ follow-up.
   transform, then renders that child via `Actor3D_TransformAndSubmitModel`.
   Only reachable via virtual dispatch (no direct callers found) — an
   `Attach::Render`-style virtual method.
-- `FUN_10083490` → `FUN_10086280` (virtual-dispatch only) — looks up an
-  **animation-frame model pointer** from a per-engine table
-  (`engine+0x6b38 + frameIndex*4`, indexed by `actor+0x2c2`, a 16-bit
-  "current frame" field), copies the actor's full transform block
-  (`actor+0x94..0x80`, i.e. position/orientation/scale), then renders that
-  frame's model — the animated-model "draw my current keyframe" path.
+- `FUN_10083490` → `FUN_10086280` (virtual-dispatch only) — looks up a
+  **model pointer** from a per-engine cache table (`engine+0x6b38 +
+  modelIndex*4`, indexed by `actor+0x2c2`), copies the actor's full
+  transform block (`actor+0x94..0x80`, i.e. position/orientation/scale),
+  then renders that model. **Correction** (see `ZONE_FORMAT.md`):
+  `actor+0x2c2` isn't a literal animation-frame counter as first guessed —
+  `engine+0x6b38` is the global `models.idx`-archive-index-keyed model
+  cache populated per-zone from `<zone>_models.txt`, so `actor+0x2c2` is
+  the entity's assigned **model archive index**, set once when the entity
+  is placed from `<zone>.ent`. The per-model vertex-animation *frame* (the
+  MD2-style keyframe within one model resource) is the separate `actor+0x70`
+  field documented in `MODEL_FORMAT.md`.
 
 All three confirm actors are driven by a **real 3D model + keyframe animation
 system**: model resources are unpacked per current frame index, transformed

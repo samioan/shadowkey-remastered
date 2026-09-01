@@ -277,12 +277,30 @@ Prioritization, driven by the port goal rather than raw coverage:
       (`tools/parse_model_resource.py`):
       [`MODEL_FORMAT.md`](MODEL_FORMAT.md).
 
+- [x] Traced the zone-loading pipeline (`GameEngine_InitLevel`,
+      0x10024dec, found via debug strings like "InitLevel Pre
+      load_models") and answered the standing question of how a placed
+      object's `+0x54` model pointer gets populated: each zone's
+      `<zone>_models.txt` lists which `models.idx` archive indices it
+      uses, loaded by `ZoneModelList_Load` into a flat 256-slot
+      `engine+0x6b38` cache keyed directly by archive index (backed by
+      `ModelArchive_Open`/`ModelArchive_LoadByIndex`, independently
+      confirming `MODEL_FORMAT.md`'s verified `models.idx`/`.huge` layout);
+      `<zone>.ent` placement records create typed game objects whose model
+      pointer is a cache read keyed by an index carried on a per-type
+      descriptor (`EntityTypeDescriptor_Lookup`, a BST at `engine+0xbe34`).
+      Also identified the outer framing of `<zone>.sur`, `.zon`, `.pth`
+      along the way (not decoded field-by-field) and corrected an earlier
+      `RENDERER_3D.md` guess (`actor+0x2c2` is the model archive index, not
+      a literal animation-frame counter). Full writeup:
+      [`ZONE_FORMAT.md`](ZONE_FORMAT.md).
+
 Next: the ~9 unexamined `Poly3D_RasterizeTextured` blend-mode variants, what
 sets `engine+0x62c` on room transitions, the `engine+0xbe0f`/`0x5c4` fade-LUT
-compositing path, and whether the per-zone `.zon`/`.zmp`/etc. files reference
-`models.huge` by this same index (how a room's `+0x54` model pointer gets
-populated on zone load). See `RENDERER_3D.md`'s and `MODEL_FORMAT.md`'s open
-follow-ups.
+compositing path, the `.sur`/`.zon`/`.pth` record field layouts, where
+`engine+0xbe34`'s type-descriptor BST itself gets populated from, and
+`azra.sta`'s still-unidentified format. See `RENDERER_3D.md`'s,
+`MODEL_FORMAT.md`'s, and `ZONE_FORMAT.md`'s open follow-ups.
 
 ## Open questions
 
