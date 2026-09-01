@@ -1,0 +1,38 @@
+# --- Copyrighted game data ---
+# Never commit the original N-Gage install image or anything extracted
+# straight from it (audio, scripts, textures, the binary itself).
+/The-Elder-Scrolls-Travels-Shadowkey_N-Gage_EN-FR-DE-ES-IT_USA-Europe-EnFrDeEsIt-26102004/
+
+# --- Third-party tooling ---
+# Not project source; fetched/installed locally, not tracked in git.
+/tools/*
+!/tools/README.md
+!/tools/e32image.py
+!/tools/resolve_imports.py
+!/tools/fingerprint_compiler.py
+!/tools/parse_symbian_lib.py
+!/tools/resolve_import_names.py
+
+# --- Ghidra project (regenerable from the .app via tools/e32image.py + analyzeHeadless) ---
+# Recursive (**) because pyghidra's open_program(), if nested_project_location
+# ever isn't passed as False, silently creates a second, nested, empty project
+# tree (shadowkey/ghidra/ShadowkeyProject/ShadowkeyProject.gpr) alongside the
+# real top-level one -- happened once already, keep the pattern robust to it.
+/shadowkey/ghidra/**/*.gpr
+/shadowkey/ghidra/**/*.rep/
+/shadowkey/ghidra/**/*.lock*
+
+# --- Extracted/derived binary artifacts (regenerable from the baserom) ---
+/shadowkey/extracted/*.bin
+/shadowkey/extracted/*.json
+# NOTE: shadowkey/import_names.json is NOT under extracted/ and IS tracked
+# on purpose -- it's a small, derived (dll!ordinal -> mangled name) table,
+# not a copy of the SDK it was cross-referenced against. See
+# docs/IMPORT_NAMES.md for provenance and how to regenerate/extend it.
+# The SDK itself (third-party, copyrighted install media) is never
+# downloaded into this repo -- it lives outside it, path documented in
+# that same doc, re-fetch it there if the table ever needs regenerating.
+
+# --- Python ---
+__pycache__/
+*.pyc

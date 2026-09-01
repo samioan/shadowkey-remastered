@@ -1,0 +1,135 @@
+# tools/
+
+Third-party/shared tooling. Not project source; this directory is
+gitignored except for the files below.
+
+- **`e32image.py`** — parser/extractor for the Symbian E32Image format (see
+  [`../docs/E32IMAGE_FORMAT.md`](../docs/E32IMAGE_FORMAT.md)). Tracked in
+  git because it *is* project code, just living in `tools/` alongside
+  everything else needed to work on this binary.
+
+  ```
+  python tools/e32image.py <path-to-6r51.app>
+  python tools/e32image.py <path-to-6r51.app> --extract-code shadowkey/extracted/6r51_code.bin
+  ```
+
+  The second form also writes `6r51_code.bin.json` with the load address
+  Ghidra needs (see below).
+
+- **`resolve_imports.py`** — resolves every import-thunk call site in the
+  code section to the `(dll, ordinal)` it actually calls, structurally (no
+  SDK `.def` file needed — see
+  [`../docs/E32IMAGE_FORMAT.md`](../docs/E32IMAGE_FORMAT.md#resolving-import-calls-without-any-sdk-def-file)
+  for how). Also usable as a library (`import resolve_imports`) — that's
+  how `shadowkey/ghidra/scripts/pyghidra_label_imports.py` gets its data.
+
+  ```
+  python tools/resolve_imports.py <path-to-6r51.app> --json out.json
+  ```
+
+- **`parse_symbian_lib.py`** — parses a period Series 60 SDK's real
+  ARM-hardware-target Symbian import library (`EUSER.LIB`, `CONE.LIB`,
+  etc. from `\epoc32\release\armi\urel\` — *not* the `\wins\`/`\winsb\`
+  emulator-target ones, incompatible ordinal scheme) into an exact
+  `ordinal -> mangled name` table. See
+  [`../docs/IMPORT_NAMES.md`](../docs/IMPORT_NAMES.md) for the full story
+  (getting the SDK, disambiguating build targets via the MSI database,
+  the `ar`-archive-with-`ds<N>.o`-members format, verification).
+
+  ```
+  python tools/parse_symbian_lib.py <path-to-EUSER.LIB> --json out.json
+  ```
+
+- **`resolve_import_names.py`** — cross-references `resolve_imports.py`'s
+  `(dll, ordinal)` list against a directory of SDK `.LIB` files
+  (`parse_symbian_lib.py`) to produce `shadowkey/import_names.json`, the
+  small derived table this repo actually tracks (see that file's header
+  comment and [`../docs/IMPORT_NAMES.md`](../docs/IMPORT_NAMES.md) — the
+  SDK itself is never committed).
+
+  ```
+  python tools/resolve_import_names.py <path-to-6r51.app> <sdk-armi-urel-dir> --json shadowkey/import_names.json
+  ```
+
+- **`fingerprint_compiler.py`** — detects ARM RVCT/ADS-style
+  frame-pointer-chained prologues vs. GCC-style lean ones, to fingerprint
+  which compiler built which part of the binary (see
+  [`../docs/COMPILER_TOOLCHAIN.md`](../docs/COMPILER_TOOLCHAIN.md)).
+
+  ```
+  python tools/fingerprint_compiler.py shadowkey/extracted/6r51_code.bin
+  ```
+
+- **Ghidra** — not installed under this repo. Reused from the sibling
+  `rac-decomp` project's shared install:
+  `C:\Users\Admin\rac-decomp\tools\ghidra_12.0.4_PUBLIC`. If that project
+  ever moves/removes it, re-fetch Ghidra 12.x and update this note (and
+  the paths below) with the new location.
+
+- **`pyghidra`** (pip package) — installed into the system Python from
+  Ghidra's own bundled copy:
+  `pip install "<GHIDRA_INSTALL_DIR>/Ghidra/Features/PyGhidra/pypkg"`.
+  This is what lets `shadowkey/ghidra/scripts/*.py` be run as plain
+  `python foo.py` instead of through `analyzeHeadless -postScript` (which,
+  on this Ghidra install, refuses `.py` scripts headless with "PyGhidra
+  script provider claims .py but Python not started" — `pyghidra` sidesteps
+  that entirely by driving Ghidra from a normal Python process).
+
+## Headless-importing `6r51.app` into Ghidra
+
+E32Image isn't ELF/PE, so Ghidra has no native loader for it. The working
+approach is: extract the raw code section with `e32image.py`, then import
+it as a raw ARM binary at its real link address, with the ARM Procedure
+Call Standard compiler spec (what Symbian's own EKA1-era toolchains
+targeted):
+
+```
+GHIDRA=/c/Users/Admin/rac-decomp/tools/ghidra_12.0.4_PUBLIC
+cd shadowkey-decomp
+"$GHIDRA/support/analyzeHeadless.bat" \
+  shadowkey/ghidra ShadowkeyProject \
+  -import shadowkey/extracted/6r51_code.bin \
+  -processor "ARM:LE:32:v4t" \
+  -cspec apcs \
+  -loader BinaryLoader \
+  -loader-baseAddr 0x10000000
+```
+
+This has been run once already (see `shadowkey/ghidra/ShadowkeyProject.gpr`,
+gitignored/regenerable) and auto-analysis completes cleanly: disassembly
+picks up mixed ARM/Thumb code without errors, which is itself a decent
+sanity check that `v4t` is the right ISA variant for this CPU.
+
+Open the resulting project in the normal Ghidra GUI
+(`"$GHIDRA/ghidraRun.bat"`) to continue analysis interactively — headless
+mode is just for the initial import/auto-analysis pass.
+
+## Labeling import calls in the Ghidra project
+
+Once the project above exists, `shadowkey/ghidra/scripts/pyghidra_label_imports.py`
+applies `resolve_imports.py`'s table (plus `shadowkey/import_names.json`'s
+real names, where resolved — 319/415) as real labels (and function
+renames, where the "Create Function" analyzer already turned a thunk into
+a Function) inside it — turns `CALL 0x1009eef0` into
+`CALL EUSER____nw__5CBaseUi` (`CBase::operator new(TUint)`) everywhere,
+including in decompiler output, or `CALL EUSER_ord1234`-style for the 96
+still-unresolved ordinals. Run from the repo root:
+
+```
+python shadowkey/ghidra/scripts/pyghidra_label_imports.py
+```
+
+It opens the existing project directly (no GUI, no `analyzeHeadless`) via
+`pyghidra.open_program(..., analyze=False, nested_project_location=False)`
+— `nested_project_location=False` matters because the project was created
+by `analyzeHeadless`, not by PyGhidra itself, so it doesn't have PyGhidra's
+usual nested-folder layout. Wrap edits in `program.openTransaction(...)`
+(a `with`-compatible `db.Transaction`) rather than the older
+`startTransaction`/`endTransaction` pair — the latter left a transaction
+open in one attempt here, which then broke `open_program`'s automatic
+save-on-exit with "Unable to lock due to active transaction".
+
+Still needs real names for the 96 unresolved ordinals (SimKin, GameComms,
+NokiaFC, one MediaClientAudioStream ordinal) — see
+[`../docs/IMPORT_NAMES.md`](../docs/IMPORT_NAMES.md) and
+[`../docs/ROADMAP.md`](../docs/ROADMAP.md).
