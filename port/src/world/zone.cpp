@@ -262,6 +262,34 @@ bool Zone::CircleHitsWall(float worldX, float worldY, float radius) const {
 
 namespace {
 
+// Shared by FloorHeightAt/CeilingHeightAt: bilinear blend of a tile's 4
+// stored corner values (0=NW,1=NE,2=SE,3=SW) at fractional position
+// (u,v) within the tile, u/v in [0,1].
+float BilinearCorner(const int16_t h[4], float u, float v) {
+    return (1.0f - u) * (1.0f - v) * h[0] + u * (1.0f - v) * h[1] + u * v * h[2] +
+           (1.0f - u) * v * h[3];
+}
+
+}  // namespace
+
+float Zone::FloorHeightAt(float worldX, float worldY) const {
+    float tx = worldX / kTileScale, ty = worldY / kTileScale;
+    int itx = static_cast<int>(std::floor(tx)), ity = static_cast<int>(std::floor(ty));
+    if (!InBounds(itx, ity)) return 0.0f;
+    const ZcpEntry& t = TypeOf(CellAt(itx, ity));
+    return BilinearCorner(t.floorHeight, tx - itx, ty - ity);
+}
+
+float Zone::CeilingHeightAt(float worldX, float worldY) const {
+    float tx = worldX / kTileScale, ty = worldY / kTileScale;
+    int itx = static_cast<int>(std::floor(tx)), ity = static_cast<int>(std::floor(ty));
+    if (!InBounds(itx, ity)) return 0.0f;
+    const ZcpEntry& t = TypeOf(CellAt(itx, ity));
+    return BilinearCorner(t.ceilingHeight, tx - itx, ty - ity);
+}
+
+namespace {
+
 constexpr int kLightAddPerCell = 0x40;  // Bullseye_PropagateLight's flat add per crossed cell
 
 // Reproduces Bullseye_PropagateLight (docs/ZONE_FORMAT.md): a 2D ray-cast

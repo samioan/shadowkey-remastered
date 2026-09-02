@@ -79,6 +79,50 @@ int main(int argc, char** argv) {
     std::printf("wall tile center, radius=1 blocked=%s\n",
                 tinyRadiusStillBlocked ? "true" : "false");
 
+    // 5. Post-M11: Zone::FloorHeightAt/CeilingHeightAt (per-tile bilinear
+    // corner interpolation, feeds main.cpp's gravity/ground-follow
+    // physics). Find an open (non-wall) tile near start and confirm: at
+    // its exact NW corner (u=v=0) the interpolated value matches
+    // ZcpEntry::floorHeight[0]/ceilingHeight[0] directly (sanity check on
+    // the bilinear math itself, not just "returns something"), and the
+    // floor is always strictly below the ceiling somewhere sane (an open
+    // tile has to have room to stand in).
+    int openTx = -1, openTy = -1;
+    for (int r = 0; r < 30 && openTx < 0; ++r) {
+        for (int dy = -r; dy <= r && openTx < 0; ++dy) {
+            for (int dx = -r; dx <= r && openTx < 0; ++dx) {
+                int x = startTx + dx, y = startTy + dy;
+                if (!zone.InBounds(x, y)) continue;
+                if (!zone.CellAt(x, y).IsWall()) {
+                    openTx = x;
+                    openTy = y;
+                }
+            }
+        }
+    }
+    if (openTx < 0) {
+        std::printf("m7_collision_smoke: no open tile found near start -- can't test heights\n");
+        return 1;
+    }
+    const sk::ZcpEntry& openType = zone.TypeOf(zone.CellAt(openTx, openTy));
+    float nwWorldX = openTx * sk::kTileScale, nwWorldY = openTy * sk::kTileScale;
+    float floorAtNW = zone.FloorHeightAt(nwWorldX, nwWorldY);
+    float ceilAtNW = zone.CeilingHeightAt(nwWorldX, nwWorldY);
+    bool cornerMatches = floorAtNW == static_cast<float>(openType.floorHeight[0]) &&
+                          ceilAtNW == static_cast<float>(openType.ceilingHeight[0]);
+    std::printf("open tile (%d,%d) NW corner: floor=%.0f (zcp=%d) ceiling=%.0f (zcp=%d) match=%s\n",
+                openTx, openTy, floorAtNW, openType.floorHeight[0], ceilAtNW,
+                openType.ceilingHeight[0], cornerMatches ? "true" : "false");
+    if (!cornerMatches) ok = false;
+
+    float centerWorldX = (openTx + 0.5f) * sk::kTileScale, centerWorldY = (openTy + 0.5f) * sk::kTileScale;
+    float floorAtCenter = zone.FloorHeightAt(centerWorldX, centerWorldY);
+    float ceilAtCenter = zone.CeilingHeightAt(centerWorldX, centerWorldY);
+    bool hasHeadroom = ceilAtCenter > floorAtCenter;
+    std::printf("open tile (%d,%d) center: floor=%.0f ceiling=%.0f headroom=%s\n", openTx, openTy,
+                floorAtCenter, ceilAtCenter, hasHeadroom ? "true" : "false");
+    if (!hasHeadroom) ok = false;
+
     std::printf("\nm7_collision_smoke: %s\n", ok ? "OK" : "FAILED");
     return ok ? 0 : 1;
 }

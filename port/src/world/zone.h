@@ -188,6 +188,22 @@ public:
     // wall-sliding feel.
     bool CircleHitsWall(float worldX, float worldY, float radius) const;
 
+    // Bilinearly interpolated floor/ceiling height (raw world units, same
+    // convention as playerStartZ/Camera::z -- NOT tile units) at a world
+    // (x,y), read from the containing tile's own ZcpEntry::floorHeight/
+    // ceilingHeight[4] corner array (corner order 0=NW,1=NE,2=SE,3=SW,
+    // matching render3d/zone_renderer.cpp's AddFloorCeiling -- these are
+    // the same 4 values that pipeline already draws the floor/ceiling
+    // quad from, just sampled here instead of rendered). No cross-tile
+    // blending: each tile's 4 corners are its own stored values, not
+    // shared with neighbors, so this only ever reads the one tile
+    // worldX/worldY falls in. Out-of-bounds returns 0.0f (callers only
+    // query positions collision has already accepted, per
+    // CircleHitsWall's own out-of-bounds-blocks convention above, so this
+    // is a conservative fallback, not expected to matter in practice).
+    float FloorHeightAt(float worldX, float worldY) const;
+    float CeilingHeightAt(float worldX, float worldY) const;
+
 private:
     int width_ = 0, height_ = 0;
     std::vector<ZmpCell> cells_;

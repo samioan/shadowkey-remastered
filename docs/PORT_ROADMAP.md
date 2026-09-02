@@ -520,12 +520,71 @@ algorithms.
       decompiled" section and `render3d/zone_renderer.h`'s updated M11
       comment.
 
+- [x] **Post-M11 fix -- player ground/gravity physics** (this session).
+      Requested directly (before scoping combat resolution): the player
+      was "just a floating camera clipping through geometry, not
+      respecting where the ground is" -- `gameCamera.z` was set once at
+      zone load (`playerStartZ + kEyeHeightOffset`) and never touched
+      again; only X/Y had wall collision (M7's `CircleHitsWall`).
+    - **No RE ground truth exists for this** -- `docs/WORLD_MODEL.md`
+      notes the real engine has fixed-point actor positions/collision
+      but was never traced to the byte level, and no gravity/jump/step
+      constant has ever been recovered. This is a from-scratch gameplay-
+      feel design, same spirit as `render3d/camera.h`'s
+      `kEyeHeightOffset`, not a decompiled behavior.
+    - Added `Zone::FloorHeightAt`/`CeilingHeightAt` (`world/zone.h`/
+      `.cpp`): bilinear interpolation across a tile's own stored
+      `ZcpEntry::floorHeight`/`ceilingHeight[4]` corners (the same 4
+      values `render3d/zone_renderer.cpp`'s `AddFloorCeiling` already
+      draws the floor/ceiling quad from -- no new data, just sampled
+      instead of rendered). Verified against real `azra.zcp` data in
+      `m7_collision_smoke`: exact-corner sampling matches the stored
+      value directly, and a real open tile's floor/ceiling gap is
+      sane (thousands of raw units, consistent with M9's room-height
+      finding).
+    - `main.cpp`'s tick loop now does simple per-tick Euler gravity
+      (`kGravity`/`kMaxFallSpeed`), a jump impulse on `Action::Jump`
+      (`kJumpSpeed`, bound to Key1 per the real default scheme -- was
+      decoded but never wired to anything), a floor clamp that snaps
+      the player to `FloorHeightAt(x,y) + kEyeHeightOffset` whenever
+      falling and at/below it (so slopes/steps of any height are
+      auto-followed while grounded -- no max step-height wall-block,
+      since there's no data on what the original's real ledge/stair
+      behavior was and `CircleHitsWall`'s wall flag already blocks
+      genuinely impassable tiles), and a ceiling clamp
+      (`kHeadroom`) against `CeilingHeightAt`.
+    - Also wired `Action::SideStepLeft`/`SideStepRight` (Key4/Key6) to
+      real strafing -- like Jump, decoded in `docs/INPUT_HANDLING.md`
+      but previously completely unused; movement forward/back/turn
+      still reads the raw `ButtonSlot` layer unchanged.
+    - Not attempted this pass: swimming/water, crouching (`SideStep`
+      wiring above only covers horizontal strafe), and any of the
+      real `PlayerExecutable`/menu-side physics hooks (if any exist --
+      not searched for).
+
 ## Next milestones (not yet started)
 
 Roughly in priority order for reaching "actually playable," not commitments:
 
 - **Combat resolution** -- Monster/Actor/Spell native classes are
-  untouched; M10 only wired up inventory/vitals data and display.
+  untouched; M10 only wired up inventory/vitals data and display. Sized
+  up this session (`shadowkey/simkin_native_bindings.json`): a Monster/AI
+  class (~55 methods -- `AiAttack`/`AiFlee`/`AiPursue`/`AiSleep`,
+  pathfinding, aggro), a separate Actor-movement class (~44 methods --
+  `SetTarget`, `FollowPath`, `SetDead`), a shared combatant-stats class
+  (~85 methods -- damage, spell resistance, status effects), a Weapon
+  class (~24 methods) plus a weapon-damage class (~6), a Spell/Scroll
+  class (~9) plus a magic-damage class (~4), and a generic game-object
+  base class (~57 methods -- position, sound, physics-adjacent). Comparable
+  in scope to M0-M11 combined, not a bounded decompile-and-patch pass --
+  plan to scope it as its own milestone starting with a narrow vertical
+  slice (one melee weapon vs. one monster type) rather than the whole
+  AI/spell surface at once. The player ground/gravity physics fix above
+  was the first concrete prerequisite (a floating, non-colliding camera
+  can't meaningfully melee anything standing on the floor); wiring a
+  real interact/attack control (`Action::Use`/`UseLeftAction`/
+  `UseRightAction` are decoded and bound but still unused) is the next
+  one, likely as part of the combat slice itself rather than ahead of it.
 - **Real save file format** -- M5's save system is simulated in-memory
   only; no on-disk save format has been RE'd yet.
 - **Real menu background images / HUD iconography** -- still flat colors

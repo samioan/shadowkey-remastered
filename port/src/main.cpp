@@ -386,6 +386,13 @@ int main(int argc, char** argv) {
     sk::Camera gameCamera;
     sk::ZoneRenderer zoneRenderer;
     bool inGame = false;
+    // Post-M11: real per-tick vertical physics (gravity/jump/ground-
+    // and-ceiling clamp), see the tick loop below for the full writeup --
+    // greenfield gameplay design (no RE ground truth exists for the
+    // original's actor physics, docs/WORLD_MODEL.md), same spirit as
+    // render3d/camera.h's kEyeHeightOffset.
+    float gameVelZ = 0.0f;
+    bool onGround = true;
     // M10: set while the character-manager screen chain is open *from*
     // the 3D view (see the CharacterManager action below) -- gameZone/
     // gameCamera stay alive so RightSelectionKey can resume gameplay
@@ -423,6 +430,8 @@ int main(int argc, char** argv) {
                 gameCamera.z = static_cast<float>(gameZone->playerStartZ) + sk::kEyeHeightOffset;
                 gameCamera.yaw = 0.0f;
                 gameCamera.fovY = 1.2f;
+                gameVelZ = 0.0f;
+                onGround = true;
                 inGame = true;
 
                 // Resolve every placed .ent record to a model archive
@@ -466,6 +475,10 @@ int main(int argc, char** argv) {
                 if (input.GetButton(sk::ButtonSlot::Right)) gameCamera.yaw -= kTurnSpeed;
                 float dx = std::cos(gameCamera.yaw) * kMoveSpeed;
                 float dy = std::sin(gameCamera.yaw) * kMoveSpeed;
+                // right = (sinYaw, -cosYaw), matching zone_renderer.cpp's
+                // own forward/right basis comment -- used for strafing.
+                float rx = std::sin(gameCamera.yaw) * kMoveSpeed;
+                float ry = -std::cos(gameCamera.yaw) * kMoveSpeed;
                 // Axis-separated collision (try X, then Y, independently)
                 // gives a simple wall-slide instead of a hard stop the
                 // instant either component would clip a wall.
@@ -481,6 +494,62 @@ int main(int argc, char** argv) {
                 };
                 if (input.GetButton(sk::ButtonSlot::Up)) tryMove(dx, dy);
                 if (input.GetButton(sk::ButtonSlot::Down)) tryMove(-dx, -dy);
+                // The real default scheme binds these to Key4/Key6
+                // (docs/INPUT_HANDLING.md) -- previously decoded but never
+                // wired up; Up/Down/Left/Right above stayed on the raw
+                // ButtonSlot layer since Left/Right double as turning, not
+                // an Action.
+                if (input.GetBoundButton(sk::Action::SideStepLeft)) tryMove(-rx, -ry);
+                if (input.GetBoundButton(sk::Action::SideStepRight)) tryMove(rx, ry);
+
+                // Post-M11: real gravity/jump/ground-and-ceiling physics,
+                // replacing the M6-M11 fixed "camera.z set once at zone
+                // load, never touched again" behavior -- the "floating
+                // camera clipping through geometry" the port previously
+                // had. No RE ground truth exists for the original's actor
+                // physics (docs/WORLD_MODEL.md notes fixed-point actor
+                // positions/collision exist but were never traced to the
+                // byte level), so this is a deliberate, from-scratch
+                // gameplay-feel design, same spirit as kEyeHeightOffset:
+                // simple Euler integration against the per-tile
+                // floor/ceiling heights Zone::FloorHeightAt/
+                // CeilingHeightAt now expose (the same corner data
+                // render3d/zone_renderer.cpp already draws the floor/
+                // ceiling quads from). Grounded state auto-follows
+                // slopes/steps of any height (snap-to-floor while
+                // velZ<=0) rather than enforcing a max step height --
+                // no data on what the original's real ledge/stair
+                // behavior was, and CircleHitsWall's own tile-level wall
+                // flag (not height) is what stops genuinely impassable
+                // terrain.
+                constexpr float kGravity = 4.0f;      // world units/tick^2
+                constexpr float kJumpSpeed = 50.0f;   // world units/tick, initial upward velocity
+                constexpr float kMaxFallSpeed = 200.0f;  // clamp, avoids tunneling through thin
+                                                          // floors over one big tick step
+                constexpr float kHeadroom = 60.0f;    // world units, eye-to-ceiling clearance
+                if (onGround && input.ConsumeBoundJustPressed(sk::Action::Jump)) {
+                    gameVelZ = kJumpSpeed;
+                    onGround = false;
+                }
+                gameVelZ -= kGravity;
+                if (gameVelZ < -kMaxFallSpeed) gameVelZ = -kMaxFallSpeed;
+                gameCamera.z += gameVelZ;
+
+                float floorEyeZ = gameZone->FloorHeightAt(gameCamera.x, gameCamera.y) +
+                                   sk::kEyeHeightOffset;
+                if (gameVelZ <= 0.0f && gameCamera.z <= floorEyeZ) {
+                    gameCamera.z = floorEyeZ;
+                    gameVelZ = 0.0f;
+                    onGround = true;
+                } else {
+                    onGround = false;
+                }
+                float ceilingZ = gameZone->CeilingHeightAt(gameCamera.x, gameCamera.y);
+                if (gameCamera.z + kHeadroom > ceilingZ) {
+                    gameCamera.z = ceilingZ - kHeadroom;
+                    if (gameVelZ > 0.0f) gameVelZ = 0.0f;
+                }
+
                 zoneRenderer.Render(backbuffer, *gameZone, gameCamera, gameEntities, &modelArchive);
                 RenderHud(backbuffer, stack.player());
                 window.Present(backbuffer);
