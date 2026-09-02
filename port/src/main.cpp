@@ -26,15 +26,20 @@
 #include "platform/win32/window.h"
 #include "render3d/camera.h"
 #include "render3d/zone_renderer.h"
+#include "simkin_bindings/combat.h"
 #include "simkin_bindings/combo_box_executable.h"
 #include "simkin_bindings/floating_sprite_executable.h"
+#include "simkin_bindings/game_constants.h"
 #include "simkin_bindings/item_button_executable.h"
+#include "simkin_bindings/item_executable.h"
 #include "simkin_bindings/menu_executable.h"
 #include "simkin_bindings/menu_stack.h"
+#include "simkin_bindings/monster_executable.h"
 #include "simkin_bindings/player_executable.h"
 #include "simkin_bindings/popup_menu_executable.h"
 #include "simkin_bindings/table_executable.h"
 #include "simkin_bindings/text_area_executable.h"
+#include "skExecutableContext.h"
 #include "skInterpreter.h"
 #include "skParseException.h"
 #include "skRuntimeException.h"
@@ -105,6 +110,25 @@ std::string SpriteLabel(const std::string& callback) {
     }
     return callback;
 }
+
+// Combat vertical-slice (docs/PORT_ROADMAP.md): a live, AI-driven
+// azra_rat instance -- unlike gameEntities' static props, these move,
+// fight, and can die, so they carry their own MonsterExecutable (real
+// stats/OnKilled pulled from monsters/Azra_Rat.s, see
+// simkin_bindings/monster_executable.h) plus mutable world position and
+// AI state, separate from the PlacedEntity list the renderer otherwise
+// draws untouched every frame. Idle/Chasing/Attacking is this port's
+// own from-scratch AI design -- no real monster script ever calls
+// AiAttack/AiPursue itself (only AiDetect(), confirmed by grepping the
+// whole monsters/*.s corpus), so there's no real state machine to
+// match, just parameters (chaseRadius etc.) to honor.
+struct MonsterInstance {
+    std::unique_ptr<sk_bindings::MonsterExecutable> script;
+    float x = 0, y = 0, z = 0;
+    int modelArchiveIndex = -1;
+    enum class AiState { Idle, Chasing, Attacking } aiState = AiState::Idle;
+    int attackCooldownTicks = 0;
+};
 
 void RenderPopup(sk::Backbuffer& backbuffer, sk_bindings::PopupMenuExecutable& popup,
                   const sk::StringTable& strings) {
@@ -383,6 +407,10 @@ int main(int argc, char** argv) {
     // engine.
     std::unique_ptr<sk::Zone> gameZone;
     std::vector<sk::PlacedEntity> gameEntities;
+    // Combat vertical-slice: live monsters, pulled out of gameEntities'
+    // static-prop list at zone load (see below) -- see MonsterInstance's
+    // comment.
+    std::vector<MonsterInstance> gameMonsters;
     sk::Camera gameCamera;
     sk::ZoneRenderer zoneRenderer;
     bool inGame = false;
@@ -439,13 +467,54 @@ int main(int argc, char** argv) {
                 // engine walks (docs/ZONE_FORMAT.md), just done eagerly
                 // here instead of through the engine+0x6b38 zone-local
                 // cache.
+                //
+                // Combat vertical-slice: typeId 202 (azra_rat, category
+                // 2/monster) is pulled out into gameMonsters instead --
+                // a live MonsterExecutable actually runs the real
+                // monsters/Azra_Rat.s Init(), same load pattern
+                // PlayerExecutable::LoadStartingInventory established
+                // for real item scripts. Every other entity (including
+                // other category-2 monster types, out of scope for this
+                // slice -- see docs/PORT_ROADMAP.md) still goes into
+                // gameEntities as a static, unanimated prop, unchanged.
                 gameEntities.clear();
+                gameMonsters.clear();
                 for (const sk::Zone::EntPlacement& e : gameZone->entities()) {
                     const sk::EntityTypeDescriptor* desc = entityTypes.Lookup(e.typeId);
                     if (!desc) continue;
+                    if (e.typeId == 202) {
+                        std::string relPath = desc->name;
+                        std::replace(relPath.begin(), relPath.end(), '\\', '/');
+                        std::string fullPath = std::string(scriptRoot) + "/" + relPath;
+                        skExecutableContext loadCtxt(&interpreter);
+                        try {
+                            auto monster = std::make_unique<sk_bindings::MonsterExecutable>(
+                                skString(fullPath.c_str()), loadCtxt, &strings, stack.player());
+                            skRValueArray args;
+                            args.append(skRValue(0));  // placeholder for Init's "(s)" parameter
+                            skRValue ret;
+                            skExecutableContext callCtxt(&interpreter);
+                            monster->method(skString("Init"), args, ret, callCtxt);
+                            MonsterInstance inst;
+                            inst.x = static_cast<float>(e.x);
+                            inst.y = static_cast<float>(e.y);
+                            inst.z = static_cast<float>(e.z);
+                            inst.modelArchiveIndex = desc->modelArchiveIndex;
+                            inst.script = std::move(monster);
+                            gameMonsters.push_back(std::move(inst));
+                        } catch (skParseException& ex) {
+                            std::printf("shadowkey-port: PARSE ERROR loading monster %s: %s\n",
+                                        fullPath.c_str(), ex.toString().ptr());
+                        } catch (skRuntimeException& ex) {
+                            std::printf("shadowkey-port: RUNTIME ERROR loading monster %s: %s\n",
+                                        fullPath.c_str(), ex.toString().ptr());
+                        }
+                        continue;
+                    }
                     gameEntities.push_back({static_cast<float>(e.x), static_cast<float>(e.y),
                                              static_cast<float>(e.z), desc->modelArchiveIndex});
                 }
+                std::printf("shadowkey-port: %zu live monster(s) loaded\n", gameMonsters.size());
             } else {
                 std::printf("shadowkey-port: failed to load zone '%s', staying in menu\n",
                             stack.requestedZone().c_str());
@@ -550,8 +619,125 @@ int main(int argc, char** argv) {
                     if (gameVelZ > 0.0f) gameVelZ = 0.0f;
                 }
 
-                zoneRenderer.Render(backbuffer, *gameZone, gameCamera, gameEntities, &modelArchive);
+                // Combat vertical-slice (docs/PORT_ROADMAP.md): from-
+                // scratch AI loop -- Idle -> Chasing once the player
+                // enters the monster's real SetChaseRadius(), Chasing ->
+                // Attacking once within melee range. Never de-aggroes
+                // once past Idle (no real data on leash/return-to-post
+                // behavior -- see monster_executable.h's class comment).
+                constexpr float kMeleeRange = 110.0f;      // world units
+                constexpr float kMonsterMoveSpeed = 22.0f;  // world units/tick, slower than the
+                                                             // player's 40 -- a rat shouldn't
+                                                             // outrun a walking player
+                constexpr float kMonsterRadius = 40.0f;     // world units, wall-collision only
+                constexpr int kAttackCooldownTicks = 25;    // ~1s at the fixed 40ms tick
+                for (MonsterInstance& m : gameMonsters) {
+                    if (!m.script->alive()) continue;
+                    float mdx = gameCamera.x - m.x, mdy = gameCamera.y - m.y;
+                    float dist = std::sqrt(mdx * mdx + mdy * mdy);
+                    if (m.aiState == MonsterInstance::AiState::Idle) {
+                        if (dist <= m.script->chaseRadius()) m.aiState = MonsterInstance::AiState::Chasing;
+                    }
+                    if (m.aiState == MonsterInstance::AiState::Idle) continue;
+                    if (dist <= kMeleeRange) {
+                        m.aiState = MonsterInstance::AiState::Attacking;
+                        if (m.attackCooldownTicks > 0) {
+                            --m.attackCooldownTicks;
+                        } else {
+                            int dmg = sk_bindings::RollDamage(
+                                m.script->attack(), stack.player().baseDefense(),
+                                stack.player().armorRating(), m.script->damageMin(),
+                                m.script->damageMax());
+                            stack.player().ApplyDamage(dmg);
+                            m.attackCooldownTicks = kAttackCooldownTicks;
+                        }
+                    } else {
+                        m.aiState = MonsterInstance::AiState::Chasing;
+                        m.attackCooldownTicks = 0;
+                        if (dist > 1.0f) {
+                            float step = kMonsterMoveSpeed / dist;
+                            float mmx = mdx * step, mmy = mdy * step;
+                            float nx = m.x + mmx;
+                            if (!gameZone->CircleHitsWall(nx, m.y, kMonsterRadius)) m.x = nx;
+                            float ny = m.y + mmy;
+                            if (!gameZone->CircleHitsWall(m.x, ny, kMonsterRadius)) m.y = ny;
+                        }
+                    }
+                    m.z = gameZone->FloorHeightAt(m.x, m.y);
+                }
+
+                // Player melee attack -- UseLeftAction/UseRightAction
+                // (Key7/Key5, real decoded default bindings, previously
+                // unused) swing whichever hand's weapon is equipped
+                // (bare-fists 1-3 damage if empty) at the nearest alive
+                // monster within melee range and roughly in front of the
+                // camera.
+                auto tryAttack = [&](sk_bindings::ItemExecutable* handItem) {
+                    float fwdX = std::cos(gameCamera.yaw), fwdY = std::sin(gameCamera.yaw);
+                    MonsterInstance* target = nullptr;
+                    float bestDist = kMeleeRange + 1.0f;
+                    for (MonsterInstance& m : gameMonsters) {
+                        if (!m.script->alive()) continue;
+                        float ddx = m.x - gameCamera.x, ddy = m.y - gameCamera.y;
+                        float dist = std::sqrt(ddx * ddx + ddy * ddy);
+                        if (dist > kMeleeRange || dist < 1.0f) continue;
+                        float facing = (fwdX * ddx + fwdY * ddy) / dist;
+                        if (facing < 0.5f) continue;  // ~60 degree forward cone
+                        if (dist < bestDist) {
+                            bestDist = dist;
+                            target = &m;
+                        }
+                    }
+                    if (!target) return;
+                    bool isWeapon = handItem && handItem->itemType() == sk_bindings::kItemTypeWeapon;
+                    int dmgMin = isWeapon ? handItem->damageMin() : 1;
+                    int dmgMax = isWeapon ? handItem->damageMax() : 3;
+                    int dmg = sk_bindings::RollDamage(stack.player().baseAttack(),
+                                                       target->script->defense(),
+                                                       target->script->armorValue(), dmgMin, dmgMax);
+                    target->script->ApplyDamage(dmg);
+                    if (!target->script->alive()) target->script->InvokeOnKilled();
+                };
+                if (input.ConsumeBoundJustPressed(sk::Action::UseLeftAction)) {
+                    tryAttack(stack.player().leftItem());
+                }
+                if (input.ConsumeBoundJustPressed(sk::Action::UseRightAction)) {
+                    tryAttack(stack.player().rightItem());
+                }
+
+                // Per-frame render list: static props (gameEntities,
+                // already excludes rats -- see the zone-load block
+                // above) plus one PlacedEntity per still-alive monster;
+                // PlacedEntity's shape (x,y,z,modelArchiveIndex) already
+                // covers what a live monster needs to render, no
+                // renderer changes required. Dead monsters simply stop
+                // appearing here -- no death animation/pose (M8's own
+                // "frame 0/skin 0 only" simplification).
+                std::vector<sk::PlacedEntity> frameEntities = gameEntities;
+                for (const MonsterInstance& m : gameMonsters) {
+                    if (m.script->alive()) {
+                        frameEntities.push_back({m.x, m.y, m.z, m.modelArchiveIndex});
+                    }
+                }
+                zoneRenderer.Render(backbuffer, *gameZone, gameCamera, frameEntities, &modelArchive);
                 RenderHud(backbuffer, stack.player());
+                // Minimal combat feedback -- name + HP of whatever
+                // monster is currently in melee range/facing cone, same
+                // "stand-in until real HUD art exists" spirit as
+                // RenderHud's vitals bars (no new art assets).
+                for (const MonsterInstance& m : gameMonsters) {
+                    if (!m.script->alive()) continue;
+                    float ddx = m.x - gameCamera.x, ddy = m.y - gameCamera.y;
+                    float dist = std::sqrt(ddx * ddx + ddy * ddy);
+                    if (dist > kMeleeRange) continue;
+                    float fwdX = std::cos(gameCamera.yaw), fwdY = std::sin(gameCamera.yaw);
+                    float facing = dist > 1.0f ? (fwdX * ddx + fwdY * ddy) / dist : 1.0f;
+                    if (facing < 0.5f) continue;
+                    std::string label = m.script->name() + "  " + std::to_string(m.script->currentHealth()) +
+                                         "/" + std::to_string(m.script->maxHealth());
+                    sk::BitmapFont::DrawString(backbuffer, 4, 4, label, kSelectedTextColor);
+                    break;
+                }
                 window.Present(backbuffer);
                 return;
             }

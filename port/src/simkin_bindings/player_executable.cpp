@@ -72,6 +72,22 @@ void PlayerExecutable::PurgeRemovedItems() {
                        m_Inventory.end());
 }
 
+int PlayerExecutable::armorRating() const {
+    int total = 0;
+    for (const auto& item : m_Inventory) {
+        if (item->itemType() == kItemTypeArmor && item->equipped()) {
+            total += item->armorValue();
+        }
+    }
+    return total;
+}
+
+void PlayerExecutable::ApplyDamage(int amount) {
+    if (amount <= 0) return;
+    m_Health -= amount;
+    if (m_Health < 0) m_Health = 0;
+}
+
 int PlayerExecutable::UpdateEquipStatus(ItemExecutable* item, bool equipping) {
     if (!item) return 3;
     if (item->itemType() == kItemTypeArmor) {
@@ -297,16 +313,7 @@ bool PlayerExecutable::method(const skString& methodName, skRValueArray& args,
         return true;
     }
     if (methodName == skString("GetArmorRating") && args.entries() == 0) {
-        // Real state: sum of every equipped armor item's real
-        // SetArmorValue() -- toggling an item's equipped flag via
-        // UpdateEquipStatus() visibly changes this.
-        int total = 0;
-        for (const auto& item : m_Inventory) {
-            if (item->itemType() == kItemTypeArmor && item->equipped()) {
-                total += item->armorValue();
-            }
-        }
-        returnValue = skRValue(total);
+        returnValue = skRValue(armorRating());
         return true;
     }
     if (methodName == skString("GetSpellToHit") && args.entries() == 0) {

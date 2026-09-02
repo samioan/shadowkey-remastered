@@ -63,6 +63,7 @@ endif()
 add_library(sk_bindings STATIC
   src/assets/string_table.cpp
   src/simkin_bindings/button_executable.cpp
+  src/simkin_bindings/combat.cpp
   src/simkin_bindings/combo_box_executable.cpp
   src/simkin_bindings/floating_sprite_executable.cpp
   src/simkin_bindings/floating_text_executable.cpp
@@ -72,6 +73,7 @@ add_library(sk_bindings STATIC
   src/simkin_bindings/menu_executable.cpp
   src/simkin_bindings/menu_item_handle.cpp
   src/simkin_bindings/menu_stack.cpp
+  src/simkin_bindings/monster_executable.cpp
   src/simkin_bindings/native_binding_common.cpp
   src/simkin_bindings/player_executable.cpp
   src/simkin_bindings/popup_menu_executable.cpp
@@ -165,3 +167,7 @@ target_link_libraries(render_at_smoke PRIVATE sk_render3d)
 # M10 milestone smoke test -- see src/tests/m10_inventory_smoke.cpp.
 add_executable(inventory_smoke src/tests/m10_inventory_smoke.cpp)
 target_link_libraries(inventory_smoke PRIVATE sk_bindings)
+
+# Combat vertical-slice smoke test -- see src/tests/m12_combat_smoke.cpp.
+add_executable(combat_smoke src/tests/m12_combat_smoke.cpp)
+target_link_libraries(combat_smoke PRIVATE sk_bindings sk_world)

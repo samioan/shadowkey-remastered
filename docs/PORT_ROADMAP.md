@@ -562,13 +562,64 @@ algorithms.
       real `PlayerExecutable`/menu-side physics hooks (if any exist --
       not searched for).
 
+- [x] **M12 -- combat vertical slice: one weapon vs. the azra rat** (this
+      session). Narrow first cut at "Combat resolution" below, scoped
+      deliberately small (one monster type, one damage formula) instead
+      of attempting the full ~250-method native surface at once.
+    - **Real data, not a synthetic fixture**: `monsters/Azra_Rat.s`'s
+      real `Init()` actually runs through the vendored interpreter
+      (`MonsterExecutable`, `port/src/simkin_bindings/
+      monster_executable.h/.cpp` -- same `skScriptedExecutable`-backed
+      pattern `ItemExecutable` established for M10's real armor/weapon
+      scripts), loaded via a chain confirmed this session:
+      `entities.txt`'s 4th column (`EntityTypeDescriptor::name`, already
+      decoded in `docs/ZONE_FORMAT.md` but never actually used by the
+      port before now) is a real script path, and the currently-tested
+      `azra` zone places 35 real typeId-202 instances. Verified against
+      the real script's literal values (attack=3, defense=4,
+      maxHealth=12, damageMin=3/damageMax=6, armorValue=2,
+      chaseRadius=18000) in the new `combat_smoke` test
+      (`src/tests/m12_combat_smoke.cpp`).
+    - `OnKilled()`'s real quest-kill-count branch
+      (`GetPlayer().QuestSolved`/`AddMonsterKilled`/`MonstersKilled`/
+      `SetQuestSolved`) is deliberately left unimplemented on
+      `PlayerExecutable` -- confirmed this session that the established
+      soft-fail convention already makes it behave correctly with no
+      kill counter modeled (walks the `else` branch, no-ops, the `>= 8`
+      check never trips), not a gap.
+    - **From-scratch, no RE ground truth**: only `AiDetect()`/
+      `AiSleep()` are ever called from any real monster script in the
+      whole corpus (`AiAttack`/`AiPursue`/`AiFlee`/`AiWounded`/
+      `AiActivate` never are) -- confirming the real AI state machine is
+      opaque/native, not scripted, so there's no real state machine to
+      match. `main.cpp`'s own Idle/Chasing/Attacking loop and
+      `simkin_bindings/combat.h`'s `RollDamage()` formula (hit-chance
+      from attack-vs-defense, damage mitigated by armor) are a deliberate
+      port-only design, same footing as the physics constants above --
+      easy to retune, not a recovered constant.
+    - Wires the real decoded `UseLeftAction`/`UseRightAction` bindings
+      (Key7/Key5, previously unused) to melee attacks with whichever
+      hand's weapon is equipped (bare fists otherwise).
+    - Not attempted: any monster type other than `typeId 202`/azra_rat,
+      spellcasting, loot spawning on death (`SetLoot`'s params are
+      stored, unused), animations/sounds (this port has none at all
+      yet), monster-vs-player physical collision, de-aggro/flee/return-
+      to-post behavior (`SetWimpy` stored, unused), and the generic
+      `Action::Use` interact binding (stays unbound -- this slice only
+      covers the two hand-attack actions).
+    - Not independently playtested for feel -- I can't drive the actual
+      windowed game loop headlessly; `combat_smoke` verifies the real
+      data and the host-side API mechanically (damage/death/soft-fail
+      sequencing), not whether the fight feels right in the running
+      game.
+
 ## Next milestones (not yet started)
 
 Roughly in priority order for reaching "actually playable," not commitments:
 
-- **Combat resolution** -- Monster/Actor/Spell native classes are
-  untouched; M10 only wired up inventory/vitals data and display. Sized
-  up this session (`shadowkey/simkin_native_bindings.json`): a Monster/AI
+- **Combat resolution (beyond the M12 slice above)** -- the rest of the
+  Monster/Actor/Spell native classes are still untouched. Sized up last
+  session (`shadowkey/simkin_native_bindings.json`): a Monster/AI
   class (~55 methods -- `AiAttack`/`AiFlee`/`AiPursue`/`AiSleep`,
   pathfinding, aggro), a separate Actor-movement class (~44 methods --
   `SetTarget`, `FollowPath`, `SetDead`), a shared combatant-stats class
@@ -576,15 +627,13 @@ Roughly in priority order for reaching "actually playable," not commitments:
   class (~24 methods) plus a weapon-damage class (~6), a Spell/Scroll
   class (~9) plus a magic-damage class (~4), and a generic game-object
   base class (~57 methods -- position, sound, physics-adjacent). Comparable
-  in scope to M0-M11 combined, not a bounded decompile-and-patch pass --
-  plan to scope it as its own milestone starting with a narrow vertical
-  slice (one melee weapon vs. one monster type) rather than the whole
-  AI/spell surface at once. The player ground/gravity physics fix above
-  was the first concrete prerequisite (a floating, non-colliding camera
-  can't meaningfully melee anything standing on the floor); wiring a
-  real interact/attack control (`Action::Use`/`UseLeftAction`/
-  `UseRightAction` are decoded and bound but still unused) is the next
-  one, likely as part of the combat slice itself rather than ahead of it.
+  in scope to M0-M11 combined, not a bounded decompile-and-patch pass.
+  M12 above took the first narrow slice (one melee weapon vs. one
+  monster type, `UseLeftAction`/`UseRightAction` wired up); still open:
+  other monster types (each with its own script and stat block, trivial
+  per-type once M12's pattern exists), spellcasting, ranged weapons,
+  loot spawning, and the generic `Action::Use` interact binding (doors,
+  pickups, NPC talk -- still unbound).
 - **Real save file format** -- M5's save system is simulated in-memory
   only; no on-disk save format has been RE'd yet.
 - **Real menu background images / HUD iconography** -- still flat colors

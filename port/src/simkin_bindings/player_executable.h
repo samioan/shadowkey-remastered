@@ -101,6 +101,19 @@ public:
     int fatigue() const { return m_Fatigue; }
     int maxFatigue() const { return m_MaxFatigue; }
 
+    // Combat vertical-slice (docs/PORT_ROADMAP.md): host-side reads of
+    // the same stat fields GetAttack()/GetDefense() answer over script
+    // calls, so main.cpp's combat loop can read a number directly
+    // instead of faking a skRValueArray call into the dispatcher.
+    int baseAttack() const { return m_BaseAttack; }
+    int baseDefense() const { return m_BaseDefense; }
+    // Sum of every equipped armor item's real SetArmorValue() -- same
+    // loop GetArmorRating()'s native handler runs, factored out here so
+    // it isn't duplicated between the script-facing path and this one.
+    int armorRating() const;
+    // Clamps m_Health at 0 -- mirrors MonsterExecutable::ApplyDamage().
+    void ApplyDamage(int amount);
+
 private:
     const sk::StringTable* m_Strings;
     std::string m_Name;
