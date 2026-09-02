@@ -919,6 +919,54 @@ Given `.sta` is dev-tool-only staging data with zero runtime consumers, this
 may not be resolvable further than "characterized precisely, not identified
 semantically" without an actual level-editor build to compare against.
 
+**Final pass, closing this out.** Four more angles were tried, specifically
+to check whether the "zero runtime consumer" wall could be worked around
+some other way:
+
+- **A second `.sta` file to cross-check against?** No — a full search of
+  the extracted install image found exactly one `.sta` file total,
+  `azra.sta`. Every other zone (21 total, each with a `.ent`) has none.
+  Previously assumed from absence of evidence; now confirmed by direct
+  search.
+- **Level-editor tool strings in the binary?** No — dumped all 3501
+  ASCII strings ≥4 chars from `6r51.app` and grepped for
+  editor/tool/staging/export/author/source-control keywords: zero hits.
+  The binary's own `"%s\%s.<ext>"` load-pattern strings cover every real
+  zone format (`.ent`, `.zmp`, `.sur`, `.ztx`, `.zon`, `.pth`, `.zfg`,
+  `.zlu`, `.zcp`, `.zsk`, `.stn`, `.s`) but conspicuously never `.sta` —
+  one more independent confirmation nothing loads it.
+- **Correlate against script-authored data instead of `.ent`'s own
+  fields?** This is the one real finding. Split `.ent`'s 282 records by
+  whether they carry a real authored `name` (63 do — NPCs, markers,
+  doors) vs. a placeholder (`none`/`noname`, 219 do — generic/decorative
+  props). Result is a clean, exceptionless partition: **all 63 named
+  records have `flags == 256` (the default), 0/63 deviate.** Every one
+  of the 22 non-default-`flags` records in the zone is an unnamed prop.
+  This sharpens the existing "skews toward decorative props" observation
+  from a statistical lean into a hard 100%/0% split: whatever `flags`
+  drives, it is provably never applied to a named/scripted entity.
+  Those same 22 records are also spatially clustered into one small
+  sub-region of the map (`x∈[24002,31460]`, `z∈[-3340,-1686]`, vs. the
+  full zone's `x∈[1744,31872]`, `z∈[-7700,-1680]`) — one localized area,
+  not a zone-wide mechanic.
+- **Ordering/index correlation?** Weak, not proof: no long runs of a
+  repeated `flags` value in record order (max run length 2, rules out
+  "last N objects placed got the same tag"), but the 22 non-default
+  records fall into two index bands (2-35 and 177-194) that echo the
+  spatial clustering above rather than adding an independent lead —
+  consistent with two separate editing sessions, not demonstrated.
+
+**Verdict: closing this as characterized as precisely as static analysis
+allows.** The named/unnamed partition and spatial clustering are real,
+verified, new evidence — `flags` is confirmed to be a decorative-prop-only,
+single-room-localized variation, strengthening (not just "consistent
+with") the level-editor visual-variation-dial hypothesis. But its *exact*
+meaning (what `flags=128` looks like vs. `240`) has no further lever to
+pull: no second `.sta` file, no tool strings, and — as already
+established — no runtime consumer at all, so there is nothing left to
+trace it against short of an actual level-editor build or source. This
+field is not going to resolve further within this project.
+
 `unkA` (already known to round-trip byte-for-byte between `.sta` and `.ent`)
 is also now more precisely characterized rather than left as a bare
 "not decoded": across all 282 `.ent` records, 190 (67%) are exactly `0`
@@ -927,8 +975,16 @@ is also now more precisely characterized rather than left as a bare
 16 or 256 fixed-point units the way `flags` is), and it is **not** a
 function of `typeId` (16 of 34 distinct `typeId`s take more than one
 `unkA` value) and does **not** equal any of the same record's own `rot[4]`
-values. No further semantic lead found this pass — still genuinely
-undecoded, just numerically bounded now.
+values. The same named/unnamed split used for `flags` above shows `unkA`
+runs on **independent, opposite logic**: nonzero on 54/63 (86%) of named
+records vs. only 38/219 (17%) of unnamed ones, and spread across the
+*entire* zone rather than one localized area — confirming `flags` and
+`unkA` are governed by unrelated mechanisms, and hinting `unkA` may be
+something like a scripting/dialogue/spawn-condition id tied mostly to
+named entities, though no value-level correlation to any specific script
+hook was found (not attempted in depth this pass). No further semantic
+lead beyond that — still genuinely undecoded, just numerically bounded
+and now behaviorally distinguished from `flags`.
 
 **Conclusion**: `azra.sta` is a **leftover development-tool export of
 (a slightly earlier version of) the same entity-placement data now
@@ -982,14 +1038,21 @@ end (not shown to be related to `.sta` — no code path connects them).
   leftover level-editor staging export of `azra.ent`'s entity placements,
   never read by the shipped game. The 5 literal `"azra"` strings in the
   binary remain unexplained (not shown related to `.sta`).
-- ~~`.sta`'s `flags`/`unkA`/`unkB` fields~~ — **`unkB` resolved**: it's not
-  a separate field at all, it's `.sta`'s own `flags`/`marker` u16 pair,
-  still packed into one `.ent` int32 (`(0xCCCC<<16)|flags`, verified
-  188/188 exact matches). `flags` itself and `unkA` are now precisely
-  characterized (value distributions, ruled out as a scaled copy of
-  `entities.txt`'s category enum or a function of `typeId`) but their
-  actual semantic meaning is still open — plausibly level-editor-only
-  per-instance metadata (e.g. a visual-variation dial) with no runtime
-  consumer to cross-reference against, since nothing in `6r51.app` reads
-  `.sta` at all. See the `azra.sta` section above and
+- ~~`.sta`'s `flags`/`unkA`/`unkB` fields~~ — **closed, as far as static
+  analysis can take it**: `unkB` is fully resolved (it's not a separate
+  `.ent` field at all, it's `.sta`'s own `flags`/`marker` u16 pair, still
+  packed into one `.ent` int32, `(0xCCCC<<16)|flags`, verified 188/188
+  exact matches). `flags` and `unkA` are precisely characterized —
+  value distributions, ruled out as a scaled copy of `entities.txt`'s
+  category enum or a function of `typeId`, and (final pass) `flags`
+  proven decorative-prop-only/single-room-localized via a clean 0/63
+  named-vs-22/22-unnamed partition while `unkA` runs on independent
+  logic skewed toward named entities (86% vs. 17% nonzero) — but their
+  exact semantic meaning is unrecoverable: confirmed only one `.sta`
+  file ever shipped (no cross-zone comparison possible), no
+  level-editor tool strings exist anywhere in the binary, and — as
+  already established — nothing in `6r51.app` ever reads a `.sta` file
+  at all, so there is no runtime consumer to trace meaning from and no
+  further data-comparison lever left to pull short of an actual
+  level-editor build or source. See the `azra.sta` section above and
   `tools/analyze_sta_fields.py`.

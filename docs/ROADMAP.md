@@ -796,8 +796,35 @@ Prioritization, driven by the port goal rather than raw coverage:
   and
   [`SIMKIN_NATIVE_API.md`](SIMKIN_NATIVE_API.md#whats-still-open).
 
-`.sta`'s `flags`/`unkA` stay closed as bounded-but-unidentified (no
-runtime consumer exists to trace meaning from, see `ZONE_FORMAT.md`).
+- [x] **`.sta`'s `flags`/`unkA`, final pass — closed as far as static
+      analysis can take it.** Four fresh angles tried, specifically to
+      see if the "no runtime consumer" wall could be worked around some
+      other way: (1) confirmed by full search of the extracted install
+      image that `azra.sta` is the *only* `.sta` file that ever shipped
+      (all 21 other zones have a `.ent` but no `.sta`) — no cross-zone
+      comparison is possible; (2) dumped all 3501 strings in `6r51.app`
+      and found zero level-editor/tool/staging/export/author strings
+      anywhere, and confirmed the binary's own `"%s\%s.<ext>"` load
+      patterns cover every real zone format except `.sta`; (3) the one
+      real finding — cross-referencing against `.ent`'s authored `name`
+      field (63 named records vs. 219 `none`/`noname` placeholders)
+      gives a clean, exceptionless split: **all 63 named records have
+      `flags == 256` (default), 0/63 deviate; every non-default-`flags`
+      record is an unnamed prop**, and those 22 records cluster into one
+      small sub-region of the map rather than spreading zone-wide —
+      sharpens "skews toward decorative props" into a hard 100%/0%
+      split. `unkA` runs on independent logic (86% nonzero on named
+      records vs. 17% on unnamed, spread across the whole zone),
+      confirming `flags`/`unkA` are unrelated mechanisms; (4) no
+      ordering/batch pattern beyond echoing the same spatial clustering.
+      Verdict: real, verified evidence that `flags` is a
+      decorative-prop-only, single-room-localized variation dial, but
+      its *exact* meaning has no further lever to pull — no second
+      `.sta` file, no tool strings, and (as already established) no
+      runtime consumer at all. This field will not resolve further
+      within this project. Full writeup:
+      [`ZONE_FORMAT.md`](ZONE_FORMAT.md#azrasta-a-leftover-level-editor-staging-file-not-a-game-format).
+
 See `MODEL_FORMAT.md`'s, `RENDERER_3D.md`'s, `WORLD_MODEL.md`'s,
 `ZONE_FORMAT.md`'s, `INPUT_HANDLING.md`'s, and `SIMKIN_BRIDGE.md`'s open
 follow-ups.
