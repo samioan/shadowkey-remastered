@@ -724,6 +724,162 @@ algorithms.
     - Full writeup: `docs/GRAPHICS_FORMAT.md`'s "The real gameplay HUD"
       section.
 
+- [x] **Post-M14 fix -- vitals bar was the wrong widget; real health/
+      magicka/fatigue cluster found and implemented** (this session).
+      Prompted by two user-provided screenshots of real gameplay: one
+      showed a small 3-bar cluster (health/magicka/fatigue stacked in
+      one 57x46 dragon frame) the port didn't render at all, the other
+      showed the M14 big single bar actually does appear in real play
+      too, just not as the default HUD.
+    - Traced `FUN_1002ae88`'s (previously misidentified as a "weapon
+      condition" indicator) real direct caller: `FUN_10029cb0`, itself
+      vtable slot `+0x1c` on the same secondary vtable, confirmed called
+      *every tick unconditionally*. Its gameplay-state branch calls
+      `FUN_1002ae88()` + `FUN_1002ba64()` (compass) + `FUN_1002bb54()`
+      (hand icons) together, every frame -- settling that `FUN_1002ae88`
+      is the real vitals HUD, not `FUN_1002c010`.
+    - `FUN_1002ae88` draws three 39x5 bars (`global.spr` slots
+      162=red/160=blue/161=green) at `(10,182)`/`(10,190)`/`(10,196)`,
+      then one shared frame (slot 180, 57x46) on top at `(0,162)`. Field
+      order in the backing stat struct (red/green/blue, not red/blue/
+      green) plus standard color convention fixes red=health (top),
+      blue=magicka (middle), green=fatigue (bottom).
+    - `FUN_1002c010`'s big single bar is real and does appear in actual
+      play (per the second screenshot) but its trigger is still
+      unresolved -- a whole-memory raw scan (not just literal pools) for
+      its address and its vtable's base address both come back with
+      exactly one static reference each (the one vtable slot itself),
+      so the real call site is a fully dynamic dispatch this pass
+      couldn't pin down. Left unimplemented; documented as an open item
+      rather than guessed at -- see `docs/GRAPHICS_FORMAT.md`.
+    - `main.cpp`'s `RenderHud` now draws the real 3-bar cluster (with a
+      flat-bar fallback if the assets fail to load) in place of the
+      single health bar + relocated flat magicka/fatigue bars M14 had.
+    - **Confirmed live**: created a character and screenshotted actual
+      gameplay -- the small dragon-head frame renders with all three
+      real bars (red/pale-blue/green), matching the user's reference
+      screenshot.
+
+- [x] **Post-M14 fix -- the real N-Gage system font, decoded and wired
+      in** (this session). M13's "real font" closure only established
+      *where* the glyphs live (the N-Gage's Symbian ROM, not this
+      game's files) -- a real ROM dump turned out to be available (an
+      EKA2L1 emulator profile), reopening the question of whether that
+      ROM's font could actually be extracted and used.
+    - `Z:\System\Fonts\Ceurope.gdr` on a real N-Gage QD ROM dump is a
+      genuine Symbian OS `.gdr` bitmap-font file -- not a shadowkey
+      format, so no Ghidra angle; ported the byte layout from the
+      open-source EKA2L1 emulator's own GPLv3 parser, then verified
+      independently: the port's reimplementation consumes the *entire*
+      31389-byte file with zero leftover bytes and recovers 8 real
+      typefaces with correctly shaped glyphs.
+    - The one real trap: embedded strings (typeface names, copyright
+      text) are SCSU-compressed, and the on-disk length prefix is only
+      an upper-bound *buffer* size to decompress into -- the real
+      per-string byte length only comes out of actually running the
+      decompressor. A naive "skip N bytes" first attempt desynced the
+      whole rest of the file after the first string; had to port the
+      real SCSU state machine to fix it. Full writeup: `docs/
+      GRAPHICS_FORMAT.md`'s "The real Symbian .gdr font format" section.
+    - New `port/src/assets/gdr_font.h/.cpp` (`GdrFont`, parses a `.gdr`
+      and exposes one typeface's glyph bitmaps by codepoint) and `font_
+      smoke` test (parses the real file, checks byte-exact full-file
+      consumption, all 94 printable-ASCII codepoints decode to sane
+      glyphs, missing-file handling stays non-fatal).
+    - `bitmap_font.h`'s `BitmapFont::DrawString` now draws real glyph
+      bitmaps (real per-glyph advance/left-bearing/baseline placement)
+      wherever the loaded font covers a codepoint, falling back to the
+      old blocky 5x7 placeholder otherwise. `main.cpp` loads
+      `"LatinPlain12"` from a configurable path (default `port/assets/
+      fonts/Ceurope.gdr`) -- like the retail game install, this file is
+      Nokia device firmware, never committed to the repo (see
+      `.gitignore`); each dev copies their own extraction in.
+    - **Confirmed live**: the main menu now renders real proportional
+      mixed-case Symbian UI text ("New Game", "Load Game", ...) in
+      place of the old blocky upper-case-only placeholder.
+
+- [x] **Post-M14 fix #2 -- the .gdr font above was wrong; real menu
+      font, size, position, and alignment all corrected** (same
+      session, immediate follow-up). A user-provided real screenshot
+      compared against every glyph in *both* real ROM font files
+      (`Ceurope.gdr`'s 8 typefaces, `Browsereur.gdr`'s 9 more) showed
+      none of them match -- the real menu font is a distinctly rounded
+      face, every real device font is a plain blocky sans.
+    - Before concluding it must be a non-ROM font, checked whether it's
+      instead a hand-drawn glyph-sheet sprite (plausible for 2004
+      handset UI, and the letterforms do look hand-pixeled) -- scanned
+      all 384 `global.spr` slots (already fully decoded) for a
+      glyph-sheet shape; found none (the one dense run of same-sized
+      slots is a torch-flicker animation, not letters). Checked
+      `6r51.mbm` too (a real separate Symbian bitmap resource this game
+      ships) -- 1770 bytes, just the launcher icon. Rules out the
+      likely loose-asset locations, doesn't rule out glyphs compiled
+      directly into `6r51.app`'s own resources (not checked).
+    - The user identified the actual visual match by comparing against
+      what EKA2L1 itself renders with: **"Nokia Cellphone FC"**, a
+      freeware TrueType lookalike of classic Nokia phone displays.
+      *How* EKA2L1 arrives at this font wasn't pinned down (checked its
+      font-matching source, user-font-import mechanism, and config
+      override -- none explain it on this machine) -- a visual-match
+      finding, not a traced code path.
+    - `bitmap_font.h`/`.cpp`'s `LoadRealFont` now dispatches by file
+      extension: `.ttf` renders through a new `TtfFont` class using
+      **Win32 GDI** (`AddFontResourceExA`/`CreateFontIndirectW`/
+      `ExtTextOutW` into an off-screen DIB, composited by luminance
+      blend) -- this port already links GDI for presentation, no reason
+      to hand-parse TrueType outlines. `.gdr` still works via `GdrFont`,
+      just isn't the default. `main.cpp` now loads `port/assets/fonts/
+      nokiafc22.ttf` as `"Nokia Cellphone FC"`, sized at 8px (12px and
+      10px both visibly too large against the real screenshot).
+    - Position was also wrong: the main menu's background
+      (`MenuBackground(69)`) has logo art baked into its top ~50px,
+      unlike every other menu background -- the port's shared `y = 8`
+      item-list start collided with it. Fixed to `y = 50` specifically
+      for `backgroundId() == 69` (a measured constant, nothing in
+      `mainmenu.s` sets this).
+    - Alignment was wrong too: real menu items are centered with
+      color-only selection (no arrow glyph); the port had left-aligned
+      text plus an invented `>` selection arrow. `BitmapFont::
+      TextWidth(text)` (changed from an unused fixed-pitch overload to
+      a real GDI-measured width) now centers `MenuItem`/`StaticItem`
+      rows in `RenderMenu`; the arrow draw was removed.
+    - **Confirmed live**: font shape, size, position, and centered
+      alignment all now match the real screenshot.
+    - Like `Ceurope.gdr`, `nokiafc22.ttf` is third-party and never
+      committed to this repo (see `.gitignore`) -- each dev supplies
+      their own copy. Full writeup: `docs/GRAPHICS_FORMAT.md`'s
+      "Correction" section right after the `.gdr` writeup.
+
+- [x] **Post-M14 fix #3 -- fix #2 above was itself wrong; `Ceurope.gdr`
+      is the real menu font after all, plus real text colors** (same
+      session). Two things prompted a second look: the TTF still didn't
+      look right, and decompiling shadowkey's own text-draw chain
+      (`DrawUIText` -> `FUN_1008f8a4` -> `FUN_10022b20`) showed ordinary
+      `AddMenuItem` rows hit the branch that calls genuine `EIKCORE::
+      LegendFont()` -- the real ROM font -- confirming fix #2's TTF
+      substitution was never actually justified by the game's own code.
+    - Re-compared properly this time: downscaled the real screenshot
+      back to native 176x208 (undoing a video capture's ~4.4x upscale)
+      instead of comparing against the upscaled image, then checked
+      "New Game" letter-by-letter against every `Ceurope.gdr` glyph --
+      **exact bit-for-bit match against `LatinBold12`** (not
+      `LatinPlain12`, fix #1's original guess). The "rounded" look that
+      drove fix #2 was video-compression blur on a blocky ~11px bitmap
+      font in the upscaled image, not a real font difference.
+    - `main.cpp` loads `Ceurope.gdr`/`"LatinBold12"` again.
+      `BitmapFont::TextWidth` (added in fix #2 for centering) now also
+      sums real `.gdr` per-glyph advances, not just the TTF/placeholder
+      cases -- needed for centering to measure the font actually in use.
+      The TTF path stays in the code, working, just not the default.
+    - Also fixed (separate user feedback, same real screenshot): menu
+      text colors, sampled directly off it -- unselected items are dark
+      red/maroon (`~112,48,48`), the selected item is near-white
+      (`~216,216,216`), replacing the port's prior gold/light-gray
+      scheme. Gave the disabled/static color its own distinct muted
+      tone too (previously too close to the unselected color to read
+      as a real third state).
+    - Full writeup: `docs/GRAPHICS_FORMAT.md`'s "Correction #2" section.
+
 ## Next milestones (not yet started)
 
 Roughly in priority order for reaching "actually playable," not commitments:
@@ -747,11 +903,11 @@ Roughly in priority order for reaching "actually playable," not commitments:
   pickups, NPC talk -- still unbound).
 - **Real save file format** -- M5's save system is simulated in-memory
   only; no on-disk save format has been RE'd yet.
-- **Weapon condition/charge HUD indicator** -- M14 below found a
-  second ornate-bar HUD function (`FUN_1002ae88`, `global.spr` slot
-  180) reading the equipped-weapon struct, not a core vital -- not
-  implemented, since this port doesn't model weapon durability/charge
-  at all yet (no backing data to drive it).
+- **`FUN_1002c010`'s big single vitals bar** -- confirmed real (appears
+  in actual gameplay per a user screenshot) but its trigger condition is
+  still unresolved after an exhaustive whole-memory reference scan; see
+  the Post-M14 fix entry above and `docs/GRAPHICS_FORMAT.md`. Leading
+  guess: an enemy lock-on/target health bar, unconfirmed.
 - Audio: entirely unaddressed so far, format not RE'd.
 
 ## Verification approach

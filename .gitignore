@@ -3,6 +3,14 @@
 # straight from it (audio, scripts, textures, the binary itself).
 /The-Elder-Scrolls-Travels-Shadowkey_N-Gage_EN-FR-DE-ES-IT_USA-Europe-EnFrDeEsIt-26102004/
 
+# --- Copyrighted device firmware ---
+# Same reasoning as the game data above -- Ceurope.gdr (the real N-Gage
+# system font, see port/src/assets/gdr_font.h) is Nokia device ROM
+# content, not this project's own data. Never commit it; each dev
+# copies their own extraction here (e.g. from an EKA2L1 profile's
+# data/drives/z/<device>/System/Fonts/).
+/port/assets/fonts/
+
 # --- Third-party tooling ---
 # Not project source; fetched/installed locally, not tracked in git.
 /tools/*

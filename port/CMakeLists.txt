@@ -115,6 +115,7 @@ target_link_libraries(sk_render3d PUBLIC sk_world)
 
 add_executable(shadowkey_port
   src/main.cpp
+  src/assets/gdr_font.cpp
   src/assets/sprite_archive.cpp
   src/graphics/bitmap_font.cpp
   src/platform/win32/window.cpp
@@ -176,3 +177,7 @@ target_link_libraries(combat_smoke PRIVATE sk_bindings sk_world)
 # Sprite archive (global.spr) smoke test -- see src/tests/m13_sprite_smoke.cpp.
 add_executable(sprite_smoke src/tests/m13_sprite_smoke.cpp src/assets/sprite_archive.cpp)
 target_include_directories(sprite_smoke PRIVATE src)
+
+# Real N-Gage system font (.gdr) smoke test -- see src/tests/m15_font_smoke.cpp.
+add_executable(font_smoke src/tests/m15_font_smoke.cpp src/assets/gdr_font.cpp)
+target_include_directories(font_smoke PRIVATE src)

@@ -50,14 +50,19 @@
 
 namespace {
 
-// Colors are placeholders -- the real palette/background-image format was
-// never RE'd (docs/GRAPHICS_FORMAT.md flags the image-cache source format
-// as unconfirmed; see the port plan's known-stubs list). Flat colors here
-// stand in for MenuBackground(id) until that's resolved.
+// kBackgroundColor is a placeholder -- only the flat fallback fill for
+// when a real MenuBackground() sprite fails to load (docs/
+// GRAPHICS_FORMAT.md); the real backgrounds themselves are decoded
+// sprite art, not a color. The menu text colors below, though, are
+// real values sampled directly off a real screenshot (unselected =
+// dark red, selected = near-white, static/disabled kept as a muted
+// tone distinct from both -- not confirmed against a real disabled
+// row, no screenshot of one on hand, but at minimum no longer
+// identical-looking to the enabled colors).
 constexpr uint16_t kBackgroundColor = sk::PackRGB565(16, 16, 32);
-constexpr uint16_t kTextColor = sk::PackRGB565(220, 220, 220);
-constexpr uint16_t kSelectedTextColor = sk::PackRGB565(255, 220, 80);
-constexpr uint16_t kStaticTextColor = sk::PackRGB565(120, 120, 130);
+constexpr uint16_t kTextColor = sk::PackRGB565(140, 40, 40);
+constexpr uint16_t kSelectedTextColor = sk::PackRGB565(235, 235, 235);
+constexpr uint16_t kStaticTextColor = sk::PackRGB565(110, 95, 75);
 constexpr uint16_t kTitleColor = sk::PackRGB565(140, 180, 255);
 constexpr uint16_t kPopupBgColor = sk::PackRGB565(40, 40, 60);
 constexpr uint16_t kPopupBorderColor = sk::PackRGB565(90, 90, 130);
@@ -172,7 +177,14 @@ void RenderMenu(sk::Backbuffer& backbuffer, sk_bindings::MenuExecutable& menu,
         backbuffer.Fill(kBackgroundColor);
     }
 
-    int y = 8;
+    // Slot 69 (the main menu's background, MenuBackground(69) in
+    // mainmenu.s) has "The Elder Scrolls Travels / SHADOWKEY" logo art
+    // baked into its top ~50px -- unlike every other menu background
+    // (20, 174), which are plain parchment. The real game's item list
+    // starts below it; nothing in mainmenu.s sets this explicitly (no
+    // native y-offset call exists), so this is a fixed native constant
+    // measured against a real screenshot, not a decompiled value.
+    int y = menu.backgroundId() == 69 ? 50 : 8;
     const int lineHeight = sk::BitmapFont::kGlyphHeight + 4;
 
     if (menu.titleTextId() >= 0) {
@@ -186,15 +198,21 @@ void RenderMenu(sk::Backbuffer& backbuffer, sk_bindings::MenuExecutable& menu,
         uint16_t color = !row.selectable      ? kStaticTextColor
                           : isSelected         ? kSelectedTextColor
                                                 : kTextColor;
-        if (isSelected) sk::BitmapFont::DrawString(backbuffer, 2, y, ">", kSelectedTextColor);
 
         switch (row.kind) {
             case RowKind::MenuItem:
-            case RowKind::StaticItem:
-                sk::BitmapFont::DrawString(backbuffer, 12, y,
-                                            RowText(row.textId, row.literalText, strings), color);
+            case RowKind::StaticItem: {
+                // Real menu item rows (mainmenu.s etc.) are centered on
+                // screen -- confirmed against a real screenshot, which
+                // also shows no left-margin arrow glyph on the selected
+                // row (selection is color-only, kSelectedTextColor).
+                std::string label = RowText(row.textId, row.literalText, strings);
+                int textW = sk::BitmapFont::TextWidth(label);
+                int textX = (sk::Backbuffer::kWidth - textW) / 2;
+                sk::BitmapFont::DrawString(backbuffer, textX, y, label, color);
                 y += lineHeight;
                 break;
+            }
             case RowKind::ItemButton: {
                 auto* item = static_cast<sk_bindings::ItemButtonExecutable*>(row.widget.get());
                 if (item->visible()) {
@@ -320,23 +338,44 @@ void RenderMenu(sk::Backbuffer& backbuffer, sk_bindings::MenuExecutable& menu,
 // unverified-direction mapping from yaw to that same [0,254] range, not
 // a decompiled formula.
 //
-// **Vitals bar** (`FUN_1002c010`, decompiled in full): draws global.spr
-// slot 205 (79x9 red gradient) at (44,182), width clipped to
-// `fraction * 79` px (a percentage fill, matching the function's own
-// `(ratio * 0x4f00) >> 16` clip-width computation, 0x4f = 79), then
-// slot 206 (94x42 dragon-wing frame, transparent gap over the fill) on
-// top at (40,166) -- same fill-then-frame-mask technique as the
-// compass. No static caller was found (real call site is an indirect
-// vtable dispatch this pass didn't fully resolve), so the *exact* stat
-// this bar represents isn't 100% certain -- red color and the most
-// prominent HUD position both point to health, the choice made here.
-// No equivalent real asset/position was found for magicka/fatigue (a
-// sibling ornate-bar function, `FUN_1002ae88`, turned out to read
-// player+0x3ac -- the equipped-weapon struct decompiled in a previous
-// session's hand-system work -- not a core vital; likely a weapon-
-// condition/charge indicator this port doesn't model). Magicka/fatigue
-// stay the M10 flat-bar stand-in, moved to the bottom-left corner so
-// they don't overlap the new real health bar.
+// **Vitals bar cluster** (`FUN_1002ae88`, decompiled in full,
+// corrected post-M14): this -- not `FUN_1002c010` below -- is the real
+// always-on vitals HUD. Found via `FUN_1002ae88`'s actual (direct,
+// non-vtable) caller `FUN_10029cb0`, which is itself vtable slot +0x1c
+// on the same `ScreenModeController` secondary vtable, confirmed called
+// unconditionally every tick from `GameTick_UpdateAndPresent`; inside
+// it, the gameplay-screen-mode branch (state == 5) calls exactly
+// `FUN_1002ae88(); FUN_1002ba64(); FUN_1002bb54();` -- vitals, compass,
+// hand icons, together, every frame. `FUN_1002ae88` draws THREE 39x9
+// bars (global.spr slots 162=red, 160=blue/white, 161=green, each 39x5)
+// at (10,182)/(10,190)/(10,196), each width-clipped to its own
+// percentage fill, then ONE shared frame (slot 180, 57x46, dragon-head/
+// wing art) on top at (0,162) masking all three. Field-order in the
+// underlying stat struct (max fields at +0x24/+0x26/+0x28, matching
+// red/green/blue in that address order -- i.e. health/fatigue/magicka,
+// not health/magicka/fatigue) plus standard health=red/magicka=blue/
+// fatigue=green color convention fixes the three bars as health (top),
+// magicka (middle), fatigue (bottom).
+//
+// A live user-provided screenshot from real gameplay confirms this
+// exact 3-bar cluster (docs/GRAPHICS_FORMAT.md's HUD section has the
+// verification writeup).
+//
+// **Open item**: a real screenshot *also* shows a second, different
+// vitals widget -- `FUN_1002c010`'s single big bar (global.spr slot 205,
+// 79x9 red gradient, at (44,182); slot 206, 94x42 dragon-wing frame, at
+// (40,166)) -- in actual play. Exhaustively searched (whole-memory scan
+// for both the function's own address and its containing vtable's base
+// address as raw 4-byte words): `FUN_1002c010` is referenced exactly
+// once anywhere in the program, at its one static vtable slot
+// (`ScreenModeController`+0x44) -- there's no second static caller to
+// find, meaning the real trigger is a fully dynamic/computed dispatch
+// this pass couldn't resolve (not this project's usual "just search
+// harder" case). Left unimplemented rather than guessing at a trigger
+// condition; a real research lead if this HUD is revisited: whatever
+// game state raises it is probably rare/conditional (an enemy
+// lock-on/target health bar is the leading guess, given it's a single
+// bar with no magicka/fatigue counterpart -- but unconfirmed).
 //
 // **Equipped-item icons** (`FUN_1002bb54`, decompiled in full): the
 // real function draws the left/right hand's equipped item icon at
@@ -365,50 +404,42 @@ void RenderHud(sk::Backbuffer& backbuffer, const sk_bindings::PlayerExecutable& 
     drawHandIcon(player.leftItem(), 5);
     drawHandIcon(player.rightItem(), 139);
 
-    const sk::Sprite* healthFill = sprites.GetSprite(205);
-    const sk::Sprite* healthFrame = sprites.GetSprite(206);
-    if (healthFill && healthFrame) {
-        float fraction = player.maxHealth() > 0
-                              ? (std::max)(0.0f, static_cast<float>(player.health())) /
-                                    static_cast<float>(player.maxHealth())
+    const sk::Sprite* vitalsFrame = sprites.GetSprite(180);
+    auto drawVitalBar = [&](int slot, int y, int value, int maxValue) {
+        const sk::Sprite* fill = sprites.GetSprite(slot);
+        if (!fill) return false;
+        float fraction = maxValue > 0
+                              ? (std::max)(0.0f, static_cast<float>(value)) / static_cast<float>(maxValue)
                               : 0.0f;
-        int fillWidth = static_cast<int>(healthFill->width * (std::min)(1.0f, fraction));
-        backbuffer.BlitRegion(44, 182, *healthFill, 0, fillWidth);
-        backbuffer.Blit(40, 166, *healthFrame);
-    } else {
-        // Fallback (missing asset): the old flat health bar, same slot
-        // the real bar would occupy.
-        constexpr int kBarWidth = 50, kBarHeight = 4;
-        int filled = player.maxHealth() > 0
-                          ? (kBarWidth * (std::max)(0, player.health())) / player.maxHealth()
-                          : 0;
-        filled = (std::min)(filled, kBarWidth);
-        for (int dy = 0; dy < kBarHeight; ++dy) {
-            for (int dx = 0; dx < kBarWidth; ++dx) {
-                backbuffer.SetPixel(40 + dx, 182 + dy,
-                                     dx < filled ? sk::PackRGB565(200, 40, 40) : kPopupBorderColor);
-            }
-        }
-    }
-
-    // Magicka/fatigue: no real ornate asset/position was found for
-    // these (see class comment) -- kept as the original M10 flat bars,
-    // relocated to the bottom-left corner clear of the real health bar
-    // above (which now occupies x=40..134, y=166..208).
-    constexpr int kBarWidth = 32, kBarHeight = 3, kBarGap = 2;
-    int y = sk::Backbuffer::kHeight - 4 - 2 * kBarHeight - kBarGap;
-    auto drawFlatBar = [&](int value, int maxValue, uint16_t color) {
-        int filled = maxValue > 0 ? (kBarWidth * (std::max)(0, value)) / maxValue : 0;
-        filled = (std::min)(filled, kBarWidth);
-        for (int dy = 0; dy < kBarHeight; ++dy) {
-            for (int dx = 0; dx < kBarWidth; ++dx) {
-                backbuffer.SetPixel(2 + dx, y + dy, dx < filled ? color : kPopupBorderColor);
-            }
-        }
-        y += kBarHeight + kBarGap;
+        int fillWidth = static_cast<int>(fill->width * (std::min)(1.0f, fraction));
+        backbuffer.BlitRegion(10, y, *fill, 0, fillWidth);
+        return true;
     };
-    drawFlatBar(player.magicka(), player.maxMagicka(), sk::PackRGB565(60, 80, 220));
-    drawFlatBar(player.fatigue(), player.maxFatigue(), sk::PackRGB565(60, 180, 80));
+    bool health = drawVitalBar(162, 182, player.health(), player.maxHealth());
+    bool magicka = drawVitalBar(160, 190, player.magicka(), player.maxMagicka());
+    bool fatigue = drawVitalBar(161, 196, player.fatigue(), player.maxFatigue());
+    if (vitalsFrame && (health || magicka || fatigue)) {
+        backbuffer.Blit(0, 162, *vitalsFrame);
+    } else {
+        // Fallback (missing asset): flat bars, same footprint the real
+        // cluster occupies.
+        constexpr int kBarWidth = 39, kBarHeight = 5, kBarGap = 3;
+        int y = 182;
+        auto drawFlatBar = [&](int value, int maxValue, uint16_t color) {
+            int filled = maxValue > 0 ? (kBarWidth * (std::max)(0, value)) / maxValue : 0;
+            filled = (std::min)(filled, kBarWidth);
+            for (int dy = 0; dy < kBarHeight; ++dy) {
+                for (int dx = 0; dx < kBarWidth; ++dx) {
+                    backbuffer.SetPixel(10 + dx, y + dy,
+                                         dx < filled ? color : kPopupBorderColor);
+                }
+            }
+            y += kBarHeight + kBarGap;
+        };
+        drawFlatBar(player.health(), player.maxHealth(), sk::PackRGB565(200, 40, 40));
+        drawFlatBar(player.magicka(), player.maxMagicka(), sk::PackRGB565(60, 80, 220));
+        drawFlatBar(player.fatigue(), player.maxFatigue(), sk::PackRGB565(60, 180, 80));
+    }
 }
 
 void RenderCredits(sk::Backbuffer& backbuffer, const std::vector<std::string>& lines,
@@ -463,6 +494,27 @@ int main(int argc, char** argv) {
     if (spriteArchive.Load(scriptRoot)) {
         spriteArchive.LoadCategory(scriptRoot, "menu");
     }
+
+    // The real N-Gage menu/UI font (bitmap_font.h/.cpp's class
+    // comments, docs/GRAPHICS_FORMAT.md). IS the device ROM's own
+    // Ceurope.gdr after all -- confirmed by decompiling shadowkey's
+    // real text-draw call chain (DrawUIText -> FUN_1008f8a4 ->
+    // FUN_10022b20, whose fontNum-gated branch calls genuine
+    // EIKCORE::LegendFont() for ordinary menu text), then verifying
+    // pixel-for-pixel: downscaling a real screenshot back to native
+    // 176x208 (undoing a video capture's ~4.4x upscale) shows every
+    // glyph in "New Game" matches Ceurope.gdr's LatinBold12 exactly.
+    // An earlier pass in this same session wrongly concluded it was a
+    // "Nokia Cellphone FC" TrueType lookalike -- that was comparing
+    // against the *upscaled, video-compressed* screenshot, where
+    // compression blur on this blocky bitmap font reads as "rounded"
+    // to the eye. Like the retail game install, Ceurope.gdr is Nokia
+    // device firmware, never committed to this repo (see .gitignore);
+    // point argv[2] at wherever it's been extracted to locally.
+    // Missing/bad file is non-fatal -- DrawString keeps using the
+    // placeholder glyphs, same as every other optional real asset here.
+    const char* fontPath = argc > 2 ? argv[2] : "port/assets/fonts/Ceurope.gdr";
+    sk::BitmapFont::LoadRealFont(fontPath, "LatinBold12");
 
     skInterpreter interpreter;
     sk_bindings::MenuStack stack(scriptRoot, interpreter, &strings);

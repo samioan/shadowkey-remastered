@@ -1,10 +1,156 @@
 #include "graphics/bitmap_font.h"
 
 #include <cctype>
+#include <cstring>
+
+#include <windows.h>
+
+#include "assets/gdr_font.h"
 
 namespace sk {
 
 namespace {
+
+GdrFont& RealFont() {
+    static GdrFont font;
+    return font;
+}
+
+// A TrueType path for DrawString, NOT currently used by default --
+// GdrFont (Ceurope.gdr, the real N-Gage ROM font) turned out to be
+// right after all; see this file's LoadRealFont for the full story of
+// how a mid-session detour through this class (loading a freeware
+// "Nokia Cellphone FC" TTF) got corrected. Kept working/available
+// (rendered through Win32 GDI -- this port already links it for
+// presentation, so this is genuine, exercised code, not dead weight)
+// in case a real TrueType asset is ever actually the right answer for
+// something else.
+class TtfFont {
+public:
+    bool Load(const std::string& path, const std::string& familyName, int pixelHeight) {
+        if (!AddFontResourceExA(path.c_str(), FR_PRIVATE, nullptr)) return false;
+
+        std::wstring wfamily(familyName.begin(), familyName.end());
+        LOGFONTW lf = {};
+        lf.lfHeight = -pixelHeight;
+        lf.lfWeight = FW_BOLD;
+        lf.lfCharSet = DEFAULT_CHARSET;
+        lf.lfOutPrecision = OUT_TT_PRECIS;
+        lf.lfQuality = ANTIALIASED_QUALITY;  // force grayscale AA, not ClearType's
+                                              // per-channel color fringing -- this
+                                              // port blends by luminance below and
+                                              // needs R==G==B out of GDI.
+        wcsncpy_s(lf.lfFaceName, wfamily.c_str(), LF_FACESIZE - 1);
+
+        font_ = CreateFontIndirectW(&lf);
+        if (!font_) return false;
+
+        HDC probe = CreateCompatibleDC(nullptr);
+        HGDIOBJ old = SelectObject(probe, font_);
+        TEXTMETRICW tm;
+        GetTextMetricsW(probe, &tm);
+        ascent_ = tm.tmAscent;
+        SelectObject(probe, old);
+        DeleteDC(probe);
+
+        loaded_ = true;
+        return true;
+    }
+
+    bool IsLoaded() const { return loaded_; }
+    int Ascent() const { return ascent_; }
+
+    int MeasureWidth(std::string_view text) const {
+        if (!loaded_ || text.empty()) return 0;
+        std::wstring wtext(text.begin(), text.end());
+        HDC memDC = CreateCompatibleDC(nullptr);
+        HGDIOBJ oldFont = SelectObject(memDC, font_);
+        SIZE sz;
+        GetTextExtentPoint32W(memDC, wtext.c_str(), static_cast<int>(wtext.size()), &sz);
+        SelectObject(memDC, oldFont);
+        DeleteDC(memDC);
+        return sz.cx;
+    }
+
+    void DrawString(Backbuffer& bb, int x, int y, std::string_view text, uint16_t color) {
+        if (!loaded_ || text.empty()) return;
+        std::wstring wtext(text.begin(), text.end());  // stringtable text is plain ASCII
+
+        HDC memDC = CreateCompatibleDC(nullptr);
+        HGDIOBJ oldFont = SelectObject(memDC, font_);
+
+        SIZE sz;
+        GetTextExtentPoint32W(memDC, wtext.c_str(), static_cast<int>(wtext.size()), &sz);
+        int w = sz.cx + 2, h = sz.cy + 2;
+
+        BITMAPINFO bmi = {};
+        bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+        bmi.bmiHeader.biWidth = w;
+        bmi.bmiHeader.biHeight = -h;  // top-down
+        bmi.bmiHeader.biPlanes = 1;
+        bmi.bmiHeader.biBitCount = 32;
+        bmi.bmiHeader.biCompression = BI_RGB;
+
+        void* bits = nullptr;
+        HBITMAP bmp = CreateDIBSection(memDC, &bmi, DIB_RGB_COLORS, &bits, nullptr, 0);
+        if (!bmp) {
+            SelectObject(memDC, oldFont);
+            DeleteDC(memDC);
+            return;
+        }
+        HGDIOBJ oldBmp = SelectObject(memDC, bmp);
+
+        RECT rc{0, 0, w, h};
+        SetBkColor(memDC, RGB(0, 0, 0));
+        SetTextColor(memDC, RGB(255, 255, 255));
+        SetBkMode(memDC, OPAQUE);
+        ExtTextOutW(memDC, 1, 1, ETO_OPAQUE, &rc, wtext.c_str(), static_cast<int>(wtext.size()),
+                    nullptr);
+
+        uint8_t colorR = static_cast<uint8_t>(((color >> 11) & 0x1F) * 255 / 31);
+        uint8_t colorG = static_cast<uint8_t>(((color >> 5) & 0x3F) * 255 / 63);
+        uint8_t colorB = static_cast<uint8_t>((color & 0x1F) * 255 / 31);
+
+        const uint32_t* px = static_cast<const uint32_t*>(bits);
+        for (int row = 0; row < h; ++row) {
+            int dy = y + row;
+            if (dy < 0 || dy >= Backbuffer::kHeight) continue;
+            uint16_t* dstRow = bb.Row(dy);
+            for (int col = 0; col < w; ++col) {
+                int dx = x + col;
+                if (dx < 0 || dx >= Backbuffer::kWidth) continue;
+                // Grayscale AA (forced above) -> any channel is the coverage.
+                uint8_t lum = static_cast<uint8_t>(px[static_cast<size_t>(row) * w + col] & 0xFF);
+                if (lum == 0) continue;
+
+                uint16_t existing = dstRow[dx];
+                uint8_t exR = static_cast<uint8_t>(((existing >> 11) & 0x1F) * 255 / 31);
+                uint8_t exG = static_cast<uint8_t>(((existing >> 5) & 0x3F) * 255 / 63);
+                uint8_t exB = static_cast<uint8_t>((existing & 0x1F) * 255 / 31);
+
+                uint8_t outR = static_cast<uint8_t>((colorR * lum + exR * (255 - lum)) / 255);
+                uint8_t outG = static_cast<uint8_t>((colorG * lum + exG * (255 - lum)) / 255);
+                uint8_t outB = static_cast<uint8_t>((colorB * lum + exB * (255 - lum)) / 255);
+                dstRow[dx] = PackRGB565(outR, outG, outB);
+            }
+        }
+
+        SelectObject(memDC, oldBmp);
+        DeleteObject(bmp);
+        SelectObject(memDC, oldFont);
+        DeleteDC(memDC);
+    }
+
+private:
+    bool loaded_ = false;
+    HFONT font_ = nullptr;
+    int ascent_ = 0;
+};
+
+TtfFont& RealTtfFont() {
+    static TtfFont font;
+    return font;
+}
 
 // Each glyph is 7 rows x 5 columns, '#' = lit, '.' = off, written as
 // ASCII art so the shape is checkable by eye rather than by decoding a
@@ -150,12 +296,60 @@ const char* const* GlyphRows(char c) {
 
 }  // namespace
 
+bool BitmapFont::LoadRealFont(const std::string& path, const std::string& typefaceName) {
+    // Dispatch by extension: a real Symbian .gdr (assets/gdr_font.h) or
+    // a .ttf (TtfFont above). Both are genuinely implemented and
+    // exercised -- .gdr is what main.cpp actually loads.
+    //
+    // Same-session history worth keeping, since it explains why both
+    // paths exist: shadowkey's own text-draw call chain (decompiled --
+    // DrawUIText -> FUN_1008f8a4 -> FUN_10022b20) calls genuine
+    // EIKCORE::LegendFont() for ordinary menu text, i.e. the N-Gage
+    // ROM's own ".gdr" system font -- so Ceurope.gdr was the first,
+    // correct answer. A mid-session detour (comparing rendered .gdr
+    // glyphs against a real screenshot) wrongly concluded none of its
+    // typefaces matched and switched to a "Nokia Cellphone FC" TTF
+    // lookalike instead. That comparison was against an *upscaled,
+    // video-compressed* screenshot -- downscaling it back to native
+    // 176x208 and comparing pixel-for-pixel showed Ceurope.gdr's
+    // LatinBold12 matches exactly, letter for letter. Compression blur
+    // on an ~11px bitmap font reads as "rounded" to the eye; it isn't.
+    if (path.size() >= 4 &&
+        _stricmp(path.c_str() + path.size() - 4, ".ttf") == 0) {
+        constexpr int kTtfPixelHeight = 8;
+        return RealTtfFont().Load(path, typefaceName, kTtfPixelHeight);
+    }
+    return RealFont().Load(path, typefaceName);
+}
+
 void BitmapFont::DrawString(Backbuffer& bb, int x, int y, std::string_view text, uint16_t color) {
+    if (RealTtfFont().IsLoaded()) {
+        RealTtfFont().DrawString(bb, x, y, text, color);
+        return;
+    }
+
     int cursorX = x;
+    const int baselineY = y + RealFont().Ascent();
+
     for (char c : text) {
+        const GdrGlyph* glyph =
+            RealFont().GetGlyph(static_cast<char32_t>(static_cast<unsigned char>(c)));
+        if (glyph) {
+            int glyphX = cursorX + glyph->leftBearing;
+            int glyphY = baselineY - glyph->ascentAboveBaseline;
+            for (int row = 0; row < glyph->height; ++row) {
+                for (int col = 0; col < glyph->width; ++col) {
+                    if (glyph->bits[static_cast<size_t>(row) * glyph->width + col])
+                        bb.SetPixel(glyphX + col, glyphY + row, color);
+                }
+            }
+            cursorX += glyph->advance;
+            continue;
+        }
+
         const char* const* rows = GlyphRows(c);
         if (rows) {
-            for (int row = 0; row < kGlyphHeight; ++row) {
+            for (int row = 0; row < 7; ++row) {
                 for (int col = 0; col < kGlyphWidth; ++col) {
                     if (rows[row][col] == '#') bb.SetPixel(cursorX + col, y + row, color);
                 }
@@ -163,6 +357,20 @@ void BitmapFont::DrawString(Backbuffer& bb, int x, int y, std::string_view text,
         }
         cursorX += kAdvance;
     }
+}
+
+int BitmapFont::TextWidth(std::string_view text) {
+    if (RealTtfFont().IsLoaded()) return RealTtfFont().MeasureWidth(text);
+    if (RealFont().IsLoaded()) {
+        int w = 0;
+        for (char c : text) {
+            const GdrGlyph* glyph =
+                RealFont().GetGlyph(static_cast<char32_t>(static_cast<unsigned char>(c)));
+            w += glyph ? glyph->advance : kAdvance;
+        }
+        return w;
+    }
+    return static_cast<int>(text.size()) * kAdvance;
 }
 
 }  // namespace sk

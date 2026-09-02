@@ -222,20 +222,250 @@ are genuine Symbian EIKON/GDI calls, not a custom in-house renderer:
   text rendering, no custom glyph atlas or bitmap-font asset anywhere
   in this call chain.
 
-**This closes `PORT_ROADMAP.md`'s "Real font/glyph rendering" item —
-not by finding a decodable format, but by confirming there isn't one
-to find.** The real glyph bitmaps live in the Nokia N-Gage's Symbian
-ROM (the `LegendFont`/`Swiss` system typefaces), not in `6r51.app` or
-any file in this game's own install image — there is nothing left to
-extract from the assets this project has access to. Pixel-exact
-reproduction would require a dump of the actual N-Gage device ROM's
-font bitmaps, out of reach here. The practical port-side conclusion:
-the existing stand-in bitmap font (`port/src/graphics/bitmap_font.h`)
-isn't missing a decode step, it's a permanent, deliberate substitute —
-worth upgrading for *visual* quality (e.g. rendering through a real
-sans-serif TrueType font via the Win32 platform layer's own GDI, which
-this port already links) but not worth further RE effort chasing an
-"original format" that isn't a game asset in the first place.
+This closed `PORT_ROADMAP.md`'s "Real font/glyph rendering" item as
+far as *this game's own files* go — not by finding a decodable format
+in `6r51.app` or the retail install image, but by confirming there
+isn't one to find there. The real glyph bitmaps live in the Nokia
+N-Gage's Symbian ROM (the `LegendFont`/`Swiss` system typefaces), not
+in this game's data. The pixel-exact reproduction this doc originally
+called "out of reach" (needing an actual N-Gage device ROM font dump)
+turned out to be reachable after all — see below.
+
+## The real Symbian `.gdr` font format -- decoded and wired into the port (follow-up session)
+
+A dump of the real N-Gage QD (RH-29) ROM was available after all (an
+EKA2L1 emulator profile), so the "font bitmaps live in device firmware,
+out of reach" conclusion above got revisited. `Z:\System\Fonts\` on
+that ROM has three real Symbian bitmap-font files (`.gdr` = Glyph Data
+Resource): `Ceurope.gdr` (31389 bytes, the general system font set —
+this is the one wired in), `Browsereur.gdr` (the WML browser's own,
+larger set), `CalcEur.gdr` (a tiny calculator digit-only font).
+
+**This is not a shadowkey-specific format** — `.gdr` is Symbian OS's
+own standard font-store format, unrelated to any of the tries/dispatch
+tables/RLE sprite formats elsewhere in this doc, so there was no
+Ghidra/decompile angle to it. It's real, though: the open-source
+EKA2L1 emulator (the same tool the ROM dump came from) ships its own
+GPLv3 `.gdr` parser (`src/emu/loader/{gdr.h,gdr.cpp}`,
+`src/emu/common/src/unicode.cpp`) — that parser's byte layout was
+ported into this port (`port/src/assets/gdr_font.h/.cpp`), then
+independently verified against the real `Ceurope.gdr`: the port's
+parser consumes the **entire 31389-byte file with zero leftover
+bytes** and recovers 8 real typefaces (`LatinBold12`/`13`/`17`/`19`,
+`LatinPlain12`, plus three small digit-only faces) with correctly
+shaped glyph bitmaps.
+
+Format, in parse order — a header (9 fixed `uint32` fields, 3 of them
+magic UIDs/checksum that identify the file as a font store at all, then
+N copyright strings) → one `font_bitmap_header` per pixel-size/style
+variant (uid, posture/stroke/proportional flags, cell height/ascent/max
+width, then that variant's `code_section_header[]` — contiguous
+Unicode codepoint ranges, each an offset into that variant's own
+bit-packed glyph blob) → one `typeface_header` per human-readable name
+(e.g. `"LatinPlain12"`) pointing at a `font_bitmap` by uid → then, per
+`font_bitmap` in header order, a `character_metric[]` table (ascent/
+height/left-bearing/advance/right-adjust per distinct glyph shape --
+many codepoints share one entry, e.g. every blank cell) followed by,
+per code_section, an offset table plus a bit-packed blob: each
+character starts with a 7- or 15-bit index into `character_metric[]`
+(the first bit picks which), then a run-length-coded 1bpp bitmap (a
+repeat-line flag + 4-bit run count per encoded row, LSB-first
+throughout — see `gdr_font.cpp`'s `ParseCodeSection` for the exact bit
+math, transliterated from EKA2L1's C++).
+
+**The one real trap**: the embedded strings (copyright text, typeface
+names) are compressed with an SCSU-like scheme (static/dynamic 128-code
+windows plus an explicit "quote raw UTF-16" escape) — and the on-disk
+cardinality-prefixed length these strings carry is only a generous
+*upper-bound buffer size* to decompress into, not the string's real
+compressed size. The real per-string byte length only comes out the far
+end of actually running the decompressor (`UnicodeExpander::Expand`
+reports bytes consumed via its return value) — a naive "skip N bytes"
+implementation (this session's first attempt) desyncs the whole rest of
+the file after the very first string. Confirmed by brute-force: for the
+real file's first (3-character) copyright string, the naive formula
+computed a 22-byte skip; the correct decompressed skip is 7 bytes,
+found by walking the SCSU state machine by hand against the raw bytes
+and cross-checking against where the (independently very recognizable —
+ascending `0x10005910..591c`-style UIDs, sane cell heights, real
+codepoint ranges) `font_bitmap_header` table actually starts.
+
+**Wired into the port**: `port/src/graphics/bitmap_font.h`'s
+`BitmapFont::LoadRealFont(path, typefaceName)` loads a `GdrFont` and
+`DrawString` now draws real glyph bitmaps (proper per-glyph advance/
+left-bearing/baseline placement) wherever the loaded font covers a
+codepoint, falling back to the old blocky 5x7 placeholder otherwise —
+same "non-fatal missing optional asset" pattern as every other real
+asset this port loads. `main.cpp` loads `"LatinPlain12"` (the one
+non-bold variant, 12px cell height) from a configurable path (`argv[2]`,
+default `port/assets/fonts/Ceurope.gdr`). **`Ceurope.gdr` itself is
+Nokia device firmware, not this project's data or shadowkey's — like
+the retail game install, it is never committed to this repo** (see
+`.gitignore`); each dev copies their own extraction in (e.g. from an
+EKA2L1 profile's `data/drives/z/<device>/System/Fonts/`).
+
+Confirmed live: the main menu now renders real proportional mixed-case
+Symbian UI glyphs ("New Game", "Load Game", "Delete Saved Game", ...)
+in place of the old blocky upper-case-only placeholder.
+
+Not pursued: `Browsereur.gdr`/`CalcEur.gdr` (no current use for either
+in this port), and the bold/other-size typefaces in `Ceurope.gdr` (only
+`LatinPlain12` is wired up — the other 7 decode fine too, just aren't
+loaded by anything yet).
+
+## Correction: the real ROM font above is NOT the menu font -- "Nokia Cellphone FC" is (same-day follow-up)
+
+The `.gdr` decode above is real and correct (byte-exact, full-file
+consumption, verified) — but wrong for this job. A user-provided real
+screenshot of the main menu, compared glyph-by-glyph against every
+single typeface in *both* real font files (`Ceurope.gdr`'s 8 plus
+`Browsereur.gdr`'s 9 — all 17, every size, every bold/italic variant),
+showed none of them match: the real menu text ("New Game", "Load
+Game", ...) is a distinctly rounded, bubbly display face, while every
+real N-Gage ROM font (both device profiles checked, RH-29 and NEM-4)
+is a plain blocky sans. Neither device ships anything else that could
+produce it (checked: the game's own retail files ship no font at all;
+neither EKA2L1 profile on hand has a `.ttf` fallback or `font:` config
+override in play).
+
+The user identified the actual source by comparing against what EKA2L1
+itself renders: **"Nokia Cellphone FC"**, a freeware TrueType lookalike
+of classic Nokia phone displays (`nokiafc22.ttf`) — rendering "New
+Game" in it lines up with the real screenshot almost exactly (same
+rounded "G"/"a"/"m" shapes, same weight). *How* EKA2L1 arrives at this
+specific font wasn't pinned down (checked its `font_store.cpp` matching
+logic, `load_custom_fonts`'s user-font-folder mechanism, and the config
+file's font-override field — none of them explain it on this machine);
+this is a visual-comparison finding, not a decompile or a traced code
+path. Given how it was found, don't extend it into a claim about how
+the real hardware or EKA2L1 internally resolves this font — that part
+stays an open question.
+
+**Wired into the port** (`port/src/graphics/bitmap_font.h`/`.cpp`):
+`BitmapFont::LoadRealFont(path, typefaceName)` now dispatches on file
+extension. A `.ttf` goes through a new `TtfFont` class that rasterizes
+via **Win32 GDI** (`AddFontResourceExA` + `CreateFontIndirectW` +
+`ExtTextOutW` into an off-screen 32bpp DIB, then composited into the
+backbuffer by per-pixel luminance blend against the requested color) —
+this port already links GDI for presentation, and TrueType
+rasterization is exactly what it's for, so there was no reason to
+hand-parse glyph outlines. A `.gdr` still goes through the `GdrFont`
+path above (kept working, just not the default any more). `main.cpp`
+now loads `port/assets/fonts/nokiafc22.ttf` as `"Nokia Cellphone FC"`
+by default. Sized at 8px (tried 12px first, matching `LatinPlain12`'s
+cell height, then 10px — both visibly too large against the real
+screenshot, e.g. "Multiplayer Menu" spanning most of the parchment
+border instead of leaving real margin; 8px matches noticeably closer).
+Like `Ceurope.gdr`, this TTF is third-party (not this project's or
+shadowkey's own data) and never committed to the repo — see
+`.gitignore`.
+
+**Checked and ruled out: a hand-drawn glyph-sheet sprite.** Before
+settling on the TTF match, checked whether the menu font might instead
+be pre-rendered pixel art blitted from `global.spr` (plausible for a
+2004 handset — a hand-pixeled display face wouldn't need a real
+system/TrueType font at all, and the letterforms' geometric,
+single-story-`a` character does read as intentionally hand-drawn, not
+a stock face). Scanned all 384 `global.spr` slots (already fully
+decoded, see above) for anything glyph-sheet-shaped: no cluster of
+~20-40 small (roughly 6-16px) sprites with sequential slot ids, and no
+single wide "strip" sprite beyond the compass tape/vitals bars already
+identified. The one dense run of same-sized slots (181-204, 24 of them,
+all 16x64) decodes to a torch/flame flicker-animation cycle, not
+glyphs. Also checked `6r51.mbm` (a real, separate Symbian
+multi-bitmap resource file this game ships) — only 1770 bytes, too
+small for anything but the app's launcher icon. No other candidate
+files exist in the retail install. This doesn't disprove a hand-drawn
+font (it could still be compiled directly into `6r51.app`'s own
+resources rather than a loose file — not checked), but rules out the
+most likely loose-asset locations.
+
+**Position was also wrong, separately from the font.** The main menu's
+background (`global.spr` slot 69, `MenuBackground(69)` in
+`mainmenu.s`) has "The Elder Scrolls Travels / SHADOWKEY" logo art
+baked into its top ~50px — unlike every other menu background (20,
+174), which are plain parchment. `mainmenu.s` sets no title row and no
+native y-offset call exists for this, so the port's fixed `y = 8` item
+list start (fine for every *other* menu) collided with the logo.
+Fixed to `y = 50` specifically when `backgroundId() == 69`, measured
+against the real screenshot (not a decompiled constant — nothing in
+the script sets this, so whatever offset the real native menu-list
+renderer uses natively isn't visible from the script side).
+
+**Alignment was wrong too.** The real screenshot's menu items are
+horizontally centered on screen, with no left-margin selection arrow
+(selection is color-only, the row's text turning
+`kSelectedTextColor`) — the port had both left-aligned text *and* a
+`>` arrow glyph in front of the selected row, neither backed by
+anything from the real screenshot. `BitmapFont::TextWidth(text)`
+(changed from a fixed-pitch `TextWidth(charCount)`, unused elsewhere,
+to a real GDI-measured width so centering tracks whatever font
+`DrawString` actually draws with) now centers `RowKind::MenuItem`/
+`StaticItem` labels in `RenderMenu`; the arrow draw was removed
+(applied to every row kind, not just these — no evidence any real
+screen uses it either).
+
+Confirmed live: menu item text now matches the real screenshot's font,
+size, position, and centered alignment — a "New Game"/"Load Game"/...
+list that looks like the same typeface, sits below the logo instead of
+through it, and is centered rather than left-hugging.
+
+## Correction #2: the ROM font WAS right all along -- the "Nokia Cellphone FC" call above was a mistake (same-day follow-up)
+
+The correction above was itself wrong. Two things forced a second look:
+user feedback that the TTF still didn't look right, and a decompile of
+shadowkey's *own* text-draw call chain — `DrawUIText`
+(`FUN_1007f49c`) → `FUN_1008f8a4` → `FUN_10022b20` — which confirmed
+`AddMenuItem`'s per-item widgets (the `Widget (UI base)` class,
+`0x14d20`, whose `SetFontNum` field flows all the way down as
+`FUN_10022b20`'s last parameter) hit the branch that calls genuine
+`EIKCORE::LegendFont()` — the real N-Gage ROM's own system font —
+whenever that field is anything but exactly `1` (the one case that
+instead builds an explicit `"Swiss"`-family `TFontSpec`, used by
+`mainmenu.s`'s separate `funtext` floating-text object via
+`SetFontNum(1)`, not by ordinary `AddMenuItem` rows). This is a real,
+decompiled finding — the earlier "rounded, therefore not this ROM
+font" conclusion never accounted for what the game's own code actually
+calls.
+
+That sent the question back to *which* `Ceurope.gdr` typeface,
+properly this time: downscaled the real screenshot back to native
+176×208 with a box filter (undoing the ~4.4x upscale a video-capture
+source applies) instead of comparing rendered glyphs against the
+upscaled image directly. The result, extracted as raw on/off pixels
+for "New Game" and compared letter-by-letter against every glyph
+`Ceurope.gdr`'s `gdr_font.cpp` already decodes: **exact, bit-for-bit
+matches against `LatinBold12`** — same 6px-wide "N"/"G"/"a"/"e" shapes,
+same 10px-wide "m", same cell height, no discrepancy in a single pixel
+checked. The "rounded" look that motivated switching to a TTF in the
+first place was video-compression blur smoothing a blocky ~10-12px
+bitmap font in the *upscaled* screenshot — comparing crisp
+Python-rendered glyphs against a blurred, re-encoded video frame was
+comparing the wrong things, not a real design difference.
+
+**Also checked and ruled out again, more carefully this time**: a
+hand-drawn glyph-sheet sprite (Correction #1's `global.spr`/`6r51.mbm`
+scan already covered this and still stands — nothing glyph-shaped
+exists in either file).
+
+**Wired into the port**: `main.cpp` now loads `Ceurope.gdr` /
+`"LatinBold12"` again (not `"LatinPlain12"` from the first `.gdr`
+pass — bold is the correct weight, confirmed by the same pixel
+comparison). `BitmapFont::TextWidth` was extended to sum real
+per-glyph `.gdr` advances (it previously only handled the TTF case or
+the flat-pitch placeholder, which would have made the centering added
+in Correction #1 measure the wrong widths against this font). The TTF
+path (`TtfFont`, Win32 GDI) is kept in place and working — genuinely
+useful, exercised code — just not the default any more.
+
+**Also fixed, from separate user feedback comparing the same
+screenshot**: menu text colors. Sampled directly off the real
+screenshot: unselected items are a dark red/maroon (`~(112,48,48)`),
+the selected item is near-white (`~(216,216,216)`), not the port's
+prior gold-select/light-gray-unselected scheme. Also gave the disabled/
+static-item color (`kStaticTextColor`) its own distinct muted tone —
+previously visually too close to the unselected color to read as a
+real third state.
 
 ## The real gameplay HUD (compass banner + vitals bar) -- decoded (PC port session)
 
@@ -287,27 +517,68 @@ the whole decompiled program for those specific constants instead
   frame renders with the `N` glyph visible in the window, matching the
   original screenshot description exactly.
 
-**Vitals bar** (`FUN_1002c010`, decompiled in full):
-- Slot 205 (79×9) is a red gradient bar-fill graphic. Slot 206 (94×42)
-  is a dragon-wing ornate frame with a transparent horizontal gap.
-- Draws slot 205 at `(44,182)`, width clipped to `fraction * 79` px
-  (the function's own `(ratio * 0x4f00) >> 16` computation, `0x4f` =
-  79 — a straight percentage-fill), then slot 206 on top at `(40,166)`
-  — same fill-then-frame-mask technique as the compass.
-- **No static caller was found** (real call site is the same indirect
-  vtable dispatch, slot `+0x44` — not traced further); which specific
-  stat this represents isn't 100% certain from code alone, but the red
-  color and prominent position both point to health.
-- A visually similar sibling, `FUN_1002ae88` (vtable slot not
-  determined), uses a *different* frame (`global.spr` slot 180, 57×46)
-  and reads `player+0x3ac+0x24`/`+0x2a` — the equipped-weapon struct
-  base a previous session's hand-equip-system decompile
-  (`UpdateEquipStatus`) already identified — not a core vital. Likely
-  a weapon condition/charge indicator. **No equivalent real
-  asset/position was found for magicka or fatigue** — plausibly this
-  cut-down N-Gage HUD only gives the ornate treatment to health (and a
-  weapon-charge readout), not all three vitals; not confirmed either
-  way.
+**Vitals bar cluster -- corrected (post-M14 session)**: the original
+pass above got this wrong. `FUN_1002c010` (single health-only bar) is
+*not* the real always-on vitals HUD -- `FUN_1002ae88` is, and it draws
+all three vitals together.
+
+Found the real per-frame caller this time (rather than stopping at "no
+static caller found"): `FUN_1002ae88` has exactly one direct (non-
+vtable) caller, `FUN_10029cb0` -- which is itself vtable slot `+0x1c`
+on this same `ScreenModeController` secondary vtable, confirmed called
+*unconditionally every tick* from `GameTick_UpdateAndPresent`. Inside
+it, the gameplay-screen-mode branch (`this+0x78 == 5`) calls exactly:
+
+```
+FUN_1002ae88(param_1);  // vitals bar cluster
+FUN_1002ba64(param_1);  // compass
+FUN_1002bb54(param_1);  // hand icons
+```
+
+every single frame, together. That settles it -- `FUN_1002ae88` is the
+real vitals widget, not a "weapon condition" indicator as the
+`player+0x3ac+0x24` field guess originally concluded.
+
+`FUN_1002ae88` (816-byte decompile) draws **three** 39×5 bar-fill
+sprites, each independently percentage-clipped by the identical
+`(ratio * 0x2700 >> 8 + 0xff) >> 8` fixed-point formula (0x27 = 39, the
+sprite width):
+- `global.spr` slot 162 (red gradient) at `(10,182)`
+- slot 160 (blue/white gradient) at `(10,190)`
+- slot 161 (green gradient) at `(10,196)`
+
+...then one shared frame, slot 180 (57×46, dragon-head/wing art, *not*
+the 94×42 frame from the original pass) on top at `(0,162)`, masking
+all three bars at once -- same fill-then-frame-mask technique as the
+compass banner.
+
+**Which bar is which stat**: the underlying stat struct's three "max"
+fields sit at `+0x24` (red bar's max), `+0x26` (green bar's max), and
+`+0x28` (blue bar's max) -- i.e. address order is red, green, blue, not
+red, blue, green. Combined with the standard health=red/magicka=blue/
+fatigue=green convention, that fixes the mapping as: **top bar (red,
+y=182) = health, middle bar (blue, y=190) = magicka, bottom bar (green,
+y=196) = fatigue.** Confirmed live: a user-provided screenshot from
+real gameplay shows exactly this 3-bar cluster (red/pale-blue/green
+stacked in one small dragon-head frame, bottom-left), matching this
+decode pixel-for-pixel once scaled.
+
+**Open item -- `FUN_1002c010`'s single big bar is real too, just not
+explained yet.** A second user-provided real-gameplay screenshot shows
+a *different*, larger single-bar widget: slot 205 (79×9 red gradient)
+at `(44,182)` plus slot 206 (94×42 dragon-wing frame) at `(40,166)` --
+exactly what the original (wrong) pass had implemented. This function
+is real and does get used in actual play, evidently under some other
+game state. Exhaustively re-searched this pass (whole-memory raw scans,
+not just literal-pool scans, for both the function's own address and
+its vtable's base address as 4-byte words): `FUN_1002c010`'s address
+appears **exactly once** anywhere in the program -- its one static slot
+at `ScreenModeController`+0x44. There is no second static reference to
+chase; the real trigger is a fully dynamic/computed dispatch this pass
+couldn't resolve. Left unimplemented in the port rather than guessing a
+trigger condition. Leading (unconfirmed) guess if this is revisited: an
+enemy lock-on/target health bar, given it's health-only with no
+magicka/fatigue counterpart.
 
 **Equipped-item icons** (`FUN_1002bb54`, decompiled in full): draws
 the left/right hand's currently-equipped item icon (via `player+0x3ac
@@ -316,18 +587,18 @@ identified) at `(5,5)`/`(139,5)` — flanking the compass banner in the
 same top HUD row.
 
 **Implemented in the port** (`port/src/main.cpp`'s `RenderHud`): the
-compass and health bar draw the real assets at the real positions;
-`Backbuffer::BlitRegion` (new, alongside the existing `Blit`) supports
-both the compass's source-X-scroll and the health bar's
+compass and the real 3-bar vitals cluster (health/magicka/fatigue, slot
+180 frame + slots 162/160/161 fills) draw the real assets at the real
+positions; `Backbuffer::BlitRegion` (new, alongside the existing
+`Blit`) supports both the compass's source-X-scroll and each bar's
 destination-width clip. The port has no equivalent 16-bit fixed-point
 heading field to replicate the exact byte-extraction formula, so
 `RenderHud`'s heading-to-scroll-offset mapping is a documented,
 unverified-direction best effort from `Camera::yaw` (a float radian),
-not a decompiled formula — flagged in the port code itself. Magicka/
-fatigue keep the original flat-bar stand-in (no real asset/position
-found), relocated to the bottom-left corner clear of the new health
-bar. Equipped-item icons use the existing per-zone icon-loading path
-this session's earlier sprite work (see above) already established.
+not a decompiled formula — flagged in the port code itself. Equipped-
+item icons use the existing per-zone icon-loading path this session's
+earlier sprite work (see above) already established. `FUN_1002c010`'s
+big single bar (see open item above) is not implemented.
 
 ## Open follow-ups
 
