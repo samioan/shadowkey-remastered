@@ -146,11 +146,23 @@ algorithms.
       raw units); recalibrated to 800 using two independent real
       model-height measurements (a door's local-space height ~1036, a
       barrel's ~373 -- both consistent with a ~800-900-unit-tall person).
-      The real engine's own equivalent constant (`player+0x224`, set once
-      in `GameEngine_InitLevel`, 0x10024dec) wasn't recovered -- flagged
-      as a loose end, not chased further. Full writeup:
-      [`RENDERER_3D.md`](RENDERER_3D.md#open-follow-ups) and
-      `render3d/zone_renderer.h`.
+    - **Follow-up (this session): traced the real constant's write site
+      as far as it goes, still unrecovered.** Confirmed `GameEngine_
+      InitLevel`'s eye-height read really does target `CMap`'s own field
+      (fingerprinted the pointer against known-`CMap`-only offsets used
+      elsewhere in the same function), then decompiled `CMap`'s ~85KB
+      constructor (`GameEngine_ctor`, 0x1000fa7c) in full and searched
+      every `strh`-to-offset-`0x1a` instruction in the whole binary
+      against known `CMap` fields -- **found zero writes to it anywhere**.
+      Working (unconfirmed) hypothesis: `CMap`'s allocation is never
+      explicitly zeroed but also never explicitly sets this field, so if
+      EKA1 hands out zeroed heap pages, the real constant may simply be
+      **0** -- the real game's camera might render from literal floor
+      height, not human eye height. Port's `kEyeHeightOffset = 800`
+      (`render3d/camera.h`) is kept as a **deliberate, documented
+      deviation** for a conventional playable camera, not a recovered
+      value. Full writeup: [`RENDERER_3D.md`](RENDERER_3D.md#open-follow-ups)
+      and `render3d/camera.h`.
 
 ## Next milestones (not yet started)
 

@@ -558,13 +558,39 @@ position.
   mind if anyone else decodes this array directly.
 - **The real per-instance eye-height constant** (`player+0x224 =
   player+0xa4 (Z) + *(short*)(CMap+0x1a)`, referenced by
-  `SurfaceFace_BuildAndProject` and set once in `GameEngine_InitLevel`,
-  0x10024dec) **is still not recovered** — `CMap+0x1a` is read there but
-  never written inside `GameEngine_InitLevel` itself, and a binary-wide
-  scan for `strh ...,[Rn,#0x1a]` turned up dozens of unrelated hits (nearby
-  candidates checked and ruled out: one is an unrelated color-config
-  function, another is a monster stat-block field storing small values
-  like 30/40/50 — not a plausible height in these raw units). Given real
-  room heights run into the thousands of raw units (above), whatever this
-  constant actually is, it's almost certainly not small. Not chased
-  further this pass.
+  `SurfaceFace_BuildAndProject`, read but not written inside
+  `GameEngine_InitLevel`, 0x10024dec) — **traced further, still not
+  recovered, but the trace itself is informative**. First confirmed
+  `*(int*)(GameEngine_InitLevel's param_1 + 0x30)` really is `CMap`
+  (fingerprinted by finding it also dereferenced with `+0x618`/`+0x6b38`/
+  `+0x5464`/`+0x470` elsewhere in the same function — all independently
+  known `CMap` fields), settling that `CMap+0x1a` is genuinely what's
+  being read, not some other object's field at a coincidentally-equal
+  offset. Then searched exhaustively for a write to it:
+  `GameEngine_ctor` (0x1000fa7c, the object's own constructor,
+  decompiled in full, ~85KB source, 556 lines of C) **never touches
+  offset `0x1a` at all** — no `strh`/`str` immediate write, no
+  short-array-indexed alias, nothing. A binary-wide scan for every
+  `strh Rd,[Rn,#0x1a]` instruction (20 total) cross-referenced against
+  whether the same base register is *also* used with an unambiguous
+  `CMap`-only offset (`0x618`/`0x480`/`0x690c`/`0x6908`/`0xbe34`/`0x62c`/
+  `0x5b4`/`0x6b38`/`0x5464`/`0x5c4`/`0x470`/`0x6f38`/`0x12618`) elsewhere
+  in the *same function* found **zero matches** — every one of those 20
+  sites is a field on some unrelated, smaller object (one candidate that
+  looked promising at first, `FUN_100477cc`, turned out to write its
+  *own* local offset `0x1a` — value `0x28`/40 — but that object is a
+  small struct embedded in the *player* sub-object, not `CMap` itself, a
+  coincidence caught only by manually reading the decompile rather than
+  trusting the offset match alone). **Working hypothesis, not proof**:
+  `GameEngine_ctor` allocates the ~85KB `CMap` object with
+  `EUSER____builtin_new` and never bulk-zeroes it, but also never
+  explicitly writes offset `0x1a` — if EKA1 hands out zeroed fresh heap
+  pages (plausible for a kernel of this era, not confirmed here), the
+  real, shipped constant is simply **0**, meaning the real game's camera
+  renders from literal floor height with no eye-height offset at all.
+  That would also cleanly explain why real room heights (above) look so
+  extreme relative to a human-scale intuition — nothing here rules that
+  reading out, but nothing confirms it either; the write site could
+  still exist via an addressing pattern this search didn't cover
+  (register-offset `strh`, or a SimKin native-binding setter reached
+  indirectly). Left as a genuinely open item.
