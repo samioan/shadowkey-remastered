@@ -216,19 +216,11 @@ algorithms.
       offset -- a real, separate render step in the original engine
       (`RoomGeometry_TransformAndSort`) alongside the tile-grid pipeline,
       not a replacement for it.
-    - **Known open item, not resolved this pass**: whether drawing the
-      `.zsk` mesh at raw local-origin (no offset) is actually correct is
-      **unconfirmed**. `azra.zsk` is small (30 vertices/56 faces,
-      roughly a 2x2-tile footprint centered on tile-grid coordinate
-      (0,0)) -- too small to be a "whole room" in the sense of covering
-      the explorable dungeon, more likely a single architectural
-      set-piece, and its position wasn't independently verified against
-      a matching real screenshot (tile (0,0) turns out to be real,
-      non-degenerate interior space in `azra`, which makes the raw-origin
-      placement *plausible*, but the debug tool used to investigate has
-      no camera pitch and this corner's real floor/ceiling heights put
-      the mesh well outside a level yaw-only view from any nearby open
-      tile). Full writeup: `render3d/zone_renderer.h`'s M11 comment.
+    - **World-position open item -- resolved in a later pass** (see the
+      "Post-M11 fix -- `.zsk` room-mesh world position, decompiled" entry
+      below): decompiling `RoomGeometry_TransformAndSort` confirmed the
+      raw-local-origin placement is correct -- there's no per-room
+      world-position field in the real function at all.
       Along the way, fixed a real bug in the M9 debug tool
       (`tests/m9_render_at_smoke.cpp`): it was placing the camera at
       `zone.playerStartZ` regardless of the tile under test, which is
@@ -500,15 +492,40 @@ algorithms.
       `ShowActionQueue()` regressing to its old no-op. All 8 smoke tests
       still pass.
 
+- [x] **Post-M11 fix -- `.zsk` room-mesh world position, decompiled** (this
+      session). Decompiled `RoomGeometry_TransformAndSort` (0x10057890) in
+      full to settle M11's open item above.
+    - No per-room world-position field exists in the real function --
+      unlike the actor pipeline's `actor+0x94/+0x9c` world position, the
+      only room-specific placement inputs are an optional scale byte pair
+      (`room+0x5e/0x5f`) and optional rotation angles
+      (`room+0xa8/0xb2/0xb6`, each zeroed when a flag bit at `room+0x86`
+      is set). The actual per-vertex translation applied comes from a
+      single **fixed** `(0, 270, 0)` constant, identical for every room
+      (not read from any room field), composed with the camera's own
+      per-frame rotation matrix via `ComposeTransform3x4`.
+    - **Confirms the port's existing no-offset placement is correct** --
+      there was no missing per-zone translation to find. No port code
+      changed as a result (nothing was wrong); this converts an
+      "unconfirmed, plausible" open item into decompiled fact.
+    - Two smaller loose ends explicitly left open (not chased further,
+      low payoff for a small ~2x2-tile decorative set-piece): whether
+      `room+0x5e/0x5f`'s scale is ever non-identity for a real zone (not
+      traced -- the room object's own construction site wasn't found),
+      and how camera *position* (not just rotation) factors into this
+      path at all -- `engine+0x5d8`'s build only consumes camera angles,
+      so it's plausible this mesh is a camera-orientation-relative
+      decorative piece rather than a walk-around-able room. Full writeup:
+      `docs/RENDERER_3D.md`'s "`.zsk` room-mesh world position --
+      decompiled" section and `render3d/zone_renderer.h`'s updated M11
+      comment.
+
 ## Next milestones (not yet started)
 
 Roughly in priority order for reaching "actually playable," not commitments:
 
 - **Combat resolution** -- Monster/Actor/Spell native classes are
   untouched; M10 only wired up inventory/vitals data and display.
-- **`.zsk` room-mesh world position** -- M11 draws it, but whether raw
-  local-origin (no offset) is the right placement is unconfirmed; see
-  M11's writeup above and `render3d/zone_renderer.h`.
 - **Real save file format** -- M5's save system is simulated in-memory
   only; no on-disk save format has been RE'd yet.
 - **Real menu background images / HUD iconography** -- still flat colors

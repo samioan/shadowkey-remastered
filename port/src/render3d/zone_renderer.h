@@ -136,24 +136,26 @@
 //    was refactored to share. Same simplifications as M8: skin 0/frame 0
 //    only, unlit.
 //
-//    **Open item, not resolved this pass**: `azra.zsk` is a small mesh
-//    (30 vertices/56 faces) whose local bounding box sits almost
-//    symmetric around its own origin (`x[-252,254] y[-290,40]
-//    z[-254,252]` raw units, i.e. roughly a 2x2-tile footprint centered
-//    on tile-grid coordinate (0,0)) -- too small to be a "whole room" in
-//    the sense of covering the explorable dungeon; more likely a single
-//    architectural set-piece. Whether drawing it at that raw local
-//    origin with no offset is actually correct, or whether the real
-//    engine applies some per-zone translation this pass didn't find
-//    (RENDERER_3D.md's `ComposeTransform3x4`/actor-transform-block
-//    parallel, per M8's own open item above), is **unconfirmed** --
-//    tile (0,0) in `azra` turns out to be real (non-degenerate) interior
-//    space bordering the grid edge, so the raw-origin placement is at
-//    least *plausible*, but this wasn't independently verified with a
-//    matching visual (the debug camera used to investigate,
-//    `tests/m9_render_at_smoke.cpp`, has no pitch control, and this
-//    corner's real floor/ceiling heights put the mesh well outside a
-//    level yaw-only view from any nearby open tile).
+//    `azra.zsk` is a small mesh (30 vertices/56 faces) whose local
+//    bounding box sits almost symmetric around its own origin
+//    (`x[-252,254] y[-290,40] z[-254,252]` raw units, i.e. roughly a
+//    2x2-tile footprint centered on tile-grid coordinate (0,0)) -- too
+//    small to be a "whole room" in the sense of covering the explorable
+//    dungeon; more likely a single architectural set-piece.
+//
+//    **Resolved this session (decompiled `RoomGeometry_TransformAndSort`,
+//    0x10057890, in full)**: drawing it at raw local origin with no
+//    per-instance offset is confirmed correct -- the real function has
+//    no per-room world-position field at all (only an optional scale and
+//    rotation angles); its per-vertex translation comes from a single
+//    fixed `(0, 270, 0)` constant, identical for every room, rotated
+//    through the camera's own orientation. See docs/RENDERER_3D.md's
+//    "`.zsk` room-mesh world position -- decompiled" section for the
+//    full trace, including two smaller loose ends left unresolved (a
+//    possible non-identity per-room scale byte this port doesn't apply,
+//    and how camera *position* -- not just rotation -- factors into this
+//    path at all, which bears on whether this mesh is genuinely
+//    walk-around-able or a camera-relative decorative piece).
 
 #include <vector>
 

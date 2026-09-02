@@ -290,6 +290,49 @@ other caller, `FUN_10057890`.
   table size/exact indexing range not pinned down) — confirming the
   torchlight/distance-fog guess.
 
+### `.zsk` room-mesh world position -- decompiled (PC port session)
+
+`RoomGeometry_TransformAndSort` itself decompiled and read in full to settle
+the port's own open item (`docs/PORT_ROADMAP.md`, `render3d/zone_renderer.h`):
+does the room mesh need a per-zone/per-room world-position offset the port
+isn't applying?
+
+**No such field exists.** The function's only room-specific placement inputs
+are a scale byte pair at `room+0x5e/0x5f` (applied as `(scale * vertexComponent)
+>> 8` to every raw vertex component before the transform) and three optional
+rotation-angle byte pairs at `room+0xa8/0xa9`, `room+0xb2/0xb3`, `room+0xb6/0xb7`
+(each zeroed instead of read when a corresponding flag bit at `room+0x86`
+(bits 2/4/8) is set). There is nothing resembling the actor pipeline's
+`actor+0x94/+0x9c` world-position pair anywhere in this function. The
+translation actually applied to every room vertex comes from a single call
+`BuildRotationMatrix3x4(matA, roomYaw, roomPitch, roomRoll, 0, 0x10e, 0)` --
+a **fixed** `(0, 270, 0)` translation, identical for every room, not read
+from any room-specific field -- which is then combined via
+`ComposeTransform3x4(dst, matA, engine+0x5d8)` with the camera's own
+per-frame rotation matrix (built earlier in `Render3DScene` from
+`camera+0xa8/0xb2/0xb6`'s negated pitch/yaw/roll via `FUN_10073760`,
+confirmed by the caller). `ComposeTransform3x4`'s translation-column output
+(despite this doc's summary above describing it as rotation-only) turns out
+to be `matA`'s translation vector rotated through `matB`'s rotation -- i.e.
+the room's final per-vertex offset is exactly that fixed `(0,270,0)`
+constant rotated by the camera's current orientation, nothing else.
+
+**Conclusion**: the PC port's existing choice to draw `.zsk` room meshes at
+raw local-vertex-space with no added per-instance world offset is confirmed
+correct by this decompile -- there is no missing per-zone translation to
+find. Two smaller, lower-priority loose ends this pass didn't chase further:
+whether `room+0x5e/0x5f`'s scale is ever non-identity (0x100) for a real
+zone like azra (not traced -- would need the room object's own construction
+site, likely assembled from `.sta`/zone metadata this project hasn't fully
+mapped to this specific runtime struct), and how the camera's *position*
+(as opposed to rotation) factors into making a room mesh recede/approach
+as the player walks -- `engine+0x5d8`'s build in `Render3DScene` only
+consumes camera angles, not `camera+0x94/+0x9c` world position, so that
+path is still unresolved; plausible given this mesh's small (~2x2-tile)
+footprint that it's genuinely a camera-orientation-relative decorative
+piece rather than a walk-around-able room, consistent with the size
+observation already on record below, but not confirmed.
+
 **Bottom line**: Shadowkey has **one 3D model format and one clip/perspective
 core** (`BuildRotationMatrix3x4`, `ComposeTransform3x4`, `Poly3D_ClipAgainstPlane`)
 shared by three renderers built on top of it — an actor renderer (immediate
