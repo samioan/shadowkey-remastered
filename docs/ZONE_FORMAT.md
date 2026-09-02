@@ -117,12 +117,21 @@ struct EntPlacement {      // offset  size
     int32  y;                // 0x04    4
     int32  z;                // 0x08    4
     uint16 rotOrScale[4];     // 0x0c    8   NOT 4 uniform rotation-or-scale
-                                //             values -- see the note below the
-                                //             struct: idx0/idx2 are real
-                                //             wide-ranging angle data, idx1/
-                                //             idx3 are both boolean flags
-    int32  unkA;                // 0x14    4   not decoded (see azra.sta below --
-                                 //             this field round-trips into it unchanged)
+                                //             values, and NOT all 4 consumed --
+                                //             see the note below the struct:
+                                //             only idx0 (-> object +0xb2) and
+                                //             idx2 (-> object +0xa8) are real,
+                                //             used angle data; idx1 and idx3
+                                //             are both boolean-flag-shaped
+                                //             (0/0xFFFF) but neither is ever
+                                //             read by GameEngine_InitLevel --
+                                //             genuinely dead in this build
+    int32  unkA;                // 0x14    4   low u16 -> object +0xb6, the 3rd
+                                 //             orientation channel (NOT
+                                 //             rotOrScale[3] as an earlier pass
+                                 //             of this doc wrongly assumed --
+                                 //             see below). High u16 round-trips
+                                 //             into azra.sta unchanged (below)
     int32  unkB;                  // 0x18    4   a packed pair, NOT a plain int32 --
                                    //             high u16 is always the constant
                                    //             0xCCCC, low u16 is a per-instance
@@ -145,24 +154,46 @@ gives large sign-extended-looking values instead — see `azra.sta`'s
 `unkA` field, which is exactly this). Tool:
 `tools/parse_zone_placement.py`.
 
-**`rotOrScale[4]` is two angles interleaved with two flags, not four
-uniform fields.** Ran `parse_zone_placement.py` against a real `azra.ent`
-(282 records) and checked each of the 4 indices' value distribution:
-`idx0` (17 distinct values) and `idx2` (24 distinct values) both span
-wide ranges in multiples of 128 (e.g. 256, 384, 768, 1152, and
-near-65536 wraparound values like 63872/64640) — the signature of real
-angle/heading data, consistent with the compass's confirmed
-`player+0xb6` heading format (`GRAPHICS_FORMAT.md`). `idx1`, by
-contrast, takes only **2 distinct values (0 or 0xFFFF)** — the exact
-same binary pattern as `idx3`, which is already confirmed to be
-`object->modelFlags` (see the code excerpt below). So `idx1` is a
-second boolean-style flag field, not an orientation value; the struct
-is really `{angle, flag, angle, flag}`, not `{rot,rot,rot,rot}`.
-`idx1`'s destination offset and purpose are still unidentified — the
-code excerpt below only traces 3 of the 4 fields (`idx0`/`idx2`/`idx3`)
-to object offsets `+0xa8/+0xb2/+0xb6`/`+0x5e`, and `idx1`'s flag-like
-data doesn't obviously fit that pattern, so the assumed 1:1 positional
-mapping across all 4 fields may not hold for it.
+**`rotOrScale[4]` is two real angles plus two dead flag-shaped fields,
+not four uniform values.** Ran `parse_zone_placement.py` against a real
+`azra.ent` (282 records) and checked each of the 4 indices' value
+distribution: `idx0` (17 distinct values) and `idx2` (24 distinct
+values) both span wide ranges in multiples of 128 (e.g. 256, 384, 768,
+1152, and near-65536 wraparound values like 63872/64640) — the
+signature of real angle/heading data, consistent with the compass's
+confirmed `player+0xb6` heading format (`GRAPHICS_FORMAT.md`). `idx1`
+and `idx3`, by contrast, each take only **2 distinct values (0 or
+0xFFFF)** — flag-shaped, not angle-shaped.
+
+**Corrects the previous pass's destination guess.** Directly tracing
+`GameEngine_InitLevel`'s raw ARM disassembly (both the player-start and
+generic-entity branches, which use an identical offset pattern —
+verified structurally against each other) instead of inferring offsets
+from the decompiler's local-variable naming order gives the *real*
+per-field mapping:
+
+| record offset | field | destination |
+|---|---|---|
+| `0x0c` | `rotOrScale[0]` | object `+0xb2` (orientation channel) |
+| `0x0e` | `rotOrScale[1]` | **never read — dead** |
+| `0x10` | `rotOrScale[2]` | object `+0xa8` (orientation channel) |
+| `0x12` | `rotOrScale[3]` | **never read — dead** |
+| `0x14` | `unkA` (low u16) | object `+0xb6` (orientation channel) |
+| `0x18` | `unkB` (low u16) | object `+0x5e`, `modelFlags` |
+
+So only 2 of the 4 `rotOrScale` fields are used at all — `idx0`/`idx2`,
+both real angle data, feeding 2 of the object's 3 orientation channels.
+The 3rd orientation channel (`+0xb6`) is fed by `unkA`'s low 16 bits, a
+field entirely outside `rotOrScale`, not by `rotOrScale[3]` as an
+earlier pass of this doc claimed (that pass had inferred the mapping
+from the decompiler's `local_75c`-style variable names rather than the
+verified raw offsets, and got both `modelFlags`' source and the
+orientation-channel order wrong — see the code excerpt below, now
+fixed). `idx1` and `idx3` are genuinely dead: grepping every write to
+object offsets `+0xa8/+0xb2/+0xb6/+0x5e` across the whole function finds
+no other occurrence besides the ones tabulated above. Whether some
+function *outside* `GameEngine_InitLevel` reads either dead field wasn't
+checked.
 
 For each record:
 
@@ -181,16 +212,22 @@ For each record:
   1. Calls a factory virtual method to allocate the actual game-object
      instance for that type.
   2. Sets its position (`vtable+0x18`) from `x/y/z`, and orientation fields
-     `+0xa8/+0xb2/+0xb6` from the record's u16 fields.
+     `+0xa8/+0xb2/+0xb6` from the record's u16 fields (`rotOrScale[2]`,
+     `rotOrScale[0]`, and `unkA`'s low 16 bits respectively — see the
+     corrected table above; `rotOrScale[1]`/`[3]` are dead).
   3. Copies the `name` field to two string slots (`+0xcb`, `+0xe2`).
   4. Calls an `Init(engine)` virtual method (`vtable+0x10`).
   5. **Looks up the type descriptor again** and does:
      ```c
      object->modelPtr /* +0x54 */ =
          engine->modelCache /* +0x6b38 */ [ typeDescriptor->modelArchiveIndex /* +0xc */ ];
-     object->modelFlags /* +0x5e (u16) */ = record.rotOrScale[3] /* local_75c */;
+     object->modelFlags /* +0x5e (u16) */ = record.unkB /* low u16 */;
      ```
-     This is the line that finally resolves the open question: the type
+     **Corrected**: `modelFlags` is `unkB`'s low 16 bits, not
+     `rotOrScale[3]` as an earlier pass of this doc claimed (traced from
+     the decompiler's `local_75c`-style variable naming rather than
+     verified raw offsets — the raw-disassembly retrace above found the
+     real source). This is the line that finally resolves the open question: the type
      descriptor found via the `engine+0xbe34` BST carries, at its own
      `+0xc`, the `models.idx` archive index for that entity type, and the
      object's model pointer is just a cache read from the already-populated
@@ -475,19 +512,32 @@ struct ZmpCell {           // 6 bytes on disk, per grid cell; the in-memory
                                      // frame (mod 4) TileGrid_RaycastVisibility
                                      // marked this cell visible, deduplicates
                                      // its per-frame output list
-    uint8  unknown7;                 // runtime-only, not decoded. Checked
-                                       // (and ruled out) `Bullseye_
-                                       // LoadZmpCells`, `Bullseye_
-                                       // BakeLighting`, `Render3DScene`, and
-                                       // `FUN_1000f694` (the raycast-
-                                       // visibility entry point) for any
-                                       // read/write of this offset -- none
-                                       // found. `FUN_1000f694` turned out to
-                                       // only be ray-count setup/dispatch
-                                       // (155 lines, never touches offset 6
-                                       // or 7), not the actual per-cell
-                                       // visibility writer, which wasn't
-                                       // located. Genuinely open.
+    uint8  unknown7;                 // runtime-only, CONFIRMED DEAD, not just
+                                       // undecoded. `TileGrid_RaycastVisibility`
+                                       // (`FUN_1000f694`) writes byte +6
+                                       // (`visibleFrameStamp`) every frame but
+                                       // never touches +7. Broadened the
+                                       // search past that one function: a
+                                       // whole-binary scan for any `STRB
+                                       // <reg>, [<reg>, #7]` (byte-store at a
+                                       // constant +7 offset, any base
+                                       // register/struct) found **zero hits
+                                       // anywhere in the entire binary** --
+                                       // nothing writes a byte-7 field via any
+                                       // standard addressing mode, full stop.
+                                       // The 29 `LDRB ...,[..,#7]` reads that
+                                       // do exist all belong to an unrelated
+                                       // struct (the player/camera
+                                       // orientation field's `byte@+6 |
+                                       // byte@+7<<24>>16` heading-decode
+                                       // idiom, not this tile array). Combined
+                                       // with `Bullseye_LoadZmpCells` only
+                                       // ever populating the first 6 of 8
+                                       // bytes from disk, this is a reserved/
+                                       // always-zero scratch byte with no
+                                       // functional consumer in this shipped
+                                       // build -- not a cut feature, not an
+                                       // unfound reader, genuinely dead.
 };
 ```
 
@@ -598,7 +648,49 @@ struct ZcpEntry {                  // 36 bytes -- now fully mapped
     uint8  surIndexCeilingA;                    // 0x1e: ceiling, band A
     uint8  surIndexCeilingB;                    // 0x1f: ceiling, band B
     uint8  surIndexFloor;                       // 0x20: floor
-    uint8  unknown2[3];                        // 0x21..0x23, not decoded
+    uint8  unknown1;                            // 0x21: near-constant in real
+                                                  // data (99.98% zero across
+                                                  // azra.zcp's 11,828 entries,
+                                                  // 2 outliers at 254) -- reads
+                                                  // as padding, no consumer
+                                                  // found. Not decoded.
+    uint8  unknown2;                            // 0x22: genuinely varying
+                                                  // real per-tile-type data
+                                                  // (no dominant value across
+                                                  // azra.zcp), but no consumer
+                                                  // found in any cached
+                                                  // decompile. Not decoded.
+    uint8  cornerShape;                         // 0x23: DECODED. A per-tile-
+                                                  // type diagonal/wedge-corner
+                                                  // selector, read in
+                                                  // `SurfaceFace_
+                                                  // BuildAndProject`
+                                                  // (0x1005d784)'s per-vertex
+                                                  // quad-building loop: an
+                                                  // 8-case switch nudges that
+                                                  // corner's world x/z by
+                                                  // +-0x80 (half a tile) in
+                                                  // the 4 diagonal + 4
+                                                  // axis-aligned combinations
+                                                  // -- the classic dungeon-
+                                                  // crawler "diagonal tile"
+                                                  // trick (a la Eye of the
+                                                  // Beholder/Ultima
+                                                  // Underworld), beveling a
+                                                  // face's quad corners
+                                                  // instead of leaving every
+                                                  // tile axis-aligned.
+                                                  // Cross-checked against real
+                                                  // azra.zcp (11,828 entries):
+                                                  // distribution is
+                                                  // {0: 10846 (92%), 1: 254,
+                                                  // 2: 195, 3: 127, 4: 143,
+                                                  // 5: 85, 6: 81, 7: 70,
+                                                  // 8: 27} -- 0/default is an
+                                                  // ordinary square tile,
+                                                  // 1-8 real but rare wedge
+                                                  // usage, matching the
+                                                  // switch's cases exactly.
 };
 ```
 

@@ -458,7 +458,26 @@ confirmed.
     cases 5-7 manage an accumulator+decay-rate pair (fields `+0x39c`/
     `+0x3a0`); case 8 sets a single bool (`+0x398`) matching
     `SetFrozen`. Real, well-formed combat-feedback code, just never
-    triggered from any shipped script — the native caller wasn't traced.
+    triggered from any shipped script. **Follow-up finding: it's a
+    mixin chained onto Player/GameState, not a standalone class.**
+    `FUN_1001e2f8` has exactly one caller in the whole binary —
+    `FUN_1003f130`, already confirmed as the **Player/GameState**
+    dispatcher (86 bindings: `BuyItem`, `ChooseCharacter`, `EquipItem`,
+    ...) — which falls through into it on a trie-lookup miss, forwarding
+    the same `param_1..param_5`. Same chained-mixin pattern already
+    documented below for Weapon/weapon-damage and Spell/spell-damage,
+    now confirmed for a 3rd pair by direct single-caller trace rather
+    than corpus-consistency inference. So the real call surface is
+    `player.ScreenShake()`/`player.DamageHere(...)`/`player.SetFrozen(
+    bool)`, reachable from any script already holding the player object
+    (`GetPlayer()`) — but grepping this session's ~186 cached decompiled
+    functions (including combat-adjacent ones) for direct vtable calls
+    at its `+0x1bc`/`+0x78` slots found no native trigger site either,
+    not exhaustive over the full ~2,000-function binary, but consistent
+    with "genuinely never fires in this shipped build" rather than
+    "fires from somewhere not yet found." Most likely candidate for a
+    future pass: whatever native code applies damage to the player,
+    not yet traced to the byte level in this project.
   - **Icon/sprite widget** (`FUN_1007f210`): case 2 picks between two
     stored sprite-id fields (`+0x9c` dormant / `+0xa0` active) via a
     bool and stores the choice at `+0x98`; cases 4/5 call dedicated
@@ -487,14 +506,20 @@ confirmed.
   are corpus-silent because nothing in the shipped scripts happens to
   use them, not because the dispatcher logic doesn't fit.
 - Why some classes split into a "mixin" and a "main" pair (Weapon/
-  weapon-damage, Spell/spell-damage) instead of registering as one — not
+  weapon-damage, Spell/spell-damage, and now Player/GameState/
+  Camera-feedback — see above) instead of registering as one — not
   investigated; could be base/derived class registration happening at
   two different constructor levels. The corpus cross-check above is
   consistent with a base/derived split for Weapon specifically (ordinary
   weapons lean on the mixin, bows/crossbows need the full class), and
   with Spell-damage being reused by non-Spell objects (trapped
   doors/chests) rather than being Spell-exclusive, but doesn't prove the
-  registration mechanism either way.
+  registration mechanism either way. Camera/player-feedback's pairing
+  with Player/GameState is now confirmed by a direct single-caller trace
+  (`FUN_1001e2f8`'s only caller is `FUN_1003f130`, a trie-lookup-miss
+  fallthrough) rather than corpus inference — the strongest evidence yet
+  for this pattern, though still not the underlying registration
+  mechanism itself.
 - The one call site (703 counted, 702 resolved) whose name didn't
   resolve — not tracked down.
 - `GetOpener()`'s ~45% non-native call surface (above) suggests other

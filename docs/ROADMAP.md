@@ -751,16 +751,53 @@ Prioritization, driven by the port goal rather than raw coverage:
       and
       [`ZONE_FORMAT.md`](ZONE_FORMAT.md#entity-placement-ent--the-type-descriptor-tree--the-model-pointer).
 
-Next, small and non-blocking (checked and found genuinely unresolved,
-not just unexamined): `.zcp`'s tile-record byte 7 — 4 candidate functions
-(`Bullseye_LoadZmpCells`, `Bullseye_BakeLighting`, `Render3DScene`, the
-raycast-visibility entry point) checked for any read/write, none found,
-actual writer (if any) not located; `.zcp`'s 3 trailing `ZcpEntry` bytes
-(`0x21`-`0x23`), not reached; `entities.txt`'s `rotOrScale[4]` `idx1`
-flag's destination offset/purpose; Camera/player-feedback's native
-trigger — real combat-feedback code, but the caller that would fire it
-off-script wasn't traced. `.sta`'s `flags`/`unkA` stay closed as bounded-
-but-unidentified (no runtime consumer exists to trace meaning from, see
-`ZONE_FORMAT.md`). See `MODEL_FORMAT.md`'s, `RENDERER_3D.md`'s,
-`WORLD_MODEL.md`'s, `ZONE_FORMAT.md`'s, `INPUT_HANDLING.md`'s, and
-`SIMKIN_BRIDGE.md`'s open follow-ups.
+- [x] **All 4 of the prior round's "small, non-blocking" follow-ups
+      resolved**, 3 by direct confirmation and 1 with a real correction
+      to previously-committed docs:
+  - **`.zcp`'s tile-record byte 7: confirmed genuinely dead**, not just
+    unfound. A whole-binary scan for any `STRB <reg>, [<reg>, #7]`
+    (byte-store at a constant +7 offset, any base register) found
+    **zero hits anywhere in the binary** — combined with
+    `TileGrid_RaycastVisibility` (`FUN_1000f694`) writing byte +6 every
+    frame but never +7, and `Bullseye_LoadZmpCells` only ever loading 6
+    of the record's 8 bytes from disk, this is a reserved/always-zero
+    scratch byte with no consumer, not a cut feature.
+  - **`.zcp`'s 3 trailing `ZcpEntry` bytes: 1 of 3 decoded.** Offset
+    `0x23` is a per-tile-type **diagonal/wedge-corner selector**
+    (`SurfaceFace_BuildAndProject`'s 8-case corner-nudge switch — the
+    classic dungeon-crawler diagonal-tile trick), cross-verified against
+    real `azra.zcp` (92% plain square tiles, the rest real diagonal
+    usage matching the switch's cases exactly). `0x21`/`0x22` stay
+    undecoded — no consumer found in any cached function; `0x21` is
+    near-constant in real data (padding-shaped), `0x22` genuinely
+    varies (real data, consumer not located).
+  - **`entities.txt`'s `rotOrScale[4]` `idx1`: confirmed dead — and this
+    corrected a mistake in the previous pass's writeup.** Retracing
+    `GameEngine_InitLevel`'s raw disassembly (not just the decompiler's
+    variable names) found only 2 of the 4 `rotOrScale` fields are ever
+    used (`[0]`→object `+0xb2`, `[2]`→object `+0xa8`); `[1]` and `[3]`
+    are both dead. The object's 3rd orientation channel (`+0xb6`) and
+    `modelFlags` (`+0x5e`) actually come from `unkA`/`unkB` (fields
+    outside `rotOrScale` entirely), not `rotOrScale[3]` as previously
+    written.
+  - **Camera/player-feedback's native trigger: still not found, but its
+    architecture is now clear.** It's a mixin chained onto
+    **Player/GameState** (single-caller trace: `FUN_1001e2f8`'s only
+    caller is the Player/GameState dispatcher, falling through on a
+    trie-lookup miss) — same pattern as Weapon/weapon-damage and
+    Spell/spell-damage, now confirmed by direct trace for a 3rd pair.
+    No trigger site (script or native) found reaching it, consistent
+    with genuinely unused in this shipped build rather than merely
+    unfound.
+
+  Full writeups:
+  [`ZONE_FORMAT.md`](ZONE_FORMAT.md#the-bullseye-subsystem-a-load-time-light-propagation-bake-not-ai-pathfinding),
+  [`ZONE_FORMAT.md`](ZONE_FORMAT.md#entity-placement-ent--the-type-descriptor-tree--the-model-pointer),
+  and
+  [`SIMKIN_NATIVE_API.md`](SIMKIN_NATIVE_API.md#whats-still-open).
+
+`.sta`'s `flags`/`unkA` stay closed as bounded-but-unidentified (no
+runtime consumer exists to trace meaning from, see `ZONE_FORMAT.md`).
+See `MODEL_FORMAT.md`'s, `RENDERER_3D.md`'s, `WORLD_MODEL.md`'s,
+`ZONE_FORMAT.md`'s, `INPUT_HANDLING.md`'s, and `SIMKIN_BRIDGE.md`'s open
+follow-ups.
