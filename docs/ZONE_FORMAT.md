@@ -116,7 +116,11 @@ struct EntPlacement {      // offset  size
     int32  x;               // 0x00    4    world position (8.8 fixed?)
     int32  y;                // 0x04    4
     int32  z;                // 0x08    4
-    uint16 rotOrScale[4];     // 0x0c    8   (four u16 fields, exact meaning TBD)
+    uint16 rotOrScale[4];     // 0x0c    8   NOT 4 uniform rotation-or-scale
+                                //             values -- see the note below the
+                                //             struct: idx0/idx2 are real
+                                //             wide-ranging angle data, idx1/
+                                //             idx3 are both boolean flags
     int32  unkA;                // 0x14    4   not decoded (see azra.sta below --
                                  //             this field round-trips into it unchanged)
     int32  unkB;                  // 0x18    4   a packed pair, NOT a plain int32 --
@@ -140,6 +144,25 @@ small, sensible `typeId`-shaped values across all 282 real records (`0x14`
 gives large sign-extended-looking values instead — see `azra.sta`'s
 `unkA` field, which is exactly this). Tool:
 `tools/parse_zone_placement.py`.
+
+**`rotOrScale[4]` is two angles interleaved with two flags, not four
+uniform fields.** Ran `parse_zone_placement.py` against a real `azra.ent`
+(282 records) and checked each of the 4 indices' value distribution:
+`idx0` (17 distinct values) and `idx2` (24 distinct values) both span
+wide ranges in multiples of 128 (e.g. 256, 384, 768, 1152, and
+near-65536 wraparound values like 63872/64640) — the signature of real
+angle/heading data, consistent with the compass's confirmed
+`player+0xb6` heading format (`GRAPHICS_FORMAT.md`). `idx1`, by
+contrast, takes only **2 distinct values (0 or 0xFFFF)** — the exact
+same binary pattern as `idx3`, which is already confirmed to be
+`object->modelFlags` (see the code excerpt below). So `idx1` is a
+second boolean-style flag field, not an orientation value; the struct
+is really `{angle, flag, angle, flag}`, not `{rot,rot,rot,rot}`.
+`idx1`'s destination offset and purpose are still unidentified — the
+code excerpt below only traces 3 of the 4 fields (`idx0`/`idx2`/`idx3`)
+to object offsets `+0xa8/+0xb2/+0xb6`/`+0x5e`, and `idx1`'s flag-like
+data doesn't obviously fit that pattern, so the assumed 1:1 positional
+mapping across all 4 fields may not hold for it.
 
 For each record:
 
@@ -452,7 +475,19 @@ struct ZmpCell {           // 6 bytes on disk, per grid cell; the in-memory
                                      // frame (mod 4) TileGrid_RaycastVisibility
                                      // marked this cell visible, deduplicates
                                      // its per-frame output list
-    uint8  unknown7;                 // runtime-only, not decoded
+    uint8  unknown7;                 // runtime-only, not decoded. Checked
+                                       // (and ruled out) `Bullseye_
+                                       // LoadZmpCells`, `Bullseye_
+                                       // BakeLighting`, `Render3DScene`, and
+                                       // `FUN_1000f694` (the raycast-
+                                       // visibility entry point) for any
+                                       // read/write of this offset -- none
+                                       // found. `FUN_1000f694` turned out to
+                                       // only be ray-count setup/dispatch
+                                       // (155 lines, never touches offset 6
+                                       // or 7), not the actual per-cell
+                                       // visibility writer, which wasn't
+                                       // located. Genuinely open.
 };
 ```
 
@@ -590,6 +625,17 @@ player-start code). Floor has just one texture index and one call, using
 use — a fifth `flags` bit now identified, alongside bit0 (light source),
 bit1 (wall), bit3 (force-draw), and bit2 (used in the floor gate,
 `flags & 4`, role not pinned down beyond "also forces a draw").
+**Confirmed directly against `Render3DScene`'s (0x100166c8) exact floor-
+draw gate** (line ~531-549):
+```c
+if ((*pbVar36 & 2) == 0 &&                                    // not a wall
+    (ceilingBandThreshold < cameraEyeHeight || (*pbVar36 & 4) != 0))
+```
+bit2 unconditionally forces the OR to true, making the floor face draw
+regardless of the height comparison — mechanically identical in spirit
+to bit3's wall force-draw. This matches the existing characterization
+exactly; the *why* (which real tile situations set bit2 in shipped
+zone data) still isn't recoverable from code alone.
 
 **Bits 4-5 identified** (PC-port session, chasing a real-vs-port
 screenshot mismatch): the tile-grid wall/surface renderer's `.zlu`

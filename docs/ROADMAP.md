@@ -701,26 +701,66 @@ Prioritization, driven by the port goal rather than raw coverage:
       `tools/analyze_sta_fields.py`. Full writeup:
       [`ZONE_FORMAT.md`](ZONE_FORMAT.md#azrasta-a-leftover-level-editor-staging-file-not-a-game-format).
 
-Next: the 11 SimKin classes still without real corpus evidence
-(Camera/player-feedback confirmed *absent* from scripts entirely; Icon/
-sprite widget, Action-queue HUD, Menu-stack manager thin-to-unexamined;
-see `SIMKIN_NATIVE_API.md`'s "What's still open"); `.zcp`'s remaining
-undecoded bits (`flags` bit2's exact role, tile-record byte 7, 3 trailing
-type-table bytes); `.sta`'s `flags`/`unkA` semantic meaning (bounded, not
-identified); `entities.txt` line field 3's (`rotOrScale[4]`) exact
-meaning. See `MODEL_FORMAT.md`'s, `RENDERER_3D.md`'s, `WORLD_MODEL.md`'s,
-`ZONE_FORMAT.md`'s, `INPUT_HANDLING.md`'s, and `SIMKIN_BRIDGE.md`'s open
-follow-ups.
+- [x] **Confirmed `6r51.app` is genuinely self-contained** — answers the
+      first open question below. Its import table lists exactly 20 stock
+      Symbian/N-Gage system DLLs (EUSER, CONE, EIKCORE, AVKON, SIMKIN,
+      ...), no `RLibrary`/`DllOpen`/ECOM plugin-framework references
+      anywhere, and its export directory has exactly one export
+      (`NewApplication`, ordinal 1) — the standard single-factory Symbian
+      app pattern, not a plugin host. The `.s` SimKin scripts are
+      interpreted data, not separately-loaded code: all 702 enumerated
+      native bindings (`SIMKIN_NATIVE_API.md`) resolve inside this one
+      binary's own dispatch tables. Out of scope by the project's own
+      convention: whether the 20 imported *system* DLLs (EIKCORE/AVKON
+      etc.) do further dynamic loading internally — that's Symbian ROM
+      territory, not `6r51.app`.
+- [x] **Checked the Series 60 v1.2 SDK lead — not worth pursuing,
+      answers the second open question below.** Its only cataloged
+      source (Symbian-Archive) is a legacy Mega.nz fragment-key link, not
+      a plain fetchable file, and even a successful fetch would resolve
+      at most 4 of the 96 still-missing import ordinals (1 each in
+      BITGDI/CONE/FBSCLI, plus `MEDIACLIENTAUDIOSTREAM`) — `SIMKIN` (64,
+      third-party) and `GAMECOMMS`/`NOKIAFC` (28, N-Gage-specific), 91 of
+      the 96, aren't in any generic Series 60 SDK regardless. Closed as
+      diminishing returns.
+- [x] **The 4 corpus-silent SimKin classes, behaviorally confirmed by
+      decompile** (Camera/player-feedback, Icon/sprite widget,
+      Action-queue HUD, Menu-stack manager) — each dispatcher's
+      field-manipulation logic matches its hypothesized identity even
+      though no script in the 1,535-file corpus calls it:
+      Camera/player-feedback's `ScreenShake`/distance-falloff
+      `DamageHere`/`SetFrozen`; Icon widget's dormant/active sprite pair
+      + `ShowBorder`; Action-queue HUD's left/right bools tied directly
+      to the known equip-slot indices 6/7; Menu-stack manager's
+      unambiguous `CreateMenu` (a real 228-byte object allocation)/
+      `OpenMenu`/`SetPrevMenu`. Not a struct/vtable confirmation, but a
+      meaningfully stronger status than the original member-name-cluster
+      guess. Full writeup:
+      [`SIMKIN_NATIVE_API.md`](SIMKIN_NATIVE_API.md#whats-still-open).
+- [x] **`.zcp` flags bit2 confirmed** directly against `Render3DScene`'s
+      exact floor-draw gate — it unconditionally forces the floor face
+      to draw, matching the existing "also forces a draw" characterization
+      exactly (confirms, doesn't add to, what was already documented).
+      **`entities.txt`'s `rotOrScale[4]` resolved**: not 4 uniform
+      rotation/scale values — `idx0`/`idx2` are real wide-ranging angle
+      data (multiples of 128, matching the compass heading format),
+      while `idx1`/`idx3` are both binary (0/0xFFFF) flags (`idx3`
+      already known as `modelFlags`; `idx1` is a second, still-
+      unidentified flag). Full writeups:
+      [`ZONE_FORMAT.md`](ZONE_FORMAT.md#the-bullseye-subsystem-a-load-time-light-propagation-bake-not-ai-pathfinding)
+      and
+      [`ZONE_FORMAT.md`](ZONE_FORMAT.md#entity-placement-ent--the-type-descriptor-tree--the-model-pointer).
 
-## Open questions
-
-- Is `6r51.app`'s single `.app` really the *entire* game engine, or does it
-  load additional overlay/plugin binaries at runtime that aren't visible as
-  static `.dll`/`.app` files in the install image? (SimKin scripts drive
-  a lot of game logic already, per the `.s` files — worth confirming how
-  much of "the game" is actually inside the binary vs. interpreted script.)
-- Would the **Series 60 v1.2 SDK** (June 2003, also cataloged by
-  Symbian-Archive, also OS 6.1) resolve any of the 3 individual ordinals
-  missing from the v0.9 SDK's tables, or add `MEDIACLIENTAUDIOSTREAM`?
-  Not checked — v0.9 already got 319/415, diminishing-returns territory
-  unless one of those specific ordinals turns out to matter.
+Next, small and non-blocking (checked and found genuinely unresolved,
+not just unexamined): `.zcp`'s tile-record byte 7 — 4 candidate functions
+(`Bullseye_LoadZmpCells`, `Bullseye_BakeLighting`, `Render3DScene`, the
+raycast-visibility entry point) checked for any read/write, none found,
+actual writer (if any) not located; `.zcp`'s 3 trailing `ZcpEntry` bytes
+(`0x21`-`0x23`), not reached; `entities.txt`'s `rotOrScale[4]` `idx1`
+flag's destination offset/purpose; Camera/player-feedback's native
+trigger — real combat-feedback code, but the caller that would fire it
+off-script wasn't traced. `.sta`'s `flags`/`unkA` stay closed as bounded-
+but-unidentified (no runtime consumer exists to trace meaning from, see
+`ZONE_FORMAT.md`). See `MODEL_FORMAT.md`'s, `RENDERER_3D.md`'s,
+`WORLD_MODEL.md`'s, `ZONE_FORMAT.md`'s, `INPUT_HANDLING.md`'s, and
+`SIMKIN_BRIDGE.md`'s open follow-ups.

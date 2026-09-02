@@ -446,10 +446,46 @@ confirmed.
   clustering passes above) — the rest (Object/Entity (world base),
   Actor (AI movement), Character-manager menu, Store/shop menu,
   Weapon-damage mixin, Spell-damage mixin, Sprite-attach mixin) have
-  weaker-but-real corpus attestation, and 3 (Camera/player-feedback,
-  Icon/sprite widget, Action-queue HUD, Menu-stack manager) remain
-  essentially just the original member-name-cluster guess. None of this
-  is a struct/vtable confirmation — it's corroborating usage evidence.
+  weaker-but-real corpus attestation. The remaining **4 corpus-silent
+  classes now have a distinct, stronger status of their own**:
+  **behaviorally confirmed by decompiling their dispatcher, even though
+  no script in the 1,535-file corpus ever calls them** —
+  - **Camera/player-feedback** (`FUN_1001e2f8`): case 0 is a bare
+    vtable-trigger call matching `ScreenShake()`; cases 4/5 compute a
+    distance-based falloff intensity from x/y coordinates (a vtable
+    distance call, clamped/scaled, applied through another vtable call)
+    — textbook `DamageHere(x,y[,z[,radius]])` screen-flash-by-distance;
+    cases 5-7 manage an accumulator+decay-rate pair (fields `+0x39c`/
+    `+0x3a0`); case 8 sets a single bool (`+0x398`) matching
+    `SetFrozen`. Real, well-formed combat-feedback code, just never
+    triggered from any shipped script — the native caller wasn't traced.
+  - **Icon/sprite widget** (`FUN_1007f210`): case 2 picks between two
+    stored sprite-id fields (`+0x9c` dormant / `+0xa0` active) via a
+    bool and stores the choice at `+0x98`; cases 4/5 call dedicated
+    helpers `FUN_1007f614`/`FUN_1007f610` — almost certainly
+    `SetActiveSprite`/`SetDormantSprite` themselves; case 7 is a lone
+    bool (`+0xac`) matching `ShowBorder`.
+  - **Action-queue HUD** (`FUN_10034d8c`): cases 0/1/2 are a bool
+    setter/setter/getter (`+0xcc`) matching
+    `SetLeftActionQueue`/`SetRightActionQueue`/a query; cases 3/4 call
+    `FUN_1002c274` (the known player-equip-slot selector) at indices 6
+    and 7 — ties this class concretely to specific hand/equip-slot
+    indices, reinforcing left/right-hand semantics.
+  - **Menu-stack manager** (`FUN_100801fc`): case 1 is unambiguous — a
+    name lookup that, on miss, calls `EUSER____builtin_new(0xe4)` to
+    allocate a real 228-byte C++ object with 2 vtable pointers and
+    registers it — this **is** `CreateMenu(name)`. Case 2 does a name
+    lookup plus `strcmp` against 8 hardcoded menu-name strings
+    (special-casing some menus) — `OpenMenu(name)`. Case 3 stores a
+    looked-up reference at `+0xdc` — `SetPrevMenu(name)`. Cases 0/4 are
+    simpler trigger/cleanup calls (`Quit`-adjacent).
+
+  This is still not a struct/vtable confirmation, and the identities
+  above are field-manipulation logic matching the hypothesized
+  semantics, not proof the class *name* is right — but it's a
+  meaningfully stronger status than "just the original guess": these 4
+  are corpus-silent because nothing in the shipped scripts happens to
+  use them, not because the dispatcher logic doesn't fit.
 - Why some classes split into a "mixin" and a "main" pair (Weapon/
   weapon-damage, Spell/spell-damage) instead of registering as one — not
   investigated; could be base/derived class registration happening at
@@ -466,17 +502,23 @@ confirmed.
   further beyond `GetPlayer`/`GetOwner`/`GetOpener` and the small-class
   factories resolved in the second pass (`AddTrigger`, `CreatePopupMenu`,
   `AddEncounters`).
-- Still genuinely open, checked directly and found to have no (or almost
-  no) real-script fingerprint: **Camera/player-feedback** (its
-  combat-shaped members `ScreenShake`/`DamageHere`/`SetFrozen` never
-  appear anywhere in the corpus — either purely native-driven or unused
-  in shipped content, can't tell which from script-reading alone),
-  **Icon/sprite widget**, **Action-queue HUD** (both only 1 file each),
-  and **Menu-stack manager** (not re-examined this pass, but its members
-  are all reused names shared with GameEngine root/Character-manager
-  menu — see the reused-name table above — so corpus attestation alone
-  can't disambiguate it from those without a factory-call trace like the
-  ones that resolved Door/trap trigger and Encounter spawner).
+- Still genuinely open from *script-corpus evidence alone* (no
+  real-script fingerprint, or almost none): **Camera/player-feedback**
+  (its combat-shaped members `ScreenShake`/`DamageHere`/`SetFrozen`
+  never appear anywhere in the corpus), **Icon/sprite widget**,
+  **Action-queue HUD** (both only 1 file each), and **Menu-stack
+  manager** (its members are all reused names shared with GameEngine
+  root/Character-manager menu — see the reused-name table above — so
+  corpus attestation alone can't disambiguate it from those). **All 4
+  have since been independently confirmed by decompile instead** (see
+  the dispatcher-by-dispatcher writeup above) — the field-manipulation
+  logic in each one's native dispatcher matches its hypothesized
+  semantics exactly, which script silence alone couldn't settle. What
+  remains open is *why* they're corpus-silent: either purely
+  native-driven with no script hook at all (most likely for
+  Camera/player-feedback, which is combat-resolution code a script
+  wouldn't naturally trigger), or real but unused in this particular
+  shipped content — can't distinguish those two from the binary alone.
 
 ## Labels applied / tools
 
