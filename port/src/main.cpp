@@ -17,6 +17,7 @@
 #include <string>
 #include <vector>
 
+#include "assets/sprite_archive.h"
 #include "assets/string_table.h"
 #include "engine/game_clock.h"
 #include "engine/input_state.h"
@@ -154,9 +155,22 @@ void RenderPopup(sk::Backbuffer& backbuffer, sk_bindings::PopupMenuExecutable& p
 }
 
 void RenderMenu(sk::Backbuffer& backbuffer, sk_bindings::MenuExecutable& menu,
-                 sk_bindings::PlayerExecutable& player, const sk::StringTable& strings) {
+                 sk_bindings::PlayerExecutable& player, const sk::StringTable& strings,
+                 sk::SpriteArchive& sprites) {
     using RowKind = sk_bindings::MenuExecutable::RowKind;
-    backbuffer.Fill(kBackgroundColor);
+    // Real background (docs/GRAPHICS_FORMAT.md) when the real script's
+    // MenuBackground(id) call resolved to a decodable global.spr slot
+    // (id *is* the slot index directly, no translation -- confirmed
+    // against every real MenuBackground() call in the corpus); falls
+    // back to the flat placeholder color otherwise (asset missing, or a
+    // menu that never calls MenuBackground() at all).
+    const sk::Sprite* background =
+        menu.backgroundId() >= 0 ? sprites.GetSprite(menu.backgroundId()) : nullptr;
+    if (background) {
+        backbuffer.Blit(0, 0, *background);
+    } else {
+        backbuffer.Fill(kBackgroundColor);
+    }
 
     int y = 8;
     const int lineHeight = sk::BitmapFont::kGlyphHeight + 4;
@@ -184,8 +198,24 @@ void RenderMenu(sk::Backbuffer& backbuffer, sk_bindings::MenuExecutable& menu,
             case RowKind::ItemButton: {
                 auto* item = static_cast<sk_bindings::ItemButtonExecutable*>(row.widget.get());
                 if (item->visible()) {
+                    // Real icon (docs/GRAPHICS_FORMAT.md) when the
+                    // real ItemExecutable::SetIcon() id resolved to a
+                    // decoded, row-sized slot -- global.spr's icon ids
+                    // aren't all small row icons (some of the same
+                    // ids item scripts use are full-screen 176x208
+                    // panels, presumably for a detail/examine view
+                    // this port doesn't have), so only draw ones that
+                    // actually fit a list row; anything bigger falls
+                    // back to the label-only rendering below, same as
+                    // a missing/undecoded slot.
+                    int textX = 12;
+                    const sk::Sprite* icon = sprites.GetSprite(item->icon());
+                    if (icon && icon->width <= 40 && icon->height <= 40) {
+                        backbuffer.Blit(textX, y, *icon);
+                        textX += icon->width + 3;
+                    }
                     std::string label = RowText(item->textId(), item->itemText(), strings);
-                    sk::BitmapFont::DrawString(backbuffer, 12, y, label, color);
+                    sk::BitmapFont::DrawString(backbuffer, textX, y, label, color);
                     y += lineHeight;
                 }
                 break;
@@ -339,6 +369,21 @@ int main(int argc, char** argv) {
     sk::ModelArchive modelArchive;
     modelArchive.Load(scriptRoot);
 
+    // Real menu backgrounds/HUD icons (docs/GRAPHICS_FORMAT.md's "The
+    // 384-slot image cache's real source format", docs/PORT_ROADMAP.md's
+    // milestone) -- global.spr is the same global archive every menu
+    // and zone icon set draws from; menu_sprites.txt prewarms exactly
+    // the slots the main-menu/character-creation flow (running before
+    // any zone is loaded) needs, including the real MenuBackground()
+    // ids (20/69/174, confirmed by grepping every real script's call).
+    // Not fatal to fail -- RenderMenu() falls back to a flat color per
+    // menu when a slot isn't available, same "optional asset" spirit as
+    // modelArchive/entityTypes above.
+    sk::SpriteArchive spriteArchive;
+    if (spriteArchive.Load(scriptRoot)) {
+        spriteArchive.LoadCategory(scriptRoot, "menu");
+    }
+
     skInterpreter interpreter;
     sk_bindings::MenuStack stack(scriptRoot, interpreter, &strings);
 
@@ -452,6 +497,12 @@ int main(int argc, char** argv) {
             stack.ClearGameStartRequest();
             auto zone = std::make_unique<sk::Zone>();
             if (zone->Load(scriptRoot, stack.requestedZone())) {
+                // Real per-zone icon set (docs/GRAPHICS_FORMAT.md) --
+                // <zone>_sprites.txt includes the same item-icon cluster
+                // (ItemExecutable::SetIcon() ids 209-218) every zone
+                // ships, since the inventory/equip screens need them
+                // available regardless of which zone the player is in.
+                spriteArchive.LoadCategory(scriptRoot, stack.requestedZone());
                 gameZone = std::move(zone);
                 gameCamera.x = static_cast<float>(gameZone->playerStartX);
                 gameCamera.y = static_cast<float>(gameZone->playerStartY);
@@ -852,7 +903,7 @@ int main(int argc, char** argv) {
         }
 
         if (menu) {
-            RenderMenu(backbuffer, *menu, stack.player(), strings);
+            RenderMenu(backbuffer, *menu, stack.player(), strings, spriteArchive);
         } else {
             backbuffer.Fill(kBackgroundColor);
         }

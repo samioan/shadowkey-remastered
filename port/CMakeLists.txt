@@ -115,6 +115,7 @@ target_link_libraries(sk_render3d PUBLIC sk_world)
 
 add_executable(shadowkey_port
   src/main.cpp
+  src/assets/sprite_archive.cpp
   src/graphics/bitmap_font.cpp
   src/platform/win32/window.cpp
 )
@@ -171,3 +172,7 @@ target_link_libraries(inventory_smoke PRIVATE sk_bindings)
 # Combat vertical-slice smoke test -- see src/tests/m12_combat_smoke.cpp.
 add_executable(combat_smoke src/tests/m12_combat_smoke.cpp)
 target_link_libraries(combat_smoke PRIVATE sk_bindings sk_world)
+
+# Sprite archive (global.spr) smoke test -- see src/tests/m13_sprite_smoke.cpp.
+add_executable(sprite_smoke src/tests/m13_sprite_smoke.cpp src/assets/sprite_archive.cpp)
+target_include_directories(sprite_smoke PRIVATE src)

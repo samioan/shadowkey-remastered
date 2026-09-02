@@ -1,11 +1,14 @@
 #pragma once
 
-// Placeholder bitmap font -- NOT the game's real glyph format, which was
-// never reverse-engineered (see the port scaffold plan's known-stubs
-// list: RENDER_LOOP.md only names a debug-overlay font cluster in
-// passing). Upper-case-only 5x7 block glyphs so menu screens show real
-// string-table text (see assets/string_table.h) instead of placeholder
-// strings, clearly marked as a stand-in pending that RE pass.
+// Placeholder bitmap font -- confirmed (docs/GRAPHICS_FORMAT.md's "The
+// real in-game font" section) to be a *permanent* stand-in, not a gap
+// pending RE: the real UI text draw path calls genuine Symbian EIKON/
+// GDI APIs (CEikonEnv::LegendFont(), or a TFontSpec for the stock
+// "Swiss" family) -- the real glyphs are the Nokia N-Gage's own system
+// font, living in the device ROM, not any file this game ships. There's
+// nothing left to extract from this project's assets. Upper-case-only
+// 5x7 block glyphs so menu screens show real string-table text (see
+// assets/string_table.h) instead of placeholder strings.
 
 #include <cstdint>
 #include <string_view>

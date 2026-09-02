@@ -3,6 +3,8 @@
 #include <cstdint>
 #include <vector>
 
+#include "assets/sprite_archive.h"
+
 namespace sk {
 
 // Mirrors the original engine's screen buffer: 176x208, 16 bits per pixel,
@@ -32,6 +34,27 @@ public:
     void SetPixel(int x, int y, uint16_t rgb565) {
         if (x < 0 || x >= kWidth || y < 0 || y >= kHeight) return;
         pixels_[static_cast<size_t>(y) * kWidth + x] = rgb565;
+    }
+
+    // Straight opaque-pixel copy of a decoded assets/sprite_archive.h
+    // Sprite at (x,y) -- clips against both the backbuffer and the
+    // sprite's own bounds. Only the real engine's Blit_RLESprite
+    // straight-copy mode (blendMode==0); its 50%-average-blend mode
+    // (blendMode==1, docs/GRAPHICS_FORMAT.md) has no current caller in
+    // this port and isn't implemented here.
+    void Blit(int x, int y, const Sprite& sprite) {
+        for (int sy = 0; sy < sprite.height; ++sy) {
+            int dy = y + sy;
+            if (dy < 0 || dy >= kHeight) continue;
+            for (int sx = 0; sx < sprite.width; ++sx) {
+                int dx = x + sx;
+                if (dx < 0 || dx >= kWidth) continue;
+                size_t si = static_cast<size_t>(sy) * sprite.width + static_cast<size_t>(sx);
+                if (!sprite.opaque[si]) continue;
+                pixels_[static_cast<size_t>(dy) * kWidth + static_cast<size_t>(dx)] =
+                    sprite.pixels[si];
+            }
+        }
     }
 
 private:

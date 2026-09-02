@@ -375,10 +375,9 @@ algorithms.
       separate compass banner (heading readout flanked by two dragon
       heads) across the top -- neither art piece exists as a decoded
       on-disk asset. Fixed the position (now bottom-left); the ornate art
-      itself is blocked on the same unresolved 384-slot sprite/icon cache
-      *source* format `GRAPHICS_FORMAT.md`'s "Open follow-ups" already
-      flags for real menu backgrounds -- see the "Next milestones" bullet
-      below, not attempted this pass.
+      itself was blocked on the 384-slot sprite/icon cache's *source*
+      format, since decoded (M13 below) -- the HUD border/compass art
+      specifically wasn't tracked down yet though, see "Next milestones".
 
 - [x] **Targeted decompilation pass -- `.zlu` hue-family selector's real
       source, and `.sur`'s flags-byte layout** (this session, immediate
@@ -613,6 +612,72 @@ algorithms.
       sequencing), not whether the fight feels right in the running
       game.
 
+- [x] **M13 -- real menu backgrounds + item/HUD icons, plus the real-font
+      question closed** (this session). The other two items the user
+      asked to close out before returning to combat resolution.
+    - **Font: closed with no code change** -- traced the real UI text-
+      draw path (`DrawListItemIconAndLabel` -> `FUN_1007f49c` ->
+      `FUN_1008f8a4` -> `FUN_10022b20`/`d48`/`f88`) and confirmed it
+      calls genuine Symbian EIKON/GDI APIs (`CEikonEnv::LegendFont()`,
+      or a `TFontSpec` for the stock `"Swiss"` family). The real glyphs
+      are the Nokia N-Gage's own system font, living in the device ROM
+      -- not a file this game ships, so there's nothing left to extract
+      from this project's assets. Full trace: `GRAPHICS_FORMAT.md`'s
+      new font section. The stand-in bitmap font
+      (`port/src/graphics/bitmap_font.h`) is now a confirmed permanent
+      substitute, not an open gap.
+    - **Menu backgrounds/icons: real format decoded and wired up.**
+      Traced `engine+0x4460`'s actual writer (not just its readers) by
+      decompiling the whole ~2000-function binary and grepping for the
+      offset (new `pyghidra_grep_decompiled.py` -- needed since the
+      offset is built via ARM arithmetic, not a loadable literal).
+      Found the lazy-load-and-cache function and its two format-string
+      arguments: `"%s\global.spr"` (the sprite data, one global file)
+      and `"%s\%s_sprites.txt"` (a per-category manifest -- newline-
+      separated slot indices, same convention as the already-known
+      `<zone>_models.txt`/`_sounds.txt`). `global.spr` is a 384-entry
+      size table followed by the sprite blobs concatenated back-to-back
+      -- each blob already the exact in-memory RLE layout
+      `GRAPHICS_FORMAT.md` had already decoded from `Blit_RLESprite`,
+      no separate decode step. Verified both structurally (the real
+      file's byte-accounting matches exactly) and visually (rendered
+      real slots to PNG -- a parchment-and-vine-border 176x208 menu
+      background, a dagger icon, a character portrait, a UI gradient
+      strip).
+    - Grepped every real script's `MenuBackground(id)` call: only 3
+      distinct ids ever used (20, 69, 174), all 3 real full-screen
+      slots already in `menu_sprites.txt` -- `id` *is* the `global.spr`
+      slot index directly, zero translation needed.
+      `MenuExecutable::backgroundId()` already stored this; new
+      `port/src/assets/sprite_archive.h/.cpp` (mirrors `world/
+      model_archive.h`'s lazy-load-and-cache shape) plus
+      `Backbuffer::Blit()` (straight opaque copy only -- the real
+      engine's 50%-blend `blendMode==1` has no current UI use) draw it
+      for real now, replacing the flat-color fallback whenever a slot
+      decodes. **Confirmed live** -- launched the built port and
+      screenshotted the real main menu: the parchment background and
+      corner art render correctly.
+    - Item icons (`ItemExecutable::SetIcon()`, ids 209-218 in the real
+      corpus) load from the *active zone's* `<zone>_sprites.txt` (same
+      per-zone manifest item scripts already need for every zone, not
+      `menu_sprites.txt`) and draw next to `ItemButtonExecutable` rows
+      (equip-slot buttons) when the resolved slot is row-sized (<=40px
+      -- some of the same ids item scripts use resolve to full-screen
+      176x208 panels, presumably a detail/examine view this port
+      doesn't have; those fall back to label-only, same as an
+      undecoded slot).
+    - **Not attempted**: inventory *table* row icons (`TableExecutable`
+      rows don't carry a per-row icon id in this port's model -- would
+      need a new field threaded from `ItemExecutable`, a larger change
+      than this pass), the `blendMode==1` translucency path, and
+      identifying exactly what the larger (150x100-ish, and a couple of
+      176x208) slots some item icon ids resolve to.
+    - New `sprite_smoke` test verifies `global.spr`'s TOC against the
+      real file's exact byte size, all 3 real `MenuBackground` ids
+      decode to full-screen non-degenerate sprites, `menu_sprites.txt`
+      decodes end to end, and out-of-range/unused-slot lookups fail
+      safely.
+
 ## Next milestones (not yet started)
 
 Roughly in priority order for reaching "actually playable," not commitments:
@@ -636,15 +701,12 @@ Roughly in priority order for reaching "actually playable," not commitments:
   pickups, NPC talk -- still unbound).
 - **Real save file format** -- M5's save system is simulated in-memory
   only; no on-disk save format has been RE'd yet.
-- **Real menu background images / HUD iconography** -- still flat colors
-  (`MenuBackground` stub) and, as of the post-M11 fix above, a
-  correctly-*positioned* but still hand-drawn HUD (no ornate dragon-head
-  compass/vitals-border art); both are blocked on the same open item --
-  the 384-slot image cache's *source* file format was never RE'd (only
-  the in-memory RLE layout `Blit_RLESprite` reads is decoded), flagged
-  open in [`GRAPHICS_FORMAT.md`](GRAPHICS_FORMAT.md).
-- **Real font/glyph rendering** -- still a stand-in bitmap font; the
-  original's glyph format was never RE'd.
+- **HUD dragon-head/compass border art** -- M13 above put real icons
+  into equip-slot rows, but the vitals bars/compass banner (`main.cpp`'s
+  `RenderHud`) are still hand-drawn bars, not the real ornate border
+  art -- likely just a matter of finding which `global.spr`/zone-sprite
+  slot(s) the real HUD draw path uses (not chased this pass, M13 only
+  traced the menu/list-item icon path).
 - Audio: entirely unaddressed so far, format not RE'd.
 
 ## Verification approach
