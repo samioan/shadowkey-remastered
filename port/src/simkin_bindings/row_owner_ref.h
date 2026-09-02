@@ -8,6 +8,7 @@
 // earlier. An index stays valid across that.
 
 #include <cstddef>
+#include <string>
 
 namespace sk_bindings {
 
@@ -23,6 +24,9 @@ protected:
     // construct them).
     void SetRowSelectable(bool selectable);
     void SetRowTextId(int textId);
+    // M10: ButtonExecutable/MenuItemHandle's SetItemText(literal string)
+    // -- charactermanager.s's nameButton.SetItemText(myname) etc.
+    void SetRowLiteralText(const std::string& text);
 
     MenuExecutable& m_Owner;
     size_t m_RowIndex;

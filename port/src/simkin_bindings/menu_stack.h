@@ -22,6 +22,10 @@
 
 class skInterpreter;
 
+namespace sk {
+class StringTable;
+}
+
 namespace sk_bindings {
 
 class MenuExecutable;
@@ -37,7 +41,13 @@ class MenuStack {
 public:
     static constexpr int kSaveSlotCount = 4;
 
-    MenuStack(std::string scriptRoot, skInterpreter& interpreter);
+    // `strings` may be null (some smoke tests construct a MenuStack with
+    // no real stringtable.eng loaded) -- M10's starting-inventory items
+    // then fall back to ItemExecutable's own no-stringtable placeholder
+    // rather than crash. Registers the real/placeholder Simkin global
+    // constants (game_constants.h) once, here.
+    MenuStack(std::string scriptRoot, skInterpreter& interpreter,
+              const sk::StringTable* strings = nullptr);
     ~MenuStack();
 
     // Loads (or returns the already-loaded) menu for `simkinPath`, running
@@ -60,6 +70,10 @@ public:
     PlayerExecutable& player() const { return *m_Player; }
     const std::string& scriptRoot() const { return m_ScriptRoot; }
     skInterpreter& interpreter() const { return m_Interpreter; }
+    // M10: real screens call the global GetLocalizedString(id) directly
+    // (charactermanager.s's GetHealthText() etc.), not just relying on a
+    // row's own textId -- may be null, same caveat as the constructor.
+    const sk::StringTable* strings() const { return m_Strings; }
 
     // Simulated save system -- there's no real save-file format RE'd here
     // (out of scope for the menu milestone), just enough in-memory state
@@ -88,10 +102,12 @@ public:
     // verified against) is wired up for now; LoadGame() requests the
     // same zone since there's no real save-file format to read a
     // different one from yet.
-    void RequestGameStart(std::string zoneName) {
-        m_GameStartRequested = true;
-        m_RequestedZone = std::move(zoneName);
-    }
+    // M10: the first call also runs PlayerExecutable::LoadStartingInventory
+    // (guarded by m_StartingInventoryLoaded so a later Load Game -- which
+    // also calls this, see menu_executable.cpp's LoadGame() handler --
+    // doesn't grant duplicate items on top of whatever the in-memory-only
+    // save system already has).
+    void RequestGameStart(std::string zoneName);
     bool gameStartRequested() const { return m_GameStartRequested; }
     const std::string& requestedZone() const { return m_RequestedZone; }
     void ClearGameStartRequest() { m_GameStartRequested = false; }
@@ -113,6 +129,7 @@ private:
 
     std::string m_ScriptRoot;
     skInterpreter& m_Interpreter;
+    const sk::StringTable* m_Strings;
     std::map<std::string, std::unique_ptr<MenuExecutable>> m_Menus;
     std::unique_ptr<PlayerExecutable> m_Player;
     MenuExecutable* m_Current = nullptr;
@@ -122,6 +139,7 @@ private:
     std::vector<std::string> m_CreditsLines;
     bool m_GameStartRequested = false;
     std::string m_RequestedZone;
+    bool m_StartingInventoryLoaded = false;
 };
 
 }  // namespace sk_bindings

@@ -2,18 +2,49 @@
 
 #include <cstdio>
 
+#include "assets/string_table.h"
+#include "simkin_bindings/button_executable.h"
 #include "simkin_bindings/combo_box_executable.h"
 #include "simkin_bindings/floating_sprite_executable.h"
 #include "simkin_bindings/floating_text_executable.h"
+#include "simkin_bindings/game_constants.h"
+#include "simkin_bindings/item_button_executable.h"
+#include "simkin_bindings/item_executable.h"
 #include "simkin_bindings/menu_item_handle.h"
 #include "simkin_bindings/native_binding_common.h"
 #include "simkin_bindings/player_executable.h"
 #include "simkin_bindings/popup_menu_executable.h"
+#include "simkin_bindings/table_executable.h"
 #include "simkin_bindings/text_area_executable.h"
 #include "skRValue.h"
 #include "skRValueArray.h"
 
 namespace sk_bindings {
+
+bool TitleHandle::method(const skString& methodName, skRValueArray& args, skRValue& returnValue,
+                          skExecutableContext& context) {
+    if (methodName == skString("SetLocalizedText") && args.entries() == 1) {
+        m_Owner.SetTitleTextId(args[0].intValue());
+        return true;
+    }
+    return SoftFailNativeCall("Title", methodName, args, returnValue);
+}
+
+namespace {
+
+// AddButton()/AddFloatingText()'s first argument is dynamically typed in
+// the real scripts -- see menu_executable.h's class comment.
+void SetRowTextFromArg(MenuExecutable::MenuRow& row, const skRValue& arg) {
+    if (arg.type() == skRValue::T_String) {
+        row.literalText = ToStdString(arg.str());
+        row.textId = -1;
+    } else {
+        row.textId = arg.intValue();
+        row.literalText.clear();
+    }
+}
+
+}  // namespace
 
 MenuExecutable::MenuExecutable(const skString& filename, skExecutableContext& ctxt,
                                 MenuStack& stack)
@@ -58,7 +89,16 @@ void MenuExecutable::RunOnDisplay() {
 
 MenuExecutable::MenuRow& MenuExecutable::AddRow(RowKind kind, int textId,
                                                  const std::string& callback, bool selectable) {
-    m_Rows.push_back(MenuRow{kind, textId, callback, selectable, nullptr});
+    // Fields are set by name, not via aggregate-initializer position --
+    // MenuRow has grown fields (literalText, M10) since this was written,
+    // and a positional initializer silently miscompiles the moment the
+    // struct's member order and this call's argument order diverge.
+    MenuRow row;
+    row.kind = kind;
+    row.textId = textId;
+    row.callback = callback;
+    row.selectable = selectable;
+    m_Rows.push_back(std::move(row));
     return m_Rows.back();
 }
 
@@ -68,6 +108,10 @@ void MenuExecutable::SetRowSelectable(size_t rowIndex, bool selectable) {
 
 void MenuExecutable::SetRowTextId(size_t rowIndex, int textId) {
     if (rowIndex < m_Rows.size()) m_Rows[rowIndex].textId = textId;
+}
+
+void MenuExecutable::SetRowLiteralText(size_t rowIndex, const std::string& text) {
+    if (rowIndex < m_Rows.size()) m_Rows[rowIndex].literalText = text;
 }
 
 void MenuExecutable::MoveSelection(int delta) {
@@ -120,6 +164,22 @@ void MenuExecutable::ActivateSelected() {
     }
 }
 
+bool MenuExecutable::TryMoveTableSelection(int delta) {
+    if (m_SelectedItem < 1 || static_cast<size_t>(m_SelectedItem) > m_Rows.size()) return false;
+    MenuRow& row = m_Rows[static_cast<size_t>(m_SelectedItem - 1)];
+    if (row.kind != RowKind::Table) return false;
+    static_cast<TableExecutable*>(row.widget.get())->MoveSelection(delta);
+    return true;
+}
+
+bool MenuExecutable::TryActivateTable() {
+    if (m_SelectedItem < 1 || static_cast<size_t>(m_SelectedItem) > m_Rows.size()) return false;
+    MenuRow& row = m_Rows[static_cast<size_t>(m_SelectedItem - 1)];
+    if (row.kind != RowKind::Table) return false;
+    static_cast<TableExecutable*>(row.widget.get())->ActivateSelected();
+    return true;
+}
+
 PopupMenuExecutable* MenuExecutable::activePopup() const {
     for (PopupMenuExecutable* popup : m_KnownPopups) {
         if (popup->visible()) return popup;
@@ -145,8 +205,15 @@ bool MenuExecutable::method(const skString& methodName, skRValueArray& args,
         m_BackgroundId = args[0].intValue();
         return true;
     }
-    if (methodName == skString("AddTitle") && args.entries() == 1) {
+    if (methodName == skString("AddTitle") && args.entries() >= 1) {
+        // questlog.s calls this twice with an explicit y position
+        // (AddTitle(3785,10); AddTitle(3786,25);) -- this port's renderer
+        // only has one title slot, so the extra y argument is accepted
+        // but ignored and the second call simply replaces the first
+        // (documented simplification, same spirit as the flat-color
+        // MenuBackground stand-in).
         m_TitleTextId = args[0].intValue();
+        returnValue = skRValue(static_cast<skiExecutable*>(&m_TitleHandle), false);
         return true;
     }
     if (methodName == skString("SetUseHoriz") && args.entries() == 1) {
@@ -236,7 +303,11 @@ bool MenuExecutable::method(const skString& methodName, skRValueArray& args,
         m_Stack.OpenMenu(ToStdString(args[0].str()));
         return true;
     }
-    if (methodName == skString("CreatePopupMenu") && args.entries() == 4) {
+    if (methodName == skString("CreatePopupMenu") && args.entries() >= 4) {
+        // M10: real callers pass a 5th trailing bool (inventory.s/
+        // charactermanager.s's CreatePopupMenu(x,y,w,h,false)) whose
+        // meaning was never RE'd and nothing here currently branches on
+        // -- accepted and ignored rather than requiring exactly 4 args.
         auto* popup = new PopupMenuExecutable(*this, args[0].intValue(), args[1].intValue(),
                                                args[2].intValue(), args[3].intValue());
         m_KnownPopups.push_back(popup);
@@ -319,6 +390,163 @@ bool MenuExecutable::method(const skString& methodName, skRValueArray& args,
         methodName == skString("ClearNewGameHook")) {
         return true;
     }
+
+    // --- M10: buttons/item buttons/tables (charactermanager.s/
+    // inventory.s/statsscreen.s/questlog.s) ---
+    if (methodName == skString("AddButton") && args.entries() >= 4) {
+        std::string callback = args.entries() >= 2 ? ToStdString(args[1].str()) : "";
+        MenuRow& row = AddRow(RowKind::MenuItem, -1, callback, true);
+        SetRowTextFromArg(row, args[0]);
+        row.widget.reset(new ButtonExecutable(*this, m_Rows.size() - 1));
+        returnValue = skRValue(static_cast<skiExecutable*>(row.widget.get()), false);
+        return true;
+    }
+    if (methodName == skString("AddQuitButton") && args.entries() == 2) {
+        MenuRow& row =
+            AddRow(RowKind::MenuItem, args[0].intValue(), ToStdString(args[1].str()), true);
+        row.widget.reset(new ButtonExecutable(*this, m_Rows.size() - 1));
+        returnValue = skRValue(static_cast<skiExecutable*>(row.widget.get()), false);
+        return true;
+    }
+    if (methodName == skString("AddFloatingText") && args.entries() >= 4) {
+        std::string callback = args.entries() >= 2 ? ToStdString(args[1].str()) : "";
+        bool selectable = args.entries() >= 5 ? args[4].boolValue() : !callback.empty();
+        MenuRow& row =
+            AddRow(selectable ? RowKind::MenuItem : RowKind::StaticItem, -1, callback, selectable);
+        SetRowTextFromArg(row, args[0]);
+        row.widget.reset(new MenuItemHandle(*this, m_Rows.size() - 1));
+        returnValue = skRValue(static_cast<skiExecutable*>(row.widget.get()), false);
+        return true;
+    }
+    if (methodName == skString("AddItemButton") && args.entries() == 6) {
+        MenuRow& row = AddRow(RowKind::ItemButton, -1, "", true);
+        row.widget.reset(new ItemButtonExecutable(*this, m_Rows.size() - 1, args[0].intValue(),
+                                                    ToStdString(args[1].str()), args[2].intValue(),
+                                                    args[3].intValue(), args[4].intValue(),
+                                                    args[5].intValue()));
+        returnValue = skRValue(static_cast<skiExecutable*>(row.widget.get()), false);
+        return true;
+    }
+    if (methodName == skString("AddTable") && args.entries() == 5) {
+        MenuRow& row = AddRow(RowKind::Table, -1, "", true);
+        row.widget.reset(new TableExecutable(*this, args[0].intValue(), args[1].intValue(),
+                                              args[2].intValue(), args[3].intValue(),
+                                              args[4].intValue()));
+        returnValue = skRValue(static_cast<skiExecutable*>(row.widget.get()), false);
+        return true;
+    }
+    if (methodName == skString("GetLocalizedString") && args.entries() == 1) {
+        // charactermanager.s's GetHealthText() etc. build their own
+        // display strings by calling this directly, unlike every M3-M5
+        // row whose text resolution happens later at render time via its
+        // own textId -- needs the real stringtable right here.
+        std::string text =
+            m_Stack.strings() ? m_Stack.strings()->Get(args[0].intValue()) : "?";
+        returnValue = skRValue(skString(text.c_str()));
+        return true;
+    }
+    if (methodName == skString("SetInventoryList") && args.entries() == 1) {
+        m_InventoryListTarget = dynamic_cast<TableExecutable*>(args[0].obj());
+        return true;
+    }
+    if ((methodName == skString("DisplayWeaponsPage") || methodName == skString("DisplayArmorMenu") ||
+         methodName == skString("DisplayConsumablesMenu") ||
+         methodName == skString("DisplayMiscItemsMenu") ||
+         methodName == skString("DisplaySpellsPage")) &&
+        args.entries() == 1) {
+        int itemType = methodName == skString("DisplayWeaponsPage")   ? kItemTypeWeapon
+                        : methodName == skString("DisplayArmorMenu")   ? kItemTypeArmor
+                        : methodName == skString("DisplayConsumablesMenu") ? kItemTypeConsumable
+                        : methodName == skString("DisplaySpellsPage")  ? kItemTypeSpell
+                                                                        : kItemTypeMisc;
+        // Marks the passed-in category button active and every other
+        // known button on this screen inactive (matches inventory.s's own
+        // "activeButton=weaponsButton"-style single-active-tab pattern),
+        // then repopulates SetInventoryList()'s remembered target table
+        // with the real inventory items of this category -- see
+        // table_executable.h's PopulateFromInventory().
+        auto* active = dynamic_cast<ButtonExecutable*>(args[0].obj());
+        for (auto& r : m_Rows) {
+            if (auto* btn = dynamic_cast<ButtonExecutable*>(r.widget.get())) {
+                btn->SetActive(btn == active);
+            }
+        }
+        if (m_InventoryListTarget) {
+            std::vector<ItemExecutable*> filtered;
+            for (const auto& item : m_Stack.player().inventory()) {
+                if (item->itemType() == itemType) filtered.push_back(item.get());
+            }
+            m_InventoryListTarget->PopulateFromInventory(filtered);
+        }
+        return true;
+    }
+    if (methodName == skString("UpdateEquipStatus") && args.entries() == 2) {
+        auto* item = dynamic_cast<ItemExecutable*>(args[0].obj());
+        returnValue = skRValue(m_Stack.player().UpdateEquipStatus(item, args[1].boolValue()));
+        return true;
+    }
+    if (methodName == skString("DisplayObjectives") && args.entries() == 1) {
+        // No quest-state system exists in this port (a separate,
+        // sizeable undertaking -- see docs/PORT_ROADMAP.md's "next
+        // milestones") -- a single placeholder row stands in for real
+        // objective text so questlog.s renders as a real, non-empty
+        // screen rather than throwing or staying blank.
+        if (auto* table = dynamic_cast<TableExecutable*>(args[0].obj())) {
+            skRValueArray setArgs;
+            setArgs.append(skRValue(0));
+            setArgs.append(skRValue(0));
+            setArgs.append(skRValue(skString("No active quests.")));
+            skRValue ret;
+            table->method(skString("SetText"), setArgs, ret, context);
+        }
+        return true;
+    }
+    if (methodName == skString("TrimText") && args.entries() == 2) {
+        std::string text = ToStdString(args[0].str());
+        size_t maxLen = static_cast<size_t>(args[1].intValue());
+        if (text.size() > maxLen) text = text.substr(0, maxLen);
+        returnValue = skRValue(skString(text.c_str()));
+        return true;
+    }
+    if (methodName == skString("GetSelectedItem") && args.entries() == 0) {
+        if (m_SelectedItem >= 1 && static_cast<size_t>(m_SelectedItem) <= m_Rows.size()) {
+            MenuRow& row = m_Rows[static_cast<size_t>(m_SelectedItem - 1)];
+            if (row.widget) {
+                returnValue = skRValue(static_cast<skiExecutable*>(row.widget.get()), false);
+            }
+        }
+        return true;
+    }
+    if (methodName == skString("DisplayCharacterManager") && args.entries() == 0) {
+        m_Stack.OpenMenu("charactermanager");
+        return true;
+    }
+    if (methodName == skString("DisplayInventory") && args.entries() == 0) {
+        m_Stack.OpenMenu("inventory");
+        return true;
+    }
+    if (methodName == skString("DisplayStatsScreen") && args.entries() == 0) {
+        m_Stack.OpenMenu("statsscreen");
+        return true;
+    }
+    if (methodName == skString("DisplayQuestLog") && args.entries() == 0) {
+        m_Stack.OpenMenu("questlog");
+        return true;
+    }
+    if (methodName == skString("OpenMainMenu") && args.entries() == 0) {
+        m_Stack.OpenMenu("MainMenu");
+        return true;
+    }
+    if (methodName == skString("SetLeftActionQueue") || methodName == skString("SetRightActionQueue") ||
+        methodName == skString("ShowActionQueue") || methodName == skString("ShowRemovedQueue")) {
+        // actionqueue.s's real drag/reorder equip-slot-assignment screen
+        // is out of scope for this milestone (docs/PORT_ROADMAP.md) --
+        // accepted so charactermanager.s's queue-selection handlers don't
+        // soft-fail-log noise, but there's no separate queue screen/state
+        // to actually open here.
+        return true;
+    }
+
     if (skScriptedExecutable::method(methodName, args, returnValue, context)) {
         return true;
     }

@@ -12,6 +12,13 @@ bool MenuItemHandle::method(const skString& methodName, skRValueArray& args,
         SetRowSelectable(args[0].boolValue());
         return true;
     }
+    if (methodName == skString("SetItemText") && args.entries() == 1) {
+        // M10: charactermanager.s's classInfoItem (an AddFloatingText()
+        // row, which shares this handle class) refreshes its text this
+        // way after the fact.
+        SetRowLiteralText(ToStdString(args[0].str()));
+        return true;
+    }
     return SoftFailNativeCall("MenuItem", methodName, args, returnValue);
 }
 

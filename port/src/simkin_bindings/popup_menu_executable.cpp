@@ -1,5 +1,7 @@
 #include "simkin_bindings/popup_menu_executable.h"
 
+#include <utility>
+
 #include "simkin_bindings/menu_executable.h"
 #include "simkin_bindings/native_binding_common.h"
 #include "skRValue.h"
@@ -17,9 +19,33 @@ bool PopupMenuExecutable::method(const skString& methodName, skRValueArray& args
         // followed by the real Yes/No-style choices, each with one --
         // matching every SetSelectable(0,false) call seen in the corpus
         // exactly, so "has a callback" doubles as "is selectable"
-        // without needing to separately track the SetSelectable() calls.
-        m_Items.push_back(
-            Item{args[0].intValue(), args.entries() >= 2 ? ToStdString(args[1].str()) : ""});
+        // (IsSelectable() above) without needing to separately track the
+        // SetSelectable() calls.
+        Item item;
+        item.textId = args[0].intValue();
+        item.callback = args.entries() >= 2 ? ToStdString(args[1].str()) : "";
+        m_Items.push_back(std::move(item));
+        return true;
+    }
+    if (methodName == skString("UpdatePopupItem") && args.entries() == 2) {
+        // M10: inventory.s's real per-action-slot text refresh (e.g.
+        // toggling "Equip"/"UnEquip" based on the selected item's current
+        // state) -- see Item::blanked's comment for the ""-hides-this-
+        // item convention.
+        size_t index = static_cast<size_t>(args[0].intValue());
+        if (index < m_Items.size()) {
+            Item& item = m_Items[index];
+            if (args[1].type() == skRValue::T_String) {
+                std::string text = ToStdString(args[1].str());
+                item.blanked = text.empty();
+                item.literalText = text;
+                item.textId = -1;
+            } else {
+                item.blanked = false;
+                item.textId = args[1].intValue();
+                item.literalText.clear();
+            }
+        }
         return true;
     }
     if (methodName == skString("SetBack") && args.entries() == 1) {
@@ -39,12 +65,12 @@ bool PopupMenuExecutable::method(const skString& methodName, skRValueArray& args
         return true;
     }
     if (methodName == skString("SetSelectable") || methodName == skString("SetBackground") ||
-        methodName == skString("SetAutoAdjust")) {
+        methodName == skString("SetAutoAdjust") || methodName == skString("SetToWidget")) {
         // SetSelectable: see the AddItem() comment above -- selectability
         // is derived from having a callback, this call doesn't need to
-        // change any state. SetBackground/SetAutoAdjust are purely
-        // cosmetic (real background images are out of scope, see
-        // main.cpp's RenderMenu()).
+        // change any state. SetBackground/SetAutoAdjust/SetToWidget are
+        // purely cosmetic (real background images/precise pixel
+        // repositioning are out of scope, see main.cpp's RenderMenu()).
         return true;
     }
     return SoftFailNativeCall("PopupMenu", methodName, args, returnValue);
@@ -53,7 +79,7 @@ bool PopupMenuExecutable::method(const skString& methodName, skRValueArray& args
 void PopupMenuExecutable::MoveSelection(int delta) {
     std::vector<size_t> selectableIndices;
     for (size_t i = 0; i < m_Items.size(); ++i) {
-        if (!m_Items[i].callback.empty()) selectableIndices.push_back(i);
+        if (IsSelectable(m_Items[i])) selectableIndices.push_back(i);
     }
     if (selectableIndices.empty()) return;
 

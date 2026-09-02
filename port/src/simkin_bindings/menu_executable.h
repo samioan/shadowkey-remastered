@@ -13,6 +13,26 @@
 // call order, so the host's Up/Down navigation and rendering (main.cpp)
 // only need to walk one list regardless of what's actually on a given
 // screen. Everything else still soft-fails per M3's original design.
+//
+// M10 adds AddButton/AddQuitButton/AddFloatingText (charactermanager.s/
+// inventory.s/statsscreen.s's UI, all real screens now instead of soft-
+// fail placeholders) -- AddButton and AddFloatingText both reuse the
+// existing MenuItem/StaticItem row kinds rather than adding new ones
+// (they're the same "text + optional selectable callback" shape), just
+// returning a different native handle object (ButtonExecutable) so
+// scripts can chain the extra cosmetic setters those screens call
+// (SetWidth/ShowBorder/...). Two genuinely new row kinds are added for
+// widgets with real distinct behavior: ItemButton (AddItemButton, an
+// icon+text equip-slot display) and Table (AddTable, the inventory/
+// stats/quest-log grid -- see table_executable.h).
+//
+// A row's display text can come from either a stringtable id (textId, the
+// M3-M5 convention) or an already-resolved literal string (textId == -1,
+// literalText used instead) -- AddButton/AddFloatingText's first argument
+// is dynamically typed in the real scripts (sometimes a text id like
+// AddButton(3043,...), sometimes a precomputed string like
+// AddButton("Cymric",...) or AddFloatingText(healthText,...)), so which
+// one applies is decided per call via the argument's own skRValue::type().
 
 #include <map>
 #include <memory>
@@ -26,7 +46,28 @@
 
 namespace sk_bindings {
 
+class ItemExecutable;
+class MenuExecutable;
 class PopupMenuExecutable;
+class TableExecutable;
+
+// M10: AddTitle()'s return value -- inventory.s's WeaponsMenu()/
+// ArmorMenu()/etc. call .SetLocalizedText(id) on it to change the title
+// text after the fact (a single title slot, m_TitleTextId, not a row --
+// so this doesn't use the RowOwnerRef mechanism the other widget handles
+// do). Defined here (not its own file) since it's a tiny, MenuExecutable-
+// only-coupled value member (see MenuExecutable::m_TitleHandle below);
+// method() is implemented out-of-line in menu_executable.cpp, once
+// MenuExecutable's own definition is visible.
+class TitleHandle : public NativeStubExecutable {
+public:
+    explicit TitleHandle(MenuExecutable& owner) : NativeStubExecutable("Title"), m_Owner(owner) {}
+    bool method(const skString& methodName, skRValueArray& args, skRValue& returnValue,
+                skExecutableContext& context) override;
+
+private:
+    MenuExecutable& m_Owner;
+};
 
 class MenuExecutable : public skScriptedExecutable {
 public:
@@ -77,18 +118,29 @@ public:
     // an optional hook, not an unresolved native call.
     void TryInvoke(const std::string& handlerName);
 
-    enum class RowKind { MenuItem, StaticItem, ComboBox, TextArea, FloatingSprite, TextEntry };
+    enum class RowKind {
+        MenuItem,
+        StaticItem,
+        ComboBox,
+        TextArea,
+        FloatingSprite,
+        TextEntry,
+        ItemButton,  // M10: AddItemButton()
+        Table,       // M10: AddTable()
+    };
     struct MenuRow {
         RowKind kind;
-        int textId = 0;
+        int textId = -1;  // -1 = use literalText instead, see header comment
+        std::string literalText;
         std::string callback;  // MenuItem's AddMenuItem callback
         bool selectable = false;
-        // Non-null for ComboBox/TextArea/FloatingSprite rows -- the same
-        // object handed back to the script (see AddComboBox() etc.); the
-        // row owns it, the script only holds a non-owning reference (see
-        // setValue()'s comment above), so clearing/replacing rows is what
-        // actually frees it, matching how the real UI would invalidate a
-        // widget handle when its menu redraws.
+        // Non-null for ComboBox/TextArea/FloatingSprite/ItemButton/Table
+        // rows -- the same object handed back to the script (see
+        // AddComboBox() etc.); the row owns it, the script only holds a
+        // non-owning reference (see setValue()'s comment above), so
+        // clearing/replacing rows is what actually frees it, matching how
+        // the real UI would invalidate a widget handle when its menu
+        // redraws.
         std::unique_ptr<NativeStubExecutable> widget;
     };
     const std::vector<MenuRow>& rows() const { return m_Rows; }
@@ -110,6 +162,20 @@ public:
     // TextAreaExecutable) .SetLocalizedText(id).
     void SetRowSelectable(size_t rowIndex, bool selectable);
     void SetRowTextId(size_t rowIndex, int textId);
+    // M10: ButtonExecutable/MenuItemHandle's .SetItemText(literalString).
+    void SetRowLiteralText(size_t rowIndex, const std::string& text);
+    // M10: TitleHandle's .SetLocalizedText(id) -- AddTitle()'s return
+    // value, see inventory.s's WeaponsMenu()/ArmorMenu()/etc.
+    void SetTitleTextId(int textId) { m_TitleTextId = textId; }
+
+    // M10: Up/Down/Enter routed into the currently-selected row's Table
+    // widget (see table_executable.h) instead of this menu's own outer
+    // MoveSelection/ActivateSelected. Returns false (did nothing) if the
+    // current selection isn't a Table row, so main.cpp falls through to
+    // its normal handling otherwise -- mirrors how CycleSelectedCombo
+    // already encapsulates ComboBox's own Left/Right special case.
+    bool TryMoveTableSelection(int delta);
+    bool TryActivateTable();
 
 private:
     MenuRow& AddRow(RowKind kind, int textId, const std::string& callback, bool selectable);
@@ -117,6 +183,7 @@ private:
     MenuStack& m_Stack;
     int m_BackgroundId = -1;
     int m_TitleTextId = -1;
+    TitleHandle m_TitleHandle{*this};
     bool m_UseHoriz = false;
     bool m_TextEntryActive = false;
     std::vector<MenuRow> m_Rows;
@@ -127,6 +194,13 @@ private:
     // the .cpp. Lets activePopup() find a visible one without scanning
     // m_NativeFields by (unknown) name or type.
     std::vector<PopupMenuExecutable*> m_KnownPopups;
+
+    // M10: SetInventoryList()'s remembered target -- DisplayWeaponsPage()/
+    // DisplayArmorMenu()/etc. populate whichever Table this last pointed
+    // at, matching inventory.s's own "SetInventoryList(inventoryTable);
+    // ... DisplayWeaponsPage(weaponsButton);" call order. Non-owning, same
+    // convention as m_KnownPopups.
+    TableExecutable* m_InventoryListTarget = nullptr;
 };
 
 }  // namespace sk_bindings

@@ -7,6 +7,7 @@
 #include <fstream>
 #include <sstream>
 
+#include "simkin_bindings/game_constants.h"
 #include "simkin_bindings/menu_executable.h"
 #include "simkin_bindings/player_executable.h"
 #include "skInterpreter.h"
@@ -45,10 +46,14 @@ bool FileExists(const std::string& path) {
 
 }  // namespace
 
-MenuStack::MenuStack(std::string scriptRoot, skInterpreter& interpreter)
+MenuStack::MenuStack(std::string scriptRoot, skInterpreter& interpreter,
+                      const sk::StringTable* strings)
     : m_ScriptRoot(std::move(scriptRoot)),
       m_Interpreter(interpreter),
-      m_Player(new PlayerExecutable()) {}
+      m_Strings(strings),
+      m_Player(new PlayerExecutable(strings)) {
+    RegisterGameConstants(interpreter);
+}
 
 MenuStack::~MenuStack() = default;
 
@@ -136,6 +141,15 @@ void MenuStack::DeleteAllGames() {
 std::string MenuStack::GetSavedTimeStr(int slot) const {
     if (slot < 0 || slot >= kSaveSlotCount) return "";
     return m_SaveSlots[static_cast<size_t>(slot)].timeStr;
+}
+
+void MenuStack::RequestGameStart(std::string zoneName) {
+    if (!m_StartingInventoryLoaded) {
+        m_Player->LoadStartingInventory(m_ScriptRoot, m_Interpreter);
+        m_StartingInventoryLoaded = true;
+    }
+    m_GameStartRequested = true;
+    m_RequestedZone = std::move(zoneName);
 }
 
 void MenuStack::ShowCredits() {

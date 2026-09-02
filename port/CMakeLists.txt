@@ -56,10 +56,19 @@ endif()
 
 # Native binding glue shared by shadowkey_port and the milestone smoke
 # tests. See src/simkin_bindings/ -- one file per native binding class.
+# string_table.cpp lives here (not in shadowkey_port's own sources below)
+# because M10's ItemExecutable/PlayerExecutable resolve real item/vitals
+# text through it directly (not just at render time like every other menu
+# row) -- smoke tests that link this library alone need the symbol too.
 add_library(sk_bindings STATIC
+  src/assets/string_table.cpp
+  src/simkin_bindings/button_executable.cpp
   src/simkin_bindings/combo_box_executable.cpp
   src/simkin_bindings/floating_sprite_executable.cpp
   src/simkin_bindings/floating_text_executable.cpp
+  src/simkin_bindings/game_constants.cpp
+  src/simkin_bindings/item_button_executable.cpp
+  src/simkin_bindings/item_executable.cpp
   src/simkin_bindings/menu_executable.cpp
   src/simkin_bindings/menu_item_handle.cpp
   src/simkin_bindings/menu_stack.cpp
@@ -67,6 +76,7 @@ add_library(sk_bindings STATIC
   src/simkin_bindings/player_executable.cpp
   src/simkin_bindings/popup_menu_executable.cpp
   src/simkin_bindings/row_owner_ref.cpp
+  src/simkin_bindings/table_executable.cpp
   src/simkin_bindings/test_armor_executable.cpp
   src/simkin_bindings/text_area_executable.cpp
 )
@@ -103,7 +113,6 @@ target_link_libraries(sk_render3d PUBLIC sk_world)
 
 add_executable(shadowkey_port
   src/main.cpp
-  src/assets/string_table.cpp
   src/graphics/bitmap_font.cpp
   src/platform/win32/window.cpp
 )
@@ -152,3 +161,7 @@ target_link_libraries(lighting_smoke PRIVATE sk_world)
 
 add_executable(render_at_smoke src/tests/m9_render_at_smoke.cpp)
 target_link_libraries(render_at_smoke PRIVATE sk_render3d)
+
+# M10 milestone smoke test -- see src/tests/m10_inventory_smoke.cpp.
+add_executable(inventory_smoke src/tests/m10_inventory_smoke.cpp)
+target_link_libraries(inventory_smoke PRIVATE sk_bindings)
