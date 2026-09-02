@@ -45,11 +45,17 @@ void MonsterExecutable::ApplyDamage(int amount) {
 
 void MonsterExecutable::InvokeOnUse() {
     if (!m_Interpreter) return;
-    skRValueArray noArgs;
+    skRValueArray args;
+    args.append(skRValue(0));  // placeholder for OnUse's "(s)" parameter, same convention every
+                                // Init(s)/OnUse(s)/OnKilled(s) caller in this codebase already
+                                // uses (main.cpp's zone-load block, etc.) -- M17 found this one
+                                // and InvokeOnKilled() below had drifted from it (empty args),
+                                // latent until a real script actually referenced its own `s`
+                                // parameter on a path this port hadn't exercised before.
     skRValue ret;
     skExecutableContext ctxt(m_Interpreter);
     try {
-        method(skString("OnUse"), noArgs, ret, ctxt);
+        method(skString("OnUse"), args, ret, ctxt);
     } catch (skParseException& e) {
         std::printf("MonsterExecutable: PARSE ERROR in OnUse(): %s\n", e.toString().ptr());
     } catch (skRuntimeException& e) {
@@ -60,25 +66,34 @@ void MonsterExecutable::InvokeOnUse() {
 void MonsterExecutable::InvokeOnKilled() {
     // azra_rat.s's OnKilled body: `if (GetPlayer().QuestSolved(0)) {
     // return; } else { GetPlayer().AddMonsterKilled(203); if
-    // (GetPlayer().MonstersKilled(203) >= 8) { ...teleport an NPC,
-    // SetQuestSolved(0,true)... } }`. None of QuestSolved/
-    // AddMonsterKilled/MonstersKilled/SetQuestSolved are implemented on
-    // PlayerExecutable -- deliberately: they're a multi-kill quest
-    // counter this slice doesn't model, and the established soft-fail
-    // convention (native_binding_common.h) already makes this branch
-    // behave correctly without them: QuestSolved(0) soft-fails false,
-    // so the else runs; AddMonsterKilled soft-fails as a no-op;
-    // MonstersKilled(203) soft-fails to 0, so `0 >= 8` is false and the
-    // teleport/SetQuestSolved body never executes. That's the real
-    // shipped behavior for any kill before the 8th anyway (this port
-    // has no kill counter to ever reach 8), so nothing is lost by
-    // leaving those unimplemented.
+    // (GetPlayer().MonstersKilled(203) >= 8) { ...if(not
+    // GetPlayer().QuestSolved(0)) { if(s=false){Delay(2,0);} }
+    // Trthgar=Level.GetEntity("trthgar"); Trthgar.SetPositionMirror(...);
+    // ... SetQuestSolved(0,true); } }`. M17: QuestSolved/
+    // AddMonsterKilled/MonstersKilled are now real state on
+    // PlayerExecutable (see its class comment) -- the kill counter
+    // genuinely reaches 8 real rat kills. But `SetQuestSolved(0,true)`
+    // itself is still never reached (confirmed empirically, `quest_smoke`
+    // test): `Level.GetEntity("trthgar")` throws first -- no `Level`/
+    // `GameEngine`-root global object exists in this port at all yet (a
+    // separate, much larger, pre-existing gap -- `docs/
+    // SIMKIN_NATIVE_API.md`'s "Zone/Level" class, ~567 real scripts
+    // reference it) -- and that exception aborts the rest of the
+    // method's real script execution, including the `SetQuestSolved`
+    // line 3 statements later. So quest id 0 stays unsolved even after 8
+    // kills until `Level`/`GetEntity` exists; `InvokeOnKilled()`'s
+    // existing try/catch already logs and swallows the exception cleanly
+    // rather than crashing, same as any other script error this
+    // host-triggered call might hit.
     if (!m_Interpreter) return;
-    skRValueArray noArgs;
+    skRValueArray args;
+    args.append(skRValue(0));  // placeholder for OnKilled's "(s)" parameter, see InvokeOnUse()'s
+                                // comment above -- this call site had the same missing-argument
+                                // bug, found by the same M17 test.
     skRValue ret;
     skExecutableContext ctxt(m_Interpreter);
     try {
-        method(skString("OnKilled"), noArgs, ret, ctxt);
+        method(skString("OnKilled"), args, ret, ctxt);
     } catch (skParseException& e) {
         std::printf("MonsterExecutable: PARSE ERROR in OnKilled(): %s\n", e.toString().ptr());
     } catch (skRuntimeException& e) {
@@ -167,7 +182,12 @@ bool MonsterExecutable::method(const skString& methodName, skRValueArray& args,
         return true;
     }
     if (methodName == skString("OpenMenu") && args.entries() == 1) {
-        m_Stack.OpenMenu(ToStdString(args[0].str()));
+        // M17: ReopenMenu(), not OpenMenu() -- an NPC's OnUse() call here
+        // starts a fresh conversation each time, and the real quest-state
+        // branching lives in the target menu's Init() (see menu_stack.h's
+        // comment), which needs to rerun on every visit, not just the
+        // first.
+        m_Stack.ReopenMenu(ToStdString(args[0].str()));
         return true;
     }
     // SetAttackNoise/SetDeathNoise/SetIsHitNoise/SetWalkAnimation/

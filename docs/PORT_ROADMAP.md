@@ -1030,6 +1030,89 @@ algorithms.
     - Not independently confirmed in an actual windowed play session
       (same caveat M12/M15's writeups already carry).
 
+- [x] **M17 -- real quest-state tracking** (this session). Direct
+      follow-up to M16: closes its own "Not attempted" note above --
+      `tanyinconvo.s`-style dialogue trees can now actually progress
+      across repeated visits instead of always soft-failing into their
+      first-visit branch.
+    - **Real semantics from the corpus, not a guess**: a research pass
+      grepped every real `QuestAssigned`/`QuestSolved`/`QuestCompleted`
+      call site across the whole `.s` corpus (94/68/70 getters, 57/75/70
+      setters) and confirmed a simple monotonic per-quest-id 3-flag model
+      (assigned -> solved -> completed, each independently settable):
+      setters are overwhelmingly bare `SetQuestX(id)` (== `SetQuestX(id,
+      true)`); an explicit `false` (retraction) appears only on
+      `SetQuestAssigned`, e.g. `tanyinconvo.s`'s own
+      `SetQuestAssigned(26, false)` when declining one dialogue branch to
+      take another. `AddMonsterKilled`/`MonstersKilled(id)` confirmed as
+      a separate shared per-quest kill-tally bucket, its own id
+      independent of both the killed entity's `typeId` and any quest id
+      (4 different monster scripts across `drgnfld/` share one counter,
+      `id=101`). No counter-example to any of this found anywhere in the
+      corpus. `PlayerExecutable` gained 3 `std::set<int>` + a
+      `std::map<int,int>` kill-tally, real `SetQuestAssigned`/
+      `SetQuestSolved`/`SetQuestCompleted`/`QuestAssigned`/`QuestSolved`/
+      `QuestCompleted`/`AddMonsterKilled`/`MonstersKilled`/
+      `AddExperience` handlers (`GetGold`/`SetGold`/`StatModGold` were
+      already real from earlier work).
+    - **A real, necessary fix alongside it**: `MenuStack::OpenMenu()`
+      only ever reruns a menu's `Init()` once per path (cached
+      thereafter, correct for genuinely stateful screens like inventory/
+      stats/options); but a dialogue tree's quest-state branching *lives
+      in* `Init()`, so a cached conversation would freeze at whatever
+      line it first showed forever, quest state or not. New
+      `MenuStack::ReopenMenu()` discards the cached instance first so
+      `Init()` genuinely reruns; `MonsterExecutable`'s `OpenMenu` handler
+      (M16) now calls this instead of plain `OpenMenu()` -- the narrower
+      fix, not a change to `OpenMenu()`'s own general caching semantics
+      (`MenuExecutable`'s own internal `OpenMenu()` calls, e.g. inventory
+      <-> stats navigation, are unaffected).
+    - **A real, separate latent bug found and fixed along the way**:
+      `MonsterExecutable::InvokeOnUse()`/`InvokeOnKilled()` and
+      `DoorExecutable::InvokeOnUse()` were calling their target script
+      method with an empty argument list, not the placeholder-for-`(s)`
+      argument every other real `Init(s)`/`OnUse(s)`/`OnKilled(s)` call
+      site in this codebase already passes (main.cpp's zone-load block,
+      etc.) -- latent since no reachable script body had ever actually
+      read its own `s` parameter before. `azra_rat.s`'s real
+      `OnKilled(s)` does, on its 8-kills branch (`if(s=false){Delay(2,
+      0);}`), which the new quest-driven test below is the first thing
+      in this project to actually reach -- would have thrown "Field s
+      not found" without this fix. All 3 call sites now pass the same
+      placeholder argument.
+    - **Verified against real script data, `quest_smoke`
+      (`src/tests/m17_quest_smoke.cpp`)**: walks `tanyinconvo.s`'s real
+      handler chain (`Speech1`->`Speech2`->`Speech2a`->`Speech3`->
+      `Accept`, real bodies) end to end and confirms a SECOND, later
+      `OnUse()` conversation genuinely opens on a different real line
+      (textId 2370 -> 2368) reflecting the quest state the first
+      conversation wrote -- proof `ReopenMenu()` and the quest flags
+      both work together, not just in isolation. Separately runs real
+      `Azra_Rat.s`'s `OnKilled()` 8 times (8 real instances, one shared
+      `PlayerExecutable`) and confirms the kill counter reaches 8 -- but
+      explicitly asserts quest id 0 stays *unsolved*, because the real
+      script's own `SetQuestSolved(0,true)` sits 3 statements after a
+      `Level.GetEntity("trthgar")` call that still throws (see below);
+      asserting this honestly, rather than silently assuming the whole
+      branch works, matches this project's verification standard.
+    - **Not attempted / found but not chased**: a `Level`/`GameEngine`-
+      root global object -- confirmed (this pass) that no such thing is
+      registered in the interpreter at all yet, a separate, much larger,
+      pre-existing gap (`docs/SIMKIN_NATIVE_API.md`'s "Zone/Level" class;
+      ~567 real scripts reference `Level.` in some form). This is why
+      `azra_rat.s`'s 8-kill quest never actually completes yet even
+      though its kill-count gate now works correctly -- worth a future
+      milestone on its own, comparable in shape to M15/M16's `Object/
+      Entity (world base)` work but for whatever `Zone/Level` itself
+      exposes (`AddTrigger`, `GetEntity`, and whatever else real scripts
+      call on it). `StatModGold`-adjacent reward calls, dialogue-tree
+      quest ids beyond `tanyinconvo.s`/`menlinconvo.s` (not individually
+      wired to anything else yet, though the underlying flag store is
+      generic and already covers them), and a real experience/leveling
+      curve (`AddExperience` accumulates but nothing consumes
+      `GetExpToNextLevel()` to level up yet) are all separate, smaller
+      loose ends.
+
 ## Next milestones (not yet started)
 
 Roughly in priority order for reaching "actually playable," not commitments:
@@ -1051,12 +1134,14 @@ Roughly in priority order for reaching "actually playable," not commitments:
   third (generalized monster/NPC loading past M12's one hardcoded
   typeId, plus real NPC dialogue via `Action::Use` -- a real finding
   this pass showed NPC talk and "other monster types" were the same gap
-  all along, both fixed by the same loader generalization). Still open:
-  spellcasting, ranged weapons, loot spawning, quest-state tracking (so
-  dialogue trees like `tanyinconvo.s` progress past their first-visit
-  branch instead of soft-failing there every time, see M16's "Not
-  attempted" note above), and `Action::Use`'s one remaining unbound
-  category, pickups (world-to-inventory transfer).
+  all along, both fixed by the same loader generalization); M17 took a
+  fourth (real quest-state tracking, so M16's dialogue trees actually
+  progress across repeated visits). Still open: spellcasting, ranged
+  weapons, loot spawning, a `Zone/Level`-root global object (`AddTrigger`/
+  `GetEntity`/... -- M17 found this is why `azra_rat.s`'s 8-kill quest
+  still can't complete, see its "Not attempted" note above), and
+  `Action::Use`'s one remaining unbound category, pickups (world-to-
+  inventory transfer).
 - **Real save file format** -- M5's save system is simulated in-memory
   only; no on-disk save format has been RE'd yet.
 - **`FUN_1002c010`'s big single vitals bar** -- confirmed real (appears

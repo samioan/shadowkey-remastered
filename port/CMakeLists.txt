@@ -192,3 +192,7 @@ target_link_libraries(interact_smoke PRIVATE sk_bindings sk_render3d)
 # see src/tests/m16_npc_smoke.cpp.
 add_executable(npc_smoke src/tests/m16_npc_smoke.cpp)
 target_link_libraries(npc_smoke PRIVATE sk_bindings sk_world)
+
+# Quest-state tracking smoke test -- see src/tests/m17_quest_smoke.cpp.
+add_executable(quest_smoke src/tests/m17_quest_smoke.cpp)
+target_link_libraries(quest_smoke PRIVATE sk_bindings)

@@ -26,11 +26,17 @@ float DoorExecutable::yawRadians() const {
 
 void DoorExecutable::InvokeOnUse() {
     if (!m_Interpreter) return;
-    skRValueArray noArgs;
+    // M17: real placeholder arg for OnUse's "(s)" parameter -- same fix
+    // as monster_executable.cpp's InvokeOnUse()/InvokeOnKilled() (see
+    // their comments); door.s/door02.s's own OnUse(s) never happens to
+    // read `s`, so this was latent here too rather than observably
+    // broken, but the fix is the same either way.
+    skRValueArray args;
+    args.append(skRValue(0));
     skRValue ret;
     skExecutableContext ctxt(m_Interpreter);
     try {
-        method(skString("OnUse"), noArgs, ret, ctxt);
+        method(skString("OnUse"), args, ret, ctxt);
     } catch (skParseException& e) {
         std::printf("DoorExecutable: PARSE ERROR in OnUse(): %s\n", e.toString().ptr());
     } catch (skRuntimeException& e) {

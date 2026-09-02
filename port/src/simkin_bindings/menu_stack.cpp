@@ -105,6 +105,24 @@ void MenuStack::OpenMenu(const std::string& simkinPath) {
     menu->RunOnDisplay();
 }
 
+void MenuStack::ReopenMenu(const std::string& simkinPath) {
+    // M17: drops the cached instance (if any) first, so GetOrCreateMenu()
+    // rebuilds it from scratch and reruns its real Init() -- needed for
+    // an NPC dialogue tree (monster_executable.h's OpenMenu handler)
+    // whose Init() body is where the real quest-state branching happens
+    // (e.g. snowline/tanyinconvo.s checks QuestSolved/QuestAssigned/
+    // QuestCompleted there). Plain OpenMenu() only ever runs Init() once
+    // per path (GetOrCreateMenu's own cache) and OnDisplay() on every
+    // reopen -- correct for genuinely stateful screens navigated to and
+    // from repeatedly (inventory/stats/options, whose Init() isn't meant
+    // to redo its setup every visit), but wrong for a conversation that
+    // needs to re-evaluate updated quest state each time it starts, so
+    // this is used only for that narrower case, not a change to
+    // OpenMenu()'s own general caching semantics.
+    m_Menus.erase(NormalizeKey(simkinPath));
+    OpenMenu(simkinPath);
+}
+
 bool MenuStack::GameAvailableForLoad(int slot) const {
     if (slot < 0) {
         for (const auto& s : m_SaveSlots) {

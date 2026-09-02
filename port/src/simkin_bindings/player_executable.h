@@ -17,7 +17,9 @@
 // SetDamageMin/Max() on top of the flat base, so equipping something
 // through the real inventory screen visibly changes these numbers.
 
+#include <map>
 #include <memory>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -114,6 +116,37 @@ public:
     // Clamps m_Health at 0 -- mirrors MonsterExecutable::ApplyDamage().
     void ApplyDamage(int amount);
 
+    // M17: real quest-state tracking, so dialogue trees like
+    // snowline/tanyinconvo.s (M16) progress across repeated visits
+    // instead of always soft-failing into their first-visit branch. A
+    // per-quest-id 3-flag monotonic state machine (assigned -> solved ->
+    // completed, each independently settable/clearable) -- confirmed
+    // against the real script corpus (a dedicated research pass this
+    // session grepped every real QuestAssigned/QuestSolved/
+    // QuestCompleted call site across the whole corpus, ~94/68/70 getter
+    // calls and ~57/75/70 setter calls): setters are a bare
+    // `SetQuestX(id)` (== `SetQuestX(id, true)`, the overwhelming
+    // majority) or an explicit `SetQuestX(id, false)` to retract (only
+    // ever seen on SetQuestAssigned, e.g. tanyinconvo.s's
+    // `SetQuestAssigned(26, false)` when declining one branch to take
+    // another) -- no counter-example to the monotonic-flags model found
+    // anywhere in the corpus. host-side accessors exposed for tests, not
+    // because any current host code needs to read them directly.
+    bool questAssigned(int id) const { return m_QuestAssigned.count(id) != 0; }
+    bool questSolved(int id) const { return m_QuestSolved.count(id) != 0; }
+    bool questCompleted(int id) const { return m_QuestCompleted.count(id) != 0; }
+    // AddMonsterKilled/MonstersKilled(id): confirmed (same research
+    // pass) to be a shared per-quest kill-tally bucket keyed by its own
+    // id, distinct from both the killed entity's typeId and any
+    // SetQuestX id -- e.g. monsters/azra_rat.s's OnKilled() calls
+    // AddMonsterKilled(203)/MonstersKilled(203), unrelated to its own
+    // typeId (202) or the quest id (0) it separately gates on.
+    int monstersKilled(int id) const {
+        auto it = m_MonstersKilled.find(id);
+        return it != m_MonstersKilled.end() ? it->second : 0;
+    }
+    int experience() const { return m_Experience; }
+
 private:
     const sk::StringTable* m_Strings;
     std::string m_Name;
@@ -143,6 +176,13 @@ private:
     std::vector<std::unique_ptr<ItemExecutable>> m_Inventory;
     ItemExecutable* m_LeftItem = nullptr;
     ItemExecutable* m_RightItem = nullptr;
+
+    // M17: quest state -- see questAssigned()/questSolved()/
+    // questCompleted()/monstersKilled()'s comments above.
+    std::set<int> m_QuestAssigned;
+    std::set<int> m_QuestSolved;
+    std::set<int> m_QuestCompleted;
+    std::map<int, int> m_MonstersKilled;
 };
 
 }  // namespace sk_bindings

@@ -255,6 +255,69 @@ bool PlayerExecutable::method(const skString& methodName, skRValueArray& args,
         returnValue = skRValue(m_ExpToNextLevel);
         return true;
     }
+    if (methodName == skString("AddExperience") && args.entries() == 1) {
+        m_Experience += args[0].intValue();
+        return true;
+    }
+
+    // --- M17: quest state -- see player_executable.h's class comment on
+    // questAssigned()/questSolved()/questCompleted() for the real
+    // monotonic-flags model this implements. Bare SetQuestX(id) means
+    // "set true"; the corpus's only real use of an explicit 2nd argument
+    // is `false` (to retract), so bool-check it directly rather than
+    // special-casing true/false separately.
+    if (methodName == skString("QuestAssigned") && args.entries() == 1) {
+        returnValue = skRValue(questAssigned(args[0].intValue()));
+        return true;
+    }
+    if (methodName == skString("SetQuestAssigned") &&
+        (args.entries() == 1 || args.entries() == 2)) {
+        int id = args[0].intValue();
+        bool value = args.entries() == 2 ? args[1].boolValue() : true;
+        if (value) {
+            m_QuestAssigned.insert(id);
+        } else {
+            m_QuestAssigned.erase(id);
+        }
+        return true;
+    }
+    if (methodName == skString("QuestSolved") && args.entries() == 1) {
+        returnValue = skRValue(questSolved(args[0].intValue()));
+        return true;
+    }
+    if (methodName == skString("SetQuestSolved") && (args.entries() == 1 || args.entries() == 2)) {
+        int id = args[0].intValue();
+        bool value = args.entries() == 2 ? args[1].boolValue() : true;
+        if (value) {
+            m_QuestSolved.insert(id);
+        } else {
+            m_QuestSolved.erase(id);
+        }
+        return true;
+    }
+    if (methodName == skString("QuestCompleted") && args.entries() == 1) {
+        returnValue = skRValue(questCompleted(args[0].intValue()));
+        return true;
+    }
+    if (methodName == skString("SetQuestCompleted") &&
+        (args.entries() == 1 || args.entries() == 2)) {
+        int id = args[0].intValue();
+        bool value = args.entries() == 2 ? args[1].boolValue() : true;
+        if (value) {
+            m_QuestCompleted.insert(id);
+        } else {
+            m_QuestCompleted.erase(id);
+        }
+        return true;
+    }
+    if (methodName == skString("AddMonsterKilled") && args.entries() == 1) {
+        ++m_MonstersKilled[args[0].intValue()];
+        return true;
+    }
+    if (methodName == skString("MonstersKilled") && args.entries() == 1) {
+        returnValue = skRValue(monstersKilled(args[0].intValue()));
+        return true;
+    }
 
     // --- M10: stat block (statsscreen.s) ---
     if (methodName == skString("GetStrength") && args.entries() == 0) {

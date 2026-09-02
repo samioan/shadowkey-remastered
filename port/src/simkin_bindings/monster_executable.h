@@ -15,11 +15,11 @@
 // GetPlayer() is implemented here (not soft-failed) because
 // azra_rat.s's OnKilled calls it directly -- returns the shared
 // PlayerExecutable passed into the constructor, same pattern
-// MenuExecutable::method()'s own GetPlayer handler already uses. Every
-// other OnKilled call (QuestSolved/AddMonsterKilled/MonstersKilled/
-// SetQuestSolved) is deliberately left unimplemented on
-// PlayerExecutable -- see monster_executable.cpp's OnKilled comment for
-// why that's the behaviorally-correct choice here, not a gap.
+// MenuExecutable::method()'s own GetPlayer handler already uses.
+// QuestSolved/AddMonsterKilled/MonstersKilled/SetQuestSolved are real
+// state on PlayerExecutable as of M17 (its own class comment) -- see
+// monster_executable.cpp's OnKilled comment for what that does and
+// doesn't unlock.
 //
 // M16: generalized past the single-hardcoded-typeId (202/azra_rat) M12
 // slice -- this same class also answers for the real corpus's non-
@@ -101,12 +101,9 @@ public:
     // Runs the real script's OnKilled() handler, same
     // skParseException/skRuntimeException-catching convention
     // PlayerExecutable::LoadStartingInventory already uses for a script
-    // call that might throw -- azra_rat.s's OnKilled body calls
-    // GetPlayer().QuestSolved(0)/.AddMonsterKilled(203)/
-    // .MonstersKilled(203), none of which PlayerExecutable implements,
-    // so this soft-fails cleanly through the quest-tracking branch
-    // (see the .cpp for why that's the correct behavior here, not a
-    // gap) rather than throwing.
+    // call that might throw -- azra_rat.s's OnKilled body calls real
+    // quest-state methods as of M17 (see the .cpp for the full trace,
+    // including one call chain it still can't reach).
     void InvokeOnKilled();
 
 private:

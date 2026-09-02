@@ -59,6 +59,13 @@ public:
     // runs its OnDisplay(). Logs and no-ops if that fails.
     void OpenMenu(const std::string& simkinPath);
 
+    // M17: like OpenMenu(), but discards any cached instance for
+    // `simkinPath` first, so it's rebuilt from scratch and its Init()
+    // genuinely reruns -- see the .cpp for why this exists (NPC dialogue
+    // needs its quest-state branching in Init() to re-evaluate on every
+    // conversation, not just the first).
+    void ReopenMenu(const std::string& simkinPath);
+
     // Constructs, registers under `key` (so a later OpenMenu(key) -- e.g.
     // every "back to main menu" handler's OpenMenu("MainMenu") -- reuses
     // this same instance instead of silently constructing a duplicate),
