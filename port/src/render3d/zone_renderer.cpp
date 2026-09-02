@@ -8,8 +8,6 @@ namespace sk {
 
 namespace {
 
-constexpr float kTileScale = 256.0f;  // world units per tile (docs/WORLD_MODEL.md)
-
 struct Vec3 {
     float x = 0, y = 0, z = 0;
 };
@@ -170,9 +168,61 @@ void RasterizeTriangle(Backbuffer& backbuffer, std::vector<float>& depthBuffer,
     }
 }
 
+// Same rasterizer shape as RasterizeTriangle above, but samples a
+// model's own raw pixel data directly (no zone .sur/.ztx/.zlu
+// palette/atlas indirection -- see world/model_archive.h) and u/v are
+// already texel-space pixel coordinates rather than the tile renderer's
+// 0..1 UVs (docs/MODEL_FORMAT.md's UV table is itself an 8.8-ish
+// fixed-point pixel coordinate, so no extra *width/*height scale is
+// needed here, just a clamp).
+void RasterizeModelTriangle(Backbuffer& backbuffer, std::vector<float>& depthBuffer,
+                             const ProjectedVertex& a, const ProjectedVertex& b,
+                             const ProjectedVertex& c, const Model& model, int skinIndex) {
+    float area = (b.sx - a.sx) * (c.sy - a.sy) - (b.sy - a.sy) * (c.sx - a.sx);
+    if (std::fabs(area) < 1e-6f) return;
+
+    int minX = std::max(0, static_cast<int>(std::floor(std::min({a.sx, b.sx, c.sx}))));
+    int maxX =
+        std::min(Backbuffer::kWidth - 1, static_cast<int>(std::ceil(std::max({a.sx, b.sx, c.sx}))));
+    int minY = std::max(0, static_cast<int>(std::floor(std::min({a.sy, b.sy, c.sy}))));
+    int maxY = std::min(Backbuffer::kHeight - 1,
+                         static_cast<int>(std::ceil(std::max({a.sy, b.sy, c.sy}))));
+    if (minX > maxX || minY > maxY) return;
+
+    for (int py = minY; py <= maxY; ++py) {
+        for (int px = minX; px <= maxX; ++px) {
+            float sx = static_cast<float>(px) + 0.5f;
+            float sy = static_cast<float>(py) + 0.5f;
+            float w0 = (b.sx - sx) * (c.sy - sy) - (b.sy - sy) * (c.sx - sx);
+            float w1 = (c.sx - sx) * (a.sy - sy) - (c.sy - sy) * (a.sx - sx);
+            float w2 = (a.sx - sx) * (b.sy - sy) - (a.sy - sy) * (b.sx - sx);
+            bool inside = (w0 >= 0 && w1 >= 0 && w2 >= 0) || (w0 <= 0 && w1 <= 0 && w2 <= 0);
+            if (!inside) continue;
+            float l0 = w0 / area, l1 = w1 / area, l2 = w2 / area;
+
+            float invW = l0 * a.invW + l1 * b.invW + l2 * c.invW;
+            if (invW <= 0.0f) continue;
+            int depthIndex = py * Backbuffer::kWidth + px;
+            if (invW <= depthBuffer[static_cast<size_t>(depthIndex)]) continue;  // farther, skip
+
+            float u = (l0 * a.u + l1 * b.u + l2 * c.u) / invW;
+            float v = (l0 * a.v + l1 * b.v + l2 * c.v) / invW;
+            int tx = std::clamp(static_cast<int>(u), 0, model.width - 1);
+            int ty = std::clamp(static_cast<int>(v), 0, model.height - 1);
+
+            uint16_t raw444 = model.TexelAt(skinIndex, tx, ty);
+            if (raw444 == 0x0f0f) continue;  // chroma-key cutout
+
+            depthBuffer[static_cast<size_t>(depthIndex)] = invW;
+            backbuffer.SetPixel(px, py, ExpandRGB444(raw444));
+        }
+    }
+}
+
 }  // namespace
 
-void ZoneRenderer::Render(Backbuffer& backbuffer, const Zone& zone, const Camera& camera) const {
+void ZoneRenderer::Render(Backbuffer& backbuffer, const Zone& zone, const Camera& camera,
+                           const std::vector<PlacedEntity>& entities, ModelArchive* models) const {
     backbuffer.Fill(PackRGB565(8, 8, 16));
     std::vector<float> depthBuffer(static_cast<size_t>(Backbuffer::kWidth) * Backbuffer::kHeight,
                                     0.0f);
@@ -219,6 +269,84 @@ void ZoneRenderer::Render(Backbuffer& backbuffer, const Zone& zone, const Camera
 
         RasterizeTriangle(backbuffer, depthBuffer, pv[0], pv[1], pv[2], zone, texIdx);
         RasterizeTriangle(backbuffer, depthBuffer, pv[0], pv[2], pv[3], zone, texIdx);
+    }
+
+    // M8: placed entities (props, monsters, doors, ...) resolved via
+    // world/entity_types.h + world/model_archive.h -- see this class's
+    // header comment for what's simplified here (frame 0/skin 0 only,
+    // no orientation, no distance culling).
+    if (models) {
+        for (const PlacedEntity& pe : entities) {
+            const Model* model = models->GetModel(pe.modelArchiveIndex);
+            if (!model) continue;
+
+            // Position/axis assumptions (undocumented in MODEL_FORMAT.md,
+            // see zone_renderer.h): the model's local-space vertex units
+            // match the .ent record's world-unit position scale
+            // directly (no extra per-instance scale factor -- unverified,
+            // simplest hypothesis absent contrary evidence), so the same
+            // /kTileScale conversion used for x/y tile-float coordinates
+            // above applies to vertex x/y too; z stays in raw world
+            // units like the tile faces' heights do.
+            //
+            // The model's local axes are Y-up (local Y -> world Z),
+            // *not* a direct X/Y/Z passthrough -- confirmed empirically
+            // this session: a real barrel model's bounding box is
+            // roughly circular in local X/Z (a barrel's round footprint)
+            // and elongated in local Y (its height), which only makes
+            // sense if local Y is "up." A real door model's bounding box
+            // is thin in local Z, wide in local X, and tall in local Y --
+            // consistent with the same convention (a door is a thin
+            // panel, tall along its up axis).
+            float baseTileX = pe.x / kTileScale;
+            float baseTileY = pe.y / kTileScale;
+            float baseZ = pe.z;
+
+            for (const ModelFace& face : model->faces) {
+                if (face.vA < 0 || face.vB < 0 || face.vC < 0 ||
+                    static_cast<size_t>(face.vC) >= model->vertices.size() ||
+                    static_cast<size_t>(face.vB) >= model->vertices.size() ||
+                    static_cast<size_t>(face.vA) >= model->vertices.size() ||
+                    face.uA < 0 || face.uB < 0 || face.uC < 0 ||
+                    static_cast<size_t>(face.uC) >= model->uvs.size() ||
+                    static_cast<size_t>(face.uB) >= model->uvs.size() ||
+                    static_cast<size_t>(face.uA) >= model->uvs.size()) {
+                    continue;  // shouldn't happen (MODEL_FORMAT.md's index invariant), guard anyway
+                }
+
+                const ModelVertex* mv[3] = {&model->vertices[static_cast<size_t>(face.vA)],
+                                             &model->vertices[static_cast<size_t>(face.vB)],
+                                             &model->vertices[static_cast<size_t>(face.vC)]};
+                const ModelUv* uv[3] = {&model->uvs[static_cast<size_t>(face.uA)],
+                                         &model->uvs[static_cast<size_t>(face.uB)],
+                                         &model->uvs[static_cast<size_t>(face.uC)]};
+
+                ProjectedVertex pv3[3];
+                bool anyBehindModel = false;
+                for (int i = 0; i < 3; ++i) {
+                    float rx = baseTileX + mv[i]->x / kTileScale - camX;
+                    float ry = baseTileY + mv[i]->z / kTileScale - camY;
+                    float rz = (baseZ + mv[i]->y) / kTileScale - camZ;
+
+                    float viewRight = rx * sinYaw - ry * cosYaw;
+                    float viewForward = rx * cosYaw + ry * sinYaw;
+                    float viewUp = rz;
+
+                    if (viewForward < 0.05f) {
+                        anyBehindModel = true;
+                        break;
+                    }
+                    pv3[i].invW = 1.0f / viewForward;
+                    pv3[i].sx = Backbuffer::kWidth * 0.5f + viewRight * focalX * pv3[i].invW;
+                    pv3[i].sy = Backbuffer::kHeight * 0.5f - viewUp * focalY * pv3[i].invW;
+                    pv3[i].u = (uv[i]->u / 256.0f) * pv3[i].invW;
+                    pv3[i].v = (uv[i]->v / 256.0f) * pv3[i].invW;
+                }
+                if (anyBehindModel) continue;
+
+                RasterizeModelTriangle(backbuffer, depthBuffer, pv3[0], pv3[1], pv3[2], *model, 0);
+            }
+        }
     }
 }
 

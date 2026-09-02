@@ -86,6 +86,8 @@ endif()
 # src/render3d/.
 add_library(sk_world STATIC
   src/assets/zone_file.cpp
+  src/world/entity_types.cpp
+  src/world/model_archive.cpp
   src/world/zone.cpp
 )
 target_include_directories(sk_world PUBLIC src)
@@ -129,3 +131,17 @@ target_link_libraries(zone_load_smoke PRIVATE sk_world)
 
 add_executable(zone_render_smoke src/tests/m6_zone_render_smoke.cpp)
 target_link_libraries(zone_render_smoke PRIVATE sk_render3d)
+
+# M7 milestone smoke test -- see src/tests/m7_collision_smoke.cpp.
+add_executable(collision_smoke src/tests/m7_collision_smoke.cpp)
+target_link_libraries(collision_smoke PRIVATE sk_world)
+
+# M8 milestone smoke tests -- see src/tests/m8_*_smoke.cpp.
+add_executable(entity_smoke src/tests/m8_entity_smoke.cpp)
+target_link_libraries(entity_smoke PRIVATE sk_world)
+
+add_executable(render_entities_smoke src/tests/m8_render_entities_smoke.cpp)
+target_link_libraries(render_entities_smoke PRIVATE sk_render3d)
+
+add_executable(closeup_smoke src/tests/m8_closeup_smoke.cpp)
+target_link_libraries(closeup_smoke PRIVATE sk_render3d)

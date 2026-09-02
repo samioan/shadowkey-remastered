@@ -16,6 +16,10 @@
 
 namespace sk {
 
+// World units per tile (docs/WORLD_MODEL.md's Map_GetTileAt fixed-point
+// convention -- 8.8-ish world coordinates, 256 units/tile).
+constexpr float kTileScale = 256.0f;
+
 // One .zcp entry, 36 bytes on disk (docs/ZONE_FORMAT.md's ZcpEntry).
 // CORRECTION found and verified against real azra.zcp this session: the
 // entry count is a u32 at offset 0, not the u8 the doc's first pass
@@ -61,6 +65,17 @@ public:
     int32_t playerStartY = 0;
     int32_t playerStartZ = 0;
 
+    // One non-player-start .ent record (docs/ZONE_FORMAT.md's
+    // EntPlacement, typeId > 1) -- resolving typeId to an actual model
+    // is the caller's job (world/entity_types.h + world/model_archive.h),
+    // matching the real engine's own two-step chain (entities.txt's
+    // global type table, looked up per-placement).
+    struct EntPlacement {
+        int32_t x = 0, y = 0, z = 0;
+        int32_t typeId = 0;
+    };
+    const std::vector<EntPlacement>& entities() const { return entities_; }
+
     // 128x128 8bpp-palettized texel at (x,y) within .ztx's texture slot
     // `surfaceTextureIndex` (0x4000 bytes = 128*128 -- confirmed: every
     // .ztx slot is exactly that size). Returns 0 if the index/coords are
@@ -80,6 +95,17 @@ public:
 
     uint8_t surfaceTextureIndex(int surIndex) const;
 
+    // Circle-vs-wall-tile collision test, in world units. SIMPLIFICATION:
+    // this is an ordinary closest-point-on-square circle test against
+    // every wall tile (and the grid boundary) the circle's bounding box
+    // touches -- not a port of the real engine's actor bounding-radius
+    // mechanics (docs/WORLD_MODEL.md notes these exist -- fixed-point
+    // positions, per-tile-type collision behavior -- but they were never
+    // traced to the byte level). Good enough to stop the player walking
+    // through walls; not guaranteed to match the original's exact
+    // wall-sliding feel.
+    bool CircleHitsWall(float worldX, float worldY, float radius) const;
+
 private:
     int width_ = 0, height_ = 0;
     std::vector<ZmpCell> cells_;
@@ -87,6 +113,7 @@ private:
     std::vector<uint8_t> surTextureIndex_;  // .sur's byte[7] per record -- see zone.cpp
     std::vector<uint8_t> ztxData_;          // 1 header byte + N*0x4000 texture slots
     std::vector<uint8_t> zluData_;          // N*2048-byte palette sets
+    std::vector<EntPlacement> entities_;
 };
 
 }  // namespace sk

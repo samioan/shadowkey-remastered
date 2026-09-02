@@ -7,7 +7,8 @@
 // confirmation popup actually closing the app. See
 // C:\Users\Admin\.claude\plans\vast-wandering-summit.md for the original
 // M0-M4 plan; M5 continues past it in the same "deepen the menu chain"
-// direction the user chose.
+// direction the user chose. M6 added the 3D zone renderer, M7 tile-grid
+// collision, M8 placed-entity rendering -- see docs/PORT_ROADMAP.md.
 #include <cmath>
 #include <cstdio>
 #include <memory>
@@ -34,6 +35,8 @@
 #include "skInterpreter.h"
 #include "skParseException.h"
 #include "skRuntimeException.h"
+#include "world/entity_types.h"
+#include "world/model_archive.h"
 #include "world/zone.h"
 
 namespace {
@@ -203,6 +206,16 @@ int main(int argc, char** argv) {
         return 1;
     }
 
+    // M8: the global model archive (models.idx/.huge) and entity type
+    // table (entities.txt) -- loaded once at startup, matching the real
+    // engine's own GameEngine_FirstTickBootstrap timing for
+    // EntityTypeConfig_Load (docs/ZONE_FORMAT.md). Not fatal to fail --
+    // the game still runs, just without placed entities in the 3D view.
+    sk::EntityTypeTable entityTypes;
+    entityTypes.Load(scriptRoot);
+    sk::ModelArchive modelArchive;
+    modelArchive.Load(scriptRoot);
+
     skInterpreter interpreter;
     sk_bindings::MenuStack stack(scriptRoot, interpreter);
 
@@ -259,10 +272,14 @@ int main(int argc, char** argv) {
     int creditsScroll = 0;
 
     // M6: the 3D zone renderer, entered when a menu calls NewGame()/
-    // LoadGame() (see MenuStack::RequestGameStart()). Free-fly, no
-    // collision -- see render3d/zone_renderer.h for what this milestone
-    // does and doesn't reproduce from the real engine.
+    // LoadGame() (see MenuStack::RequestGameStart()). M7 added simple
+    // circle-vs-wall-tile collision (Zone::CircleHitsWall); M8 added
+    // placed-entity rendering (props/monsters/doors resolved through
+    // entities.txt -> models.idx) -- see render3d/zone_renderer.h for
+    // what each milestone does and doesn't reproduce from the real
+    // engine.
     std::unique_ptr<sk::Zone> gameZone;
+    std::vector<sk::PlacedEntity> gameEntities;
     sk::Camera gameCamera;
     sk::ZoneRenderer zoneRenderer;
     bool inGame = false;
@@ -287,6 +304,19 @@ int main(int argc, char** argv) {
                 gameCamera.yaw = 0.0f;
                 gameCamera.fovY = 1.2f;
                 inGame = true;
+
+                // Resolve every placed .ent record to a model archive
+                // index via entities.txt -- same two-step chain the real
+                // engine walks (docs/ZONE_FORMAT.md), just done eagerly
+                // here instead of through the engine+0x6b38 zone-local
+                // cache.
+                gameEntities.clear();
+                for (const sk::Zone::EntPlacement& e : gameZone->entities()) {
+                    const sk::EntityTypeDescriptor* desc = entityTypes.Lookup(e.typeId);
+                    if (!desc) continue;
+                    gameEntities.push_back({static_cast<float>(e.x), static_cast<float>(e.y),
+                                             static_cast<float>(e.z), desc->modelArchiveIndex});
+                }
             } else {
                 std::printf("shadowkey-port: failed to load zone '%s', staying in menu\n",
                             stack.requestedZone().c_str());
@@ -295,25 +325,37 @@ int main(int argc, char** argv) {
 
         if (inGame && gameZone) {
             // Esc returns to the main menu (no in-game pause menu exists
-            // yet); everything else is free-fly movement, no collision.
+            // yet); everything else is movement against the tile-grid
+            // collision (M7).
             if (input.ConsumeJustPressed(sk::ButtonSlot::RightSelectionKey)) {
                 inGame = false;
             } else {
                 constexpr float kMoveSpeed = 40.0f;    // world units/tick (256 units/tile)
                 constexpr float kTurnSpeed = 0.06f;    // radians/tick
-                if (input.GetButton(sk::ButtonSlot::Left)) gameCamera.yaw -= kTurnSpeed;
-                if (input.GetButton(sk::ButtonSlot::Right)) gameCamera.yaw += kTurnSpeed;
+                constexpr float kPlayerRadius = 48.0f;  // world units, M7 collision
+                // yaw's forward vector rotates toward -right as yaw increases
+                // (see render3d/zone_renderer.cpp's forward/right basis), so
+                // turning right means *decreasing* yaw.
+                if (input.GetButton(sk::ButtonSlot::Left)) gameCamera.yaw += kTurnSpeed;
+                if (input.GetButton(sk::ButtonSlot::Right)) gameCamera.yaw -= kTurnSpeed;
                 float dx = std::cos(gameCamera.yaw) * kMoveSpeed;
                 float dy = std::sin(gameCamera.yaw) * kMoveSpeed;
-                if (input.GetButton(sk::ButtonSlot::Up)) {
-                    gameCamera.x += dx;
-                    gameCamera.y += dy;
-                }
-                if (input.GetButton(sk::ButtonSlot::Down)) {
-                    gameCamera.x -= dx;
-                    gameCamera.y -= dy;
-                }
-                zoneRenderer.Render(backbuffer, *gameZone, gameCamera);
+                // Axis-separated collision (try X, then Y, independently)
+                // gives a simple wall-slide instead of a hard stop the
+                // instant either component would clip a wall.
+                auto tryMove = [&](float mx, float my) {
+                    float nx = gameCamera.x + mx;
+                    if (!gameZone->CircleHitsWall(nx, gameCamera.y, kPlayerRadius)) {
+                        gameCamera.x = nx;
+                    }
+                    float ny = gameCamera.y + my;
+                    if (!gameZone->CircleHitsWall(gameCamera.x, ny, kPlayerRadius)) {
+                        gameCamera.y = ny;
+                    }
+                };
+                if (input.GetButton(sk::ButtonSlot::Up)) tryMove(dx, dy);
+                if (input.GetButton(sk::ButtonSlot::Down)) tryMove(-dx, -dy);
+                zoneRenderer.Render(backbuffer, *gameZone, gameCamera, gameEntities, &modelArchive);
                 window.Present(backbuffer);
                 return;
             }

@@ -1,5 +1,7 @@
 #include "world/zone.h"
 
+#include <algorithm>
+#include <cmath>
 #include <cstdio>
 #include <cstring>
 #include <fstream>
@@ -134,15 +136,20 @@ bool Zone::Load(const std::string& scriptRoot, const std::string& zoneName) {
     }
     uint32_t entCount = ReadU32(&ent[0]);
     bool foundStart = false;
+    entities_.clear();
     for (uint32_t i = 0; i < entCount && 4 + (i + 1) * kEntRecordSize <= ent.size(); ++i) {
         const uint8_t* p = &ent[4 + static_cast<size_t>(i) * kEntRecordSize];
         int32_t typeId = ReadI32(p + 0x1c);
+        int32_t x = ReadI32(p + 0x00);
+        int32_t y = ReadI32(p + 0x04);
+        int32_t z = ReadI32(p + 0x08);
         if (typeId == 1) {
-            playerStartX = ReadI32(p + 0x00);
-            playerStartY = ReadI32(p + 0x04);
-            playerStartZ = ReadI32(p + 0x08);
+            playerStartX = x;
+            playerStartY = y;
+            playerStartZ = z;
             foundStart = true;
-            break;
+        } else if (typeId > 1) {
+            entities_.push_back({x, y, z, typeId});
         }
     }
     if (!foundStart) {
@@ -150,9 +157,11 @@ bool Zone::Load(const std::string& scriptRoot, const std::string& zoneName) {
         return false;
     }
 
-    std::printf("Zone: loaded %s -- %dx%d tiles, %u zcp entries, %u surfaces, player start (%d,%d)\n",
-                zoneName.c_str(), width_, height_, zcpCount, surCount, playerStartX >> 8,
-                playerStartY >> 8);
+    std::printf(
+        "Zone: loaded %s -- %dx%d tiles, %u zcp entries, %u surfaces, player start (%d,%d), "
+        "%zu placed entities\n",
+        zoneName.c_str(), width_, height_, zcpCount, surCount, playerStartX >> 8, playerStartY >> 8,
+        entities_.size());
     return true;
 }
 
@@ -189,6 +198,27 @@ uint16_t Zone::PaletteColor(int surfaceTextureIndex, uint8_t texel) const {
     size_t offset = setIndex * kZluSetSize + static_cast<size_t>(texel) * 2;
     if (offset + 1 >= zluData_.size()) return 0;
     return ReadU16(&zluData_[offset]);
+}
+
+bool Zone::CircleHitsWall(float worldX, float worldY, float radius) const {
+    int minTx = static_cast<int>(std::floor((worldX - radius) / kTileScale));
+    int maxTx = static_cast<int>(std::floor((worldX + radius) / kTileScale));
+    int minTy = static_cast<int>(std::floor((worldY - radius) / kTileScale));
+    int maxTy = static_cast<int>(std::floor((worldY + radius) / kTileScale));
+    for (int ty = minTy; ty <= maxTy; ++ty) {
+        for (int tx = minTx; tx <= maxTx; ++tx) {
+            // Out-of-bounds tiles block movement too, matching the
+            // renderer's neighborBlocks() treatment of the grid edge
+            // (render3d/zone_renderer.cpp).
+            if (!InBounds(tx, ty) || CellAt(tx, ty).IsWall()) {
+                float closestX = std::clamp(worldX, tx * kTileScale, (tx + 1) * kTileScale);
+                float closestY = std::clamp(worldY, ty * kTileScale, (ty + 1) * kTileScale);
+                float dx = worldX - closestX, dy = worldY - closestY;
+                if (dx * dx + dy * dy < radius * radius) return true;
+            }
+        }
+    }
+    return false;
 }
 
 }  // namespace sk
