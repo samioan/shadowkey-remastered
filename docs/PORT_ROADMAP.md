@@ -236,22 +236,238 @@ algorithms.
       (different parts of a zone can sit at very different floor
       heights) -- now uses the tested tile's own floor height instead.
 
+- [x] **M10 -- inventory/character-manager screens + a live HUD** (this
+      session). Scoped down from the original "combat/inventory HUD"
+      framing in this doc's own "Next milestones" list below (kept here
+      for context) to what a HUD milestone actually needs: real item/
+      player data and real navigable screens, not full combat
+      resolution -- see "explicitly out of scope" at the end.
+    - **`ItemExecutable`** (`simkin_bindings/item_executable.h`/`.cpp`) --
+      a real native binding for armor/weapon/item/consumable `.s` scripts
+      (the M2 milestone's `TestArmorExecutable` made real), backing the
+      setters those scripts actually call (`SetName`/`SetArmorValue`/
+      `SetDamageMin`/`SetUsable`/...) and the getters
+      `inventory.s`/`charactermanager.s` read back
+      (`GetItemType`/`CanDrop`/`GetArmorText`/...). `GetItemType()` is
+      *inferred* from which category setter fired, not stored by the
+      loader -- confirmed against real corpus data, not guessed:
+      `buysell.s`'s own `AddProduct(..., IPT_Weapon)`/`IPT_Spell`/
+      `IPT_Armor`/`IPT_Consumable` calls use literal `1`/`2`/`3`/`4`
+      with matching comments (`game_constants.h`).
+    - **`game_constants.h`/`.cpp`** -- registers every bare-identifier
+      enum constant the real armor/weapon corpus references
+      (`AR_Medium`, `WR_Blunt`, ...) as Simkin global variables via
+      `skInterpreter::addGlobalVariable`, without which those scripts
+      throw on load. The `IPT_*` item-type values are real/confirmed (see
+      above); the `AR_*`/`WR_*` sub-category values are a documented,
+      arbitrary-but-consistent placeholder (nothing in this port reads
+      them back).
+    - **`PlayerExecutable`** extended with real vitals (health/magicka/
+      fatigue + max), a stat block matching `statsscreen.s`'s
+      `ShowStats()`/`ShowSkills()` exactly (fixed baseline defaults --
+      no character-creation stat-rolling system exists to derive them
+      from), and a real inventory of `ItemExecutable` objects.
+      `LoadStartingInventory()` proves this against real data the same
+      way M8 proved `model_archive.h` against real `models.idx`/`.huge`
+      entries: it actually runs a curated set of 3 real scripts (one
+      weapon, one armor piece, one consumable) through the interpreter
+      at New Game start. `GetArmorRating()`/`GetAttack()` are *real*
+      derived state (sum of equipped armor's `SetArmorValue()`/the
+      equipped weapon's average damage), not static numbers -- equipping
+      something through the real inventory screen visibly changes them.
+    - **Deferred-removal item lifecycle.** Dropping/consuming an item can
+      happen mid-script-call with a live script-side reference still in
+      scope (`inventory.s`'s `UseItem()` calls `RemoveRow()` then
+      immediately `OnUsedBy()` on the same `inv` variable) -- erasing the
+      owning `unique_ptr` right then would be a use-after-free.
+      `ItemExecutable::markedForRemoval()` + `PlayerExecutable::
+      PurgeRemovedItems()` (called once per tick, after any in-flight
+      script call chain has fully returned -- `main.cpp`) defers the
+      real erase to a safe point instead.
+    - **New `MenuExecutable` widgets/native calls** for the real
+      screens: `AddButton`/`AddQuitButton` (cosmetic setters like
+      `ShowBorder`/`SetHAdjust` stored but not rendered -- same
+      simplification spirit as the stand-in bitmap font),
+      `AddFloatingText`, `AddItemButton` (`item_button_executable.h`,
+      the left/right hand equip-slot display), `AddTable`
+      (`table_executable.h`, the inventory/stats/quest-log grid widget --
+      supports both `statsscreen.s`'s direct `SetText(row,col,text)`
+      grid-write mode and `inventory.s`'s host-populated,
+      `ItemExecutable`-backed row mode via one shared `Row` model),
+      `SetInventoryList`/`DisplayWeaponsPage`/`DisplayArmorMenu`/
+      `DisplayConsumablesMenu`/`DisplayMiscItemsMenu`/`DisplaySpellsPage`
+      (populate the remembered table from the player's real inventory,
+      filtered by category), `DisplayCharacterManager`/`DisplayInventory`/
+      `DisplayStatsScreen`/`DisplayQuestLog`/`OpenMainMenu` (fixed-target
+      navigation to the real `.s` files), `UpdateEquipStatus`,
+      `GetLocalizedString`, `TrimText`, `GetSelectedItem`. A row's
+      display text can now come from either a stringtable id or an
+      already-resolved literal string (`AddButton("Cymric",...)` vs.
+      `AddButton(3043,...)`), decided per call via the argument's own
+      `skRValue::type()`.
+    - **`PopupMenuExecutable::UpdatePopupItem`** implemented for real
+      (previously soft-failed) -- `inventory.s`'s action popup
+      dynamically shows/hides Use/Equip/Drop/View based on the selected
+      item's real state (`CanDrop()`, `IsInventoryEquipped()`, ...), and
+      needed this to actually reflect on screen.
+    - **A live in-game hook**: pressing the real default control scheme's
+      own `CharacterManager` action (`docs/INPUT_HANDLING.md`, bound to
+      `KeyHash`/`=` on PC) during the 3D view opens the real
+      `charactermanager.s` chain, pausing gameplay; a minimal always-on
+      HUD (three vitals bars, `main.cpp`'s `RenderHud`) draws over the 3D
+      view itself. Deliberate simplification: `RightSelectionKey` while
+      paused for the menu chain *always* returns straight to gameplay,
+      even from a nested Inventory/Stats/QuestLog screen, rather than
+      backing out one level at a time -- `charactermanager.s`'s own
+      `OnRightSoftKey` handler calls `Quit()`+`OpenMainMenu()`, correct
+      when reached from a menu but wrong reached mid-game, and no real
+      in-game pause-menu entry point was ever found to disambiguate the
+      two contexts.
+    - Verified end to end against real data, not just "doesn't throw":
+      `port/src/tests/m10_inventory_smoke.cpp` loads the real curated
+      starting kit, opens the real `charactermanager.s` ->`inventory.s`
+      chain, switches categories via the real `ArmorMenu()`/
+      `WeaponsMenu()` script callbacks, equips the real armor item and
+      confirms `GetArmorRating()` changes by exactly its real
+      `SetArmorValue()`, and uses the real consumable (confirms fatigue
+      actually rises and the item leaves the inventory). All 6
+      pre-existing smoke tests (M2/M3/M6-M9) still pass unchanged.
+    - **Explicitly out of scope** (a HUD/inventory-display milestone, not
+      a combat-simulation one): actual combat resolution (attack rolls,
+      damage, Monster/Actor AI -- those native classes are untouched);
+      `actionqueue.s`'s real drag/reorder hand-assignment flow
+      (`SetLeftActionQueue`/`SetRightActionQueue`/`ShowActionQueue` are
+      accepted-but-no-op so the real screens don't soft-fail-log noise,
+      but there's no separate queue screen); the buy/sell shop screens
+      (`buysell.s`/`blk_market.s`, a separate, large "Store/shop menu"
+      class surface); real quest content (`DisplayObjectives` shows one
+      fixed placeholder row); a real orientation/world-drop for a
+      discarded item.
+
+- [x] **Post-M11 fix -- `.zlu` palette-selection bug (near-black/banded
+      walls) + HUD bar repositioning** (this session, prompted by a
+      player-submitted side-by-side: a port screenshot vs. the real
+      game). Two issues, one root-caused, one deferred:
+    - **The real bug**: wall/floor/ceiling faces sometimes rendered
+      near-black with visible per-tile banding. Root cause: M9's
+      `PaletteColor()` picked which 2048-byte "set" of a real `.zlu` file
+      to read via `surfaceTextureIndex % 64`, always its first 512-byte
+      chunk -- a documented, explicitly-unverified guess at the time.
+      Dumping a real `azra.zlu` (131072 bytes) at every 512-byte boundary
+      this session showed it isn't organized per-texture at all: it's
+      **4 hue-family palettes of 64 brightness rungs each** (rung 0 of
+      every family is pure black, rising smoothly to a clipped-white top
+      by roughly rung 8-10, each family its own hue -- brown/tan,
+      orange/red, teal/green, blue/purple). This lines up exactly with
+      `kMaxLightLevel` (0x3f00 = 63<<8) and RENDERER_3D.md's separately-
+      documented per-vertex light/fog scalar clamp `[0x400, 0x3f00]`
+      (4-63) -- i.e. `ZmpCell::lightLevel` (already baked per-tile by
+      `BakeLighting()`) directly selects the rung (a `>>8`, no rescale),
+      and `.sur`'s flags byte (bits 4-5, a best-effort byte-offset guess,
+      not independently confirmed by decompilation) selects the hue
+      family. Fixed by rewriting `Zone::PaletteColor()` to take
+      `(surIndex, lightLevel, texel)` and index `.zlu` directly by
+      `(hueGroup*64 + rung)*512`, and by removing the now-redundant
+      post-hoc RGB brightness multiply in `zone_renderer.cpp` (brightness
+      is baked into the rung selection now, not applied twice). Verified
+      three ways: `tests/m6_zone_load_smoke.cpp` now asserts a real wall
+      texture's fully-lit brightness sum isn't near-zero (the exact
+      regression this session hit), a direct before/after render of the
+      same real camera position/yaw went from solid near-black to real
+      visible wood-panel texture detail, and all other smoke tests still
+      pass unchanged.
+    - **Remaining known gap**: per-tile-flat lighting (not per-vertex
+      blended -- see M9's own writeup above) still produces visible
+      brightness seams between adjacent wall tiles; softening that would
+      need real per-vertex light interpolation, not attempted this pass.
+    - **The HUD issue**: `main.cpp`'s M10 vitals HUD (three flat bars) was
+      anchored top-left; the real HUD anchors its equivalent bars
+      bottom-left, inside an ornate gold dragon-head/wing border, plus a
+      separate compass banner (heading readout flanked by two dragon
+      heads) across the top -- neither art piece exists as a decoded
+      on-disk asset. Fixed the position (now bottom-left); the ornate art
+      itself is blocked on the same unresolved 384-slot sprite/icon cache
+      *source* format `GRAPHICS_FORMAT.md`'s "Open follow-ups" already
+      flags for real menu backgrounds -- see the "Next milestones" bullet
+      below, not attempted this pass.
+
+- [x] **Targeted decompilation pass -- `.zlu` hue-family selector's real
+      source, and `.sur`'s flags-byte layout** (this session, immediate
+      follow-up to the fix above once the "still doesn't look right"
+      report showed the `.sur`-flags-byte guess was wrong). Fully
+      decompiled `SurfaceFace_BuildAndProject` (0x1005d784) and its only
+      caller, `Render3DScene` (0x100166c8), via pyghidra
+      (`shadowkey/extracted/decomp_1005d784.c`, `decomp_100166c8.c`) --
+      not a general re-decompilation, just these two functions, enough to
+      settle the two concrete unknowns blocking a real fix:
+    - **`.sur`'s 8-byte record, byte-for-byte** (previously only byte[7]
+        was used, the rest approximated by elimination): byte[0]/[1] = U/V
+        bit-shift, byte[2..3]/[4..5] = two signed-16-bit UV offsets,
+        byte[6] = flags, byte[7] = texture index. Confirms the earlier
+        elimination-based guess was exactly right on layout -- but byte[6]
+        itself turned out to be something this session's earlier fix had
+        wrong: **bit0 = flip V, bit1 = flip U, bit5 = disable this face
+        entirely** (`SurfaceFace_BuildAndProject`'s very first check,
+        `(flags & 0x20) == 0`, gates the whole function body) -- not a
+        `.zlu` hue-family selector at all. A real `azra.sur` record has
+        bit5 set; the previous fix was mistakenly rendering that face
+        (green-tinted, from a wrong hue-group guess) when the real engine
+        never draws it. Wired up as `Zone::surfaceDisabled()`, checked in
+        `zone_renderer.cpp`'s `AddWall`/`AddFloorCeiling` alongside the
+        existing `surIndex == 0xff` check; flip-U/flip-V decoded but not
+        yet wired into the port's (still-flat-0..1) UV computation.
+    - **The real `.zlu` hue-family selector's source**: tracing
+        `SurfaceFace_ClipAndDispatch`'s `*param_2` through
+        `Render3DScene`'s 4 wall-direction blocks (`param_2` = `pbVar36 +-
+        8`/a row-stride offset, i.e. simple pointer arithmetic on a
+        `ZmpCell*`) shows it's **not** part of `.sur` at all -- it's
+        `ZmpCell::flags` bits 4-5 (previously-undocumented bits in an
+        already-mostly-decoded byte, ZONE_FORMAT.md's bit0/1/3/6), read
+        from the *blocking neighbor's* cell for a wall face and the
+        *current* tile's own cell for floor/ceiling. `Zone::PaletteColor()`
+        now takes `hueGroup` directly from the caller instead of deriving
+        it from `surIndex`; `zone_renderer.cpp`'s `CollectFaces()` resolves
+        the right cell per direction (`hueGroupOf()` for walls, the
+        current tile for floor/ceiling) and threads it through the new
+        `Face::hueGroup` field.
+    - **Re-tested against the same real camera position** used to verify
+        the previous fix: no longer near-black (confirmed fixed), and the
+        specific wall this pass flagged as green is now understood as
+        *plausibly correct* rather than definitely-a-bug -- dumping the
+        full 256-entry palette (not just the first ~10 indices sampled
+        earlier) shows real material-to-material color variation *within*
+        one hue family's mid/high index range, so a texture using those
+        indices can legitimately look teal/green even in "family 0."
+        Confirming an exact match to a specific reference screenshot would
+        need identifying which real room the screenshot was taken in
+        (not yet done) -- the *mechanism* (which byte selects what) is now
+        decompiled ground truth either way, replacing every guess the
+        previous fix pass made. All 8 smoke tests still pass; live app
+        boot still responsive.
+
 ## Next milestones (not yet started)
 
 Roughly in priority order for reaching "actually playable," not commitments:
 
-- **M10 -- combat/inventory HUD.** Needs its own native-binding pass
-  (Weapon/Armor/Item/Character-stats classes, all named in
-  [`SIMKIN_NATIVE_API.md`](SIMKIN_NATIVE_API.md)) plus real HUD layout,
-  not just menus.
+- **`actionqueue.s`'s real hand-assignment flow** -- M10 leaves
+  `SetLeftActionQueue`/`SetRightActionQueue`/`ShowActionQueue` as
+  accepted no-ops; equipping a weapon always goes to the right hand
+  (`PlayerExecutable::UpdateEquipStatus`) rather than letting the player
+  choose.
+- **Combat resolution** -- Monster/Actor/Spell native classes are
+  untouched; M10 only wired up inventory/vitals data and display.
 - **`.zsk` room-mesh world position** -- M11 draws it, but whether raw
   local-origin (no offset) is the right placement is unconfirmed; see
   M11's writeup above and `render3d/zone_renderer.h`.
 - **Real save file format** -- M5's save system is simulated in-memory
   only; no on-disk save format has been RE'd yet.
-- **Real menu background images** -- still flat colors (`MenuBackground`
-  stub); the 384-slot image cache's source format was never RE'd
-  (flagged open in [`GRAPHICS_FORMAT.md`](GRAPHICS_FORMAT.md)).
+- **Real menu background images / HUD iconography** -- still flat colors
+  (`MenuBackground` stub) and, as of the post-M11 fix above, a
+  correctly-*positioned* but still hand-drawn HUD (no ornate dragon-head
+  compass/vitals-border art); both are blocked on the same open item --
+  the 384-slot image cache's *source* file format was never RE'd (only
+  the in-memory RLE layout `Blit_RLESprite` reads is decoded), flagged
+  open in [`GRAPHICS_FORMAT.md`](GRAPHICS_FORMAT.md).
 - **Real font/glyph rendering** -- still a stand-in bitmap font; the
   original's glyph format was never RE'd.
 - Audio: entirely unaddressed so far, format not RE'd.

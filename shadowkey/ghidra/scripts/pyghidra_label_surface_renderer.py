@@ -43,8 +43,13 @@ FUNCS = [
      "pointer passed through is *(engine+0x6b20) + surfaceIndex*0x4000 "
      "-- .ztx's per-face texture slot -- and the extra pointer forwarded "
      "alongside it is one of .zlu's 4 selected 256-color palette chunks "
-     "(engine+0x6b24 + 2-bit selector*4, selector = bits 4-5 of the "
-     "caller's per-face material byte). See docs/RENDERER_3D.md and "
+     "(engine+0x6b24 + 2-bit selector*4, selector = bits 4-5 of "
+     "*param_2). param_2's identity RESOLVED (PC-port session): it is a "
+     "ZmpCell* (Render3DScene's E/W/S/N wall blocks pass pbVar36 +- 8/a "
+     "row-stride offset -- the BLOCKING NEIGHBOR's cell; floor/ceiling "
+     "pass pbVar36 itself, the CURRENT tile's own cell), NOT anything "
+     "from .sur -- the 2-bit .zlu family selector is ZmpCell::flags bits "
+     "4-5, a per-tile property. See docs/RENDERER_3D.md and "
      "docs/ZONE_FORMAT.md."),
     (0x1005a9e0, "SurfaceFace_RasterizeTextured_v0",
      "near + fade. One of SurfaceFace_ClipAndDispatch's 4 targets; see "

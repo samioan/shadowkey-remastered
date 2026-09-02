@@ -42,7 +42,9 @@ struct ZcpEntry {
 
 // One .zmp cell, 6 bytes on disk (docs/ZONE_FORMAT.md's ZmpCell).
 struct ZmpCell {
-    uint8_t flags = 0;  // bit0 light source, bit1 wall, bit3 force-draw, bit6 ceiling-band-select
+    uint8_t flags = 0;  // bit0 light source, bit1 wall, bit3 force-draw, bit6 ceiling-band-select,
+                         // bits4-5 .zlu hue-family selector for faces this cell blocks/owns (this
+                         // session, decompiled -- see Zone::PaletteColor()'s comment)
     // `lightLevel`'s on-disk value is only a leftover editor baseline --
     // the real engine zeroes it at the start of Bullseye_BakeLighting and
     // rebuilds it from scratch (propagation + .zcp's lightDelta). Zone::
@@ -110,17 +112,70 @@ public:
     uint8_t TexelAt(int surfaceTextureIndex, int x, int y) const;
 
     // Resolves a palettized texel to a real 16bpp-ish color.
-    // SIMPLIFICATION (see zone.cpp): .zlu's exact per-face palette-chunk
-    // selection wasn't fully traced (docs/RENDERER_3D.md's writeup
-    // describes 4 *globally* fixed chunks stashed once at zone-load time,
-    // which doesn't obviously square with the 131072-byte real file this
-    // session found -- 64 candidate 2048-byte sets, not 1). This uses
-    // `surfaceTextureIndex` to pick one of those sets (a reasonable, but
-    // unverified, guess) and always chunk 0 within it -- good enough for
-    // "real texture content, plausible color," not a byte-exact match.
-    uint16_t PaletteColor(int surfaceTextureIndex, uint8_t texel) const;
+    //
+    // CORRECTED twice this session -- see git history. First pass: was
+    // picking 2048-byte "set" `texIdx % 64`, always its first 512-byte
+    // chunk (the near-black/banded walls a real screenshot comparison
+    // caught). Dumping a real `azra.zlu` (131072 bytes) showed it's
+    // actually **4 hue-family palettes of 64 brightness rungs each**
+    // (512 bytes/rung, rung 0 of every family pure black rising to a
+    // clipped-white top by roughly rung 8-10, each family its own hue) --
+    // matching `kMaxLightLevel` (0x3f00 = 63<<8) exactly, so
+    // `ZmpCell::lightLevel` (already baked per-tile) directly selects the
+    // rung (a >>8, no rescale). That fixed the near-black bug but the
+    // *family* selector was still a guess (read from `.sur`'s own flags
+    // byte) -- confirmed wrong by fully decompiling
+    // `SurfaceFace_BuildAndProject`/`SurfaceFace_ClipAndDispatch`
+    // (0x1005d784/0x1005d074, `shadowkey/extracted/decomp_1005d784.c`):
+    // the real 2-bit family selector (`engine+0x6b24 + (matByte&0x30)>>2`)
+    // reads `*param_2`, and `param_2` is NOT the `.sur` record at all --
+    // tracing `Render3DScene`'s (0x100166c8) call sites shows it's a
+    // `ZmpCell*` (the runtime, 8-byte-padded form -- `pbVar36 +- 8`/row
+    // stride for the E/W/S/N wall directions, always the *blocking
+    // neighbor's* cell; `pbVar36` itself, i.e. the *current* tile's own
+    // cell, for floor/ceiling). So the hue family is a **per-tile**
+    // property (`ZmpCell::flags` bits 4-5, previously-undocumented bits
+    // in an otherwise-decoded byte -- ZONE_FORMAT.md's bit0/1/3/6 =
+    // light-source/wall/force-draw/ceiling-band-select), not a per-
+    // material one -- callers pass it in directly now (see
+    // render3d/zone_renderer.cpp's `hueGroup` plumbing), this function no
+    // longer derives it from `surIndex`. `.sur`'s own flags byte (byte 6)
+    // turned out to be something else entirely, confirmed by the same
+    // decompile: bit0 = flip V, bit1 = flip U, bit5 = **disable this
+    // face** (see `surfaceDisabled()`) -- exactly the "flip U/flip V/
+    // disable" description this doc's `.sur` comment already had, just
+    // not until now mapped to specific bits.
+    //
+    // `lightLevel` takes the *raw* baked value (ZmpCell::lightLevel
+    // range), not the [0,1] LightLevelToBrightness() float, since the
+    // real per-vertex scalar and rung index share that same fixed-point
+    // convention directly (a >>8, no separate rescale).
+    //
+    // Caution re: "hue family" as a name -- dumping a *whole* 256-entry
+    // rung (not just its first ~10 indices, this session's earlier
+    // sampling) shows each family is only strongly a single hue at *low*
+    // indices; the mid/high index range (roughly 30-230) has real
+    // material-to-material color variation within the same family (e.g.
+    // family 0's index 34 decodes notably more teal than its index 10) --
+    // so two different `.ztx` textures sharing one hueGroup/rung can
+    // still look quite different in-game depending which index range
+    // their texel data actually uses. Confirming a specific real wall's
+    // rendered tint (e.g. against a reference screenshot) therefore needs
+    // the real texel data too, not just the family/rung math checked out
+    // in isolation -- the family/rung *selection* mechanism documented
+    // above is decompiled ground truth either way.
+    uint16_t PaletteColor(uint8_t hueGroup, uint16_t lightLevel, uint8_t texel) const;
 
     uint8_t surfaceTextureIndex(int surIndex) const;
+
+    // `.sur` byte 6, bit 5 (decompiled confirmation above) -- when set,
+    // `SurfaceFace_BuildAndProject` skips the face entirely (no vertices
+    // built, no draw call). A real azra.sur record has this set (the
+    // wall face this session's first .zlu fix mistakenly rendered
+    // green -- it should never have been drawn at all). Flip-U/flip-V
+    // (bits 0/1) are decoded but not yet wired into the port's UV
+    // computation (still a flat 0..1 quad either way).
+    bool surfaceDisabled(int surIndex) const;
 
     // Circle-vs-wall-tile collision test, in world units. SIMPLIFICATION:
     // this is an ordinary closest-point-on-square circle test against
@@ -138,6 +193,8 @@ private:
     std::vector<ZmpCell> cells_;
     std::vector<ZcpEntry> zcpEntries_;
     std::vector<uint8_t> surTextureIndex_;  // .sur's byte[7] per record -- see zone.cpp
+    std::vector<uint8_t> surFlags_;         // .sur's byte[6] -- bit0/1 flip V/U, bit5 disable
+                                             // (decompiled confirmation, see PaletteColor())
     std::vector<uint8_t> ztxData_;          // 1 header byte + N*0x4000 texture slots
     std::vector<uint8_t> zluData_;          // N*2048-byte palette sets
     std::vector<EntPlacement> entities_;

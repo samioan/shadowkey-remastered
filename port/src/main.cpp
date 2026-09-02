@@ -9,6 +9,7 @@
 // M0-M4 plan; M5 continues past it in the same "deepen the menu chain"
 // direction the user chose. M6 added the 3D zone renderer, M7 tile-grid
 // collision, M8 placed-entity rendering -- see docs/PORT_ROADMAP.md.
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <memory>
@@ -27,10 +28,12 @@
 #include "render3d/zone_renderer.h"
 #include "simkin_bindings/combo_box_executable.h"
 #include "simkin_bindings/floating_sprite_executable.h"
+#include "simkin_bindings/item_button_executable.h"
 #include "simkin_bindings/menu_executable.h"
 #include "simkin_bindings/menu_stack.h"
 #include "simkin_bindings/player_executable.h"
 #include "simkin_bindings/popup_menu_executable.h"
+#include "simkin_bindings/table_executable.h"
 #include "simkin_bindings/text_area_executable.h"
 #include "skInterpreter.h"
 #include "skParseException.h"
@@ -80,6 +83,16 @@ int DrawWrappedText(sk::Backbuffer& bb, int x, int y, const std::string& text, i
     return static_cast<int>(lines.size());
 }
 
+// A row's display text: a literal (already-resolved) string if one was
+// set (AddButton("Cymric",...), AddFloatingText(healthText,...)) takes
+// priority; otherwise resolves textId through the real stringtable, same
+// as every row kind before M10. See menu_executable.h's class comment.
+std::string RowText(int textId, const std::string& literalText, const sk::StringTable& strings) {
+    if (!literalText.empty()) return literalText;
+    if (textId < 0) return "";
+    return strings.Get(textId);
+}
+
 // "ChooseMale" -> "Male", "ChooseFemale" -> "Female" -- strips the
 // convention these callbacks use; falls back to the raw name otherwise.
 // Real portrait sprites are out of scope here (see
@@ -105,12 +118,14 @@ void RenderPopup(sk::Backbuffer& backbuffer, sk_bindings::PopupMenuExecutable& p
     int y = y0 + 6;
     int itemIndex = 1;
     for (const auto& item : popup.items()) {
-        bool hasCallback = !item.callback.empty();
-        bool isSelected = hasCallback && itemIndex == popup.selectedItem();
+        if (item.blanked) continue;  // M10: UpdatePopupItem(index, "") hides this row entirely
+        bool selectable = sk_bindings::PopupMenuExecutable::IsSelectable(item);
+        bool isSelected = selectable && itemIndex == popup.selectedItem();
         uint16_t color = isSelected ? kSelectedTextColor : kTextColor;
-        int lines = DrawWrappedText(backbuffer, x0 + 6, y, strings.Get(item.textId), 22, color);
+        std::string text = !item.literalText.empty() ? item.literalText : strings.Get(item.textId);
+        int lines = DrawWrappedText(backbuffer, x0 + 6, y, text, 22, color);
         y += lines * (sk::BitmapFont::kGlyphHeight + 3) + 2;
-        if (hasCallback) ++itemIndex;
+        if (selectable) ++itemIndex;
     }
 }
 
@@ -138,9 +153,52 @@ void RenderMenu(sk::Backbuffer& backbuffer, sk_bindings::MenuExecutable& menu,
         switch (row.kind) {
             case RowKind::MenuItem:
             case RowKind::StaticItem:
-                sk::BitmapFont::DrawString(backbuffer, 12, y, strings.Get(row.textId), color);
+                sk::BitmapFont::DrawString(backbuffer, 12, y,
+                                            RowText(row.textId, row.literalText, strings), color);
                 y += lineHeight;
                 break;
+            case RowKind::ItemButton: {
+                auto* item = static_cast<sk_bindings::ItemButtonExecutable*>(row.widget.get());
+                if (item->visible()) {
+                    std::string label = RowText(item->textId(), item->itemText(), strings);
+                    sk::BitmapFont::DrawString(backbuffer, 12, y, label, color);
+                    y += lineHeight;
+                }
+                break;
+            }
+            case RowKind::Table: {
+                auto* table = static_cast<sk_bindings::TableExecutable*>(row.widget.get());
+                // Only a handful of rows fit on a 208px-tall screen
+                // alongside everything else on the page -- show a window
+                // centered on the current selection rather than the whole
+                // table (a real scrollable viewport, docs/PORT_ROADMAP.md
+                // flags this table widget's layout as simplified overall).
+                constexpr int kVisibleRows = 6;
+                int selected = table->selectedRow();
+                // Parenthesized -- this file transitively includes the
+                // vendored Simkin headers (skGeneral.h), which '#define
+                // max(a,b)'/'min(a,b)' as plain macros; (std::max)(...)
+                // defeats the function-like-macro expansion without
+                // touching that vendored file.
+                int start = (std::max)(0, selected - kVisibleRows / 2);
+                int end = (std::min)(table->rowCount(), start + kVisibleRows);
+                for (int r = start; r < end; ++r) {
+                    std::string line = table->CellText(r, 0);
+                    for (int c = 1; c < table->columnCount(); ++c) {
+                        std::string cell = table->CellText(r, c);
+                        if (!cell.empty()) line += "  " + cell;
+                    }
+                    uint16_t rowColor = (isSelected && r == selected) ? kSelectedTextColor
+                                                                       : kTextColor;
+                    sk::BitmapFont::DrawString(backbuffer, 16, y, line, rowColor);
+                    y += lineHeight;
+                }
+                if (table->rowCount() == 0) {
+                    sk::BitmapFont::DrawString(backbuffer, 16, y, "(empty)", kStaticTextColor);
+                    y += lineHeight;
+                }
+                break;
+            }
             case RowKind::ComboBox: {
                 auto* combo = static_cast<sk_bindings::ComboBoxExecutable*>(row.widget.get());
                 int value = combo->currentOptionValue();
@@ -176,6 +234,47 @@ void RenderMenu(sk::Backbuffer& backbuffer, sk_bindings::MenuExecutable& menu,
     if (auto* popup = menu.activePopup()) {
         RenderPopup(backbuffer, *popup, strings);
     }
+}
+
+// M10: a minimal always-on HUD during the 3D view -- three bars reading
+// the player's real vitals (world/PlayerExecutable state, the same
+// numbers charactermanager.s's health/magicka/fatigue text lines show).
+//
+// Positioned bottom-left this session, after a real screenshot comparison
+// (a player-submitted port screenshot vs. the original game) showed the
+// real HUD's health/magicka/fatigue bars anchored there (inside an ornate
+// gold dragon-head/wing border), not top-left, plus a separate compass
+// banner across the top (heading readout flanked by two dragon heads) --
+// neither of those two art pieces exist as a decoded on-disk asset yet:
+// docs/GRAPHICS_FORMAT.md's "Open follow-ups" already flags the 384-slot
+// sprite/icon cache's *source* file format as unresolved (only the
+// in-memory RLE layout `Blit_RLESprite` reads is decoded), so there's no
+// known way yet to blit the real dragon-head/compass art here -- still a
+// stand-in, same "not a byte-exact reproduction" spirit as the bitmap
+// font/flat menu backgrounds, just correctly *placed* now instead of in
+// an arbitrary corner. Finding that sprite source format (probably the
+// natural next step for pixel-accurate HUD art) is tracked as a follow-up
+// in docs/PORT_ROADMAP.md, not attempted here.
+void RenderHud(sk::Backbuffer& backbuffer, const sk_bindings::PlayerExecutable& player) {
+    constexpr int kBarWidth = 50, kBarHeight = 4, kBarGap = 2;
+    constexpr int kBarCount = 3;
+    constexpr int x0 = 4;
+    int y = sk::Backbuffer::kHeight - 4 - kBarCount * kBarHeight - (kBarCount - 1) * kBarGap;
+    auto drawBar = [&](int value, int maxValue, uint16_t color) {
+        // See the (std::max)/(std::min) comment above -- same vendored-
+        // header macro-collision workaround.
+        int filled = maxValue > 0 ? (kBarWidth * (std::max)(0, value)) / maxValue : 0;
+        filled = (std::min)(filled, kBarWidth);
+        for (int dy = 0; dy < kBarHeight; ++dy) {
+            for (int dx = 0; dx < kBarWidth; ++dx) {
+                backbuffer.SetPixel(x0 + dx, y + dy, dx < filled ? color : kPopupBorderColor);
+            }
+        }
+        y += kBarHeight + kBarGap;
+    };
+    drawBar(player.health(), player.maxHealth(), sk::PackRGB565(200, 40, 40));
+    drawBar(player.magicka(), player.maxMagicka(), sk::PackRGB565(60, 80, 220));
+    drawBar(player.fatigue(), player.maxFatigue(), sk::PackRGB565(60, 180, 80));
 }
 
 void RenderCredits(sk::Backbuffer& backbuffer, const std::vector<std::string>& lines,
@@ -217,7 +316,7 @@ int main(int argc, char** argv) {
     modelArchive.Load(scriptRoot);
 
     skInterpreter interpreter;
-    sk_bindings::MenuStack stack(scriptRoot, interpreter);
+    sk_bindings::MenuStack stack(scriptRoot, interpreter, &strings);
 
     std::string mainMenuPath = std::string(scriptRoot) + "/mainmenu.s";
     try {
@@ -267,6 +366,10 @@ int main(int argc, char** argv) {
     std::printf(
         "shadowkey-port: New Game/Load Game enter the 3D zone (M6) -- Up/Down walk, "
         "Left/Right turn, Esc returns to the main menu.\n");
+    std::printf(
+        "shadowkey-port: '=' (stands in for the N-Gage's '#') opens the character manager "
+        "(real inventory/stats/quest-log screens, M10) -- Esc there always returns straight "
+        "to the 3D view.\n");
 
     sk_bindings::MenuExecutable* lastMenu = nullptr;
     int creditsScroll = 0;
@@ -283,10 +386,27 @@ int main(int argc, char** argv) {
     sk::Camera gameCamera;
     sk::ZoneRenderer zoneRenderer;
     bool inGame = false;
+    // M10: set while the character-manager screen chain is open *from*
+    // the 3D view (see the CharacterManager action below) -- gameZone/
+    // gameCamera stay alive so RightSelectionKey can resume gameplay
+    // directly instead of falling through to charactermanager.s's own
+    // OnRightSoftKey handler, which calls Quit()+OpenMainMenu() (correct
+    // for reaching it from a menu, wrong for reaching it mid-game -- no
+    // real in-game pause-menu entry point was ever found to disambiguate
+    // the two contexts, so this is a deliberate host-side simplification:
+    // RightSelectionKey always means "back to gameplay" here, even from a
+    // nested Inventory/Stats/QuestLog screen, rather than backing out one
+    // level at a time).
+    bool gamePausedForMenu = false;
 
     window.RunMessageLoop([&]() {
         if (window.ShouldClose()) return;
         if (!clock.PollTick()) return;
+
+        // M10: erase any inventory items marked for removal last tick
+        // (UseItem/DropItem) -- safe here since any script call chain
+        // that marked them has long since returned. See item_executable.h.
+        stack.player().PurgeRemovedItems();
 
         if (stack.quitRequested()) {
             window.Close();
@@ -324,10 +444,16 @@ int main(int argc, char** argv) {
         }
 
         if (inGame && gameZone) {
-            // Esc returns to the main menu (no in-game pause menu exists
-            // yet); everything else is movement against the tile-grid
-            // collision (M7).
-            if (input.ConsumeJustPressed(sk::ButtonSlot::RightSelectionKey)) {
+            // M10: the real default control scheme's own CharacterManager
+            // action (docs/INPUT_HANDLING.md, KeyHash by default) opens
+            // the real charactermanager.s screen chain, pausing the 3D
+            // view -- RightSelectionKey (Esc) still returns straight to
+            // the main menu when not paused for a menu.
+            if (input.ConsumeBoundJustPressed(sk::Action::CharacterManager)) {
+                stack.OpenMenu("charactermanager");
+                inGame = false;
+                gamePausedForMenu = true;
+            } else if (input.ConsumeJustPressed(sk::ButtonSlot::RightSelectionKey)) {
                 inGame = false;
             } else {
                 constexpr float kMoveSpeed = 40.0f;    // world units/tick (256 units/tile)
@@ -356,9 +482,23 @@ int main(int argc, char** argv) {
                 if (input.GetButton(sk::ButtonSlot::Up)) tryMove(dx, dy);
                 if (input.GetButton(sk::ButtonSlot::Down)) tryMove(-dx, -dy);
                 zoneRenderer.Render(backbuffer, *gameZone, gameCamera, gameEntities, &modelArchive);
+                RenderHud(backbuffer, stack.player());
                 window.Present(backbuffer);
                 return;
             }
+        }
+
+        if (gamePausedForMenu && input.ConsumeJustPressed(sk::ButtonSlot::RightSelectionKey)) {
+            // See gamePausedForMenu's declaration comment -- always
+            // resumes gameplay directly, bypassing whatever menu screen
+            // (charactermanager.s or a nested Inventory/Stats/QuestLog)
+            // is currently open.
+            gamePausedForMenu = false;
+            inGame = true;
+            zoneRenderer.Render(backbuffer, *gameZone, gameCamera, gameEntities, &modelArchive);
+            RenderHud(backbuffer, stack.player());
+            window.Present(backbuffer);
+            return;
         }
 
         if (stack.creditsActive()) {
@@ -405,8 +545,17 @@ int main(int argc, char** argv) {
                         menu->TryInvoke("OnRightSoftKey");
                     }
                 } else {
-                    if (input.ConsumeJustPressed(sk::ButtonSlot::Up)) menu->MoveSelection(-1);
-                    if (input.ConsumeJustPressed(sk::ButtonSlot::Down)) menu->MoveSelection(1);
+                    // M10: Up/Down on a Table row (inventory/stats/quest-
+                    // log screens) navigates within the table instead of
+                    // to the next outer row -- TryMoveTableSelection()
+                    // only does something (and returns true) when the
+                    // current selection actually is a Table.
+                    if (input.ConsumeJustPressed(sk::ButtonSlot::Up)) {
+                        if (!menu->TryMoveTableSelection(-1)) menu->MoveSelection(-1);
+                    }
+                    if (input.ConsumeJustPressed(sk::ButtonSlot::Down)) {
+                        if (!menu->TryMoveTableSelection(1)) menu->MoveSelection(1);
+                    }
                     if (menu->useHoriz()) {
                         // Portrait/name-entry-style screens: Left/Right
                         // navigate rows instead of cycling a combo (there
@@ -422,7 +571,12 @@ int main(int argc, char** argv) {
                         }
                     }
                     if (input.ConsumeJustPressed(sk::ButtonSlot::LeftSelectionKey)) {
-                        menu->ActivateSelected();
+                        // M10: Enter on a selected Table row fires its own
+                        // SetCallback() handler (inventory.s's
+                        // SelectedInventoryItem, statsscreen.s's
+                        // OnTableSel, ...) instead of the outer row's
+                        // usual ActivateSelected() path.
+                        if (!menu->TryActivateTable()) menu->ActivateSelected();
                     }
                     if (input.ConsumeJustPressed(sk::ButtonSlot::RightSelectionKey)) {
                         menu->TryInvoke("OnRightSoftkey");

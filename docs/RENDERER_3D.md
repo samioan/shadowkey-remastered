@@ -340,8 +340,18 @@ scheme:
   is **`.ztx`'s role, fully resolved**: a flat wall-texture atlas, one
   `0x4000`-byte (16384-byte) slot per surface index. It also forwards one
   of **`.zlu`'s 4 selected 512-byte chunks** (`engine+0x6b24 +
-  2-bit-selector*4`, the selector taken from bits 4-5 of the caller's
-  per-face material byte) as an extra pointer argument.
+  2-bit-selector*4`, the selector taken from bits 4-5 of `*param_2`) as an
+  extra pointer argument. **`param_2`'s identity resolved** (PC-port
+  session, chasing a real screenshot mismatch): it is *not* part of the
+  `.sur` record (an earlier port-side guess assumed this) — tracing
+  `SurfaceFace_BuildAndProject`'s only caller, `Render3DScene`
+  (0x100166c8)'s 4 wall-direction blocks, `param_2` is simple pointer
+  arithmetic (`+-8`/a row-stride offset) on a `ZmpCell*`, always the
+  *blocking neighbor's* cell for a wall face and the *current* tile's own
+  cell for floor/ceiling (`param_2 == pbVar36` there, no offset). So the
+  2-bit `.zlu` family selector is **`ZmpCell::flags` bits 4-5** — a
+  per-*tile* property, not a per-material one. See `ZONE_FORMAT.md`'s
+  `ZmpCell` flags-byte bit table for the write-up merged there.
 - **`SurfaceFace_RasterizeTextured_v0`..`_v3`** (renamed from
   `FUN_1005a9e0`/`FUN_10059970`/`FUN_1005c1a4`/`FUN_1005bbc8`) — the 4
   dispatch targets (near+fade, near+no-fade, far+fade, far+no-fade). All

@@ -13,7 +13,6 @@ namespace sk {
 namespace {
 
 constexpr int kZtxSlotSize = 0x4000;   // 128*128, 8bpp
-constexpr int kZluSetSize = 2048;      // 4 * 512
 constexpr size_t kZcpEntrySize = 36;
 constexpr size_t kZmpCellSize = 6;
 constexpr size_t kEntRecordSize = 0x48;
@@ -100,10 +99,18 @@ bool Zone::Load(const std::string& scriptRoot, const std::string& zoneName) {
     // and zcpEntries_, so this is the earliest point both are ready.
     BakeLighting();
 
-    // --- .sur: u8 count + 8-byte records. Only byte[7] (the .ztx texture
-    // slot index) is used here -- see zone.h's PaletteColor()/TexelAt()
-    // comments on why the UV-shift/offset fields are approximated rather
-    // than reproduced exactly for this first pass.
+    // --- .sur: u8 count + 8-byte records. Byte[7] (the .ztx texture slot
+    // index) and byte[6] (flags -- bit0 flip V, bit1 flip U, bit5
+    // disable-this-face, see zone.h's surfaceDisabled()/PaletteColor()
+    // comments) are used here; bytes[0..5] (UV shift/offset) are still
+    // approximated rather than reproduced exactly (each wall/floor quad
+    // already spans a full 0..1 UV range over its dedicated 128x128 atlas
+    // slot). Field layout confirmed this session by fully decompiling
+    // SurfaceFace_BuildAndProject (0x1005d784,
+    // shadowkey/extracted/decomp_1005d784.c): byte[0]/[1] = U/V
+    // bit-shift, byte[2..3]/[4..5] = two signed-16-bit UV offsets,
+    // byte[6] = flags, byte[7] = texture index (all read via
+    // `iVar4 = surIndex*8 + tableBase` then `*(char*)(iVar4+N)`).
     std::vector<uint8_t> sur;
     if (!ReadWholeFile(base + ".sur", sur) || sur.empty()) {
         std::printf("Zone: %s.sur missing/empty\n", zoneName.c_str());
@@ -115,8 +122,11 @@ bool Zone::Load(const std::string& scriptRoot, const std::string& zoneName) {
         return false;
     }
     surTextureIndex_.resize(surCount);
+    surFlags_.resize(surCount);
     for (uint8_t i = 0; i < surCount; ++i) {
-        surTextureIndex_[i] = sur[1 + static_cast<size_t>(i) * 8 + 7];
+        const uint8_t* rec = &sur[1 + static_cast<size_t>(i) * 8];
+        surTextureIndex_[i] = rec[7];
+        surFlags_[i] = rec[6];
     }
 
     // --- .ztx: 1 header byte + N * 0x4000-byte 128x128 8bpp texture slots ---
@@ -196,6 +206,11 @@ uint8_t Zone::surfaceTextureIndex(int surIndex) const {
     return surTextureIndex_[static_cast<size_t>(surIndex)];
 }
 
+bool Zone::surfaceDisabled(int surIndex) const {
+    if (surIndex < 0 || static_cast<size_t>(surIndex) >= surFlags_.size()) return false;
+    return (surFlags_[static_cast<size_t>(surIndex)] & 0x20) != 0;
+}
+
 uint8_t Zone::TexelAt(int surfaceTextureIndex, int x, int y) const {
     if (x < 0 || y < 0 || x >= 128 || y >= 128) return 0;
     size_t slotOffset = 1 + static_cast<size_t>(surfaceTextureIndex) * kZtxSlotSize;
@@ -204,12 +219,22 @@ uint8_t Zone::TexelAt(int surfaceTextureIndex, int x, int y) const {
     return ztxData_[offset];
 }
 
-uint16_t Zone::PaletteColor(int surfaceTextureIndex, uint8_t texel) const {
-    size_t setCount = zluData_.size() / kZluSetSize;
-    if (setCount == 0) return 0;
-    size_t setIndex = static_cast<size_t>(surfaceTextureIndex) % setCount;
-    // Always chunk 0 of the 4 -- see the PaletteColor() header comment.
-    size_t offset = setIndex * kZluSetSize + static_cast<size_t>(texel) * 2;
+uint16_t Zone::PaletteColor(uint8_t hueGroup, uint16_t lightLevel, uint8_t texel) const {
+    // See zone.h's header comment: .zlu is 4 hue-families x 64 brightness
+    // rungs x 512 bytes/rung (256 rungs total), not a per-texture table --
+    // and hueGroup is a per-*tile* property (ZmpCell::flags bits 4-5, the
+    // caller's job to resolve to the right tile -- see
+    // render3d/zone_renderer.cpp), not a per-.sur-record one.
+    constexpr int kRungSize = 512;
+    constexpr int kRungsPerFamily = 64;
+    constexpr int kMinRung = 4;   // RENDERER_3D.md's real [0x400, 0x3f00] clamp, >>8
+    constexpr int kMaxRung = 63;
+
+    hueGroup &= 0x3;
+    int rung = std::clamp(static_cast<int>(lightLevel >> 8), kMinRung, kMaxRung);
+    size_t offset = (static_cast<size_t>(hueGroup) * kRungsPerFamily + static_cast<size_t>(rung)) *
+                         static_cast<size_t>(kRungSize) +
+                     static_cast<size_t>(texel) * 2;
     if (offset + 1 >= zluData_.size()) return 0;
     return ReadU16(&zluData_[offset]);
 }

@@ -15,7 +15,16 @@ struct Vec3 {
 struct Face {
     Vec3 corners[4];  // winding: 0,1,2,3 around the quad
     int surIndex = 0xff;
-    float brightness = 1.0f;  // M9: LightLevelToBrightness() of the owning tile
+    uint16_t lightLevel = 0;  // M9/this session: the owning tile's raw baked
+                               // ZmpCell::lightLevel -- see zone.h's
+                               // PaletteColor() comment on why this is the
+                               // real .zlu rung selector directly (a >>8),
+                               // not a pre-converted [0,1] brightness float.
+    uint8_t hueGroup = 0;      // This session (decompiled confirmation): the
+                               // relevant tile's own ZmpCell::flags bits 4-5
+                               // -- the *blocking neighbor's* cell for a wall
+                               // face, the current tile's own cell for
+                               // floor/ceiling. See zone.h's PaletteColor().
 };
 
 // One quad per direction/band; corner order matches a consistent
@@ -23,12 +32,14 @@ struct Face {
 // exact winding doesn't matter here since the rasterizer below doesn't
 // backface-cull (small faces are cheap enough at this screen/tile scale
 // to just always draw and let the z-buffer sort it out).
-void AddFloorCeiling(std::vector<Face>& faces, int tx, int ty, const int16_t heights[4],
-                      uint8_t surIndex, float brightness) {
-    if (surIndex == 0xff) return;
+void AddFloorCeiling(std::vector<Face>& faces, const Zone& zone, int tx, int ty,
+                      const int16_t heights[4], uint8_t surIndex, uint16_t lightLevel,
+                      uint8_t hueGroup) {
+    if (surIndex == 0xff || zone.surfaceDisabled(surIndex)) return;
     Face f;
     f.surIndex = surIndex;
-    f.brightness = brightness;
+    f.lightLevel = lightLevel;
+    f.hueGroup = hueGroup;
     float x0 = static_cast<float>(tx), x1 = x0 + 1.0f;
     float y0 = static_cast<float>(ty), y1 = y0 + 1.0f;
     f.corners[0] = {x0, y0, heights[0] / 1.0f};
@@ -42,13 +53,15 @@ void AddFloorCeiling(std::vector<Face>& faces, int tx, int ty, const int16_t hei
 // floorZ0/floorZ1 (the two edge-endpoint floor heights) up to
 // ceilZ0/ceilZ1 -- lets a wall follow a sloped/stepped neighbor rather
 // than assuming a flat rectangle.
-void AddWall(std::vector<Face>& faces, float ex0, float ey0, float ex1, float ey1, float floorZ0,
-             float floorZ1, float ceilZ0, float ceilZ1, uint8_t surIndex, float brightness) {
-    if (surIndex == 0xff) return;
+void AddWall(std::vector<Face>& faces, const Zone& zone, float ex0, float ey0, float ex1, float ey1,
+             float floorZ0, float floorZ1, float ceilZ0, float ceilZ1, uint8_t surIndex,
+             uint16_t lightLevel, uint8_t hueGroup) {
+    if (surIndex == 0xff || zone.surfaceDisabled(surIndex)) return;
     if (floorZ0 >= ceilZ0 && floorZ1 >= ceilZ1) return;  // degenerate (no vertical extent)
     Face f;
     f.surIndex = surIndex;
-    f.brightness = brightness;
+    f.lightLevel = lightLevel;
+    f.hueGroup = hueGroup;
     f.corners[0] = {ex0, ey0, floorZ0};
     f.corners[1] = {ex1, ey1, floorZ1};
     f.corners[2] = {ex1, ey1, ceilZ1};
@@ -82,17 +95,37 @@ std::vector<Face> CollectFaces(const Zone& zone, int centerX, int centerY, int r
             // uses its own baked light level -- the real engine blends
             // per-vertex across tiles (docs/RENDERER_3D.md's fade/light
             // discussion); this is flat per-face instead, a deliberate
-            // simplification (see zone_renderer.h).
-            float brightness = LightLevelToBrightness(cell.lightLevel);
+            // simplification (see zone_renderer.h). Passed as the raw
+            // baked value now (not a pre-converted brightness float) --
+            // see zone.h's PaletteColor() comment on why that's what the
+            // real .zlu rung selector actually wants.
+            uint16_t lightLevel = cell.lightLevel;
+            // This session (decompiled confirmation, see zone.h's
+            // PaletteColor() comment): floor/ceiling faces use the
+            // *current* tile's own ZmpCell::flags bits 4-5 as the .zlu
+            // hue-family selector -- wall faces use the blocking
+            // neighbor's instead, see hueGroupOf() below.
+            uint8_t ownHueGroup = static_cast<uint8_t>((cell.flags >> 4) & 0x3);
 
-            AddFloorCeiling(faces, tx, ty, t.floorHeight, t.surIndexFloor, brightness);
-            AddFloorCeiling(faces, tx, ty, t.ceilingHeight, t.surIndexCeilingA, brightness);
+            AddFloorCeiling(faces, zone, tx, ty, t.floorHeight, t.surIndexFloor, lightLevel,
+                             ownHueGroup);
+            AddFloorCeiling(faces, zone, tx, ty, t.ceilingHeight, t.surIndexCeilingA, lightLevel,
+                             ownHueGroup);
 
             float x0 = static_cast<float>(tx), x1 = x0 + 1.0f;
             float y0 = static_cast<float>(ty), y1 = y0 + 1.0f;
 
             auto neighborBlocks = [&](int nx, int ny) {
                 return !zone.InBounds(nx, ny) || zone.CellAt(nx, ny).IsWall();
+            };
+            // Real per-face rule (decompiled from Render3DScene's E/W/S/N
+            // wall blocks): the hue family for a wall face always comes
+            // from whichever neighbor tile is actually blocking that
+            // direction, not the current tile -- out-of-bounds neighbors
+            // have no cell to read, so default to family 0 there.
+            auto hueGroupOf = [&](int nx, int ny) -> uint8_t {
+                if (!zone.InBounds(nx, ny)) return 0;
+                return static_cast<uint8_t>((zone.CellAt(nx, ny).flags >> 4) & 0x3);
             };
 
             // M11: an open (non-blocking) neighbor with a different
@@ -114,52 +147,57 @@ std::vector<Face> CollectFaces(const Zone& zone, int centerX, int centerY, int r
             // self-consistent with it, not separately verified.
             auto steppedBands = [&](float ex0, float ey0, float ex1, float ey1, int16_t fA,
                                      int16_t fB, int16_t cA, int16_t cB, int16_t nfA, int16_t nfB,
-                                     int16_t ncA, int16_t ncB, uint8_t surLo, uint8_t surHi) {
+                                     int16_t ncA, int16_t ncB, uint8_t surLo, uint8_t surHi,
+                                     uint8_t neighborHueGroup) {
                 if (nfA != fA || nfB != fB) {
-                    AddWall(faces, ex0, ey0, ex1, ey1, fA, fB, std::min(nfA, cA), std::min(nfB, cB),
-                            surLo, brightness);
+                    AddWall(faces, zone, ex0, ey0, ex1, ey1, fA, fB, std::min(nfA, cA),
+                            std::min(nfB, cB), surLo, lightLevel, neighborHueGroup);
                 }
                 if (ncA != cA || ncB != cB) {
-                    AddWall(faces, ex0, ey0, ex1, ey1, std::max(fA, ncA), std::max(fB, ncB), cA, cB,
-                            surHi, brightness);
+                    AddWall(faces, zone, ex0, ey0, ex1, ey1, std::max(fA, ncA), std::max(fB, ncB), cA,
+                            cB, surHi, lightLevel, neighborHueGroup);
                 }
             };
 
             if (neighborBlocks(tx + 1, ty)) {  // east edge: corners 1 (NE) / 2 (SE)
-                AddWall(faces, x1, y0, x1, y1, t.floorHeight[1], t.floorHeight[2],
-                        t.ceilingHeight[1], t.ceilingHeight[2], t.surIndexE_lo, brightness);
+                AddWall(faces, zone, x1, y0, x1, y1, t.floorHeight[1], t.floorHeight[2],
+                        t.ceilingHeight[1], t.ceilingHeight[2], t.surIndexE_lo, lightLevel,
+                        hueGroupOf(tx + 1, ty));
             } else {
                 const ZcpEntry& n = zone.TypeOf(zone.CellAt(tx + 1, ty));
                 steppedBands(x1, y0, x1, y1, t.floorHeight[1], t.floorHeight[2], t.ceilingHeight[1],
                              t.ceilingHeight[2], n.floorHeight[0], n.floorHeight[3], n.ceilingHeight[0],
-                             n.ceilingHeight[3], t.surIndexE_lo, t.surIndexE_hi);
+                             n.ceilingHeight[3], t.surIndexE_lo, t.surIndexE_hi, hueGroupOf(tx + 1, ty));
             }
             if (neighborBlocks(tx - 1, ty)) {  // west edge: corners 3 (SW) / 0 (NW)
-                AddWall(faces, x0, y1, x0, y0, t.floorHeight[3], t.floorHeight[0],
-                        t.ceilingHeight[3], t.ceilingHeight[0], t.surIndexW_lo, brightness);
+                AddWall(faces, zone, x0, y1, x0, y0, t.floorHeight[3], t.floorHeight[0],
+                        t.ceilingHeight[3], t.ceilingHeight[0], t.surIndexW_lo, lightLevel,
+                        hueGroupOf(tx - 1, ty));
             } else {
                 const ZcpEntry& n = zone.TypeOf(zone.CellAt(tx - 1, ty));
                 steppedBands(x0, y1, x0, y0, t.floorHeight[3], t.floorHeight[0], t.ceilingHeight[3],
                              t.ceilingHeight[0], n.floorHeight[2], n.floorHeight[1], n.ceilingHeight[2],
-                             n.ceilingHeight[1], t.surIndexW_lo, t.surIndexW_hi);
+                             n.ceilingHeight[1], t.surIndexW_lo, t.surIndexW_hi, hueGroupOf(tx - 1, ty));
             }
             if (neighborBlocks(tx, ty + 1)) {  // south edge: corners 2 (SE) / 3 (SW)
-                AddWall(faces, x1, y1, x0, y1, t.floorHeight[2], t.floorHeight[3],
-                        t.ceilingHeight[2], t.ceilingHeight[3], t.surIndexS_lo, brightness);
+                AddWall(faces, zone, x1, y1, x0, y1, t.floorHeight[2], t.floorHeight[3],
+                        t.ceilingHeight[2], t.ceilingHeight[3], t.surIndexS_lo, lightLevel,
+                        hueGroupOf(tx, ty + 1));
             } else {
                 const ZcpEntry& n = zone.TypeOf(zone.CellAt(tx, ty + 1));
                 steppedBands(x1, y1, x0, y1, t.floorHeight[2], t.floorHeight[3], t.ceilingHeight[2],
                              t.ceilingHeight[3], n.floorHeight[1], n.floorHeight[0], n.ceilingHeight[1],
-                             n.ceilingHeight[0], t.surIndexS_lo, t.surIndexS_hi);
+                             n.ceilingHeight[0], t.surIndexS_lo, t.surIndexS_hi, hueGroupOf(tx, ty + 1));
             }
             if (neighborBlocks(tx, ty - 1)) {  // north edge: corners 0 (NW) / 1 (NE)
-                AddWall(faces, x0, y0, x1, y0, t.floorHeight[0], t.floorHeight[1],
-                        t.ceilingHeight[0], t.ceilingHeight[1], t.surIndexN_lo, brightness);
+                AddWall(faces, zone, x0, y0, x1, y0, t.floorHeight[0], t.floorHeight[1],
+                        t.ceilingHeight[0], t.ceilingHeight[1], t.surIndexN_lo, lightLevel,
+                        hueGroupOf(tx, ty - 1));
             } else {
                 const ZcpEntry& n = zone.TypeOf(zone.CellAt(tx, ty - 1));
                 steppedBands(x0, y0, x1, y0, t.floorHeight[0], t.floorHeight[1], t.ceilingHeight[0],
                              t.ceilingHeight[1], n.floorHeight[3], n.floorHeight[2], n.ceilingHeight[3],
-                             n.ceilingHeight[2], t.surIndexN_lo, t.surIndexN_hi);
+                             n.ceilingHeight[2], t.surIndexN_lo, t.surIndexN_hi, hueGroupOf(tx, ty - 1));
             }
         }
     }
@@ -188,7 +226,7 @@ uint16_t ExpandRGB444(uint16_t raw444, float brightness) {
 void RasterizeTriangle(Backbuffer& backbuffer, std::vector<float>& depthBuffer,
                         const ProjectedVertex& a, const ProjectedVertex& b,
                         const ProjectedVertex& c, const Zone& zone, int textureIndex,
-                        float brightness) {
+                        uint8_t hueGroup, uint16_t lightLevel) {
     float area = (b.sx - a.sx) * (c.sy - a.sy) - (b.sy - a.sy) * (c.sx - a.sx);
     if (std::fabs(area) < 1e-6f) return;
 
@@ -222,11 +260,15 @@ void RasterizeTriangle(Backbuffer& backbuffer, std::vector<float>& depthBuffer,
             int ty = std::clamp(static_cast<int>(v * 128.0f), 0, 127);
 
             uint8_t texel = zone.TexelAt(textureIndex, tx, ty);
-            uint16_t raw444 = zone.PaletteColor(textureIndex, texel);
+            // Brightness is baked into the .zlu rung selection itself now
+            // (zone.h's PaletteColor() comment) -- no separate post-hoc
+            // scale needed, so ExpandRGB444 gets a flat 1.0 here, same as
+            // the (unlit) model rasterizer below.
+            uint16_t raw444 = zone.PaletteColor(hueGroup, lightLevel, texel);
             if (raw444 == 0x0f0f) continue;  // chroma-key cutout (docs/GRAPHICS_FORMAT.md)
 
             depthBuffer[static_cast<size_t>(depthIndex)] = invW;
-            backbuffer.SetPixel(px, py, ExpandRGB444(raw444, brightness));
+            backbuffer.SetPixel(px, py, ExpandRGB444(raw444, 1.0f));
         }
     }
 }
@@ -386,8 +428,10 @@ void ZoneRenderer::Render(Backbuffer& backbuffer, const Zone& zone, const Camera
         }
         if (anyBehind) continue;  // whole-quad near-plane cull, see header comment
 
-        RasterizeTriangle(backbuffer, depthBuffer, pv[0], pv[1], pv[2], zone, texIdx, face.brightness);
-        RasterizeTriangle(backbuffer, depthBuffer, pv[0], pv[2], pv[3], zone, texIdx, face.brightness);
+        RasterizeTriangle(backbuffer, depthBuffer, pv[0], pv[1], pv[2], zone, texIdx, face.hueGroup,
+                           face.lightLevel);
+        RasterizeTriangle(backbuffer, depthBuffer, pv[0], pv[2], pv[3], zone, texIdx, face.hueGroup,
+                           face.lightLevel);
     }
 
     // M8: placed entities (props, monsters, doors, ...) resolved via

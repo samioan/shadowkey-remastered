@@ -82,19 +82,25 @@
 // Bullseye_BakeLighting/Bullseye_PropagateLight (docs/ZONE_FORMAT.md): a
 // 2D ray-cast light-propagation-with-wall-bounce from every light-source
 // cell, plus each cell's .zcp lightDelta, baked once at zone load exactly
-// like the real engine (not per-frame). Applied here as a **flat per-face
-// brightness multiplier** on the owning tile's baked light level -- a
-// real simplification, not a port of the original's actual consumption
-// path (a per-vertex light/fog scalar feeding a *palette-chunk* blend in
-// `.zlu`, RENDERER_3D.md's "secondary `0x200`-byte offset" writeup, not a
-// simple brightness scale). Entity models (M8) are **not** lit by this --
-// still unconditionally full-bright, matching M8's own scope. The ray-cast
-// itself is also an approximation of the original's exact integer
-// stepping (see zone.cpp's PropagateLight comment) and includes one
-// deliberate port-only tweak the real engine doesn't have: a small
-// non-zero ambient floor so fully unlit geometry doesn't render as a
-// literal, bug-looking pure black (LightLevelToBrightness() in world/
-// zone.h/.cpp).
+// like the real engine (not per-frame). Applied here as a **flat per-face**
+// value (still a simplification vs. the real per-vertex blend across
+// tiles) driving the *actual* mechanism this session corrected: each
+// tile's baked light level directly selects one of `.zlu`'s 64 brightness
+// rungs (zone.h's PaletteColor() comment has the full writeup) -- not a
+// post-hoc RGB multiply on an already-resolved color, which is what an
+// earlier pass here did and which produced near-black/banded walls once
+// a real screenshot comparison caught it (a texture-index-keyed guess at
+// which `.zlu` bytes to read picked the *darkest* rung for several real
+// wall textures, regardless of the tile's actual light level). Entity
+// models (M8) are still **not** lit by any of this -- unconditionally
+// full-bright, matching M8's own scope. The ray-cast itself is also an
+// approximation of the original's exact integer stepping (see zone.cpp's
+// PropagateLight comment); LightLevelToBrightness()'s [0,1] float and its
+// small ambient floor still exist for other callers (test/debug output)
+// but the tile-grid renderer no longer goes through it -- clamping the
+// raw baked value into `.zlu`'s real [4,63] rung range (RENDERER_3D.md's
+// documented per-vertex scalar clamp) already keeps fully-unlit geometry
+// visible without a separate stylized floor.
 //
 // M11 -- second wall band + .zsk room mesh. Two pieces:
 //

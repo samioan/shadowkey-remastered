@@ -26,6 +26,15 @@ fallback). `GameEngine_InitLevel` loads them in this order:
    `RENDERER_3D.md`): each record describes one selectable wall-face
    "surface" — UV scale (as bit-shifts), UV origin offset, a flags byte
    (flip U/flip V/disable), and a clamped texture-slot index into `.ztx`.
+   **Byte offsets confirmed** (PC-port session, decompiling
+   `SurfaceFace_BuildAndProject`, 0x1005d784):
+   `[0]`=U bit-shift, `[1]`=V bit-shift, `[2..3]`=signed-16 U offset,
+   `[4..5]`=signed-16 V offset, `[6]`=flags (`bit0`=flip V, `bit1`=flip U,
+   `bit5`=**disable this face entirely** — `BuildAndProject`'s very first
+   check, no vertices built, no draw call at all when set), `[7]`=texture
+   index (clamped into `[0, 0xfe]`, or `0xff` if the raw value overflows
+   that). Flip-U/flip-V and the UV-shift/offset fields are decoded but not
+   yet ported (the PC port still uses a flat 0..1 UV per quad).
 3. **`<zone>.zon`** — room definitions: `u16` count → `engine+0x5460`, then
    count × 0x48-byte (72-byte) room records into `engine+0x5464`, stride
    0x84 (132 bytes) per room slot. **Record layout now fully decoded** (see
@@ -581,6 +590,15 @@ player-start code). Floor has just one texture index and one call, using
 use — a fifth `flags` bit now identified, alongside bit0 (light source),
 bit1 (wall), bit3 (force-draw), and bit2 (used in the floor gate,
 `flags & 4`, role not pinned down beyond "also forces a draw").
+
+**Bits 4-5 identified** (PC-port session, chasing a real-vs-port
+screenshot mismatch): the tile-grid wall/surface renderer's `.zlu`
+palette selection (`SurfaceFace_ClipAndDispatch`'s 2-bit selector,
+`RENDERER_3D.md`) reads `ZmpCell::flags` bits 4-5, not anything from
+`.sur` — a per-face color "family" is therefore a property of *which
+tile* (specifically: the blocking neighbor, for a wall face; the current
+tile itself, for floor/ceiling), not of which `.sur` material index is
+in use. `flags`' only remaining undecoded bit is bit7.
 
 **This is also `WORLD_MODEL.md`'s "36-byte tile-type table at `map+0x690c`"**
 — found independently in a much earlier round of this project, before
