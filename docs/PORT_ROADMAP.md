@@ -948,11 +948,87 @@ algorithms.
     - **Not attempted**: pickups (`entities.txt` categories 3/8/9,
       misc-loot/containers/consumables -- would need a world-to-
       inventory transfer this port's `ItemExecutable`/`PlayerExecutable`
-      don't have yet) and NPC talk (category 7, merchants -- would need
-      a dialogue/menu-opening path from `OnUse()`, a materially
-      different scope from a stateless door toggle). Both stay genuinely
-      unbound, same as before this session -- `docs/PORT_ROADMAP.md`'s
-      "Next milestones" below still lists them.
+      don't have yet) and NPC talk (guessed here as category 7/merchants
+      -- **corrected by M16 below**, real NPC talk is actually category
+      2/monster, the same category as ordinary hostile monsters,
+      distinguished only by script content). Both still needed a
+      materially different scope than a stateless door toggle -- NPC
+      talk is M16's own slice below; pickups remain unbound.
+
+- [x] **M16 -- generalized monster/NPC loading + `Action::Use` dialogue**
+      (this session). Second slice of "Combat resolution"'s still-open
+      items -- both "other monster types" and (per a real finding this
+      pass) "NPC talk" turned out to be the *same* underlying gap: M12's
+      loader only ever constructed a `MonsterExecutable` for the one
+      hardcoded `typeId 202`.
+    - **Real finding that reframed NPC talk's scope**: `entities.txt`'s
+      category 2 ("monster") covers named quest NPCs alongside ordinary
+      hostile monsters -- e.g. real `monsters/Tanyin_Aldwyr.s` (typeId
+      166, 1 real placement in azra) is category 2, not the guessed
+      category 7 (merchant) M15's "Not attempted" note above assumed.
+      NPCs are distinguished purely by their own script content:
+      `SetAggressive(false)` + `SetUsable(true)`/`SetUseText(...)` +
+      (for essential named characters) `SetInvulnerable(true)`, with an
+      `OnUse()` that calls `OpenMenu(...)` to start a real dialogue
+      instead of participating in combat at all. So generalizing the
+      loader past `typeId 202` and wiring `Action::Use` into it delivers
+      real NPC dialogue "for free," using the exact same
+      `MonsterExecutable`/`OnUse()` mechanism M15 already built for
+      doors -- no new native class needed.
+    - **Generalized past M12's hardcoded typeId**, same `HasRealScript()`
+      (".s"-suffix) filter M15 already established for doors, now shared
+      by both branches of the zone-load loop: any category-2 placement
+      with a real script loads a live `MonsterExecutable`. Confirmed
+      against real azra data: 11 distinct category-2 typeIds place real
+      scripts in this one zone alone (65 placements beyond the 35
+      azra_rats M12 already covered), including Tanyin Aldwyr.
+    - `MonsterExecutable` gained `SetUsable`/`SetUseText`/
+      `SetInvulnerable`/`OpenMenu` (the last routes through a new
+      `MenuStack&` constructor parameter, same reference
+      `MenuExecutable`'s own `OpenMenu` handler already goes through) and
+      `InvokeOnUse()` (mirrors `InvokeOnKilled()`). `ApplyDamage()` now
+      no-ops when `invulnerable()` -- ArithmeticException-free, an
+      essential NPC genuinely can't be killed. Verified against real
+      `Tanyin_Aldwyr.s`/`snowline/tanyinconvo.s` data in the new
+      `npc_smoke` test (`src/tests/m16_npc_smoke.cpp`): real
+      aggressive/usable/useTextId/invulnerable values, `ApplyDamage`
+      surviving a lethal hit, and `OnUse()` actually opening the real
+      conversation menu (confirmed non-null, changed, and carrying real
+      rows -- the quest-state-gated `if` chain in `tanyinconvo.s`'s
+      `Init()` soft-fails through unmodeled `QuestSolved`/
+      `QuestAssigned` calls into a real, deterministic opening line
+      rather than erroring, the same soft-fail philosophy already
+      established everywhere else in this port).
+    - `main.cpp`'s AI/melee loop gated on the real `aggressive()`
+      flag (previously implicit/coincidental via a never-set
+      `chaseRadius()` defaulting to 0) and melee targeting now skips
+      `invulnerable()` entities outright, so an NPC never shows up as an
+      attackable target. The y=34 HUD prompt line now shows an in-range
+      usable NPC's real `SetUseText()` (same door-style prompt M15
+      established) when no hostile monster is in melee range.
+    - `Action::Use` (Key3) now checks both `gameDoors` and usable
+      `gameMonsters`, firing whichever real placement is nearer. When an
+      NPC's `OnUse()` opens a menu (detected by comparing
+      `MenuStack::currentMenu()` before/after -- robust to whatever
+      menu was already stale-cached from before `NewGame()`), the tick
+      loop switches out of the 3D view the same way the
+      `CharacterManager` action already does (`gamePausedForMenu`), so
+      `Esc` returns straight to gameplay afterward -- `tanyinconvo.s`'s
+      own `Quit()` call is a plain (unimplemented) `Quit`, not
+      `QuitGame`, so it soft-fails as a harmless no-op rather than
+      routing anywhere; only `Esc` actually leaves the conversation.
+    - **Not attempted**: modeling the quest state (`QuestSolved`/
+      `QuestAssigned`/`QuestCompleted`/`AddExperience`/`AddMonsterKilled`)
+      dialogue trees like `tanyinconvo.s` branch on -- every such call
+      soft-fails to a benign default, so conversations always render
+      their first-visit branch rather than tracking real progress. A
+      real, substantial feature on its own, out of scope for this pass
+      (same "soft-fail lets scripts run, imperfectly, rather than not at
+      all" precedent every prior milestone already relies on). Pickups
+      (world-to-inventory transfer) remain the one genuinely unbound
+      `Action::Use` category.
+    - Not independently confirmed in an actual windowed play session
+      (same caveat M12/M15's writeups already carry).
 
 ## Next milestones (not yet started)
 
@@ -970,14 +1046,17 @@ Roughly in priority order for reaching "actually playable," not commitments:
   base class (~57 methods -- position, sound, physics-adjacent). Comparable
   in scope to M0-M11 combined, not a bounded decompile-and-patch pass.
   M12 above took the first narrow slice (one melee weapon vs. one
-  monster type, `UseLeftAction`/`UseRightAction` wired up); M15 above
-  took a second (the generic `Action::Use` interact binding, doors
-  only). Still open: other monster types (each with its own script and
-  stat block, trivial per-type once M12's pattern exists), spellcasting,
-  ranged weapons, loot spawning, and `Action::Use`'s other two
-  categories -- pickups (world-to-inventory transfer) and NPC talk
-  (dialogue/menu-opening from `OnUse()`), see M15's "Not attempted"
-  note above for why both are a different scope than the door slice.
+  monster type, `UseLeftAction`/`UseRightAction` wired up); M15 took a
+  second (the generic `Action::Use` interact binding, doors); M16 took a
+  third (generalized monster/NPC loading past M12's one hardcoded
+  typeId, plus real NPC dialogue via `Action::Use` -- a real finding
+  this pass showed NPC talk and "other monster types" were the same gap
+  all along, both fixed by the same loader generalization). Still open:
+  spellcasting, ranged weapons, loot spawning, quest-state tracking (so
+  dialogue trees like `tanyinconvo.s` progress past their first-visit
+  branch instead of soft-failing there every time, see M16's "Not
+  attempted" note above), and `Action::Use`'s one remaining unbound
+  category, pickups (world-to-inventory transfer).
 - **Real save file format** -- M5's save system is simulated in-memory
   only; no on-disk save format has been RE'd yet.
 - **`FUN_1002c010`'s big single vitals bar** -- confirmed real (appears

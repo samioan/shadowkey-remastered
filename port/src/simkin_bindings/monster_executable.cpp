@@ -3,6 +3,7 @@
 #include <cstdio>
 
 #include "assets/string_table.h"
+#include "simkin_bindings/menu_stack.h"
 #include "simkin_bindings/native_binding_common.h"
 #include "simkin_bindings/player_executable.h"
 #include "skExecutableContext.h"
@@ -14,10 +15,12 @@
 namespace sk_bindings {
 
 MonsterExecutable::MonsterExecutable(const skString& filename, skExecutableContext& ctxt,
-                                      const sk::StringTable* strings, PlayerExecutable& player)
+                                      const sk::StringTable* strings, PlayerExecutable& player,
+                                      MenuStack& stack)
     : skScriptedExecutable(filename, ctxt),
       m_Strings(strings),
       m_Player(player),
+      m_Stack(stack),
       m_Interpreter(ctxt.getInterpreter()) {}
 
 std::string MonsterExecutable::name() const {
@@ -26,11 +29,31 @@ std::string MonsterExecutable::name() const {
 }
 
 void MonsterExecutable::ApplyDamage(int amount) {
-    if (!m_Alive || amount <= 0) return;
+    // m_Invulnerable (M16): real essential-NPC scripts (Tanyin Aldwyr and
+    // the other named quest NPCs) call SetInvulnerable(true) in Init() --
+    // honoring it here means main.cpp's melee target selection doesn't
+    // even need its own separate check for the common case, though it
+    // still skips them too (see main.cpp) so they're never shown as a
+    // combat target in the first place.
+    if (!m_Alive || amount <= 0 || m_Invulnerable) return;
     m_CurrentHealth -= amount;
     if (m_CurrentHealth <= 0) {
         m_CurrentHealth = 0;
         m_Alive = false;
+    }
+}
+
+void MonsterExecutable::InvokeOnUse() {
+    if (!m_Interpreter) return;
+    skRValueArray noArgs;
+    skRValue ret;
+    skExecutableContext ctxt(m_Interpreter);
+    try {
+        method(skString("OnUse"), noArgs, ret, ctxt);
+    } catch (skParseException& e) {
+        std::printf("MonsterExecutable: PARSE ERROR in OnUse(): %s\n", e.toString().ptr());
+    } catch (skRuntimeException& e) {
+        std::printf("MonsterExecutable: RUNTIME ERROR in OnUse(): %s\n", e.toString().ptr());
     }
 }
 
@@ -128,6 +151,23 @@ bool MonsterExecutable::method(const skString& methodName, skRValueArray& args,
     }
     if (methodName == skString("GetPlayer") && args.entries() == 0) {
         returnValue = skRValue(static_cast<skiExecutable*>(&m_Player), false);
+        return true;
+    }
+    // M16: NPC-mode fields/calls -- see class comment.
+    if (methodName == skString("SetUsable") && args.entries() == 1) {
+        m_Usable = args[0].boolValue();
+        return true;
+    }
+    if (methodName == skString("SetUseText") && args.entries() == 1) {
+        m_UseTextId = args[0].intValue();
+        return true;
+    }
+    if (methodName == skString("SetInvulnerable") && args.entries() == 1) {
+        m_Invulnerable = args[0].boolValue();
+        return true;
+    }
+    if (methodName == skString("OpenMenu") && args.entries() == 1) {
+        m_Stack.OpenMenu(ToStdString(args[0].str()));
         return true;
     }
     // SetAttackNoise/SetDeathNoise/SetIsHitNoise/SetWalkAnimation/

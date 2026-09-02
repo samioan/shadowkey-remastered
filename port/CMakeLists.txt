@@ -187,3 +187,8 @@ target_include_directories(font_smoke PRIVATE src)
 # src/tests/m15_interact_smoke.cpp.
 add_executable(interact_smoke src/tests/m15_interact_smoke.cpp)
 target_link_libraries(interact_smoke PRIVATE sk_bindings sk_render3d)
+
+# Generalized monster/NPC loading + Action::Use dialogue smoke test --
+# see src/tests/m16_npc_smoke.cpp.
+add_executable(npc_smoke src/tests/m16_npc_smoke.cpp)
+target_link_libraries(npc_smoke PRIVATE sk_bindings sk_world)

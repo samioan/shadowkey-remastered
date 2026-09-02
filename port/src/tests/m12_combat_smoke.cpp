@@ -92,8 +92,8 @@ int main(int argc, char** argv) {
     skExecutableContext loadCtxt(&interpreter);
     std::unique_ptr<sk_bindings::MonsterExecutable> rat;
     try {
-        rat = std::make_unique<sk_bindings::MonsterExecutable>(skString(fullPath.c_str()),
-                                                                 loadCtxt, &strings, stack.player());
+        rat = std::make_unique<sk_bindings::MonsterExecutable>(skString(fullPath.c_str()), loadCtxt,
+                                                                 &strings, stack.player(), stack);
         skRValueArray args;
         args.append(skRValue(0));  // placeholder for Init's "(s)" parameter
         skRValue ret;

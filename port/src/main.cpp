@@ -105,6 +105,19 @@ std::string RowText(int textId, const std::string& literalText, const sk::String
     return strings.Get(textId);
 }
 
+// M15/M16: entities.txt's `name` column is a real loadable script path
+// only for a minority of placements in any given category -- the rest
+// use a "!label"-only convention for generic/decorative instances that
+// share their category's appearance but have no unique per-instance
+// script/behavior (docs/ZONE_FORMAT.md's category table; confirmed
+// separately for category 11/doors and category 2/monsters this
+// session). Shared by both the door and monster/NPC branches of the
+// zone-load loop below.
+bool HasRealScript(const std::string& entityTypeName) {
+    return entityTypeName.size() > 2 &&
+           entityTypeName.compare(entityTypeName.size() - 2, 2, ".s") == 0;
+}
+
 // "ChooseMale" -> "Male", "ChooseFemale" -> "Female" -- strips the
 // convention these callbacks use; falls back to the raw name otherwise.
 // Real portrait sprites are out of scope here (see
@@ -673,39 +686,27 @@ int main(int argc, char** argv) {
                 // here instead of through the engine+0x6b38 zone-local
                 // cache.
                 //
-                // Combat vertical-slice: typeId 202 (azra_rat, category
-                // 2/monster) is pulled out into gameMonsters instead --
-                // a live MonsterExecutable actually runs the real
-                // monsters/Azra_Rat.s Init(), same load pattern
-                // PlayerExecutable::LoadStartingInventory established
-                // for real item scripts. Every other entity (including
-                // other category-2 monster types, out of scope for this
-                // slice -- see docs/PORT_ROADMAP.md) still goes into
-                // gameEntities as a static, unanimated prop, unchanged.
+                // Combat vertical-slice (M12) + interact binding (M15/
+                // M16): category 2 (monster, including named NPCs -- see
+                // monster_executable.h's class comment) and category 11
+                // (door) placements whose entities.txt `name` is a real
+                // loadable script (HasRealScript() above) are pulled out
+                // into gameMonsters/gameDoors instead -- a live
+                // MonsterExecutable/DoorExecutable actually runs that
+                // real script's Init(), same load pattern
+                // PlayerExecutable::LoadStartingInventory established for
+                // real item scripts. Everything else (including the
+                // "!label"-only majority of both categories) still goes
+                // into gameEntities as a static, unanimated prop,
+                // unchanged.
                 gameEntities.clear();
                 gameMonsters.clear();
                 gameDoors.clear();
                 for (const sk::Zone::EntPlacement& e : gameZone->entities()) {
                     const sk::EntityTypeDescriptor* desc = entityTypes.Lookup(e.typeId);
                     if (!desc) continue;
-                    // M15: category 11 (door, docs/ZONE_FORMAT.md's
-                    // entities.txt category table) whose entities.txt
-                    // `name` column is an actual loadable script (ends in
-                    // ".s") -- the real convention every other category
-                    // already uses too (typeId 202/azra_rat below): most
-                    // category-11 entries are "!label"-only placeholders
-                    // with no unique script of their own (dungeon set-
-                    // pieces reusing the door category for switches,
-                    // urns, mushrooms, ...), so only the ones with a real
-                    // script get live OnUse() behavior; everything else
-                    // still falls through to the static-prop path below,
-                    // unchanged. Confirmed against real azra data: 7 of
-                    // azra.ent's 282 placements are typeId 54 -> door.s.
-                    std::string descName = desc->name;
-                    bool hasScript = desc->category == 11 && descName.size() > 2 &&
-                                      descName.compare(descName.size() - 2, 2, ".s") == 0;
-                    if (hasScript) {
-                        std::string relPath = descName;
+                    if (desc->category == 11 && HasRealScript(desc->name)) {
+                        std::string relPath = desc->name;
                         std::replace(relPath.begin(), relPath.end(), '\\', '/');
                         std::string fullPath = std::string(scriptRoot) + "/" + relPath;
                         skExecutableContext loadCtxt(&interpreter);
@@ -733,14 +734,14 @@ int main(int argc, char** argv) {
                         }
                         continue;
                     }
-                    if (e.typeId == 202) {
+                    if (desc->category == 2 && HasRealScript(desc->name)) {
                         std::string relPath = desc->name;
                         std::replace(relPath.begin(), relPath.end(), '\\', '/');
                         std::string fullPath = std::string(scriptRoot) + "/" + relPath;
                         skExecutableContext loadCtxt(&interpreter);
                         try {
                             auto monster = std::make_unique<sk_bindings::MonsterExecutable>(
-                                skString(fullPath.c_str()), loadCtxt, &strings, stack.player());
+                                skString(fullPath.c_str()), loadCtxt, &strings, stack.player(), stack);
                             skRValueArray args;
                             args.append(skRValue(0));  // placeholder for Init's "(s)" parameter
                             skRValue ret;
@@ -877,6 +878,16 @@ int main(int argc, char** argv) {
                 // Attacking once within melee range. Never de-aggroes
                 // once past Idle (no real data on leash/return-to-post
                 // behavior -- see monster_executable.h's class comment).
+                //
+                // M16: gated on the real script's own SetAggressive()
+                // flag -- gameMonsters now also holds non-hostile NPCs
+                // (monster_executable.h's class comment), whose real
+                // scripts already call SetAggressive(false) themselves;
+                // skipping this whole block for them is the direct,
+                // evidenced behavior (an NPC has no SetChaseRadius() call
+                // either, so it would default to 0 and never trigger
+                // anyway -- this makes the intent explicit rather than
+                // relying on that coincidence).
                 constexpr float kMeleeRange = 110.0f;      // world units
                 constexpr float kMonsterMoveSpeed = 22.0f;  // world units/tick, slower than the
                                                              // player's 40 -- a rat shouldn't
@@ -884,7 +895,7 @@ int main(int argc, char** argv) {
                 constexpr float kMonsterRadius = 40.0f;     // world units, wall-collision only
                 constexpr int kAttackCooldownTicks = 25;    // ~1s at the fixed 40ms tick
                 for (MonsterInstance& m : gameMonsters) {
-                    if (!m.script->alive()) continue;
+                    if (!m.script->alive() || !m.script->aggressive()) continue;
                     float mdx = gameCamera.x - m.x, mdy = gameCamera.y - m.y;
                     float dist = std::sqrt(mdx * mdx + mdy * mdy);
                     if (m.aiState == MonsterInstance::AiState::Idle) {
@@ -929,7 +940,14 @@ int main(int argc, char** argv) {
                     MonsterInstance* target = nullptr;
                     float bestDist = kMeleeRange + 1.0f;
                     for (MonsterInstance& m : gameMonsters) {
-                        if (!m.script->alive()) continue;
+                        // M16: invulnerable() (essential quest NPCs, e.g.
+                        // Tanyin Aldwyr's real SetInvulnerable(true))
+                        // can't be targeted at all -- matches the real
+                        // script's own intent, not just a damage-application
+                        // no-op (ApplyDamage() already guards this too, but
+                        // skipping targeting means the crosshair/prompt line
+                        // never shows an NPC as attackable in the first place).
+                        if (!m.script->alive() || m.script->invulnerable()) continue;
                         float ddx = m.x - gameCamera.x, ddy = m.y - gameCamera.y;
                         float dist = std::sqrt(ddx * ddx + ddy * ddy);
                         if (dist > kMeleeRange || dist < 1.0f) continue;
@@ -957,12 +975,14 @@ int main(int argc, char** argv) {
                     tryAttack(stack.player().rightItem());
                 }
 
-                // M15: Action::Use (Key3, docs/INPUT_HANDLING.md's default
-                // scheme) interact binding -- doors only, see DoorInstance's
-                // comment for scope. Same nearest-in-range-and-facing-cone
-                // targeting tryAttack uses above, reused here (and again
-                // below for the on-screen use-text prompt) via
-                // FindNearbyDoor.
+                // M15/M16: Action::Use (Key3, docs/INPUT_HANDLING.md's
+                // default scheme) interact binding -- doors (M15) and
+                // usable NPCs (M16, e.g. Tanyin Aldwyr's real dialogue,
+                // see monster_executable.h's class comment); pickups
+                // stay unbound (docs/PORT_ROADMAP.md). Same nearest-in-
+                // range-and-facing-cone targeting tryAttack uses above,
+                // reused here (and again below for the on-screen use-text
+                // prompt).
                 constexpr float kInteractRange = 140.0f;  // world units, slightly past melee range
                 auto findNearbyDoor = [&]() -> DoorInstance* {
                     float fwdX = std::cos(gameCamera.yaw), fwdY = std::sin(gameCamera.yaw);
@@ -981,8 +1001,59 @@ int main(int argc, char** argv) {
                     }
                     return nearest;
                 };
+                // M16: usable() is the real script's own SetUsable(true)
+                // (monster_executable.h) -- an aggressive monster never
+                // sets it, so this naturally only ever finds NPCs, not
+                // hostile creatures the player is fighting.
+                auto findNearbyUsableMonster = [&]() -> MonsterInstance* {
+                    float fwdX = std::cos(gameCamera.yaw), fwdY = std::sin(gameCamera.yaw);
+                    MonsterInstance* nearest = nullptr;
+                    float bestDist = kInteractRange + 1.0f;
+                    for (MonsterInstance& m : gameMonsters) {
+                        if (!m.script->alive() || !m.script->usable()) continue;
+                        float ddx = m.x - gameCamera.x, ddy = m.y - gameCamera.y;
+                        float dist = std::sqrt(ddx * ddx + ddy * ddy);
+                        if (dist > kInteractRange || dist < 1.0f) continue;
+                        float facing = (fwdX * ddx + fwdY * ddy) / dist;
+                        if (facing < 0.5f) continue;  // ~60 degree forward cone
+                        if (dist < bestDist) {
+                            bestDist = dist;
+                            nearest = &m;
+                        }
+                    }
+                    return nearest;
+                };
+                // Doors and usable NPCs are two separate lists -- pick
+                // whichever real placement is actually nearer when both
+                // are in range at once, same "nearest wins" rule each
+                // list already uses internally.
+                auto distanceTo = [&](float x, float y) {
+                    float dx = x - gameCamera.x, dy = y - gameCamera.y;
+                    return std::sqrt(dx * dx + dy * dy);
+                };
                 if (input.ConsumeBoundJustPressed(sk::Action::Use)) {
-                    if (DoorInstance* door = findNearbyDoor()) {
+                    DoorInstance* door = findNearbyDoor();
+                    MonsterInstance* npc = findNearbyUsableMonster();
+                    if (npc && (!door || distanceTo(npc->x, npc->y) < distanceTo(door->x, door->y))) {
+                        // A real NPC's OnUse() (e.g. tanyinconvo.s) calls
+                        // OpenMenu(...) -- detect that by comparing
+                        // currentMenu() before/after (robust to whatever
+                        // stale menu happened to be cached from before
+                        // NewGame(), since a real conversation always
+                        // resolves to a genuinely different MenuExecutable
+                        // instance) and switch out of the 3D view into it,
+                        // same mechanism the CharacterManager action above
+                        // already uses -- RightSelectionKey (Esc) still
+                        // returns straight to gameplay from there via
+                        // gamePausedForMenu, bypassing tanyinconvo.s's own
+                        // (soft-failed, native-only) Quit() handler.
+                        sk_bindings::MenuExecutable* before = stack.currentMenu();
+                        npc->script->InvokeOnUse();
+                        if (stack.currentMenu() != before) {
+                            inGame = false;
+                            gamePausedForMenu = true;
+                        }
+                    } else if (door) {
                         door->script->InvokeOnUse();
                     }
                 }
@@ -1010,14 +1081,18 @@ int main(int argc, char** argv) {
                 zoneRenderer.Render(backbuffer, *gameZone, gameCamera, frameEntities, &modelArchive);
                 RenderHud(backbuffer, stack.player(), spriteArchive, gameCamera.yaw);
                 // Minimal combat/interact feedback -- name + HP of
-                // whatever monster is currently in melee range/facing
-                // cone, else the nearby door's real SetUseText() prompt
-                // (monster combat takes priority when both are in range
-                // at once). Drawn at y=34, below the real compass banner
-                // (RenderHud now occupies y=0..31 across the top).
+                // whatever *aggressive* monster is currently in melee
+                // range/facing cone, else the nearer of a usable NPC's
+                // real SetUseText() prompt (M16) or a door's (M15)
+                // (combat takes priority when both are in range at once;
+                // aggressive()==false already keeps an NPC like Tanyin
+                // Aldwyr out of this first loop entirely -- see
+                // monster_executable.h's class comment). Drawn at y=34,
+                // below the real compass banner (RenderHud now occupies
+                // y=0..31 across the top).
                 const MonsterInstance* facingMonster = nullptr;
                 for (const MonsterInstance& m : gameMonsters) {
-                    if (!m.script->alive()) continue;
+                    if (!m.script->alive() || !m.script->aggressive()) continue;
                     float ddx = m.x - gameCamera.x, ddy = m.y - gameCamera.y;
                     float dist = std::sqrt(ddx * ddx + ddy * ddy);
                     if (dist > kMeleeRange) continue;
@@ -1032,8 +1107,15 @@ int main(int argc, char** argv) {
                                          std::to_string(facingMonster->script->currentHealth()) + "/" +
                                          std::to_string(facingMonster->script->maxHealth());
                     sk::BitmapFont::DrawString(backbuffer, 4, 34, label, kSelectedTextColor);
-                } else if (DoorInstance* door = findNearbyDoor()) {
-                    int useTextId = door->script->useTextId();
+                } else {
+                    DoorInstance* door = findNearbyDoor();
+                    MonsterInstance* npc = findNearbyUsableMonster();
+                    int useTextId = -1;
+                    if (npc && (!door || distanceTo(npc->x, npc->y) < distanceTo(door->x, door->y))) {
+                        useTextId = npc->script->useTextId();
+                    } else if (door) {
+                        useTextId = door->script->useTextId();
+                    }
                     if (useTextId >= 0) {
                         sk::BitmapFont::DrawString(backbuffer, 4, 34, strings.Get(useTextId),
                                                     kSelectedTextColor);
