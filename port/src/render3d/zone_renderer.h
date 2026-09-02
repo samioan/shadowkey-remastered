@@ -48,15 +48,35 @@
 // scale," hinting a real per-instance scale field exists somewhere this
 // port isn't reading yet -- not chased down this pass.
 //
-// Also surfaced (not fixed) while investigating the above: real .zcp
-// floor/ceiling height data near the player start implies room heights
-// around 19 tile-widths tall under the existing single kTileScale
-// divisor applied uniformly to X/Y/Z -- implausible for a dungeon
-// corridor, and consistent with what a rendered frame looks like (floor
-// visible, ceiling/opposite walls out of frame, looking like a very
-// tall shaft). Whether world Z actually needs its own, different scale
-// divisor from X/Y's tile-grid addressing is an open question predating
-// M8, not resolved here.
+// World Z-scale investigation (this session, follow-up to the above):
+// confirmed, by decompiling SurfaceFace_BuildAndProject (0x1005d784),
+// that X/Y/Z genuinely share ONE raw-unit scale in the real engine --
+// it feeds camera-relative X, Y, and height deltas into the exact same
+// rotation-matrix weighted-sum-then->>8 formula with no separate height
+// scale factor, which is only geometrically valid if all three share one
+// unit. So the port's single kTileScale divisor applied uniformly to
+// X/Y/Z (unchanged since M6) was already correct -- not a bug. The
+// "implausibly tall room" read from M8's renders turned out to be real:
+// azra's own .zcp data has a *median* floor-to-ceiling height of ~6800
+// raw units (~27 tile-widths) across all 15,659 open cells, with many
+// exact/near-exact multiples of a tile (15.00, 19.00, 22.00, 34.00
+// tile-heights, plus 1/8-tile-quantized fractions) -- genuine,
+// intentional level data, not degenerate placeholder cells. A "floor +
+// nearby wall, ceiling out of frame" render is what a normal eye-level
+// view of a room that tall actually looks like; it isn't a rendering
+// defect. Full writeup: docs/RENDERER_3D.md's "World X/Y/Z share one
+// uniform fixed-point scale" open-follow-up entry.
+//
+// What *did* get fixed as a result: the player eye-height offset above
+// the floor (render3d/camera.h's kEyeHeightOffset) was a bare guess of
+// 128 raw units -- implausibly small once real room heights are in the
+// thousands. Recalibrated to 800 using two independent real model-height
+// measurements from M8's entity data (a door's local-space height span
+// is ~1036 raw units, a barrel's ~373 -- both consistent with a person
+// roughly 800-900 raw units tall). The real engine's own equivalent
+// field (docs/ZONE_FORMAT.md: `player+0x224`, set once in
+// `GameEngine_InitLevel`, 0x10024dec) wasn't recovered -- it reads a
+// per-zone/per-something constant this pass didn't trace to its source.
 
 #include <vector>
 

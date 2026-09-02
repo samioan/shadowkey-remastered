@@ -52,7 +52,7 @@ int main(int argc, char** argv) {
     sk::Camera camera;
     camera.x = static_cast<float>(zone.playerStartX);
     camera.y = static_cast<float>(zone.playerStartY);
-    camera.z = static_cast<float>(zone.playerStartZ) + 128.0f;  // rough eye-height offset
+    camera.z = static_cast<float>(zone.playerStartZ) + sk::kEyeHeightOffset;
     camera.yaw = yawDegrees * 3.14159265f / 180.0f;
     camera.fovY = 1.2f;
 

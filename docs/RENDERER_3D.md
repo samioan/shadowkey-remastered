@@ -528,3 +528,43 @@ position.
   decompiling `_v0`/`_v1`/`_v2` for the identical pattern this pass (all 3
   are structurally close enough to `_v3` per the existing writeup that it's
   a safe bet, but that's an assumption, not a separate confirmation).
+- **World X/Y/Z share one uniform fixed-point scale — confirmed, not
+  assumed.** Raised while building the PC port's 3D renderer (real .zcp
+  floor/ceiling height data made rooms look implausibly tall under the
+  port's existing single-scale assumption, prompting a check against the
+  actual ARM code). Decompiled `SurfaceFace_BuildAndProject`
+  (0x1005d784): it computes camera-relative X/Y deltas and a height delta
+  (`iVar4`, read from the vertex's middle component after subtracting the
+  camera's eye-height field) and feeds **all three into the same rotation-
+  matrix weighted-sum-then-`>>8` formula**, with no separate scale factor
+  applied to the height term. Since a real 3D rotation is only
+  geometrically valid if every axis shares one unit, this settles it: the
+  documented "256 raw units = 1 tile" convention (`Map_GetTileAt`,
+  `WORLD_MODEL.md`) applies to height too, not just the X/Y grid.
+  Cross-checked directly against real `azra.zcp` data: floor-to-ceiling
+  height across all 15,659 open (non-wall) cells has a **median of ~6800
+  raw units (~27× the 256-unit tile scale)**, with many exact multiples of
+  256/8 (e.g. precisely 15.00, 19.00, 22.00, 34.00, and fractional
+  33.88/33.62/33.75-tile values) — i.e. real, intentional, consistently-
+  quantized level data, not degenerate placeholder cells. So this dungeon's
+  rooms really are dozens of tile-widths tall relative to a single grid
+  cell; whether that means "256 units" is a much finer physical
+  subdivision than a full room-width square (most likely, given the
+  numbers), or the level genuinely favors very tall vertical spaces,
+  wasn't pinned down further — either way it's not a units bug. Also
+  found, while tracing the eye-height field this same pass: the vertex
+  array `SurfaceFace_BuildAndProject` receives orders its three
+  components as `(X, height, Y)`, not `(X, Y, height)` — worth keeping in
+  mind if anyone else decodes this array directly.
+- **The real per-instance eye-height constant** (`player+0x224 =
+  player+0xa4 (Z) + *(short*)(CMap+0x1a)`, referenced by
+  `SurfaceFace_BuildAndProject` and set once in `GameEngine_InitLevel`,
+  0x10024dec) **is still not recovered** — `CMap+0x1a` is read there but
+  never written inside `GameEngine_InitLevel` itself, and a binary-wide
+  scan for `strh ...,[Rn,#0x1a]` turned up dozens of unrelated hits (nearby
+  candidates checked and ruled out: one is an unrelated color-config
+  function, another is a monster stat-block field storing small values
+  like 30/40/50 — not a plausible height in these raw units). Given real
+  room heights run into the thousands of raw units (above), whatever this
+  constant actually is, it's almost certainly not small. Not chased
+  further this pass.

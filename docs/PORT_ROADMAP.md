@@ -122,25 +122,40 @@ algorithms.
       field on the actor transform block that this port isn't reading
       yet), no orientation (`.ent`'s `rotOrScale[0..2]` fields' exact
       meaning is still unconfirmed, so entities render in their default
-      facing), frame 0/skin 0 only, no distance culling. Also surfaced
-      (not fixed, predates M8): real `.zcp` floor/ceiling height data
-      near the player start implies ~19-tile-tall rooms under the
-      current single `kTileScale` divisor applied uniformly to X/Y/Z --
-      implausible, and matches what a rendered frame actually looks like
-      (ceiling/far walls out of frame). Whether world Z needs its own
-      scale divisor, separate from X/Y's tile-grid addressing, is now a
-      real open question for a future pass -- see
-      `render3d/zone_renderer.h`'s header comment for the full writeup.
+      facing), frame 0/skin 0 only, no distance culling. Also surfaced a
+      question (not fixed here, followed up on below): real `.zcp`
+      floor/ceiling height data near the player start implies
+      ~19-tile-tall rooms under the port's single `kTileScale` divisor,
+      which looked implausible at the time.
+
+- [x] **World Z-scale investigation** (this session). Decompiled
+      `SurfaceFace_BuildAndProject` (0x1005d784) directly: it feeds
+      camera-relative X, Y, and height deltas into one shared
+      rotation-matrix weighted-sum-then-`>>8` formula, with no separate
+      scale factor for height -- confirming X/Y/Z genuinely share one
+      raw-unit scale in the real engine. **No bug**: the port's existing
+      single `kTileScale` divisor (unchanged since M6) was already
+      correct. Cross-checked against real `azra.zcp` data across all
+      15,659 open cells: floor-to-ceiling height has a *median* of ~6800
+      raw units (~27 tile-widths), with values landing on exact/near-exact
+      tile-height fractions -- real, intentional (if unusually tall)
+      level data, not a units mismatch. A "floor + nearby wall, ceiling
+      out of frame" render is what a normal eye-level view of a room that
+      tall actually looks like. What *did* get fixed: the player
+      eye-height offset above the floor was a bare, too-small guess (128
+      raw units); recalibrated to 800 using two independent real
+      model-height measurements (a door's local-space height ~1036, a
+      barrel's ~373 -- both consistent with a ~800-900-unit-tall person).
+      The real engine's own equivalent constant (`player+0x224`, set once
+      in `GameEngine_InitLevel`, 0x10024dec) wasn't recovered -- flagged
+      as a loose end, not chased further. Full writeup:
+      [`RENDERER_3D.md`](RENDERER_3D.md#open-follow-ups) and
+      `render3d/zone_renderer.h`.
 
 ## Next milestones (not yet started)
 
 Roughly in priority order for reaching "actually playable," not commitments:
 
-- **World Z-scale investigation.** Pin down whether `.zcp` floor/ceiling
-  heights (and model vertex Y/"up") actually share one scale with X/Y's
-  256-units/tile convention, or need a separate divisor -- the M8 finding
-  above suggests the latter. Affects room proportions, entity scale, and
-  where the camera's eye-height offset should really sit.
 - **M9 -- lighting.** Currently unlit, raw palette color. The Bullseye
   per-cell light-propagation bake is documented
   ([`ZONE_FORMAT.md`](ZONE_FORMAT.md#the-bullseye-subsystem-a-load-time-light-propagation-bake-not-ai-pathfinding))

@@ -300,7 +300,7 @@ int main(int argc, char** argv) {
                 gameZone = std::move(zone);
                 gameCamera.x = static_cast<float>(gameZone->playerStartX);
                 gameCamera.y = static_cast<float>(gameZone->playerStartY);
-                gameCamera.z = static_cast<float>(gameZone->playerStartZ) + 128.0f;
+                gameCamera.z = static_cast<float>(gameZone->playerStartZ) + sk::kEyeHeightOffset;
                 gameCamera.yaw = 0.0f;
                 gameCamera.fovY = 1.2f;
                 inGame = true;
