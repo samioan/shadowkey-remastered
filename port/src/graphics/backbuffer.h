@@ -42,12 +42,22 @@ public:
     // straight-copy mode (blendMode==0); its 50%-average-blend mode
     // (blendMode==1, docs/GRAPHICS_FORMAT.md) has no current caller in
     // this port and isn't implemented here.
-    void Blit(int x, int y, const Sprite& sprite) {
+    void Blit(int x, int y, const Sprite& sprite) { BlitRegion(x, y, sprite, 0, sprite.width); }
+
+    // Like Blit(), but only copies `srcW` source columns starting at
+    // source column `srcX` -- the real HUD's own srcXOffset/clipRight
+    // Blit_RLESprite parameters (docs/GRAPHICS_FORMAT.md's HUD section),
+    // used for the percentage-scaled vitals bar fill (srcX=0, srcW =
+    // fraction*sprite.width) and the heading-scrolled compass tape
+    // (srcX = heading-derived offset into a wider-than-screen strip).
+    void BlitRegion(int x, int y, const Sprite& sprite, int srcX, int srcW) {
         for (int sy = 0; sy < sprite.height; ++sy) {
             int dy = y + sy;
             if (dy < 0 || dy >= kHeight) continue;
-            for (int sx = 0; sx < sprite.width; ++sx) {
-                int dx = x + sx;
+            for (int i = 0; i < srcW; ++i) {
+                int sx = srcX + i;
+                if (sx < 0 || sx >= sprite.width) continue;
+                int dx = x + i;
                 if (dx < 0 || dx >= kWidth) continue;
                 size_t si = static_cast<size_t>(sy) * sprite.width + static_cast<size_t>(sx);
                 if (!sprite.opaque[si]) continue;

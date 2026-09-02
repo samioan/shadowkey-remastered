@@ -290,45 +290,125 @@ void RenderMenu(sk::Backbuffer& backbuffer, sk_bindings::MenuExecutable& menu,
     }
 }
 
-// M10: a minimal always-on HUD during the 3D view -- three bars reading
-// the player's real vitals (world/PlayerExecutable state, the same
-// numbers charactermanager.s's health/magicka/fatigue text lines show).
+// M10/M14: the always-on HUD during the 3D view. M10 first placed a
+// hand-drawn vitals HUD bottom-left (a real screenshot comparison had
+// shown that's where the real bars sit, inside ornate art this port
+// couldn't yet draw). M14 (this session) decompiled the real HUD draw
+// functions and wires up the real assets docs/GRAPHICS_FORMAT.md's HUD
+// section documents in full -- traced by finding the *fixed* (not
+// variable-indexed) 384-slot cache addresses the compiler folds a
+// compile-time-constant slot index into (engine+0x4460+slot*4 with slot
+// a literal collapses to one constant address, e.g. slot 1 ->
+// engine+0x4464 -- invisible to a plain "0x4460" text search, which is
+// why this took a second pass; shadowkey/ghidra/scripts/
+// pyghidra_grep_decompiled.py found the handful of functions using
+// those specific fixed addresses).
 //
-// Positioned bottom-left this session, after a real screenshot comparison
-// (a player-submitted port screenshot vs. the original game) showed the
-// real HUD's health/magicka/fatigue bars anchored there (inside an ornate
-// gold dragon-head/wing border), not top-left, plus a separate compass
-// banner across the top (heading readout flanked by two dragon heads) --
-// neither of those two art pieces exist as a decoded on-disk asset yet:
-// docs/GRAPHICS_FORMAT.md's "Open follow-ups" already flags the 384-slot
-// sprite/icon cache's *source* file format as unresolved (only the
-// in-memory RLE layout `Blit_RLESprite` reads is decoded), so there's no
-// known way yet to blit the real dragon-head/compass art here -- still a
-// stand-in, same "not a byte-exact reproduction" spirit as the bitmap
-// font/flat menu backgrounds, just correctly *placed* now instead of in
-// an arbitrary corner. Finding that sprite source format (probably the
-// natural next step for pixel-accurate HUD art) is tracked as a follow-up
-// in docs/PORT_ROADMAP.md, not attempted here.
-void RenderHud(sk::Backbuffer& backbuffer, const sk_bindings::PlayerExecutable& player) {
-    constexpr int kBarWidth = 50, kBarHeight = 4, kBarGap = 2;
-    constexpr int kBarCount = 3;
-    constexpr int x0 = 4;
-    int y = sk::Backbuffer::kHeight - 4 - kBarCount * kBarHeight - (kBarCount - 1) * kBarGap;
-    auto drawBar = [&](int value, int maxValue, uint16_t color) {
-        // See the (std::max)/(std::min) comment above -- same vendored-
-        // header macro-collision workaround.
+// **Compass banner** (`FUN_1002ba64`, decompiled in full): draws
+// global.spr slot 0 (a 322x13 strip repeating "N...E...S...W...", wider
+// than the screen on purpose) at screen (52,5), showing only a 68px
+// window starting at a heading-derived source X offset, then draws slot
+// 1 (176x31, dragon-head-flanked frame with a transparent center
+// window) on top at (0,0) -- the frame's transparent gap is exactly
+// where the scrolled tape shows through. The real source-offset formula
+// reads the *high byte* of a 16-bit heading field at player+0xb6 (an
+// 8-bit angle, 0-255 across a full turn) as a signed value, wrapped into
+// [0,255] and capped at 254. This port has no equivalent 16-bit fixed-
+// point heading field (Camera::yaw is a float radian, see camera.h) and
+// no real screenshot to confirm which turn direction should scroll the
+// tape which way -- HeadingToCompassOffset() below is a best-effort,
+// unverified-direction mapping from yaw to that same [0,254] range, not
+// a decompiled formula.
+//
+// **Vitals bar** (`FUN_1002c010`, decompiled in full): draws global.spr
+// slot 205 (79x9 red gradient) at (44,182), width clipped to
+// `fraction * 79` px (a percentage fill, matching the function's own
+// `(ratio * 0x4f00) >> 16` clip-width computation, 0x4f = 79), then
+// slot 206 (94x42 dragon-wing frame, transparent gap over the fill) on
+// top at (40,166) -- same fill-then-frame-mask technique as the
+// compass. No static caller was found (real call site is an indirect
+// vtable dispatch this pass didn't fully resolve), so the *exact* stat
+// this bar represents isn't 100% certain -- red color and the most
+// prominent HUD position both point to health, the choice made here.
+// No equivalent real asset/position was found for magicka/fatigue (a
+// sibling ornate-bar function, `FUN_1002ae88`, turned out to read
+// player+0x3ac -- the equipped-weapon struct decompiled in a previous
+// session's hand-system work -- not a core vital; likely a weapon-
+// condition/charge indicator this port doesn't model). Magicka/fatigue
+// stay the M10 flat-bar stand-in, moved to the bottom-left corner so
+// they don't overlap the new real health bar.
+//
+// **Equipped-item icons** (`FUN_1002bb54`, decompiled in full): the
+// real function draws the left/right hand's equipped item icon at
+// (5,5)/(139,5) -- flanking the compass banner in the same top HUD
+// row. Ties directly into this port's own PlayerExecutable::leftItem()/
+// rightItem() (the real hand-equip system decompiled two sessions ago).
+void RenderHud(sk::Backbuffer& backbuffer, const sk_bindings::PlayerExecutable& player,
+                sk::SpriteArchive& sprites, float cameraYaw) {
+    const sk::Sprite* compassTape = sprites.GetSprite(0);
+    const sk::Sprite* compassFrame = sprites.GetSprite(1);
+    if (compassTape && compassFrame) {
+        constexpr float kTwoPi = 6.28318530718f;
+        float turns = cameraYaw / kTwoPi;
+        turns -= std::floor(turns);  // wrap to [0,1)
+        int offset = static_cast<int>(turns * 255.0f);
+        offset = (std::max)(0, (std::min)(253, offset));
+        backbuffer.BlitRegion(52, 5, *compassTape, offset, 68);
+        backbuffer.Blit(0, 0, *compassFrame);
+    }
+
+    auto drawHandIcon = [&](sk_bindings::ItemExecutable* handItem, int x) {
+        if (!handItem) return;
+        const sk::Sprite* icon = sprites.GetSprite(handItem->icon());
+        if (icon && icon->width <= 32 && icon->height <= 32) backbuffer.Blit(x, 5, *icon);
+    };
+    drawHandIcon(player.leftItem(), 5);
+    drawHandIcon(player.rightItem(), 139);
+
+    const sk::Sprite* healthFill = sprites.GetSprite(205);
+    const sk::Sprite* healthFrame = sprites.GetSprite(206);
+    if (healthFill && healthFrame) {
+        float fraction = player.maxHealth() > 0
+                              ? (std::max)(0.0f, static_cast<float>(player.health())) /
+                                    static_cast<float>(player.maxHealth())
+                              : 0.0f;
+        int fillWidth = static_cast<int>(healthFill->width * (std::min)(1.0f, fraction));
+        backbuffer.BlitRegion(44, 182, *healthFill, 0, fillWidth);
+        backbuffer.Blit(40, 166, *healthFrame);
+    } else {
+        // Fallback (missing asset): the old flat health bar, same slot
+        // the real bar would occupy.
+        constexpr int kBarWidth = 50, kBarHeight = 4;
+        int filled = player.maxHealth() > 0
+                          ? (kBarWidth * (std::max)(0, player.health())) / player.maxHealth()
+                          : 0;
+        filled = (std::min)(filled, kBarWidth);
+        for (int dy = 0; dy < kBarHeight; ++dy) {
+            for (int dx = 0; dx < kBarWidth; ++dx) {
+                backbuffer.SetPixel(40 + dx, 182 + dy,
+                                     dx < filled ? sk::PackRGB565(200, 40, 40) : kPopupBorderColor);
+            }
+        }
+    }
+
+    // Magicka/fatigue: no real ornate asset/position was found for
+    // these (see class comment) -- kept as the original M10 flat bars,
+    // relocated to the bottom-left corner clear of the real health bar
+    // above (which now occupies x=40..134, y=166..208).
+    constexpr int kBarWidth = 32, kBarHeight = 3, kBarGap = 2;
+    int y = sk::Backbuffer::kHeight - 4 - 2 * kBarHeight - kBarGap;
+    auto drawFlatBar = [&](int value, int maxValue, uint16_t color) {
         int filled = maxValue > 0 ? (kBarWidth * (std::max)(0, value)) / maxValue : 0;
         filled = (std::min)(filled, kBarWidth);
         for (int dy = 0; dy < kBarHeight; ++dy) {
             for (int dx = 0; dx < kBarWidth; ++dx) {
-                backbuffer.SetPixel(x0 + dx, y + dy, dx < filled ? color : kPopupBorderColor);
+                backbuffer.SetPixel(2 + dx, y + dy, dx < filled ? color : kPopupBorderColor);
             }
         }
         y += kBarHeight + kBarGap;
     };
-    drawBar(player.health(), player.maxHealth(), sk::PackRGB565(200, 40, 40));
-    drawBar(player.magicka(), player.maxMagicka(), sk::PackRGB565(60, 80, 220));
-    drawBar(player.fatigue(), player.maxFatigue(), sk::PackRGB565(60, 180, 80));
+    drawFlatBar(player.magicka(), player.maxMagicka(), sk::PackRGB565(60, 80, 220));
+    drawFlatBar(player.fatigue(), player.maxFatigue(), sk::PackRGB565(60, 180, 80));
 }
 
 void RenderCredits(sk::Backbuffer& backbuffer, const std::vector<std::string>& lines,
@@ -771,11 +851,11 @@ int main(int argc, char** argv) {
                     }
                 }
                 zoneRenderer.Render(backbuffer, *gameZone, gameCamera, frameEntities, &modelArchive);
-                RenderHud(backbuffer, stack.player());
+                RenderHud(backbuffer, stack.player(), spriteArchive, gameCamera.yaw);
                 // Minimal combat feedback -- name + HP of whatever
-                // monster is currently in melee range/facing cone, same
-                // "stand-in until real HUD art exists" spirit as
-                // RenderHud's vitals bars (no new art assets).
+                // monster is currently in melee range/facing cone.
+                // Drawn at y=34, below the real compass banner
+                // (RenderHud now occupies y=0..31 across the top).
                 for (const MonsterInstance& m : gameMonsters) {
                     if (!m.script->alive()) continue;
                     float ddx = m.x - gameCamera.x, ddy = m.y - gameCamera.y;
@@ -786,7 +866,7 @@ int main(int argc, char** argv) {
                     if (facing < 0.5f) continue;
                     std::string label = m.script->name() + "  " + std::to_string(m.script->currentHealth()) +
                                          "/" + std::to_string(m.script->maxHealth());
-                    sk::BitmapFont::DrawString(backbuffer, 4, 4, label, kSelectedTextColor);
+                    sk::BitmapFont::DrawString(backbuffer, 4, 34, label, kSelectedTextColor);
                     break;
                 }
                 window.Present(backbuffer);
@@ -802,7 +882,7 @@ int main(int argc, char** argv) {
             gamePausedForMenu = false;
             inGame = true;
             zoneRenderer.Render(backbuffer, *gameZone, gameCamera, gameEntities, &modelArchive);
-            RenderHud(backbuffer, stack.player());
+            RenderHud(backbuffer, stack.player(), spriteArchive, gameCamera.yaw);
             window.Present(backbuffer);
             return;
         }

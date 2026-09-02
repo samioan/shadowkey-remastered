@@ -237,6 +237,98 @@ sans-serif TrueType font via the Win32 platform layer's own GDI, which
 this port already links) but not worth further RE effort chasing an
 "original format" that isn't a game asset in the first place.
 
+## The real gameplay HUD (compass banner + vitals bar) -- decoded (PC port session)
+
+Following up on `PORT_ROADMAP.md`'s "HUD dragon-head/compass border art"
+item: traced the actual native draw functions for the always-on
+in-game HUD (not the menu/list-item icon path above).
+
+**Finding the functions was the hard part.** The obvious path —
+`GameTick_UpdateAndPresent`'s per-tick "screen mode" dispatcher
+(`FUN_10068e0c`, `RENDER_LOOP.md`) — turned out to be a dead end for
+this: its gameplay case (`this+0x78 == 5`) only calls `Render3DScene`,
+which itself never touches the sprite cache at all (grepped its full
+decompile for `Blit_RLESprite`/`0x4460` — zero hits). The real HUD
+draw functions are called through **indirect vtable dispatch**
+(`ScreenModeController`'s secondary vtable, a static array at
+`0x100fb908` — confirmed by finding `FUN_10029cb0`'s and
+`FUN_1002a6d4`'s own addresses stored at `+0x1c`/`+0x24` there), which
+Ghidra's static "find callers" can't trace back to a concrete caller.
+Found them instead by searching for their own address as a raw 32-bit
+value elsewhere in the binary (`pyghidra_find_literal_pool_offset.py`
+against each candidate function's own entry-point address) — e.g. the
+vitals-bar function's address turns up at `0x100fb94c`, i.e. **the
+same vtable, slot `+0x44`**.
+
+A second wrinkle: these functions use a **compile-time-constant** slot
+index into the 384-slot cache (`engine+0x4460+slot*4`), which the
+compiler folds into one fixed address (`engine+0x4464` for slot 1,
+etc.) — invisible to a plain `"0x4460"` text search across the whole
+binary, unlike the *variable*-indexed lookups the menu/icon code above
+uses. Found by computing the fixed addresses for the candidate slots
+(from the real art already identified by eye, see below) and grepping
+the whole decompiled program for those specific constants instead
+(`pyghidra_grep_decompiled.py`, new this session).
+
+**Compass banner** (`FUN_1002ba64`, decompiled in full):
+- `global.spr` slot 0 (322×13 — wider than the 176px screen on
+  purpose) is a strip reading `"...N...E...S...W..."`, meant to be
+  scrolled. Slot 1 (176×31) is the dragon-head-flanked frame, with a
+  transparent center window.
+- Draws slot 0 at screen `(52,5)`, but only an **68px-wide window**
+  (`Blit_RLESprite`'s `srcXOffset`/`clipRight` params) starting at a
+  **heading-derived source X offset** — the real formula reads the
+  *high byte* of a 16-bit heading field at `player+0xb6` as a signed
+  value, wrapped into `[0,255]` and capped at `254`. Then draws slot 1
+  on top at `(0,0)`, full screen width — its transparent gap is
+  exactly where the scrolled tape shows through.
+- Confirmed live: launched the built port, created a character, and
+  screenshotted the compass banner mid-gameplay — the gold dragon-head
+  frame renders with the `N` glyph visible in the window, matching the
+  original screenshot description exactly.
+
+**Vitals bar** (`FUN_1002c010`, decompiled in full):
+- Slot 205 (79×9) is a red gradient bar-fill graphic. Slot 206 (94×42)
+  is a dragon-wing ornate frame with a transparent horizontal gap.
+- Draws slot 205 at `(44,182)`, width clipped to `fraction * 79` px
+  (the function's own `(ratio * 0x4f00) >> 16` computation, `0x4f` =
+  79 — a straight percentage-fill), then slot 206 on top at `(40,166)`
+  — same fill-then-frame-mask technique as the compass.
+- **No static caller was found** (real call site is the same indirect
+  vtable dispatch, slot `+0x44` — not traced further); which specific
+  stat this represents isn't 100% certain from code alone, but the red
+  color and prominent position both point to health.
+- A visually similar sibling, `FUN_1002ae88` (vtable slot not
+  determined), uses a *different* frame (`global.spr` slot 180, 57×46)
+  and reads `player+0x3ac+0x24`/`+0x2a` — the equipped-weapon struct
+  base a previous session's hand-equip-system decompile
+  (`UpdateEquipStatus`) already identified — not a core vital. Likely
+  a weapon condition/charge indicator. **No equivalent real
+  asset/position was found for magicka or fatigue** — plausibly this
+  cut-down N-Gage HUD only gives the ornate treatment to health (and a
+  weapon-charge readout), not all three vitals; not confirmed either
+  way.
+
+**Equipped-item icons** (`FUN_1002bb54`, decompiled in full): draws
+the left/right hand's currently-equipped item icon (via `player+0x3ac
++0x48`/`+0x4c`, the same hand-slot fields `UpdateEquipStatus` already
+identified) at `(5,5)`/`(139,5)` — flanking the compass banner in the
+same top HUD row.
+
+**Implemented in the port** (`port/src/main.cpp`'s `RenderHud`): the
+compass and health bar draw the real assets at the real positions;
+`Backbuffer::BlitRegion` (new, alongside the existing `Blit`) supports
+both the compass's source-X-scroll and the health bar's
+destination-width clip. The port has no equivalent 16-bit fixed-point
+heading field to replicate the exact byte-extraction formula, so
+`RenderHud`'s heading-to-scroll-offset mapping is a documented,
+unverified-direction best effort from `Camera::yaw` (a float radian),
+not a decompiled formula — flagged in the port code itself. Magicka/
+fatigue keep the original flat-bar stand-in (no real asset/position
+found), relocated to the bottom-left corner clear of the new health
+bar. Equipped-item icons use the existing per-zone icon-loading path
+this session's earlier sprite work (see above) already established.
+
 ## Open follow-ups
 
 - `FUN_1006bee8`/`FUN_1006be58` (rect/outline fill primitives used

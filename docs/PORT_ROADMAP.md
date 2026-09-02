@@ -678,6 +678,52 @@ algorithms.
       decodes end to end, and out-of-range/unused-slot lookups fail
       safely.
 
+- [x] **M14 -- real gameplay HUD: compass banner + vitals bar** (this
+      session). Continuation of M13 -- traces the always-on in-game HUD
+      draw path specifically (M13 only covered menu/list-item icons).
+    - The obvious per-tick render path (`GameTick_UpdateAndPresent` ->
+      `FUN_10068e0c`'s gameplay case -> `Render3DScene`) turned out to
+      be a dead end -- `Render3DScene`'s full decompile has zero
+      sprite-cache references. The real HUD functions are reached
+      through **indirect vtable dispatch** on `ScreenModeController`'s
+      secondary vtable (a static array at `0x100fb908`), invisible to a
+      normal "find callers" search -- found instead by searching for
+      each candidate function's own address as a raw value elsewhere in
+      the binary (its vtable slot).
+    - **Compass banner** (`FUN_1002ba64`): `global.spr` slot 0 (a
+      322x13 "...N...E...S...W..." strip, wider than the screen on
+      purpose) scrolled through a 68px window at a heading-derived
+      source offset, with slot 1 (176x31, the dragon-head-flanked
+      frame) drawn on top -- its transparent center window is exactly
+      where the scrolled tape shows through.
+    - **Vitals bar** (`FUN_1002c010`): slot 205 (79x9 red gradient)
+      width-clipped to a percentage fill, with slot 206 (94x42
+      dragon-wing frame) drawn on top, same fill-then-mask technique.
+      No static caller found (same indirect-dispatch issue) so the
+      exact stat isn't 100% certain -- red color/prominent position
+      point to health.
+    - **Equipped-item icons** (`FUN_1002bb54`): draws the real
+      left/right-hand equipped item icon at (5,5)/(139,5), flanking the
+      compass -- ties directly into the hand-equip system a previous
+      session already decompiled (`UpdateEquipStatus`).
+    - Implemented in `main.cpp`'s `RenderHud`: real compass + health
+      bar at the real positions (`Backbuffer::BlitRegion`, new,
+      supports both the compass's source-scroll and the bar's
+      destination-width clip); magicka/fatigue keep the M10 flat-bar
+      stand-in (no real asset/position found for them -- possibly this
+      cut-down HUD only gives the ornate treatment to health, not
+      confirmed either way), relocated clear of the new health bar.
+      This port has no 16-bit fixed-point heading field to replicate
+      the real byte-extraction formula exactly, so the yaw-to-scroll
+      mapping is a documented, unverified-direction best effort, not a
+      decompiled formula.
+    - **Confirmed live**: created a character and screenshotted actual
+      gameplay -- the gold dragon-head compass frame (with the `N`
+      glyph visible in its window) and the dragon-wing health bar both
+      render correctly.
+    - Full writeup: `docs/GRAPHICS_FORMAT.md`'s "The real gameplay HUD"
+      section.
+
 ## Next milestones (not yet started)
 
 Roughly in priority order for reaching "actually playable," not commitments:
@@ -701,12 +747,11 @@ Roughly in priority order for reaching "actually playable," not commitments:
   pickups, NPC talk -- still unbound).
 - **Real save file format** -- M5's save system is simulated in-memory
   only; no on-disk save format has been RE'd yet.
-- **HUD dragon-head/compass border art** -- M13 above put real icons
-  into equip-slot rows, but the vitals bars/compass banner (`main.cpp`'s
-  `RenderHud`) are still hand-drawn bars, not the real ornate border
-  art -- likely just a matter of finding which `global.spr`/zone-sprite
-  slot(s) the real HUD draw path uses (not chased this pass, M13 only
-  traced the menu/list-item icon path).
+- **Weapon condition/charge HUD indicator** -- M14 below found a
+  second ornate-bar HUD function (`FUN_1002ae88`, `global.spr` slot
+  180) reading the equipped-weapon struct, not a core vital -- not
+  implemented, since this port doesn't model weapon durability/charge
+  at all yet (no backing data to drive it).
 - Audio: entirely unaddressed so far, format not RE'd.
 
 ## Verification approach
