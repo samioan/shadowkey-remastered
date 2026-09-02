@@ -15,9 +15,9 @@
 // radius tile scan instead), no near-plane clipping (a quad/triangle is
 // dropped whole if any corner is behind the camera), one wall band per
 // direction (the "upper band" stepped-height second segment is
-// skipped), always ceiling band A (the eye-height-vs-threshold
-// comparison that picks A/B is skipped), and no Bullseye lighting bake
-// (unlit, raw palette/texture color).
+// skipped), and always ceiling band A (the eye-height-vs-threshold
+// comparison that picks A/B is skipped). M9 added the Bullseye lighting
+// bake (see below) -- tile faces are no longer unconditionally unlit.
 //
 // M8 added placed-entity rendering (real .ent placements resolved
 // through entities.txt -> models.idx/.huge, world/entity_types.h +
@@ -77,6 +77,24 @@
 // field (docs/ZONE_FORMAT.md: `player+0x224`, set once in
 // `GameEngine_InitLevel`, 0x10024dec) wasn't recovered -- it reads a
 // per-zone/per-something constant this pass didn't trace to its source.
+//
+// M9 -- lighting. world/zone.cpp's Zone::BakeLighting() reproduces
+// Bullseye_BakeLighting/Bullseye_PropagateLight (docs/ZONE_FORMAT.md): a
+// 2D ray-cast light-propagation-with-wall-bounce from every light-source
+// cell, plus each cell's .zcp lightDelta, baked once at zone load exactly
+// like the real engine (not per-frame). Applied here as a **flat per-face
+// brightness multiplier** on the owning tile's baked light level -- a
+// real simplification, not a port of the original's actual consumption
+// path (a per-vertex light/fog scalar feeding a *palette-chunk* blend in
+// `.zlu`, RENDERER_3D.md's "secondary `0x200`-byte offset" writeup, not a
+// simple brightness scale). Entity models (M8) are **not** lit by this --
+// still unconditionally full-bright, matching M8's own scope. The ray-cast
+// itself is also an approximation of the original's exact integer
+// stepping (see zone.cpp's PropagateLight comment) and includes one
+// deliberate port-only tweak the real engine doesn't have: a small
+// non-zero ambient floor so fully unlit geometry doesn't render as a
+// literal, bug-looking pure black (LightLevelToBrightness() in world/
+// zone.h/.cpp).
 
 #include <vector>
 

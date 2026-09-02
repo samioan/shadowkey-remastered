@@ -4,11 +4,12 @@
 // to render its static tile-grid wall/floor/ceiling geometry: the
 // TileGrid_RaycastVisibility + SurfaceFace_* pipeline documented in
 // docs/RENDERER_3D.md's "The tile-grid wall/surface-face renderer"
-// section. Explicitly out of scope for this first pass (see the port's
-// M6 scope): the .zsk-baked whole-room mesh, actors/entities beyond the
-// player start position, and the Bullseye lighting bake (.zfg fog LUT,
-// per-cell light propagation) -- walls/floor/ceiling render unlit with
-// their raw palette colors.
+// section, plus (M9) the Bullseye per-cell lighting bake (docs/
+// ZONE_FORMAT.md's "Bullseye subsystem" -- Bullseye_BakeLighting/
+// Bullseye_PropagateLight). Explicitly out of scope for this pass: the
+// .zsk-baked whole-room mesh and the .zfg fog LUT (a separate, distance-
+// driven effect layered on top of this per-cell bake in the real engine,
+// not reproduced here).
 
 #include <cstdint>
 #include <string>
@@ -40,10 +41,16 @@ struct ZcpEntry {
 // One .zmp cell, 6 bytes on disk (docs/ZONE_FORMAT.md's ZmpCell).
 struct ZmpCell {
     uint8_t flags = 0;  // bit0 light source, bit1 wall, bit3 force-draw, bit6 ceiling-band-select
+    // `lightLevel`'s on-disk value is only a leftover editor baseline --
+    // the real engine zeroes it at the start of Bullseye_BakeLighting and
+    // rebuilds it from scratch (propagation + .zcp's lightDelta). Zone::
+    // Load() reproduces that: after parsing, this field holds the *baked*
+    // result (see BakeLighting() below), not the raw disk bytes.
     uint16_t lightLevel = 0;
     uint16_t zcpIndex = 0;
 
     bool IsWall() const { return (flags & 0x02) != 0; }
+    bool IsLightSource() const { return (flags & 0x01) != 0; }
 };
 
 class Zone {
@@ -114,6 +121,21 @@ private:
     std::vector<uint8_t> ztxData_;          // 1 header byte + N*0x4000 texture slots
     std::vector<uint8_t> zluData_;          // N*2048-byte palette sets
     std::vector<EntPlacement> entities_;
+
+    // M9: reproduces Bullseye_BakeLighting/Bullseye_PropagateLight
+    // (docs/ZONE_FORMAT.md) -- called once from Load(), after cells_ and
+    // zcpEntries_ are both populated. See zone.cpp for the algorithm and
+    // its documented simplifications (ray count/step size approximated,
+    // not a byte-exact port of the original's integer stepping).
+    void BakeLighting();
 };
+
+// Baked light level (ZmpCell::lightLevel, range [0, kMaxLightLevel] per
+// Bullseye_BakeLighting's own clamp) to a [0,1]-ish brightness multiplier
+// for the renderer. A small non-zero floor is a deliberate *port-only*
+// tweak (see the comment in zone.cpp's BakeLighting) -- the real engine
+// has no such floor, so fully unlit cells there would render pure black.
+constexpr uint16_t kMaxLightLevel = 0x3f00;
+float LightLevelToBrightness(uint16_t lightLevel);
 
 }  // namespace sk

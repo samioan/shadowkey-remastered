@@ -145,3 +145,10 @@ target_link_libraries(render_entities_smoke PRIVATE sk_render3d)
 
 add_executable(closeup_smoke src/tests/m8_closeup_smoke.cpp)
 target_link_libraries(closeup_smoke PRIVATE sk_render3d)
+
+# M9 milestone smoke tests -- see src/tests/m9_*_smoke.cpp.
+add_executable(lighting_smoke src/tests/m9_lighting_smoke.cpp)
+target_link_libraries(lighting_smoke PRIVATE sk_world)
+
+add_executable(render_at_smoke src/tests/m9_render_at_smoke.cpp)
+target_link_libraries(render_at_smoke PRIVATE sk_render3d)

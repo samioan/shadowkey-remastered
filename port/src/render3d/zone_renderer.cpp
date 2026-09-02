@@ -15,6 +15,7 @@ struct Vec3 {
 struct Face {
     Vec3 corners[4];  // winding: 0,1,2,3 around the quad
     int surIndex = 0xff;
+    float brightness = 1.0f;  // M9: LightLevelToBrightness() of the owning tile
 };
 
 // One quad per direction/band; corner order matches a consistent
@@ -23,10 +24,11 @@ struct Face {
 // backface-cull (small faces are cheap enough at this screen/tile scale
 // to just always draw and let the z-buffer sort it out).
 void AddFloorCeiling(std::vector<Face>& faces, int tx, int ty, const int16_t heights[4],
-                      uint8_t surIndex) {
+                      uint8_t surIndex, float brightness) {
     if (surIndex == 0xff) return;
     Face f;
     f.surIndex = surIndex;
+    f.brightness = brightness;
     float x0 = static_cast<float>(tx), x1 = x0 + 1.0f;
     float y0 = static_cast<float>(ty), y1 = y0 + 1.0f;
     f.corners[0] = {x0, y0, heights[0] / 1.0f};
@@ -41,11 +43,12 @@ void AddFloorCeiling(std::vector<Face>& faces, int tx, int ty, const int16_t hei
 // ceilZ0/ceilZ1 -- lets a wall follow a sloped/stepped neighbor rather
 // than assuming a flat rectangle.
 void AddWall(std::vector<Face>& faces, float ex0, float ey0, float ex1, float ey1, float floorZ0,
-             float floorZ1, float ceilZ0, float ceilZ1, uint8_t surIndex) {
+             float floorZ1, float ceilZ0, float ceilZ1, uint8_t surIndex, float brightness) {
     if (surIndex == 0xff) return;
     if (floorZ0 >= ceilZ0 && floorZ1 >= ceilZ1) return;  // degenerate (no vertical extent)
     Face f;
     f.surIndex = surIndex;
+    f.brightness = brightness;
     f.corners[0] = {ex0, ey0, floorZ0};
     f.corners[1] = {ex1, ey1, floorZ1};
     f.corners[2] = {ex1, ey1, ceilZ1};
@@ -75,9 +78,15 @@ std::vector<Face> CollectFaces(const Zone& zone, int centerX, int centerY, int r
             const ZmpCell& cell = zone.CellAt(tx, ty);
             if (cell.IsWall()) continue;  // walls themselves aren't walked into/drawn from
             const ZcpEntry& t = zone.TypeOf(cell);
+            // M9: every face this tile owns (floor/ceiling/its own walls)
+            // uses its own baked light level -- the real engine blends
+            // per-vertex across tiles (docs/RENDERER_3D.md's fade/light
+            // discussion); this is flat per-face instead, a deliberate
+            // simplification (see zone_renderer.h).
+            float brightness = LightLevelToBrightness(cell.lightLevel);
 
-            AddFloorCeiling(faces, tx, ty, t.floorHeight, t.surIndexFloor);
-            AddFloorCeiling(faces, tx, ty, t.ceilingHeight, t.surIndexCeilingA);
+            AddFloorCeiling(faces, tx, ty, t.floorHeight, t.surIndexFloor, brightness);
+            AddFloorCeiling(faces, tx, ty, t.ceilingHeight, t.surIndexCeilingA, brightness);
 
             float x0 = static_cast<float>(tx), x1 = x0 + 1.0f;
             float y0 = static_cast<float>(ty), y1 = y0 + 1.0f;
@@ -88,19 +97,19 @@ std::vector<Face> CollectFaces(const Zone& zone, int centerX, int centerY, int r
 
             if (neighborBlocks(tx + 1, ty)) {  // east edge: corners 1 (NE) / 2 (SE)
                 AddWall(faces, x1, y0, x1, y1, t.floorHeight[1], t.floorHeight[2],
-                        t.ceilingHeight[1], t.ceilingHeight[2], t.surIndexE_lo);
+                        t.ceilingHeight[1], t.ceilingHeight[2], t.surIndexE_lo, brightness);
             }
             if (neighborBlocks(tx - 1, ty)) {  // west edge: corners 0 (NW) / 3 (SW)
                 AddWall(faces, x0, y1, x0, y0, t.floorHeight[3], t.floorHeight[0],
-                        t.ceilingHeight[3], t.ceilingHeight[0], t.surIndexW_lo);
+                        t.ceilingHeight[3], t.ceilingHeight[0], t.surIndexW_lo, brightness);
             }
             if (neighborBlocks(tx, ty + 1)) {  // south edge: corners 2 (SE) / 3 (SW)
                 AddWall(faces, x1, y1, x0, y1, t.floorHeight[2], t.floorHeight[3],
-                        t.ceilingHeight[2], t.ceilingHeight[3], t.surIndexS_lo);
+                        t.ceilingHeight[2], t.ceilingHeight[3], t.surIndexS_lo, brightness);
             }
             if (neighborBlocks(tx, ty - 1)) {  // north edge: corners 0 (NW) / 1 (NE)
                 AddWall(faces, x0, y0, x1, y0, t.floorHeight[0], t.floorHeight[1],
-                        t.ceilingHeight[0], t.ceilingHeight[1], t.surIndexN_lo);
+                        t.ceilingHeight[0], t.ceilingHeight[1], t.surIndexN_lo, brightness);
             }
         }
     }
@@ -114,18 +123,22 @@ struct ProjectedVertex {
 };
 
 // 4-bit-per-channel color (docs/GRAPHICS_FORMAT.md), 0x0RGB -> RGB565 for
-// the backbuffer.
-uint16_t ExpandRGB444(uint16_t raw444) {
+// the backbuffer. `brightness` (M9, [0,1]-ish) scales each channel before
+// packing -- see Zone::BakeLighting()/LightLevelToBrightness().
+uint16_t ExpandRGB444(uint16_t raw444, float brightness) {
     uint8_t r = static_cast<uint8_t>((raw444 >> 8) & 0xf);
     uint8_t g = static_cast<uint8_t>((raw444 >> 4) & 0xf);
     uint8_t b = static_cast<uint8_t>(raw444 & 0xf);
-    return PackRGB565(static_cast<uint8_t>(r * 17), static_cast<uint8_t>(g * 17),
-                       static_cast<uint8_t>(b * 17));
+    auto shade = [&](uint8_t c) {
+        return static_cast<uint8_t>(std::clamp(static_cast<float>(c) * 17.0f * brightness, 0.0f, 255.0f));
+    };
+    return PackRGB565(shade(r), shade(g), shade(b));
 }
 
 void RasterizeTriangle(Backbuffer& backbuffer, std::vector<float>& depthBuffer,
                         const ProjectedVertex& a, const ProjectedVertex& b,
-                        const ProjectedVertex& c, const Zone& zone, int textureIndex) {
+                        const ProjectedVertex& c, const Zone& zone, int textureIndex,
+                        float brightness) {
     float area = (b.sx - a.sx) * (c.sy - a.sy) - (b.sy - a.sy) * (c.sx - a.sx);
     if (std::fabs(area) < 1e-6f) return;
 
@@ -163,7 +176,7 @@ void RasterizeTriangle(Backbuffer& backbuffer, std::vector<float>& depthBuffer,
             if (raw444 == 0x0f0f) continue;  // chroma-key cutout (docs/GRAPHICS_FORMAT.md)
 
             depthBuffer[static_cast<size_t>(depthIndex)] = invW;
-            backbuffer.SetPixel(px, py, ExpandRGB444(raw444));
+            backbuffer.SetPixel(px, py, ExpandRGB444(raw444, brightness));
         }
     }
 }
@@ -214,7 +227,9 @@ void RasterizeModelTriangle(Backbuffer& backbuffer, std::vector<float>& depthBuf
             if (raw444 == 0x0f0f) continue;  // chroma-key cutout
 
             depthBuffer[static_cast<size_t>(depthIndex)] = invW;
-            backbuffer.SetPixel(px, py, ExpandRGB444(raw444));
+            // M9 doesn't reach entity models -- unlit, matching M8's
+            // scope (see zone_renderer.h).
+            backbuffer.SetPixel(px, py, ExpandRGB444(raw444, 1.0f));
         }
     }
 }
@@ -267,8 +282,8 @@ void ZoneRenderer::Render(Backbuffer& backbuffer, const Zone& zone, const Camera
         }
         if (anyBehind) continue;  // whole-quad near-plane cull, see header comment
 
-        RasterizeTriangle(backbuffer, depthBuffer, pv[0], pv[1], pv[2], zone, texIdx);
-        RasterizeTriangle(backbuffer, depthBuffer, pv[0], pv[2], pv[3], zone, texIdx);
+        RasterizeTriangle(backbuffer, depthBuffer, pv[0], pv[1], pv[2], zone, texIdx, face.brightness);
+        RasterizeTriangle(backbuffer, depthBuffer, pv[0], pv[2], pv[3], zone, texIdx, face.brightness);
     }
 
     // M8: placed entities (props, monsters, doors, ...) resolved via

@@ -164,15 +164,34 @@ algorithms.
       value. Full writeup: [`RENDERER_3D.md`](RENDERER_3D.md#open-follow-ups)
       and `render3d/camera.h`.
 
+- [x] **M9 -- lighting** (this session). `world/zone.cpp`'s
+      `Zone::BakeLighting()` reproduces `Bullseye_BakeLighting`/
+      `Bullseye_PropagateLight`
+      ([`ZONE_FORMAT.md`](ZONE_FORMAT.md#the-bullseye-subsystem-a-load-time-light-propagation-bake-not-ai-pathfinding)):
+      a 2D ray-cast (256 directions per light-source cell) that
+      propagates light outward, bouncing off the first wall it hits per
+      axis, plus each cell's `.zcp` `lightDelta` -- baked once at zone
+      load, replacing the on-disk `.zmp` `lightLevel` field (confirmed a
+      leftover editor baseline the real engine also discards/rebuilds,
+      per the doc). `ZoneRenderer` applies the result as a flat
+      per-face brightness multiplier on tile geometry (floor/ceiling/
+      walls); entity models (M8) stay unconditionally full-bright.
+      Verified against real `azra` data: 65 real light sources, 97% of
+      open cells end up with nonzero light, and a light-source's own
+      tile renders visibly brighter/more detailed than an ambient-only
+      spot (`port/src/tests/m9_lighting_smoke.cpp`,
+      `m9_render_at_smoke.cpp`). Known simplifications: the ray-cast is
+      an approximation of the original's exact integer stepping (small
+      fixed-step march instead), lighting is a flat brightness scale
+      rather than the real per-vertex light value feeding a `.zlu`
+      palette-chunk blend, and a small non-zero ambient floor (0.12) is
+      a deliberate port-only tweak so unlit geometry doesn't render as
+      literal pure black.
+
 ## Next milestones (not yet started)
 
 Roughly in priority order for reaching "actually playable," not commitments:
 
-- **M9 -- lighting.** Currently unlit, raw palette color. The Bullseye
-  per-cell light-propagation bake is documented
-  ([`ZONE_FORMAT.md`](ZONE_FORMAT.md#the-bullseye-subsystem-a-load-time-light-propagation-bake-not-ai-pathfinding))
-  but not yet consumed by the renderer -- `.zmp`'s per-cell light level
-  and `.zcp`'s `lightDelta` are already loaded and sitting unused.
 - **M10 -- combat/inventory HUD.** Needs its own native-binding pass
   (Weapon/Armor/Item/Character-stats classes, all named in
   [`SIMKIN_NATIVE_API.md`](SIMKIN_NATIVE_API.md)) plus real HUD layout,

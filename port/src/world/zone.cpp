@@ -95,6 +95,11 @@ bool Zone::Load(const std::string& scriptRoot, const std::string& zoneName) {
         e.surIndexFloor = p[0x20];
     }
 
+    // M9: replace the on-disk lightLevel (an unused editor leftover, see
+    // zone.h's ZmpCell comment) with the real bake -- needs both cells_
+    // and zcpEntries_, so this is the earliest point both are ready.
+    BakeLighting();
+
     // --- .sur: u8 count + 8-byte records. Only byte[7] (the .ztx texture
     // slot index) is used here -- see zone.h's PaletteColor()/TexelAt()
     // comments on why the UV-shift/offset fields are approximated rather
@@ -219,6 +224,122 @@ bool Zone::CircleHitsWall(float worldX, float worldY, float radius) const {
         }
     }
     return false;
+}
+
+namespace {
+
+constexpr int kLightAddPerCell = 0x40;  // Bullseye_PropagateLight's flat add per crossed cell
+
+// Reproduces Bullseye_PropagateLight (docs/ZONE_FORMAT.md): a 2D ray-cast
+// from a light-source cell in 256 directions, adding kLightAddPerCell to
+// every cell each ray crosses (clamped, saturating at kMaxLightLevel),
+// bouncing off the first wall it hits on each axis (sign-flipping that
+// axis' step direction), and stopping once it has bounced on both axes or
+// left the grid.
+//
+// SIMPLIFICATION: the original steps its rays using the same integer
+// sin/cos LUT the rotation-matrix/automap code shares (RENDERER_3D.md) --
+// not reproduced here bit-for-bit. This instead marches each ray in small
+// fixed world-unit steps (kStepSize) and only credits a cell the first
+// time the ray enters it, which visits the same sequence of cells a
+// simple grid DDA would for reasonable step sizes -- close enough for a
+// "torches spread warm light, walls block/bounce it" result without
+// matching the original's exact per-ray footprint.
+void PropagateLight(std::vector<ZmpCell>& cells, int width, int height, int startTx, int startTy) {
+    constexpr int kRayCount = 256;
+    constexpr float kStepSize = 48.0f;     // world units per march step (< 1 tile)
+    constexpr float kMaxDistance = 20.0f * kTileScale;  // ray travel cap
+    constexpr float kTwoPi = 6.28318530718f;
+
+    auto inBounds = [&](int tx, int ty) { return tx >= 0 && ty >= 0 && tx < width && ty < height; };
+    auto addLight = [&](int tx, int ty) {
+        ZmpCell& c = cells[static_cast<size_t>(ty) * static_cast<size_t>(width) + static_cast<size_t>(tx)];
+        int v = static_cast<int>(c.lightLevel) + kLightAddPerCell;
+        c.lightLevel = static_cast<uint16_t>(std::min(v, static_cast<int>(kMaxLightLevel)));
+    };
+
+    float originX = startTx * kTileScale + kTileScale * 0.5f;
+    float originY = startTy * kTileScale + kTileScale * 0.5f;
+
+    for (int r = 0; r < kRayCount; ++r) {
+        float angle = static_cast<float>(r) * (kTwoPi / static_cast<float>(kRayCount));
+        float dx = std::cos(angle), dy = std::sin(angle);
+        float x = originX, y = originY;
+        int lastTx = startTx, lastTy = startTy;
+        bool bouncedX = false, bouncedY = false;
+
+        for (float traveled = 0.0f; traveled < kMaxDistance; traveled += kStepSize) {
+            float stepDx = dx * kStepSize, stepDy = dy * kStepSize;
+            x += stepDx;
+            y += stepDy;
+            int tx = static_cast<int>(std::floor(x / kTileScale));
+            int ty = static_cast<int>(std::floor(y / kTileScale));
+            if (!inBounds(tx, ty)) break;  // left the grid
+            if (tx == lastTx && ty == lastTy) continue;
+
+            const ZmpCell& cell = cells[static_cast<size_t>(ty) * static_cast<size_t>(width) +
+                                         static_cast<size_t>(tx)];
+            if (cell.IsWall()) {
+                bool crossedX = tx != lastTx, crossedY = ty != lastTy;
+                bool bounced = false;
+                if (crossedX && !bouncedX) {
+                    dx = -dx;
+                    bouncedX = true;
+                    bounced = true;
+                }
+                if (crossedY && !bouncedY) {
+                    dy = -dy;
+                    bouncedY = true;
+                    bounced = true;
+                }
+                if (!bounced) break;  // both axes already bounced (or re-hit) -- stop this ray
+                // Undo the step that walked into the wall cell (using the
+                // pre-flip delta) so x/y land back at a safe position just
+                // outside it -- otherwise x/y stay inside the wall cell and
+                // the next iteration's tx/ty may not change enough to look
+                // like a fresh crossing, causing spurious repeated "bounce"
+                // detection against the same wall.
+                x -= stepDx;
+                y -= stepDy;
+                continue;
+            }
+            addLight(tx, ty);
+            lastTx = tx;
+            lastTy = ty;
+        }
+    }
+}
+
+}  // namespace
+
+void Zone::BakeLighting() {
+    for (ZmpCell& c : cells_) c.lightLevel = 0;
+
+    for (int ty = 0; ty < height_; ++ty) {
+        for (int tx = 0; tx < width_; ++tx) {
+            if (cells_[static_cast<size_t>(ty) * static_cast<size_t>(width_) + static_cast<size_t>(tx)]
+                    .IsLightSource()) {
+                PropagateLight(cells_, width_, height_, tx, ty);
+            }
+        }
+    }
+
+    for (ZmpCell& c : cells_) {
+        const ZcpEntry& t = TypeOf(c);
+        int v = static_cast<int>(c.lightLevel) + static_cast<int>(t.lightDelta) * 256;
+        c.lightLevel = static_cast<uint16_t>(std::clamp(v, 0, static_cast<int>(kMaxLightLevel)));
+    }
+}
+
+float LightLevelToBrightness(uint16_t lightLevel) {
+    // Small ambient floor -- a deliberate port-only tweak, not part of the
+    // original algorithm (which has none): a torch-lit dungeon with zero
+    // ambient light anywhere unlit is authentic to the source data, but a
+    // literal RGB(0,0,0) reads as a rendering bug more than "dark" on a
+    // modern display. 0.12 keeps unlit geometry dim but still visible.
+    constexpr float kAmbientFloor = 0.12f;
+    float t = std::clamp(static_cast<float>(lightLevel) / static_cast<float>(kMaxLightLevel), 0.0f, 1.0f);
+    return kAmbientFloor + (1.0f - kAmbientFloor) * t;
 }
 
 }  // namespace sk
