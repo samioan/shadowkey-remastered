@@ -72,12 +72,23 @@ public:
     void PurgeRemovedItems();
 
     // inventory.s's PerformEquipAction() real implementation: toggles
-    // `item`'s equipped state (armor) or assigns it to the right hand
-    // slot (weapon/other, since this port doesn't have the real
-    // left/right-hand *choice* UI -- actionqueue.s's full assignment flow
-    // is out of scope, see docs/PORT_ROADMAP.md). Returns the same
-    // ret-code convention the script branches on: 0 = ok, 3 = not
-    // equippable (silently closes the action popup).
+    // `item`'s equipped state (armor) or assigns it to a hand slot
+    // (weapon/other). Decompiled the real native (FUN_10033660 case 1,
+    // "UpdateEquipStatus") this session: unequip-if-already-worn happens
+    // unconditionally in either hand, and a newly-equipped item only
+    // becomes the *visibly wielded* item in a hand whose slot is
+    // currently empty -- the real engine doesn't just always evict
+    // whatever's in the right hand the way this port's earlier stub did.
+    // The real function backs that with a genuine multi-item queue per
+    // hand (so a second weapon equipped while both hands are full still
+    // joins an invisible waitlist) -- this port doesn't model that queue
+    // (see MenuExecutable's SetLeftActionQueue()/ShowActionQueue()
+    // comment for why: the screen that would let a player browse it,
+    // actionqueue.s, is confirmed non-functional in the real shipped
+    // game), so here that same case is just a no-op return-success:
+    // nothing visibly changes. Returns the same ret-code convention the
+    // script branches on: 0 = ok, 3 = not equippable (silently closes the
+    // action popup).
     int UpdateEquipStatus(ItemExecutable* item, bool equipping);
 
     ItemExecutable* leftItem() const { return m_LeftItem; }

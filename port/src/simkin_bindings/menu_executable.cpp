@@ -537,13 +537,52 @@ bool MenuExecutable::method(const skString& methodName, skRValueArray& args,
         m_Stack.OpenMenu("MainMenu");
         return true;
     }
-    if (methodName == skString("SetLeftActionQueue") || methodName == skString("SetRightActionQueue") ||
-        methodName == skString("ShowActionQueue") || methodName == skString("ShowRemovedQueue")) {
-        // actionqueue.s's real drag/reorder equip-slot-assignment screen
-        // is out of scope for this milestone (docs/PORT_ROADMAP.md) --
-        // accepted so charactermanager.s's queue-selection handlers don't
-        // soft-fail-log noise, but there's no separate queue screen/state
-        // to actually open here.
+    if (methodName == skString("SetLeftActionQueue") && args.entries() == 0) {
+        m_QueueHandIsRight = false;
+        return true;
+    }
+    if (methodName == skString("SetRightActionQueue") && args.entries() == 0) {
+        m_QueueHandIsRight = true;
+        return true;
+    }
+    if (methodName == skString("IsLeftQueue") && args.entries() == 0) {
+        // Decompiled ground truth (FUN_10034d8c case 2): the real native
+        // returns the raw hand-selection byte UN-negated -- true exactly
+        // when the RIGHT hand was most recently selected, the opposite of
+        // what its name says. A genuine naming bug in the shipped binary,
+        // reproduced faithfully here; harmless since no real script ever
+        // calls IsLeftQueue() (actionqueue.s calls the never-registered
+        // "IsRightQueue()" instead, which always soft-fails to false/null
+        // -- see actionqueue.s's OnDisplay(), confirmed by this session's
+        // decompile that no such native binding exists in the real
+        // 702-entry table).
+        returnValue = skRValue(m_QueueHandIsRight);
+        return true;
+    }
+    if (methodName == skString("ShowActionQueue") && args.entries() == 0) {
+        // Real engine (FUN_10034d8c case 3): resolves the actionqueue.s
+        // menu slot, copies the CALLER's hand flag onto it, then actually
+        // pushes/opens it. actionqueue.s's own row-population
+        // (UpdateTextItems()/GetLastItem()) isn't a registered native at
+        // all in the real binary, so the screen it opens genuinely never
+        // shows real item names or wires up DropItem/ItemUp/ItemDown to a
+        // real object in the shipped game either -- this port reproduces
+        // that same (non-functional) screen rather than inventing a
+        // working one, faithful to the real, confirmed-broken behavior.
+        m_Stack.OpenMenu("actionqueue");
+        if (auto* target = dynamic_cast<MenuExecutable*>(m_Stack.currentMenu())) {
+            target->SetQueueHandIsRight(m_QueueHandIsRight);
+        }
+        return true;
+    }
+    if (methodName == skString("ShowRemovedQueue") && args.entries() == 0) {
+        // Decompiled ground truth (FUN_10034d8c case 4): unlike
+        // ShowActionQueue() above, this resolves the removequeue.s slot
+        // but never calls the "copy flag + actually open" step -- a real,
+        // confirmed dead native in the shipped binary. Matches
+        // charactermanager.s's own DisplayRemoved() handler being
+        // unreachable too (its only popup entry is commented out). No-op,
+        // faithfully.
         return true;
     }
 

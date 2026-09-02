@@ -177,6 +177,16 @@ public:
     bool TryMoveTableSelection(int delta);
     bool TryActivateTable();
 
+    // Decompiled (FUN_10034d8c) this session: SetLeftActionQueue()/
+    // SetRightActionQueue() set a hand-selection byte on the CALLING menu
+    // instance (charactermanager.s), and ShowActionQueue() copies it onto
+    // the target actionqueue.s instance before opening it -- both ends are
+    // this same per-instance field on whichever MenuExecutable it's read
+    // or written on. See ShowActionQueue()'s own handler in the .cpp for
+    // the full real/faithful-vs-simplified writeup.
+    bool queueHandIsRight() const { return m_QueueHandIsRight; }
+    void SetQueueHandIsRight(bool right) { m_QueueHandIsRight = right; }
+
 private:
     MenuRow& AddRow(RowKind kind, int textId, const std::string& callback, bool selectable);
 
@@ -188,6 +198,7 @@ private:
     bool m_TextEntryActive = false;
     std::vector<MenuRow> m_Rows;
     int m_SelectedItem = 0;
+    bool m_QueueHandIsRight = false;
     int m_PrevSelectedItem = 0;
     std::map<std::string, skRValue> m_NativeFields;
     // Non-owning -- see CreatePopupMenu's handler and ClearMenu's reset in

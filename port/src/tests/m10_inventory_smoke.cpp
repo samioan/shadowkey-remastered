@@ -140,6 +140,25 @@ int main(int argc, char** argv) {
             }
         }
 
+        // --- Real hand-selection flow (charactermanager.s ->
+        // actionqueue.s): decompiled this session (FUN_10034d8c) --
+        // RightQueueSelected() sets a hand flag on charactermanager.s's
+        // own instance, then ShowActionQueue() copies it onto the
+        // actionqueue.s instance and actually pushes it. Guards against
+        // ShowActionQueue() regressing back to its old complete no-op. ---
+        stack.OpenMenu("charactermanager");
+        charMgr = stack.currentMenu();
+        charMgr->TryInvoke("RightQueueSelected");
+        sk_bindings::MenuExecutable* actionQueue = stack.currentMenu();
+        std::printf("\nafter RightQueueSelected(): current menu is %s\n",
+                    actionQueue == charMgr ? "still charactermanager (FAILED)" : "actionqueue");
+        if (actionQueue == charMgr || !actionQueue->queueHandIsRight()) {
+            std::printf(
+                "m10_inventory_smoke: FAILED ShowActionQueue() didn't open actionqueue.s with "
+                "the right-hand flag set\n");
+            return 1;
+        }
+
         // --- Real consumable use: OnUsedBy() should run the item's own
         // OnUse() handler (items/bread.s: GetOwner().SetFatigue(...)) and
         // mark itself for removal; PurgeRemovedItems() then drops it. ---

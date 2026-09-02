@@ -335,10 +335,7 @@ algorithms.
     - **Explicitly out of scope** (a HUD/inventory-display milestone, not
       a combat-simulation one): actual combat resolution (attack rolls,
       damage, Monster/Actor AI -- those native classes are untouched);
-      `actionqueue.s`'s real drag/reorder hand-assignment flow
-      (`SetLeftActionQueue`/`SetRightActionQueue`/`ShowActionQueue` are
-      accepted-but-no-op so the real screens don't soft-fail-log noise,
-      but there's no separate queue screen); the buy/sell shop screens
+      the buy/sell shop screens
       (`buysell.s`/`blk_market.s`, a separate, large "Store/shop menu"
       class surface); real quest content (`DisplayObjectives` shows one
       fixed placeholder row); a real orientation/world-drop for a
@@ -445,15 +442,68 @@ algorithms.
         previous fix pass made. All 8 smoke tests still pass; live app
         boot still responsive.
 
+- [x] **Post-M11 fix -- `actionqueue.s`'s real hand-assignment flow,
+      decompiled** (this session). Decompiled all three native class
+      dispatchers behind `charactermanager.s`'s left/right-hand action-
+      queue UI (`FUN_10034d8c` -- `SetLeftActionQueue`/
+      `SetRightActionQueue`/`IsLeftQueue`/`ShowActionQueue`/
+      `ShowRemovedQueue`; `FUN_10033660` case 1 -- `UpdateEquipStatus`;
+      `FUN_1002ed74` -- an item's equip-category field read).
+    - **`ShowActionQueue()` genuinely opens a screen in the real game** --
+      it resolves the `actionqueue.s` menu slot, copies the caller's
+      hand-selection flag onto it, and actually pushes it (confirmed via
+      `FUN_10034c40`). The port's `ShowActionQueue()` was a complete
+      no-op before this pass; now it really does `MenuStack::OpenMenu
+      ("actionqueue")` and copies the flag, matching real behavior.
+    - **But `actionqueue.s`'s row population is confirmed non-functional
+      in the real shipped game.** `UpdateTextItems()` and `GetLastItem()`
+      -- the two natives that script calls to fill its 5 floating-text
+      rows with real item names and wire up `GetAssociatedObject()` --
+      are **absent from the fully-enumerated real 702-entry native
+      table** (cross-checked against
+      `shadowkey/simkin_native_bindings.json`). They were never
+      registered, so those calls always miss and soft-fail in the real
+      binary too: the rows permanently show the literal placeholder text
+      `"item"`, and `DropItem`/`ItemUp`/`ItemDown` always operate on a
+      null associated object. Likewise `actionqueue.s` itself calls
+      `IsRightQueue()`, which also isn't a registered name (only
+      `IsLeftQueue` is) -- so its title always falls back to the
+      left-hand string regardless of which hand was actually selected.
+      `removequeue.s` (`ShowRemovedQueue`) is even more clearly dead:
+      `FUN_10034d8c` resolves its menu slot but never calls the
+      copy-flag-and-push helper `ShowActionQueue()` does, and
+      `charactermanager.s`'s only call site for it is commented out. This
+      port now reproduces that same (non-functional) screen faithfully
+      rather than inventing a working one -- see `MenuExecutable`'s
+      `ShowActionQueue()`/`IsLeftQueue()` handlers for the full writeup.
+    - **`UpdateEquipStatus`'s real hand-choice logic, decompiled**: not
+      "always right hand" (the previous stub) -- unequip-toggle if the
+      item is already worn in either hand, else auto-fill whichever hand
+      is currently *empty* (the real function only assigns a hand's
+      active slot when that slot was previously empty). The real function
+      also backs this with a genuine multi-item queue per hand (so a
+      third weapon equipped while both hands are full joins an invisible
+      waitlist, via roughly a dozen further list/UI helper functions not
+      traced here) and an item-category field (`+0x1c0`, read by
+      `FUN_1002ed74`) that can restrict some items to one hand only,
+      neither of which this port models (disproportionate to the earlier,
+      confirmed-broken screen that would let a player observe either
+      one) -- `PlayerExecutable::UpdateEquipStatus` now does the
+      empty-hand-first fill/unequip-toggle for real, and silently no-ops
+      (still returns success) if both hands are already occupied.
+      `GetAttack()` updated to sum both hands' weapon damage, since a
+      solo weapon can now land in the left hand.
+    - Verified: `port/src/tests/m10_inventory_smoke.cpp` extended with a
+      real `charactermanager.s` -> `RightQueueSelected()` ->
+      `actionqueue.s` round trip, asserting the target menu actually
+      switches and carries the right-hand flag -- guards against
+      `ShowActionQueue()` regressing to its old no-op. All 8 smoke tests
+      still pass.
+
 ## Next milestones (not yet started)
 
 Roughly in priority order for reaching "actually playable," not commitments:
 
-- **`actionqueue.s`'s real hand-assignment flow** -- M10 leaves
-  `SetLeftActionQueue`/`SetRightActionQueue`/`ShowActionQueue` as
-  accepted no-ops; equipping a weapon always goes to the right hand
-  (`PlayerExecutable::UpdateEquipStatus`) rather than letting the player
-  choose.
 - **Combat resolution** -- Monster/Actor/Spell native classes are
   untouched; M10 only wired up inventory/vitals data and display.
 - **`.zsk` room-mesh world position** -- M11 draws it, but whether raw

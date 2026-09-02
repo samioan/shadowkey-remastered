@@ -79,16 +79,29 @@ int PlayerExecutable::UpdateEquipStatus(ItemExecutable* item, bool equipping) {
         return 0;
     }
     if (item->itemType() == kItemTypeWeapon) {
-        // This port has no real left/right-hand *choice* UI
-        // (actionqueue.s's full assignment flow is out of scope, see
-        // docs/PORT_ROADMAP.md) -- equipping a weapon always goes to the
-        // right hand, matching charactermanager.s's own primary/"other"
-        // item naming (GetRightItem() is read first, unconditionally).
         if (equipping) {
-            if (m_RightItem) m_RightItem->SetEquipped(false);
-            m_RightItem = item;
-            item->SetEquipped(true);
+            // Decompiled real behavior (see player_executable.h's comment):
+            // unequip-toggle if already worn in either hand, else fill
+            // whichever hand is currently empty (left first), else -- both
+            // hands full -- a no-op success (the item would join the real
+            // engine's invisible per-hand queue; this port doesn't model
+            // that queue, see ShowActionQueue()'s comment).
+            if (m_LeftItem == item) {
+                m_LeftItem = nullptr;
+                item->SetEquipped(false);
+            } else if (m_RightItem == item) {
+                m_RightItem = nullptr;
+                item->SetEquipped(false);
+            } else if (!m_LeftItem) {
+                m_LeftItem = item;
+                item->SetEquipped(true);
+            } else if (!m_RightItem) {
+                m_RightItem = item;
+                item->SetEquipped(true);
+            }
+            // else: both hands occupied -- no visible change, still "ok".
         } else {
+            if (m_LeftItem == item) m_LeftItem = nullptr;
             if (m_RightItem == item) m_RightItem = nullptr;
             item->SetEquipped(false);
         }
@@ -269,9 +282,14 @@ bool PlayerExecutable::method(const skString& methodName, skRValueArray& args,
         return true;
     }
     if (methodName == skString("GetAttack") && args.entries() == 0) {
-        // Real state: base attack plus the equipped (right-hand) weapon's
-        // average damage, if any -- see UpdateEquipStatus().
+        // Real state: base attack plus each equipped hand's weapon average
+        // damage, if any -- UpdateEquipStatus() fills whichever hand is
+        // empty first (left, then right), not always the right hand, so
+        // both are checked here.
         int total = m_BaseAttack;
+        if (m_LeftItem && m_LeftItem->itemType() == kItemTypeWeapon) {
+            total += (m_LeftItem->damageMin() + m_LeftItem->damageMax()) / 2;
+        }
         if (m_RightItem && m_RightItem->itemType() == kItemTypeWeapon) {
             total += (m_RightItem->damageMin() + m_RightItem->damageMax()) / 2;
         }
@@ -326,14 +344,25 @@ bool PlayerExecutable::method(const skString& methodName, skRValueArray& args,
         return true;
     }
     if (methodName == skString("ResetQueue") && args.entries() == 1) {
-        // actionqueue.s's full item-reorder/reassign flow is out of scope
-        // (docs/PORT_ROADMAP.md) -- accepted so charactermanager.s's
-        // ResetQueue() handler doesn't soft-fail-log noise, but there's no
-        // queue-ordering state here to actually reset.
+        // Dead in the real shipped game -- charactermanager.s's only call
+        // site (its ResetQueue() handler) is on a popup item
+        // (actionQueuePopup.AddItem(3776,"ResetQueue")) that's commented
+        // out in the real script, and that popup is never even made
+        // visible on the live click path anyway. Accepted so nothing logs
+        // soft-fail noise if a build ever does reach it; no state to reset.
         return true;
     }
     if (methodName == skString("MoveToOtherQueue") || methodName == skString("RemoveItemFromQueue")) {
-        // Same action-queue-reorder scope note as ResetQueue() above.
+        // Reachable (DropItem/RelocateItem in actionqueue.s), but always
+        // called with a null argument in the real game: both handlers read
+        // `selectedItem.GetAssociatedObject()` where selectedItem came from
+        // a row actionqueue.s's own UpdateTextItems()/GetLastItem() calls
+        // were supposed to populate -- and those two names are absent from
+        // the fully-enumerated real native binding table (confirmed this
+        // session, decompiled cross-check against
+        // shadowkey/simkin_native_bindings.json), so they never resolve
+        // and the rows are never actually bound to a real item. Accepted
+        // no-op, matching that real (non-functional) behavior faithfully.
         return true;
     }
     return SoftFailNativeCall("Player", methodName, args, returnValue);
