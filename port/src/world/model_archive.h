@@ -76,4 +76,14 @@ private:
     std::vector<std::unique_ptr<Model>> cache_;  // parallel to index_; null until parsed/found-empty
 };
 
+// Parses one already-decompressed MODEL_FORMAT.md resource blob into
+// `out` -- the same per-resource logic ModelArchive::GetModel() uses for
+// a models.huge slot, factored out so world/zone.h's M11 room-mesh
+// loader (a whole decompressed .zsk file, confirmed to be an ordinary
+// resource of this same format, docs/ZONE_FORMAT.md) can reuse it
+// without going through the archive's offset/size index. Returns false
+// (state of `out` unspecified) if `blob`/`size` don't parse as a valid
+// resource.
+bool ParseModelResource(const uint8_t* blob, size_t size, Model& out);
+
 }  // namespace sk

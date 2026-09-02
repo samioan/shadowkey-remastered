@@ -95,21 +95,71 @@ std::vector<Face> CollectFaces(const Zone& zone, int centerX, int centerY, int r
                 return !zone.InBounds(nx, ny) || zone.CellAt(nx, ny).IsWall();
             };
 
+            // M11: an open (non-blocking) neighbor with a different
+            // floor/ceiling height than this tile draws up to two
+            // *stepped* wall segments instead of the single full-span
+            // wall above -- a "lower band" kick wall up to the
+            // neighbor's floor (when it's raised) using this tile's own
+            // *_lo index, and an "upper band" lintel down to the
+            // neighbor's ceiling (when it's lower) using its own *_hi
+            // index (docs/ZONE_FORMAT.md: "each wall direction actually
+            // fires up to two draws... a stepped-height wall segment").
+            // Only fires when the neighbor's mirrored edge height
+            // actually differs, so an ordinary flat, same-height
+            // corridor continuation (the common case) draws nothing
+            // extra. The neighbor-corner mirroring below follows this
+            // function's own corner-index convention per direction (see
+            // this file's header comment on corners 0-3's mapping not
+            // being independently confirmed against the real engine) --
+            // self-consistent with it, not separately verified.
+            auto steppedBands = [&](float ex0, float ey0, float ex1, float ey1, int16_t fA,
+                                     int16_t fB, int16_t cA, int16_t cB, int16_t nfA, int16_t nfB,
+                                     int16_t ncA, int16_t ncB, uint8_t surLo, uint8_t surHi) {
+                if (nfA != fA || nfB != fB) {
+                    AddWall(faces, ex0, ey0, ex1, ey1, fA, fB, std::min(nfA, cA), std::min(nfB, cB),
+                            surLo, brightness);
+                }
+                if (ncA != cA || ncB != cB) {
+                    AddWall(faces, ex0, ey0, ex1, ey1, std::max(fA, ncA), std::max(fB, ncB), cA, cB,
+                            surHi, brightness);
+                }
+            };
+
             if (neighborBlocks(tx + 1, ty)) {  // east edge: corners 1 (NE) / 2 (SE)
                 AddWall(faces, x1, y0, x1, y1, t.floorHeight[1], t.floorHeight[2],
                         t.ceilingHeight[1], t.ceilingHeight[2], t.surIndexE_lo, brightness);
+            } else {
+                const ZcpEntry& n = zone.TypeOf(zone.CellAt(tx + 1, ty));
+                steppedBands(x1, y0, x1, y1, t.floorHeight[1], t.floorHeight[2], t.ceilingHeight[1],
+                             t.ceilingHeight[2], n.floorHeight[0], n.floorHeight[3], n.ceilingHeight[0],
+                             n.ceilingHeight[3], t.surIndexE_lo, t.surIndexE_hi);
             }
-            if (neighborBlocks(tx - 1, ty)) {  // west edge: corners 0 (NW) / 3 (SW)
+            if (neighborBlocks(tx - 1, ty)) {  // west edge: corners 3 (SW) / 0 (NW)
                 AddWall(faces, x0, y1, x0, y0, t.floorHeight[3], t.floorHeight[0],
                         t.ceilingHeight[3], t.ceilingHeight[0], t.surIndexW_lo, brightness);
+            } else {
+                const ZcpEntry& n = zone.TypeOf(zone.CellAt(tx - 1, ty));
+                steppedBands(x0, y1, x0, y0, t.floorHeight[3], t.floorHeight[0], t.ceilingHeight[3],
+                             t.ceilingHeight[0], n.floorHeight[2], n.floorHeight[1], n.ceilingHeight[2],
+                             n.ceilingHeight[1], t.surIndexW_lo, t.surIndexW_hi);
             }
             if (neighborBlocks(tx, ty + 1)) {  // south edge: corners 2 (SE) / 3 (SW)
                 AddWall(faces, x1, y1, x0, y1, t.floorHeight[2], t.floorHeight[3],
                         t.ceilingHeight[2], t.ceilingHeight[3], t.surIndexS_lo, brightness);
+            } else {
+                const ZcpEntry& n = zone.TypeOf(zone.CellAt(tx, ty + 1));
+                steppedBands(x1, y1, x0, y1, t.floorHeight[2], t.floorHeight[3], t.ceilingHeight[2],
+                             t.ceilingHeight[3], n.floorHeight[1], n.floorHeight[0], n.ceilingHeight[1],
+                             n.ceilingHeight[0], t.surIndexS_lo, t.surIndexS_hi);
             }
             if (neighborBlocks(tx, ty - 1)) {  // north edge: corners 0 (NW) / 1 (NE)
                 AddWall(faces, x0, y0, x1, y0, t.floorHeight[0], t.floorHeight[1],
                         t.ceilingHeight[0], t.ceilingHeight[1], t.surIndexN_lo, brightness);
+            } else {
+                const ZcpEntry& n = zone.TypeOf(zone.CellAt(tx, ty - 1));
+                steppedBands(x0, y0, x1, y0, t.floorHeight[0], t.floorHeight[1], t.ceilingHeight[0],
+                             t.ceilingHeight[1], n.floorHeight[3], n.floorHeight[2], n.ceilingHeight[3],
+                             n.ceilingHeight[2], t.surIndexN_lo, t.surIndexN_hi);
             }
         }
     }
@@ -234,6 +284,60 @@ void RasterizeModelTriangle(Backbuffer& backbuffer, std::vector<float>& depthBuf
     }
 }
 
+// Transforms and rasterizes every face of one model instance, positioned
+// by a tile-space X/Y offset plus a raw-world-unit Z offset -- shared by
+// M8's per-entity placement loop and M11's whole-room `.zsk` mesh (which
+// simply passes a zero offset, see this file's header comment). See
+// RasterizeModelTriangle's own header comment for the local-axis/scale
+// assumptions baked into the per-vertex transform below.
+void SubmitModel(Backbuffer& backbuffer, std::vector<float>& depthBuffer, const Model& model,
+                  int skinIndex, float offsetTileX, float offsetTileY, float offsetZ, float camX,
+                  float camY, float camZ, float cosYaw, float sinYaw, float focalX, float focalY) {
+    for (const ModelFace& face : model.faces) {
+        if (face.vA < 0 || face.vB < 0 || face.vC < 0 ||
+            static_cast<size_t>(face.vC) >= model.vertices.size() ||
+            static_cast<size_t>(face.vB) >= model.vertices.size() ||
+            static_cast<size_t>(face.vA) >= model.vertices.size() || face.uA < 0 || face.uB < 0 ||
+            face.uC < 0 || static_cast<size_t>(face.uC) >= model.uvs.size() ||
+            static_cast<size_t>(face.uB) >= model.uvs.size() ||
+            static_cast<size_t>(face.uA) >= model.uvs.size()) {
+            continue;  // shouldn't happen (MODEL_FORMAT.md's index invariant), guard anyway
+        }
+
+        const ModelVertex* mv[3] = {&model.vertices[static_cast<size_t>(face.vA)],
+                                     &model.vertices[static_cast<size_t>(face.vB)],
+                                     &model.vertices[static_cast<size_t>(face.vC)]};
+        const ModelUv* uv[3] = {&model.uvs[static_cast<size_t>(face.uA)],
+                                 &model.uvs[static_cast<size_t>(face.uB)],
+                                 &model.uvs[static_cast<size_t>(face.uC)]};
+
+        ProjectedVertex pv3[3];
+        bool anyBehindModel = false;
+        for (int i = 0; i < 3; ++i) {
+            float rx = offsetTileX + mv[i]->x / kTileScale - camX;
+            float ry = offsetTileY + mv[i]->z / kTileScale - camY;
+            float rz = (offsetZ + mv[i]->y) / kTileScale - camZ;
+
+            float viewRight = rx * sinYaw - ry * cosYaw;
+            float viewForward = rx * cosYaw + ry * sinYaw;
+            float viewUp = rz;
+
+            if (viewForward < 0.05f) {
+                anyBehindModel = true;
+                break;
+            }
+            pv3[i].invW = 1.0f / viewForward;
+            pv3[i].sx = Backbuffer::kWidth * 0.5f + viewRight * focalX * pv3[i].invW;
+            pv3[i].sy = Backbuffer::kHeight * 0.5f - viewUp * focalY * pv3[i].invW;
+            pv3[i].u = (uv[i]->u / 256.0f) * pv3[i].invW;
+            pv3[i].v = (uv[i]->v / 256.0f) * pv3[i].invW;
+        }
+        if (anyBehindModel) continue;
+
+        RasterizeModelTriangle(backbuffer, depthBuffer, pv3[0], pv3[1], pv3[2], model, skinIndex);
+    }
+}
+
 }  // namespace
 
 void ZoneRenderer::Render(Backbuffer& backbuffer, const Zone& zone, const Camera& camera,
@@ -317,51 +421,21 @@ void ZoneRenderer::Render(Backbuffer& backbuffer, const Zone& zone, const Camera
             float baseTileY = pe.y / kTileScale;
             float baseZ = pe.z;
 
-            for (const ModelFace& face : model->faces) {
-                if (face.vA < 0 || face.vB < 0 || face.vC < 0 ||
-                    static_cast<size_t>(face.vC) >= model->vertices.size() ||
-                    static_cast<size_t>(face.vB) >= model->vertices.size() ||
-                    static_cast<size_t>(face.vA) >= model->vertices.size() ||
-                    face.uA < 0 || face.uB < 0 || face.uC < 0 ||
-                    static_cast<size_t>(face.uC) >= model->uvs.size() ||
-                    static_cast<size_t>(face.uB) >= model->uvs.size() ||
-                    static_cast<size_t>(face.uA) >= model->uvs.size()) {
-                    continue;  // shouldn't happen (MODEL_FORMAT.md's index invariant), guard anyway
-                }
-
-                const ModelVertex* mv[3] = {&model->vertices[static_cast<size_t>(face.vA)],
-                                             &model->vertices[static_cast<size_t>(face.vB)],
-                                             &model->vertices[static_cast<size_t>(face.vC)]};
-                const ModelUv* uv[3] = {&model->uvs[static_cast<size_t>(face.uA)],
-                                         &model->uvs[static_cast<size_t>(face.uB)],
-                                         &model->uvs[static_cast<size_t>(face.uC)]};
-
-                ProjectedVertex pv3[3];
-                bool anyBehindModel = false;
-                for (int i = 0; i < 3; ++i) {
-                    float rx = baseTileX + mv[i]->x / kTileScale - camX;
-                    float ry = baseTileY + mv[i]->z / kTileScale - camY;
-                    float rz = (baseZ + mv[i]->y) / kTileScale - camZ;
-
-                    float viewRight = rx * sinYaw - ry * cosYaw;
-                    float viewForward = rx * cosYaw + ry * sinYaw;
-                    float viewUp = rz;
-
-                    if (viewForward < 0.05f) {
-                        anyBehindModel = true;
-                        break;
-                    }
-                    pv3[i].invW = 1.0f / viewForward;
-                    pv3[i].sx = Backbuffer::kWidth * 0.5f + viewRight * focalX * pv3[i].invW;
-                    pv3[i].sy = Backbuffer::kHeight * 0.5f - viewUp * focalY * pv3[i].invW;
-                    pv3[i].u = (uv[i]->u / 256.0f) * pv3[i].invW;
-                    pv3[i].v = (uv[i]->v / 256.0f) * pv3[i].invW;
-                }
-                if (anyBehindModel) continue;
-
-                RasterizeModelTriangle(backbuffer, depthBuffer, pv3[0], pv3[1], pv3[2], *model, 0);
-            }
+            SubmitModel(backbuffer, depthBuffer, *model, 0, baseTileX, baseTileY, baseZ, camX, camY,
+                        camZ, cosYaw, sinYaw, focalX, focalY);
         }
+    }
+
+    // M11: the room's own static mesh baked into <zone>.zsk -- a real,
+    // separate render step in the original engine alongside the
+    // tile-grid pipeline above, not a replacement for it (see
+    // world/zone.h's RoomMesh() comment). No per-instance offset (unlike
+    // .ent-placed entities): the mesh's own vertex coordinates already
+    // sit in the zone's world-unit frame. Same simplifications as M8's
+    // entities: skin 0 only, unlit (no lighting reaches models yet).
+    if (const Model* room = zone.RoomMesh()) {
+        SubmitModel(backbuffer, depthBuffer, *room, 0, 0.0f, 0.0f, 0.0f, camX, camY, camZ, cosYaw,
+                    sinYaw, focalX, focalY);
     }
 }
 

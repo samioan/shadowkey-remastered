@@ -188,6 +188,54 @@ algorithms.
       a deliberate port-only tweak so unlit geometry doesn't render as
       literal pure black.
 
+- [x] **M11 -- second wall band + `.zsk` room mesh** (this session). Two
+      pieces:
+    - **The wall "upper band."** `docs/ZONE_FORMAT.md`'s `ZcpEntry`
+      documents each wall direction firing up to two stacked draws -- a
+      floor-anchored "lower band" (already implemented since M6) and a
+      ceiling-anchored "upper band" (`surIndexE_hi`/`W_hi`/`S_hi`/`N_hi`,
+      unused until now) for a stepped floor/ceiling height difference
+      with a neighboring tile. `zone_renderer.cpp`'s `CollectFaces()` now
+      compares each open tile's edge-corner heights against its open
+      neighbors' mirrored edge and draws a kick-wall segment up to the
+      neighbor's floor and/or a lintel segment down from the ceiling to
+      the neighbor's ceiling, only when that neighbor's edge height
+      actually differs -- an ordinary flat corridor still draws nothing
+      extra, and neighbors that are genuine walls/out-of-bounds are
+      unchanged (single full-span wall, as before M11).
+    - **`.zsk`-baked room mesh.** `Zone::RoomMesh()` (`world/zone.h`/
+      `.cpp`) decompresses `<zone>.zsk` and parses it as an ordinary
+      [`MODEL_FORMAT.md`](MODEL_FORMAT.md) resource -- confirmed against
+      real `azra.zsk` (its header decodes exactly per that spec,
+      including the `H5==H2*3` invariant). The per-resource parser was
+      factored out of `world/model_archive.cpp` into a free
+      `ParseModelResource()` so both M8's entity archive and this new
+      loader share it. `ZoneRenderer::Render()` draws it via a new shared
+      `SubmitModel()` helper (M8's per-entity transform/rasterize loop
+      refactored into this, used by both call sites) with no per-instance
+      offset -- a real, separate render step in the original engine
+      (`RoomGeometry_TransformAndSort`) alongside the tile-grid pipeline,
+      not a replacement for it.
+    - **Known open item, not resolved this pass**: whether drawing the
+      `.zsk` mesh at raw local-origin (no offset) is actually correct is
+      **unconfirmed**. `azra.zsk` is small (30 vertices/56 faces,
+      roughly a 2x2-tile footprint centered on tile-grid coordinate
+      (0,0)) -- too small to be a "whole room" in the sense of covering
+      the explorable dungeon, more likely a single architectural
+      set-piece, and its position wasn't independently verified against
+      a matching real screenshot (tile (0,0) turns out to be real,
+      non-degenerate interior space in `azra`, which makes the raw-origin
+      placement *plausible*, but the debug tool used to investigate has
+      no camera pitch and this corner's real floor/ceiling heights put
+      the mesh well outside a level yaw-only view from any nearby open
+      tile). Full writeup: `render3d/zone_renderer.h`'s M11 comment.
+      Along the way, fixed a real bug in the M9 debug tool
+      (`tests/m9_render_at_smoke.cpp`): it was placing the camera at
+      `zone.playerStartZ` regardless of the tile under test, which is
+      wrong for any tile far from the player start's own vertical level
+      (different parts of a zone can sit at very different floor
+      heights) -- now uses the tested tile's own floor height instead.
+
 ## Next milestones (not yet started)
 
 Roughly in priority order for reaching "actually playable," not commitments:
@@ -196,10 +244,9 @@ Roughly in priority order for reaching "actually playable," not commitments:
   (Weapon/Armor/Item/Character-stats classes, all named in
   [`SIMKIN_NATIVE_API.md`](SIMKIN_NATIVE_API.md)) plus real HUD layout,
   not just menus.
-- **M11 -- `.zsk`-baked room meshes and the second wall band.** The
-  renderer only draws the tile-grid pipeline's lower wall band; the
-  stepped-height upper band and the separate `.zsk` room-mesh path
-  (used for non-tile-grid geometry) are both still unimplemented.
+- **`.zsk` room-mesh world position** -- M11 draws it, but whether raw
+  local-origin (no offset) is the right placement is unconfirmed; see
+  M11's writeup above and `render3d/zone_renderer.h`.
 - **Real save file format** -- M5's save system is simulated in-memory
   only; no on-disk save format has been RE'd yet.
 - **Real menu background images** -- still flat colors (`MenuBackground`

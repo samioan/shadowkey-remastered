@@ -6,14 +6,16 @@
 // docs/RENDERER_3D.md's "The tile-grid wall/surface-face renderer"
 // section, plus (M9) the Bullseye per-cell lighting bake (docs/
 // ZONE_FORMAT.md's "Bullseye subsystem" -- Bullseye_BakeLighting/
-// Bullseye_PropagateLight). Explicitly out of scope for this pass: the
-// .zsk-baked whole-room mesh and the .zfg fog LUT (a separate, distance-
-// driven effect layered on top of this per-cell bake in the real engine,
-// not reproduced here).
+// Bullseye_PropagateLight), plus (M11) the .zsk-baked whole-room static
+// mesh (see RoomMesh() below). Explicitly still out of scope: the .zfg
+// fog LUT (a separate, distance-driven effect layered on top of this
+// per-cell bake in the real engine, not reproduced here).
 
 #include <cstdint>
 #include <string>
 #include <vector>
+
+#include "world/model_archive.h"
 
 namespace sk {
 
@@ -83,6 +85,24 @@ public:
     };
     const std::vector<EntPlacement>& entities() const { return entities_; }
 
+    // M11: the room's own static mesh baked into <zone>.zsk -- a real,
+    // separate render step in the original engine
+    // (`RoomGeometry_TransformAndSort`, docs/RENDERER_3D.md's "Open
+    // follow-ups") alongside the tile-grid wall/surface pipeline above,
+    // not a replacement for it. `.zsk` decompresses (via
+    // LoadCompressedZoneFile, same as every other per-zone file) into an
+    // ordinary MODEL_FORMAT.md resource -- confirmed against real
+    // azra.zsk this session (its header decodes exactly per that spec,
+    // including the H5==H2*3 invariant). Positioned directly in the
+    // zone's own world-unit frame with no per-instance offset (unlike
+    // .ent-placed entities' world/entity_types.h chain) -- **unconfirmed**,
+    // see render3d/zone_renderer.h's fuller M11 writeup on why this is
+    // plausible but not independently verified against a real screenshot.
+    // Returns nullptr if the zone has no .zsk or it failed to parse --
+    // not fatal to Load() either way, since not every zone necessarily
+    // has one.
+    const Model* RoomMesh() const { return roomMeshValid_ ? &roomMesh_ : nullptr; }
+
     // 128x128 8bpp-palettized texel at (x,y) within .ztx's texture slot
     // `surfaceTextureIndex` (0x4000 bytes = 128*128 -- confirmed: every
     // .ztx slot is exactly that size). Returns 0 if the index/coords are
@@ -121,6 +141,8 @@ private:
     std::vector<uint8_t> ztxData_;          // 1 header byte + N*0x4000 texture slots
     std::vector<uint8_t> zluData_;          // N*2048-byte palette sets
     std::vector<EntPlacement> entities_;
+    Model roomMesh_;         // M11: parsed <zone>.zsk, see RoomMesh() above
+    bool roomMeshValid_ = false;
 
     // M9: reproduces Bullseye_BakeLighting/Bullseye_PropagateLight
     // (docs/ZONE_FORMAT.md) -- called once from Load(), after cells_ and

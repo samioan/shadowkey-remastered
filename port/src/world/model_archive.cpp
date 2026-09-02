@@ -61,7 +61,16 @@ const Model* ModelArchive::GetModel(int archiveIndex) {
     if (e.size < 14 || static_cast<size_t>(e.offset) + e.size > huge_.size()) {
         return nullptr;  // "NULL.bin" placeholder or a bad index -- no model
     }
-    const uint8_t* blob = &huge_[e.offset];
+
+    auto model = std::make_unique<Model>();
+    if (!ParseModelResource(&huge_[e.offset], e.size, *model)) return nullptr;
+
+    cache_[static_cast<size_t>(archiveIndex)] = std::move(model);
+    return cache_[static_cast<size_t>(archiveIndex)].get();
+}
+
+bool ParseModelResource(const uint8_t* blob, size_t size, Model& out) {
+    if (size < 14) return false;
 
     int16_t h0 = ReadI16(blob + 0x00);
     int16_t h1 = ReadI16(blob + 0x02);  // frame count, unused beyond frame 0 here
@@ -72,7 +81,7 @@ const Model* ModelArchive::GetModel(int archiveIndex) {
     (void)h1;
     (void)h5;
 
-    if (h2 < 0 || h3 < 0 || h4 < 0) return nullptr;
+    if (h2 < 0 || h3 < 0 || h4 < 0) return false;
 
     // uv_base = h0 + h1*h5 (halfwords); face_base = uv_base + h3*2;
     // tex_hdr_base = face_base + h4*6 -- see docs/MODEL_FORMAT.md and
@@ -81,40 +90,39 @@ const Model* ModelArchive::GetModel(int archiveIndex) {
     int faceBase = uvBase + h3 * 2;
     int texHdrBase = faceBase + h4 * 6;
     size_t texHdrByte = static_cast<size_t>(texHdrBase) * 2;
-    if (texHdrByte + 8 > e.size) return nullptr;
+    if (texHdrByte + 8 > size) return false;
 
     uint16_t skinCount = ReadU16(blob + texHdrByte);
     uint16_t width = ReadU16(blob + texHdrByte + 2);
     uint16_t height = ReadU16(blob + texHdrByte + 4);
     size_t pixStart = texHdrByte + 8;
     size_t pixTotal = static_cast<size_t>(skinCount) * width * height * 2;
-    if (pixStart + pixTotal > e.size) return nullptr;
+    if (pixStart + pixTotal > size) return false;
 
-    auto model = std::make_unique<Model>();
-    model->skinCount = skinCount;
-    model->width = width;
-    model->height = height;
+    out.skinCount = skinCount;
+    out.width = width;
+    out.height = height;
 
-    model->vertices.resize(static_cast<size_t>(h2));
+    out.vertices.resize(static_cast<size_t>(h2));
     for (int v = 0; v < h2; ++v) {
         size_t off = static_cast<size_t>(h0) * 2 + static_cast<size_t>(v) * 6;  // frame 0
-        if (off + 6 > e.size) return nullptr;
-        model->vertices[static_cast<size_t>(v)] = {ReadI16(blob + off), ReadI16(blob + off + 2),
-                                                     ReadI16(blob + off + 4)};
+        if (off + 6 > size) return false;
+        out.vertices[static_cast<size_t>(v)] = {ReadI16(blob + off), ReadI16(blob + off + 2),
+                                                  ReadI16(blob + off + 4)};
     }
 
-    model->uvs.resize(static_cast<size_t>(h3));
+    out.uvs.resize(static_cast<size_t>(h3));
     for (int u = 0; u < h3; ++u) {
         size_t off = static_cast<size_t>(uvBase) * 2 + static_cast<size_t>(u) * 4;
-        if (off + 4 > e.size) return nullptr;
-        model->uvs[static_cast<size_t>(u)] = {ReadU16(blob + off), ReadU16(blob + off + 2)};
+        if (off + 4 > size) return false;
+        out.uvs[static_cast<size_t>(u)] = {ReadU16(blob + off), ReadU16(blob + off + 2)};
     }
 
-    model->faces.resize(static_cast<size_t>(h4));
+    out.faces.resize(static_cast<size_t>(h4));
     for (int f = 0; f < h4; ++f) {
         size_t off = static_cast<size_t>(faceBase) * 2 + static_cast<size_t>(f) * 12;
-        if (off + 12 > e.size) return nullptr;
-        ModelFace& face = model->faces[static_cast<size_t>(f)];
+        if (off + 12 > size) return false;
+        ModelFace& face = out.faces[static_cast<size_t>(f)];
         face.vA = ReadI16(blob + off);
         face.vB = ReadI16(blob + off + 2);
         face.vC = ReadI16(blob + off + 4);
@@ -123,13 +131,12 @@ const Model* ModelArchive::GetModel(int archiveIndex) {
         face.uC = ReadI16(blob + off + 10);
     }
 
-    model->pixels.resize(pixTotal / 2);
-    for (size_t i = 0; i < model->pixels.size(); ++i) {
-        model->pixels[i] = ReadU16(blob + pixStart + i * 2);
+    out.pixels.resize(pixTotal / 2);
+    for (size_t i = 0; i < out.pixels.size(); ++i) {
+        out.pixels[i] = ReadU16(blob + pixStart + i * 2);
     }
 
-    cache_[static_cast<size_t>(archiveIndex)] = std::move(model);
-    return cache_[static_cast<size_t>(archiveIndex)].get();
+    return true;
 }
 
 uint16_t Model::TexelAt(int skinIndex, int x, int y) const {

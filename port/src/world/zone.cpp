@@ -133,6 +133,15 @@ bool Zone::Load(const std::string& scriptRoot, const std::string& zoneName) {
         return false;
     }
 
+    // --- .zsk: whole-room static mesh (M11), see zone.h's RoomMesh()
+    // comment -- an ordinary MODEL_FORMAT.md resource once decompressed.
+    // Not fatal if missing/unparsed: falls back to no room mesh drawn.
+    std::vector<uint8_t> zsk = LoadCompressedZoneFile(base + ".zsk");
+    roomMeshValid_ = !zsk.empty() && ParseModelResource(zsk.data(), zsk.size(), roomMesh_);
+    if (!roomMeshValid_) {
+        std::printf("Zone: %s.zsk missing or unparsed -- no room mesh\n", zoneName.c_str());
+    }
+
     // --- .ent: find the player start record (typeId == 1) ---
     std::vector<uint8_t> ent;
     if (!ReadWholeFile(base + ".ent", ent) || ent.size() < 4) {

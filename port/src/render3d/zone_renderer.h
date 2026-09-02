@@ -13,11 +13,11 @@
 // Known simplifications vs. the real engine (see zone_renderer.cpp for
 // the reasoning behind each): no TileGrid_RaycastVisibility (a fixed-
 // radius tile scan instead), no near-plane clipping (a quad/triangle is
-// dropped whole if any corner is behind the camera), one wall band per
-// direction (the "upper band" stepped-height second segment is
-// skipped), and always ceiling band A (the eye-height-vs-threshold
-// comparison that picks A/B is skipped). M9 added the Bullseye lighting
-// bake (see below) -- tile faces are no longer unconditionally unlit.
+// dropped whole if any corner is behind the camera), and always ceiling
+// band A (the eye-height-vs-threshold comparison that picks A/B is
+// skipped). M9 added the Bullseye lighting bake (see below) -- tile
+// faces are no longer unconditionally unlit. M11 added the wall
+// "upper band" stepped second segment (see below) -- no longer skipped.
 //
 // M8 added placed-entity rendering (real .ent placements resolved
 // through entities.txt -> models.idx/.huge, world/entity_types.h +
@@ -95,6 +95,59 @@
 // non-zero ambient floor so fully unlit geometry doesn't render as a
 // literal, bug-looking pure black (LightLevelToBrightness() in world/
 // zone.h/.cpp).
+//
+// M11 -- second wall band + .zsk room mesh. Two pieces:
+//
+// 1. The wall "upper band" (docs/ZONE_FORMAT.md: each wall direction can
+//    fire up to two stacked draws, a floor-anchored "lower band" and a
+//    ceiling-anchored "upper band", when a neighboring open tile's floor
+//    or ceiling height differs from this tile's own -- a stepped ledge
+//    or lintel). zone_renderer.cpp's CollectFaces() now compares each
+//    open tile's edge-corner heights against its open neighbors' mirrored
+//    edge (using this renderer's own corner-index convention, since the
+//    real per-corner NE/SE/SW/NW mapping was never independently
+//    confirmed -- see the "SIMPLIFICATION" comment there) and draws a
+//    kick-wall segment (this tile's own `*_lo` index) up to the
+//    neighbor's floor and/or a lintel segment (`*_hi`) down from this
+//    tile's ceiling to the neighbor's ceiling, only when that neighbor's
+//    edge height actually differs -- an ordinary flat corridor draws
+//    nothing extra. Tiles whose neighbor is a genuine wall/out-of-bounds
+//    are unchanged (single full-span wall, as before).
+//
+// 2. `.zsk`-baked whole-room static mesh (docs/RENDERER_3D.md's
+//    `RoomGeometry_TransformAndSort` writeup) -- a real, separate render
+//    step in the original engine alongside the tile-grid pipeline above,
+//    not a replacement for it. `world/zone.h`'s `Zone::RoomMesh()`
+//    decompresses `<zone>.zsk` and parses it as an ordinary
+//    `MODEL_FORMAT.md` resource (the same parser M8's entities use,
+//    factored into `world/model_archive.h`'s free `ParseModelResource()`
+//    -- confirmed against real `azra.zsk`, whose header decodes exactly
+//    per that spec including the `H5==H2*3` invariant). Drawn here with
+//    no per-instance offset (its own vertices already sit in the zone's
+//    world-unit frame, unlike `.ent`-placed entities, the simplest
+//    hypothesis absent contrary evidence -- same reasoning M8 applied to
+//    entity scale), via the same `SubmitModel()` helper M8's entity loop
+//    was refactored to share. Same simplifications as M8: skin 0/frame 0
+//    only, unlit.
+//
+//    **Open item, not resolved this pass**: `azra.zsk` is a small mesh
+//    (30 vertices/56 faces) whose local bounding box sits almost
+//    symmetric around its own origin (`x[-252,254] y[-290,40]
+//    z[-254,252]` raw units, i.e. roughly a 2x2-tile footprint centered
+//    on tile-grid coordinate (0,0)) -- too small to be a "whole room" in
+//    the sense of covering the explorable dungeon; more likely a single
+//    architectural set-piece. Whether drawing it at that raw local
+//    origin with no offset is actually correct, or whether the real
+//    engine applies some per-zone translation this pass didn't find
+//    (RENDERER_3D.md's `ComposeTransform3x4`/actor-transform-block
+//    parallel, per M8's own open item above), is **unconfirmed** --
+//    tile (0,0) in `azra` turns out to be real (non-degenerate) interior
+//    space bordering the grid edge, so the raw-origin placement is at
+//    least *plausible*, but this wasn't independently verified with a
+//    matching visual (the debug camera used to investigate,
+//    `tests/m9_render_at_smoke.cpp`, has no pitch control, and this
+//    corner's real floor/ceiling heights put the mesh well outside a
+//    level yaw-only view from any nearby open tile).
 
 #include <vector>
 
