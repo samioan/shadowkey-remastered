@@ -29,6 +29,7 @@
 #include "render3d/zone_renderer.h"
 #include "simkin_bindings/combat.h"
 #include "simkin_bindings/combo_box_executable.h"
+#include "simkin_bindings/door_executable.h"
 #include "simkin_bindings/floating_sprite_executable.h"
 #include "simkin_bindings/game_constants.h"
 #include "simkin_bindings/item_button_executable.h"
@@ -134,6 +135,21 @@ struct MonsterInstance {
     int modelArchiveIndex = -1;
     enum class AiState { Idle, Chasing, Attacking } aiState = AiState::Idle;
     int attackCooldownTicks = 0;
+};
+
+// M15: Action::Use interact binding, first (narrow) slice -- doors only,
+// same "one real category, not the whole native surface" precedent M12
+// set for combat (docs/PORT_ROADMAP.md's "generic Action::Use interact
+// binding (doors, pickups, NPC talk -- still unbound)" open item; pickups
+// and NPC talk stay unbound, see the zone-load block below). Like
+// MonsterInstance, a live door carries its own DoorExecutable (a real
+// door.s/door02.s script's Init() actually runs) plus mutable world
+// state (yaw, for the open/close swing) separate from gameEntities'
+// untouched static-prop list.
+struct DoorInstance {
+    std::unique_ptr<sk_bindings::DoorExecutable> script;
+    float x = 0, y = 0, z = 0;
+    int modelArchiveIndex = -1;
 };
 
 void RenderPopup(sk::Backbuffer& backbuffer, sk_bindings::PopupMenuExecutable& popup,
@@ -568,6 +584,9 @@ int main(int argc, char** argv) {
         "shadowkey-port: New Game/Load Game enter the 3D zone (M6) -- Up/Down walk, "
         "Left/Right turn, Esc returns to the main menu.\n");
     std::printf(
+        "shadowkey-port: '3' (real default Use binding, M15) opens/closes the nearest door "
+        "you're facing -- '7'/'5' swing your left/right-hand weapon (M12).\n");
+    std::printf(
         "shadowkey-port: '=' (stands in for the N-Gage's '#') opens the character manager "
         "(real inventory/stats/quest-log screens, M10) -- Esc there always returns straight "
         "to the 3D view.\n");
@@ -588,6 +607,9 @@ int main(int argc, char** argv) {
     // static-prop list at zone load (see below) -- see MonsterInstance's
     // comment.
     std::vector<MonsterInstance> gameMonsters;
+    // M15: live doors, pulled out of gameEntities the same way gameMonsters
+    // is -- see DoorInstance's comment.
+    std::vector<DoorInstance> gameDoors;
     sk::Camera gameCamera;
     sk::ZoneRenderer zoneRenderer;
     bool inGame = false;
@@ -662,9 +684,55 @@ int main(int argc, char** argv) {
                 // gameEntities as a static, unanimated prop, unchanged.
                 gameEntities.clear();
                 gameMonsters.clear();
+                gameDoors.clear();
                 for (const sk::Zone::EntPlacement& e : gameZone->entities()) {
                     const sk::EntityTypeDescriptor* desc = entityTypes.Lookup(e.typeId);
                     if (!desc) continue;
+                    // M15: category 11 (door, docs/ZONE_FORMAT.md's
+                    // entities.txt category table) whose entities.txt
+                    // `name` column is an actual loadable script (ends in
+                    // ".s") -- the real convention every other category
+                    // already uses too (typeId 202/azra_rat below): most
+                    // category-11 entries are "!label"-only placeholders
+                    // with no unique script of their own (dungeon set-
+                    // pieces reusing the door category for switches,
+                    // urns, mushrooms, ...), so only the ones with a real
+                    // script get live OnUse() behavior; everything else
+                    // still falls through to the static-prop path below,
+                    // unchanged. Confirmed against real azra data: 7 of
+                    // azra.ent's 282 placements are typeId 54 -> door.s.
+                    std::string descName = desc->name;
+                    bool hasScript = desc->category == 11 && descName.size() > 2 &&
+                                      descName.compare(descName.size() - 2, 2, ".s") == 0;
+                    if (hasScript) {
+                        std::string relPath = descName;
+                        std::replace(relPath.begin(), relPath.end(), '\\', '/');
+                        std::string fullPath = std::string(scriptRoot) + "/" + relPath;
+                        skExecutableContext loadCtxt(&interpreter);
+                        try {
+                            auto door = std::make_unique<sk_bindings::DoorExecutable>(
+                                skString(fullPath.c_str()), loadCtxt, stack.player());
+                            skRValueArray args;
+                            args.append(skRValue(0));  // placeholder for Init's "(s)" parameter
+                            skRValue ret;
+                            skExecutableContext callCtxt(&interpreter);
+                            door->method(skString("Init"), args, ret, callCtxt);
+                            DoorInstance inst;
+                            inst.x = static_cast<float>(e.x);
+                            inst.y = static_cast<float>(e.y);
+                            inst.z = static_cast<float>(e.z);
+                            inst.modelArchiveIndex = desc->modelArchiveIndex;
+                            inst.script = std::move(door);
+                            gameDoors.push_back(std::move(inst));
+                        } catch (skParseException& ex) {
+                            std::printf("shadowkey-port: PARSE ERROR loading door %s: %s\n",
+                                        fullPath.c_str(), ex.toString().ptr());
+                        } catch (skRuntimeException& ex) {
+                            std::printf("shadowkey-port: RUNTIME ERROR loading door %s: %s\n",
+                                        fullPath.c_str(), ex.toString().ptr());
+                        }
+                        continue;
+                    }
                     if (e.typeId == 202) {
                         std::string relPath = desc->name;
                         std::replace(relPath.begin(), relPath.end(), '\\', '/');
@@ -697,7 +765,8 @@ int main(int argc, char** argv) {
                     gameEntities.push_back({static_cast<float>(e.x), static_cast<float>(e.y),
                                              static_cast<float>(e.z), desc->modelArchiveIndex});
                 }
-                std::printf("shadowkey-port: %zu live monster(s) loaded\n", gameMonsters.size());
+                std::printf("shadowkey-port: %zu live monster(s), %zu live door(s) loaded\n",
+                            gameMonsters.size(), gameDoors.size());
             } else {
                 std::printf("shadowkey-port: failed to load zone '%s', staying in menu\n",
                             stack.requestedZone().c_str());
@@ -888,26 +957,65 @@ int main(int argc, char** argv) {
                     tryAttack(stack.player().rightItem());
                 }
 
+                // M15: Action::Use (Key3, docs/INPUT_HANDLING.md's default
+                // scheme) interact binding -- doors only, see DoorInstance's
+                // comment for scope. Same nearest-in-range-and-facing-cone
+                // targeting tryAttack uses above, reused here (and again
+                // below for the on-screen use-text prompt) via
+                // FindNearbyDoor.
+                constexpr float kInteractRange = 140.0f;  // world units, slightly past melee range
+                auto findNearbyDoor = [&]() -> DoorInstance* {
+                    float fwdX = std::cos(gameCamera.yaw), fwdY = std::sin(gameCamera.yaw);
+                    DoorInstance* nearest = nullptr;
+                    float bestDist = kInteractRange + 1.0f;
+                    for (DoorInstance& d : gameDoors) {
+                        float ddx = d.x - gameCamera.x, ddy = d.y - gameCamera.y;
+                        float dist = std::sqrt(ddx * ddx + ddy * ddy);
+                        if (dist > kInteractRange || dist < 1.0f) continue;
+                        float facing = (fwdX * ddx + fwdY * ddy) / dist;
+                        if (facing < 0.5f) continue;  // ~60 degree forward cone
+                        if (dist < bestDist) {
+                            bestDist = dist;
+                            nearest = &d;
+                        }
+                    }
+                    return nearest;
+                };
+                if (input.ConsumeBoundJustPressed(sk::Action::Use)) {
+                    if (DoorInstance* door = findNearbyDoor()) {
+                        door->script->InvokeOnUse();
+                    }
+                }
+
                 // Per-frame render list: static props (gameEntities,
-                // already excludes rats -- see the zone-load block
-                // above) plus one PlacedEntity per still-alive monster;
-                // PlacedEntity's shape (x,y,z,modelArchiveIndex) already
-                // covers what a live monster needs to render, no
-                // renderer changes required. Dead monsters simply stop
-                // appearing here -- no death animation/pose (M8's own
-                // "frame 0/skin 0 only" simplification).
+                // already excludes rats/doors -- see the zone-load block
+                // above) plus one PlacedEntity per still-alive monster and
+                // one per live door (its accumulated yaw() reflects any
+                // real AddRotationTurn() calls OnUse() has made, so an
+                // opened door visibly swings); PlacedEntity's shape
+                // already covers both, no further renderer changes
+                // needed. Dead monsters simply stop appearing here -- no
+                // death animation/pose (M8's own "frame 0/skin 0 only"
+                // simplification).
                 std::vector<sk::PlacedEntity> frameEntities = gameEntities;
                 for (const MonsterInstance& m : gameMonsters) {
                     if (m.script->alive()) {
                         frameEntities.push_back({m.x, m.y, m.z, m.modelArchiveIndex});
                     }
                 }
+                for (const DoorInstance& d : gameDoors) {
+                    frameEntities.push_back(
+                        {d.x, d.y, d.z, d.modelArchiveIndex, d.script->yawRadians()});
+                }
                 zoneRenderer.Render(backbuffer, *gameZone, gameCamera, frameEntities, &modelArchive);
                 RenderHud(backbuffer, stack.player(), spriteArchive, gameCamera.yaw);
-                // Minimal combat feedback -- name + HP of whatever
-                // monster is currently in melee range/facing cone.
-                // Drawn at y=34, below the real compass banner
+                // Minimal combat/interact feedback -- name + HP of
+                // whatever monster is currently in melee range/facing
+                // cone, else the nearby door's real SetUseText() prompt
+                // (monster combat takes priority when both are in range
+                // at once). Drawn at y=34, below the real compass banner
                 // (RenderHud now occupies y=0..31 across the top).
+                const MonsterInstance* facingMonster = nullptr;
                 for (const MonsterInstance& m : gameMonsters) {
                     if (!m.script->alive()) continue;
                     float ddx = m.x - gameCamera.x, ddy = m.y - gameCamera.y;
@@ -916,10 +1024,20 @@ int main(int argc, char** argv) {
                     float fwdX = std::cos(gameCamera.yaw), fwdY = std::sin(gameCamera.yaw);
                     float facing = dist > 1.0f ? (fwdX * ddx + fwdY * ddy) / dist : 1.0f;
                     if (facing < 0.5f) continue;
-                    std::string label = m.script->name() + "  " + std::to_string(m.script->currentHealth()) +
-                                         "/" + std::to_string(m.script->maxHealth());
-                    sk::BitmapFont::DrawString(backbuffer, 4, 34, label, kSelectedTextColor);
+                    facingMonster = &m;
                     break;
+                }
+                if (facingMonster) {
+                    std::string label = facingMonster->script->name() + "  " +
+                                         std::to_string(facingMonster->script->currentHealth()) + "/" +
+                                         std::to_string(facingMonster->script->maxHealth());
+                    sk::BitmapFont::DrawString(backbuffer, 4, 34, label, kSelectedTextColor);
+                } else if (DoorInstance* door = findNearbyDoor()) {
+                    int useTextId = door->script->useTextId();
+                    if (useTextId >= 0) {
+                        sk::BitmapFont::DrawString(backbuffer, 4, 34, strings.Get(useTextId),
+                                                    kSelectedTextColor);
+                    }
                 }
                 window.Present(backbuffer);
                 return;

@@ -173,6 +173,12 @@ namespace sk {
 struct PlacedEntity {
     float x = 0, y = 0, z = 0;  // world units, same convention as Camera
     int modelArchiveIndex = -1;
+    // M15: local rotation around the vertical axis, radians -- only ever
+    // non-zero for a live DoorExecutable instance replaying its script's
+    // real AddRotationTurn() calls (main.cpp, door_executable.h). Every
+    // other placed entity keeps 0, matching this file's existing "no
+    // orientation" scope note above (still true for everything but doors).
+    float yaw = 0.0f;
 };
 
 class ZoneRenderer {

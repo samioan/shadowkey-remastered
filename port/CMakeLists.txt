@@ -65,6 +65,7 @@ add_library(sk_bindings STATIC
   src/simkin_bindings/button_executable.cpp
   src/simkin_bindings/combat.cpp
   src/simkin_bindings/combo_box_executable.cpp
+  src/simkin_bindings/door_executable.cpp
   src/simkin_bindings/floating_sprite_executable.cpp
   src/simkin_bindings/floating_text_executable.cpp
   src/simkin_bindings/game_constants.cpp
@@ -181,3 +182,8 @@ target_include_directories(sprite_smoke PRIVATE src)
 # Real N-Gage system font (.gdr) smoke test -- see src/tests/m15_font_smoke.cpp.
 add_executable(font_smoke src/tests/m15_font_smoke.cpp src/assets/gdr_font.cpp)
 target_include_directories(font_smoke PRIVATE src)
+
+# Action::Use interact binding (doors) smoke test -- see
+# src/tests/m15_interact_smoke.cpp.
+add_executable(interact_smoke src/tests/m15_interact_smoke.cpp)
+target_link_libraries(interact_smoke PRIVATE sk_bindings sk_render3d)

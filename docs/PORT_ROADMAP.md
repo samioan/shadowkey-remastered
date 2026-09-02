@@ -880,6 +880,80 @@ algorithms.
       as a real third state).
     - Full writeup: `docs/GRAPHICS_FORMAT.md`'s "Correction #2" section.
 
+- [x] **M15 -- Action::Use interact binding: doors** (this session). First
+      (narrow) slice of "Combat resolution (beyond the M12 slice)"'s
+      generic interact binding, same "one real category, not the whole
+      57-method native surface" precedent M12 set for combat -- pickups
+      and NPC talk stay unbound (see "Not attempted" below).
+    - **Real script, not a synthetic fixture**: `door.s`/`door02.s`
+      (read directly off the install image) are ordinary placed-entity
+      scripts on the real `Object/Entity (world base)` native class
+      (`shadowkey/simkin_native_bindings.json` trie `0x14d08`, docs/
+      SIMKIN_NATIVE_API.md) -- `Init()` calls `SetUseText(941)`/
+      `SetMPUsable(true)`; `OnUse()` toggles `saved_Open`, calling
+      `SetPassable`/`AddRotationTurn`/`DoorOpened`/`SetUseText` each
+      time. New `sk_bindings::DoorExecutable`
+      (`simkin_bindings/door_executable.h/.cpp`) actually runs these
+      through the vendored interpreter, same `skScriptedExecutable`-
+      backed pattern `MonsterExecutable`/`ItemExecutable` already
+      established -- confirmed against real `azra.ent` data (7 real
+      typeId-54 placements, all resolving to `door.s`) in the new
+      `interact_smoke` test (`src/tests/m15_interact_smoke.cpp`):
+      `useTextId`/rotation/`passable` all match the script's own literal
+      values across a full open-then-close cycle.
+    - **Which entities get a live script**: generalized past M12's
+      single-hardcoded-typeId check -- any placement whose
+      `entities.txt` category is 11 (door, docs/ZONE_FORMAT.md's
+      category table) *and* whose `name` column is an actual `.s`
+      script (not the `"!label"`-only convention most category-11
+      entries use for reused-category dungeon set-pieces with no unique
+      behavior of their own -- switches, urns, mushrooms, ... only 2 of
+      60 real category-11 typeIds are real scripts). Everything else
+      still falls through to the unchanged static-prop path.
+    - `AddRotationTurn`'s raw units share the same 65536-per-turn
+      fixed-point convention already confirmed for `.ent`'s
+      `rotOrScale` fields (docs/ZONE_FORMAT.md) -- `door.s`'s own
+      `-64*256` is exactly a quarter turn, a physically sensible 90-
+      degree swing. `render3d/zone_renderer.cpp`'s `SubmitModel` gained
+      a new `entityYaw` parameter (rotating each vertex's local X/Z
+      about the model's own origin before the existing camera
+      transform) to actually show it -- `PlacedEntity` gained a `yaw`
+      field, zero for every entity but a live door, so this is purely
+      additive to M8's existing "no orientation" placed-entity render
+      path.
+    - `SetPassable`/`SetMPUsable`/`DoorOpened` are stored/no-op only --
+      this port has no per-entity collision at all yet (only
+      `Zone::CircleHitsWall`'s tile-grid test), so a closed door was
+      never actually blocking movement to begin with (not a regression
+      this pass introduces), and no multiplayer/replication exists to
+      receive `DoorOpened`.
+    - `main.cpp`: Key3 (`Action::Use`, the real default binding, docs/
+      INPUT_HANDLING.md -- previously decoded but unwired) finds the
+      nearest live door within 140 units in a forward-facing cone (same
+      targeting shape M12's melee `tryAttack` already established) and
+      calls its real `OnUse()`. The door's real `SetUseText()` string
+      (`"Open door"`/`"Close door"`, resolved through the string table)
+      now shows as an on-screen prompt when facing a door in range, at
+      the same HUD line M12's monster-name/HP label uses (monster combat
+      takes priority when both are in range at once).
+    - **Visual confirmation**: extended `interact_smoke` to also render
+      one real door (headless, `ZoneRenderer`, same PPM-dump technique
+      `m8_render_entities_smoke.cpp` already established) before and
+      after a real `OnUse()` call -- the door's projected footprint
+      visibly changes from its closed orientation to a wider face-on
+      profile after opening, consistent with a door swinging into view.
+      Not independently confirmed in an actual windowed play session
+      (same caveat M12's writeup already carries -- can't drive the
+      real windowed game loop headlessly).
+    - **Not attempted**: pickups (`entities.txt` categories 3/8/9,
+      misc-loot/containers/consumables -- would need a world-to-
+      inventory transfer this port's `ItemExecutable`/`PlayerExecutable`
+      don't have yet) and NPC talk (category 7, merchants -- would need
+      a dialogue/menu-opening path from `OnUse()`, a materially
+      different scope from a stateless door toggle). Both stay genuinely
+      unbound, same as before this session -- `docs/PORT_ROADMAP.md`'s
+      "Next milestones" below still lists them.
+
 ## Next milestones (not yet started)
 
 Roughly in priority order for reaching "actually playable," not commitments:
@@ -896,11 +970,14 @@ Roughly in priority order for reaching "actually playable," not commitments:
   base class (~57 methods -- position, sound, physics-adjacent). Comparable
   in scope to M0-M11 combined, not a bounded decompile-and-patch pass.
   M12 above took the first narrow slice (one melee weapon vs. one
-  monster type, `UseLeftAction`/`UseRightAction` wired up); still open:
-  other monster types (each with its own script and stat block, trivial
-  per-type once M12's pattern exists), spellcasting, ranged weapons,
-  loot spawning, and the generic `Action::Use` interact binding (doors,
-  pickups, NPC talk -- still unbound).
+  monster type, `UseLeftAction`/`UseRightAction` wired up); M15 above
+  took a second (the generic `Action::Use` interact binding, doors
+  only). Still open: other monster types (each with its own script and
+  stat block, trivial per-type once M12's pattern exists), spellcasting,
+  ranged weapons, loot spawning, and `Action::Use`'s other two
+  categories -- pickups (world-to-inventory transfer) and NPC talk
+  (dialogue/menu-opening from `OnUse()`), see M15's "Not attempted"
+  note above for why both are a different scope than the door slice.
 - **Real save file format** -- M5's save system is simulated in-memory
   only; no on-disk save format has been RE'd yet.
 - **`FUN_1002c010`'s big single vitals bar** -- confirmed real (appears

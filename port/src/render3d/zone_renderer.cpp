@@ -332,9 +332,17 @@ void RasterizeModelTriangle(Backbuffer& backbuffer, std::vector<float>& depthBuf
 // simply passes a zero offset, see this file's header comment). See
 // RasterizeModelTriangle's own header comment for the local-axis/scale
 // assumptions baked into the per-vertex transform below.
+// entityYaw (M15): local rotation around the vertical axis, radians --
+// applied to each vertex's local X/Z before the camera transform, so a
+// door instance (see zone_renderer.h's PlacedEntity::yaw) visibly swings
+// open. Zero for every caller before M15 (room mesh, and every entity
+// but a live door), so this is purely additive -- cosEntityYaw=1/
+// sinEntityYaw=0 reduces the new rotation to a no-op.
 void SubmitModel(Backbuffer& backbuffer, std::vector<float>& depthBuffer, const Model& model,
                   int skinIndex, float offsetTileX, float offsetTileY, float offsetZ, float camX,
-                  float camY, float camZ, float cosYaw, float sinYaw, float focalX, float focalY) {
+                  float camY, float camZ, float cosYaw, float sinYaw, float focalX, float focalY,
+                  float entityYaw = 0.0f) {
+    float cosEntityYaw = std::cos(entityYaw), sinEntityYaw = std::sin(entityYaw);
     for (const ModelFace& face : model.faces) {
         if (face.vA < 0 || face.vB < 0 || face.vC < 0 ||
             static_cast<size_t>(face.vC) >= model.vertices.size() ||
@@ -356,8 +364,14 @@ void SubmitModel(Backbuffer& backbuffer, std::vector<float>& depthBuffer, const 
         ProjectedVertex pv3[3];
         bool anyBehindModel = false;
         for (int i = 0; i < 3; ++i) {
-            float rx = offsetTileX + mv[i]->x / kTileScale - camX;
-            float ry = offsetTileY + mv[i]->z / kTileScale - camY;
+            // Local X/Z rotated about the model's own origin before the
+            // world-space offset/camera transform -- local Y (up) is
+            // untouched, matching a door swinging on a vertical hinge.
+            float lx = mv[i]->x * cosEntityYaw - mv[i]->z * sinEntityYaw;
+            float lz = mv[i]->x * sinEntityYaw + mv[i]->z * cosEntityYaw;
+
+            float rx = offsetTileX + lx / kTileScale - camX;
+            float ry = offsetTileY + lz / kTileScale - camY;
             float rz = (offsetZ + mv[i]->y) / kTileScale - camZ;
 
             float viewRight = rx * sinYaw - ry * cosYaw;
@@ -466,7 +480,7 @@ void ZoneRenderer::Render(Backbuffer& backbuffer, const Zone& zone, const Camera
             float baseZ = pe.z;
 
             SubmitModel(backbuffer, depthBuffer, *model, 0, baseTileX, baseTileY, baseZ, camX, camY,
-                        camZ, cosYaw, sinYaw, focalX, focalY);
+                        camZ, cosYaw, sinYaw, focalX, focalY, pe.yaw);
         }
     }
 
