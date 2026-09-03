@@ -2549,16 +2549,25 @@ Roughly in priority order for reaching "actually playable," not commitments:
   (`AddEncounters`/`AddRandomSets`, random monster-group spawning --
   M24's own currently-inert stand-in); Zone effects beyond `SetZone`
   (`Vignette`/`SpawnWithinRadius`, ...).
-- ~~**The real status-effect system** `DoAttackRoll`'s `effectId` argument
-  selects~~ -- **resolved in M32**: the effect is chosen by the *spell
-  entity's own `entities.txt` typeId* (`FUN_100458e4`), not by
-  `DoAttackRoll`'s second argument, which is a magnitude. The "scripted
-  table" that was never found is `entities.txt` itself. **All nine
-  branches are now implemented** -- Fear and Paralyze (M32), Poison,
-  Disease, Drain, Blind and HarmArmor (M33), Absorb and IgniteFoe (M34).
-  What remains of this subsystem is the resistance *gate* (see M34) and
-  the caster spell-power stat both it and every effect's magnitude really
-  read.
+- **The caster's spell-power stat, and the resistance gate built on it**
+  -- all that is left of the status-effect system, whose nine branches are
+  now fully implemented (M32/M33/M34; the selector is the spell entity's
+  own `entities.txt` typeId via `FUN_100458e4`). Two connected gaps, both
+  rooted in one missing stat:
+    - The real `magnitude` behind every effect's parameters is the
+      *caster's* spell power (`stats+0x34`, index 0x18), clamped to 25.
+      This port has no such stat and substitutes the spell's own
+      `SetRating()` -- a documented substitution, not a recovered value.
+    - The dispatcher gates the **entire** effect, status included, behind
+      a hit roll of `casterPower * 0x100 / (casterPower + resistance)`
+      against `rand(0, 0x100)` (`FUN_1004bc60`/`FUN_1004bbd0`, defaulting
+      `casterPower` to 100 with no caster stats block). The port keeps a
+      flat resistance-subtraction model instead; adopting the real gate
+      needs the stat above and would change every existing spell.
+  Related: `pergan_asuul_crypt2.s` shows monsters casting these spells
+  themselves via `AddSpell(Level.CreateEntity(4024), 35)`, so a caster is
+  not always the player -- Absorb's heal currently always targets the
+  player, correct only because nothing but the player casts in this port.
 - **Small documented loose ends**, one call/argument each, left open in
   their own milestone's "Not attempted" note rather than guessed at:
   M21's empty-bag despawn (`QuitAndDestroyOpener`/`QueryDestroy`) and
@@ -2566,20 +2575,20 @@ Roughly in priority order for reaching "actually playable," not commitments:
   `CountInventory()`/`SetZone`'s real meaning; M24's `Level.Log(...)`.
 - **Real save file format** -- M5's save system is simulated in-memory
   only; no on-disk save format has been RE'd yet.
-- **`FUN_1002c010`'s exact real trigger state(s)** -- resolved as a
-  zone-transition loading-progress bar, M26 below (not the earlier "enemy
-  lock-on/target health bar" guess, corrected by the user with a real
-  reference). One narrower gap remains: which of the 4 real
-  `ScreenModeController` mode values that gate it (3, 4, 10, 0x1f) maps to
-  which real scenario (zone travel vs. save-load vs. initial boot splash,
-  etc.) -- M26's own entry has the details.
+- **Which scenario each of `FUN_1002c010`'s 4 gating modes means** -- the
+  function itself is resolved (M26: a zone-transition loading-progress
+  bar, not the earlier "enemy lock-on/target health bar" guess, corrected
+  by the user with a real reference). What is still open is narrower:
+  which of the 4 real `ScreenModeController` mode values that gate it
+  (3, 4, 10, 0x1f) maps to which real scenario -- zone travel vs.
+  save-load vs. initial boot splash, etc. M26's entry has the details.
 - **The real weapon-swing trigger** -- M25's RE pass fully decompiled the
   first-person viewmodel's draw function and struct shape but couldn't
   find the native call site that actually starts a swing (writes
   `WeaponViewState`'s `+0x230`/`+0x234`/`+0x238`), despite tracing every
-  write site reachable from the Weapon class dispatcher. Same "exhaustive
-  search, still open" footing as `FUN_1002c010` above -- see M25's own
-  entry and `simkin_bindings/weapon_viewmodel.h`'s class comment. This
+  write site reachable from the Weapon class dispatcher. Recorded as an
+  exhaustive-search-and-still-open gap rather than guessed at -- see M25's
+  own entry and `simkin_bindings/weapon_viewmodel.h`'s class comment. This
   port currently substitutes the `UseLeftAction`/`UseRightAction` keypress
   that already drives combat resolution, undecompiled.
 - **`AnimationClip::rate`'s real units** (M29) -- frames per second is the
