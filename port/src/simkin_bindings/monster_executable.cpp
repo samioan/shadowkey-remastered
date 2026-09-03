@@ -30,6 +30,18 @@ std::string MonsterExecutable::name() const {
     return m_Id.empty() ? std::string("?") : m_Id;
 }
 
+void MonsterExecutable::PlayNoise(int soundId) {
+    // M28: -1 covers both "SetXNoise() never called" (e.g. an NPC that
+    // never sets one) and any script that genuinely passes a negative id
+    // -- neither should reach SoundArchive::GetSound(), same defensive
+    // shape the real slot-index convention already assumes elsewhere.
+    if (soundId < 0 || !m_Stack.sounds() || !m_Stack.audio()) return;
+    const sk::Sound* sound = m_Stack.sounds()->GetSound(soundId);
+    if (sound) m_Stack.audio()->PlaySfx(*sound);
+}
+
+void MonsterExecutable::PlayAttackNoise() { PlayNoise(m_AttackNoiseId); }
+
 void MonsterExecutable::ApplyDamage(int amount) {
     // m_Invulnerable (M16): real essential-NPC scripts (Tanyin Aldwyr and
     // the other named quest NPCs) call SetInvulnerable(true) in Init() --
@@ -42,6 +54,13 @@ void MonsterExecutable::ApplyDamage(int amount) {
     if (m_CurrentHealth <= 0) {
         m_CurrentHealth = 0;
         m_Alive = false;
+        // M28: death noise wins over hit noise -- both fire from the same
+        // single ApplyDamage() choke point (melee and spell HitTarget
+        // both route through here), so there's no risk of ever double-
+        // playing.
+        PlayNoise(m_DeathNoiseId);
+    } else {
+        PlayNoise(m_IsHitNoiseId);
     }
 }
 
@@ -227,13 +246,26 @@ bool MonsterExecutable::method(const skString& methodName, skRValueArray& args,
         m_Destroyed = true;
         return true;
     }
-    // SetAttackNoise/SetDeathNoise/SetIsHitNoise/SetWalkAnimation/
-    // SetSwingAnimation/SetDeathAnimation/SetIdleAnimation/
-    // PlayAnimationOffset/SetScale/AiDetect -- azra_rat.s calls all of
-    // these, but this port has no audio and no skeletal animation
-    // (consistent with every prior milestone), so they fall through to
-    // the soft-fail below rather than getting dedicated no-op handlers --
-    // there's nothing meaningful to store them into yet.
+    if (methodName == skString("SetAttackNoise") && args.entries() == 1) {
+        // M28: see PlayAttackNoise()'s comment.
+        m_AttackNoiseId = args[0].intValue();
+        return true;
+    }
+    if (methodName == skString("SetDeathNoise") && args.entries() == 1) {
+        m_DeathNoiseId = args[0].intValue();
+        return true;
+    }
+    if (methodName == skString("SetIsHitNoise") && args.entries() == 1) {
+        m_IsHitNoiseId = args[0].intValue();
+        return true;
+    }
+    // SetWalkAnimation/SetSwingAnimation/SetDeathAnimation/
+    // SetIdleAnimation/PlayAnimationOffset/SetScale/AiDetect -- azra_rat.s
+    // calls all of these, but this port has no skeletal animation and
+    // renders every entity at a fixed scale/skin (consistent with every
+    // prior milestone -- see docs/PORT_ROADMAP.md's M12 entry), so they
+    // fall through to the soft-fail below rather than getting dedicated
+    // no-op handlers -- there's nothing meaningful to store them into yet.
     if (skScriptedExecutable::method(methodName, args, returnValue, context)) {
         return true;
     }

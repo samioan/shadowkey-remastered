@@ -1309,6 +1309,7 @@ int main(int argc, char** argv) {
                                 stack.player().armorRating(), m.script->damageMin(),
                                 m.script->damageMax());
                             stack.player().ApplyDamage(dmg);
+                            m.script->PlayAttackNoise();
                             m.attackCooldownTicks = kAttackCooldownTicks;
                         }
                     } else {

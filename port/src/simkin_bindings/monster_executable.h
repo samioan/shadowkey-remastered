@@ -129,6 +129,17 @@ public:
     // OpenMenu(...) -- see the class comment).
     void InvokeOnUse();
 
+    // M28: azra_rat.s's own SetAttackNoise(15)/SetDeathNoise(16)/
+    // SetIsHitNoise(17) -- the monster's own real per-instance combat
+    // sound-effect ids (same <zone>_sounds.txt manifest slot convention
+    // as PlaySound(), see method()'s comment), previously stored nowhere
+    // and soft-failed. ApplyDamage() below plays the hit/death noise
+    // itself (the one choke point every damage source -- melee, spell
+    // HitTarget -- already routes through), so only the attack noise
+    // needs a host-triggered call, played from main.cpp's monster-attack
+    // block at the same point it already rolls damage against the player.
+    void PlayAttackNoise();
+
     // Clamps m_CurrentHealth at 0 and flips alive() false there -- does
     // NOT itself invoke OnKilled(), matching ItemExecutable::
     // MarkForRemoval()'s split between "mutate state now" and "let the
@@ -145,6 +156,12 @@ public:
     void InvokeOnKilled();
 
 private:
+    // M28: shared by ApplyDamage()/PlayAttackNoise() -- same null-checked
+    // sounds()/audio() lookup the PlaySound() method handler already uses
+    // (monster_executable.cpp), just reusable for a host-triggered call
+    // instead of a script one.
+    void PlayNoise(int soundId);
+
     const sk::StringTable* m_Strings;
     PlayerExecutable& m_Player;
     MenuStack& m_Stack;
@@ -177,6 +194,12 @@ private:
     bool m_Invulnerable = false;
     std::string m_LootTag;  // M21: see lootTag()'s comment.
     bool m_Destroyed = false;  // M23: see destroyed()'s comment.
+    // M28: see PlayAttackNoise()'s comment -- -1 (SetXNoise() never
+    // called, e.g. an NPC) is a real, harmless no-play case, same
+    // sentinel convention m_NameId/m_UseTextId already use.
+    int m_AttackNoiseId = -1;
+    int m_DeathNoiseId = -1;
+    int m_IsHitNoiseId = -1;
 };
 
 }  // namespace sk_bindings
