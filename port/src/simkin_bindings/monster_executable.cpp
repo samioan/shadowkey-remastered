@@ -6,6 +6,7 @@
 #include "assets/sound_archive.h"
 #include "assets/string_table.h"
 #include "audio/audio_engine.h"
+#include "simkin_bindings/combat.h"
 #include "simkin_bindings/menu_stack.h"
 #include "simkin_bindings/native_binding_common.h"
 #include "simkin_bindings/player_executable.h"
@@ -42,6 +43,13 @@ void MonsterExecutable::PlayNoise(int soundId) {
 }
 
 void MonsterExecutable::PlayAttackNoise() { PlayNoise(m_AttackNoiseId); }
+
+// M37: see monster_executable.h / combat.h.
+int MonsterExecutable::spellResistance() const {
+    return SpellResistance(m_MagicResistance, m_Will);
+}
+
+int MonsterExecutable::spellToHit() const { return SpellToHit(m_Spellcast, m_Will); }
 
 void MonsterExecutable::ApplyDamage(int amount) {
     // m_Invulnerable (M16): real essential-NPC scripts (Tanyin Aldwyr and
@@ -337,6 +345,43 @@ bool MonsterExecutable::method(const skString& methodName, skRValueArray& args,
     }
     if (methodName == skString("SetMagicResistance") && args.entries() == 1) {
         m_MagicResistance = args[0].intValue();
+        return true;
+    }
+    if ((methodName == skString("SetWillpower") || methodName == skString("SetWill")) &&
+        args.entries() == 1) {
+        m_Will = args[0].intValue();
+        return true;
+    }
+    if ((methodName == skString("GetWill") || methodName == skString("GetWil") ||
+         methodName == skString("GetWillpower")) &&
+        args.entries() == 0) {
+        returnValue = skRValue(m_Will);
+        return true;
+    }
+    // M37: the real creature-kind field -- see monster_executable.h.
+    // Both setters take a bool in the corpus (`SetUndead(true)`), but the
+    // real handler ignores the argument and just assigns the kind, so a
+    // hypothetical SetUndead(false) would still mark the creature undead;
+    // transcribed as-is rather than "fixed", since nothing calls it that
+    // way.
+    if (methodName == skString("SetUndead") && args.entries() == 1) {
+        m_CreatureKind = kCreatureUndead;
+        return true;
+    }
+    if (methodName == skString("SetSpider") && args.entries() == 1) {
+        m_CreatureKind = kCreatureSpider;
+        return true;
+    }
+    if (methodName == skString("IsUndead") && args.entries() == 0) {
+        returnValue = skRValue(undead());
+        return true;
+    }
+    if (methodName == skString("GetSpellToHit") && args.entries() == 0) {
+        returnValue = skRValue(spellToHit());
+        return true;
+    }
+    if (methodName == skString("GetSpellResistance") && args.entries() == 0) {
+        returnValue = skRValue(spellResistance());
         return true;
     }
     if (methodName == skString("SetDamageMin") && args.entries() == 1) {

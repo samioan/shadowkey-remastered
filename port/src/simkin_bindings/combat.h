@@ -65,15 +65,58 @@ int RollSpellDamage(int rating, int targetMagicResistance);
 // (which is now exactly `SpellDamageAfterResistance(rating * 3, ...)`, an
 // identity refactor -- its behaviour is unchanged).
 //
-// Absorb and IgniteFoe need it separately because their damage comes from
-// the real decompiled roll rather than from `rating * 3`, but still has to
-// meet the same resistance model every other spell in this port already
-// uses. The real engine instead resolves resistance as a *hit chance*
-// gate before the whole effect -- `casterPower * 256 / (casterPower +
-// resistance)` against a 0..0x100 roll, gating the status effect too, not
-// just the damage. Not adopted: it would silently change every existing
-// spell's behaviour, and the caster-power term reads the same spell-power
-// stat this port doesn't have (see ItemExecutable's magnitude comment).
+// M37 retired this from the status-effect dispatcher: the real engine does
+// not subtract resistance from spell damage at all, it resolves resistance
+// as a *hit chance* gate in front of the whole effect (RollSpellHit()
+// below). Kept only for RollSpellDamage()'s own from-scratch path, which
+// covers spells that are not in the real dispatcher's typeId table.
 int SpellDamageAfterResistance(int rawDamage, int targetMagicResistance);
+
+// ---------------------------------------------------------------------
+// M37: the real magic to-hit model. Unlike everything above, none of this
+// is from-scratch -- all four functions are transcriptions of decompiled
+// code, and the two stat formulas are each confirmed twice over (once in
+// the standalone helper the dispatcher calls, once in the Character-stats
+// native binding a script can call directly, which compute the same thing
+// inline).
+//
+// The stats block's own layout was recovered the same pass, from
+// FUN_1004ad40's index switch cross-checked against FUN_10048244's
+// getters: `+0x04` spellcast, `+0x06` magic resistance, `+0x1a` willpower,
+// `+0x34` character level.
+
+// `GetSpellToHit` (Character-stats index 3) / FUN_1004bc60 -- how hard
+// this caster's magic lands: `spellcast + 2 * willpower`.
+//
+// Both real functions add a further enchantment term for an equipped item
+// whose enchantment type is 4 (to-hit) or 7 (resistance, in the function
+// below); this port has no enchantment objects to read one from, and the
+// omission is a missing bonus rather than a wrong formula.
+int SpellToHit(int spellcast, int willpower);
+
+// `GetSpellResistance` (Character-stats index 4) / FUN_1004bbd0 -- how
+// hard it is to land magic on this target: `magicResistance +
+// willpower / 5`. The /5 is a magic-multiply in the binary (0x66666667
+// with a 33-bit shift), not a written division.
+int SpellResistance(int magicResistance, int willpower);
+
+// The gate itself, from FUN_100458e4:
+//
+//   chance = (power << 16) / ((power + resistance) * 0x100)
+//
+// i.e. `power * 256 / (power + resistance)`, in 0..0x100 -- kept in the
+// real integer order so the truncation matches step for step. A caster
+// with no power at all (`power <= 0`) gets 0 and can never land anything.
+int SpellHitChance(int casterPower, int targetResistance);
+
+// `chance == 0x100 || rand(0, 0x100) < chance`. The `== 0x100` special
+// case is the engine's own and is load-bearing: a zero-resistance target
+// yields exactly 0x100, which a `< chance` roll over [0, 0x100] would
+// still miss 1 time in 257.
+//
+// This gates the **entire** effect, status included -- the real dispatcher
+// does all its damage and status work inside this branch, so a resisted
+// Poison applies no poison at all rather than a weakened one.
+bool RollSpellHit(int casterPower, int targetResistance);
 
 }  // namespace sk_bindings

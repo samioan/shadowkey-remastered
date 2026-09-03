@@ -5,6 +5,7 @@
 
 #include "assets/sound_archive.h"
 #include "audio/audio_engine.h"
+#include "simkin_bindings/combat.h"
 #include "simkin_bindings/game_constants.h"
 #include "simkin_bindings/item_executable.h"
 #include "simkin_bindings/menu_stack.h"
@@ -113,6 +114,15 @@ void PlayerExecutable::SetHealth(int value) {
     m_Health = value;
     if (m_MaxHealth < value) m_Health = m_MaxHealth;
     if (m_Health < 0) m_Health = 0;
+}
+
+// M37: the real derived stats -- see combat.h. Both are computed, never
+// stored: the shipped engine's own GetSpellToHit/GetSpellResistance
+// bindings recompute them on every read too.
+int PlayerExecutable::spellToHit() const { return SpellToHit(m_Spellcast, m_Will); }
+
+int PlayerExecutable::spellResistance() const {
+    return SpellResistance(m_MagicResistance, m_Will);
 }
 
 int PlayerExecutable::UpdateEquipStatus(ItemExecutable* item, bool equipping) {
@@ -384,7 +394,11 @@ bool PlayerExecutable::method(const skString& methodName, skRValueArray& args,
         returnValue = skRValue(m_StrengthBonus);
         return true;
     }
-    if (methodName == skString("GetWill") && args.entries() == 0) {
+    // GetWil/GetWill/GetWillpower are three real bindings on the same
+    // field (indices 0x1d/0x1e/0x3c all read stats+0x1a).
+    if ((methodName == skString("GetWill") || methodName == skString("GetWil") ||
+         methodName == skString("GetWillpower")) &&
+        args.entries() == 0) {
         returnValue = skRValue(m_Will);
         return true;
     }
@@ -435,12 +449,40 @@ bool PlayerExecutable::method(const skString& methodName, skRValueArray& args,
         returnValue = skRValue(armorRating());
         return true;
     }
+    // M37: both were flat stored numbers; both are now the real derived
+    // formulas (combat.h), so statsscreen.s shows a value that actually
+    // moves with willpower the way the shipped game's does.
     if (methodName == skString("GetSpellToHit") && args.entries() == 0) {
-        returnValue = skRValue(m_SpellToHit);
+        returnValue = skRValue(spellToHit());
         return true;
     }
     if (methodName == skString("GetSpellResistance") && args.entries() == 0) {
-        returnValue = skRValue(m_SpellResistance);
+        returnValue = skRValue(spellResistance());
+        return true;
+    }
+    if (methodName == skString("GetSpellcast") && args.entries() == 0) {
+        returnValue = skRValue(m_Spellcast);
+        return true;
+    }
+    if (methodName == skString("GetMagicResistance") && args.entries() == 0) {
+        returnValue = skRValue(m_MagicResistance);
+        return true;
+    }
+    if (methodName == skString("SetSpellcast") && args.entries() == 1) {
+        m_Spellcast = args[0].intValue();
+        return true;
+    }
+    if (methodName == skString("SetMagicResistance") && args.entries() == 1) {
+        m_MagicResistance = args[0].intValue();
+        return true;
+    }
+    if ((methodName == skString("SetWillpower") || methodName == skString("SetWill")) &&
+        args.entries() == 1) {
+        m_Will = args[0].intValue();
+        return true;
+    }
+    if (methodName == skString("SetLevel") && args.entries() == 1) {
+        m_Level = args[0].intValue();
         return true;
     }
     if (methodName == skString("GetSpecialAbilityText") && args.entries() == 0) {

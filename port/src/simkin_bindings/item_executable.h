@@ -106,7 +106,10 @@ public:
     //
     // This port loads a spell by script *path* rather than by typeId, but
     // that is the same relation -- entities.txt maps one to the other --
-    // so the effect is resolved from the script filename.
+    // so the effect is resolved from the script filename, unless the
+    // script set its own typeId with SetSpellType() (M37), which is both
+    // more direct and the only way to tell apart the four typeIds that
+    // share a script file (50/4006 blaze.s, 4012/4017 DoomHammer.s).
     enum StatusEffect {
         kEffectNone,
         kEffectFear,       // 4020 spells\Fear.s
@@ -118,8 +121,40 @@ public:
         kEffectHarmArmor,  // 4023 spells\HarmArmor.s
         kEffectAbsorb,     // 4009 spells\Absorb.s      (M34)
         kEffectIgniteFoe,  // 4024 spells\IgniteFoe.s   (M34)
+        // ---- M37: the dispatcher's four remaining branches, all
+        // damage-only (they set the shared min/max pair and then fall off
+        // the end of the status switch without applying anything further).
+        // Naming each one took entities.txt: the typeIds are what
+        // FUN_100458e4 switches on, and entities.txt is what maps them to
+        // a shipped script.
+        kEffectBlaze,          // 50   blaze.s
+        kEffectBlazeGreater,   // 4006 blaze.s   (flat 45..50, no scaling)
+        kEffectDeadToDust,     // 4002 spells\DeadToDust.s
+        kEffectDoomHammer,     // 4012 + 4017 spells\DoomHammer.s
+        kEffectDeathHowl,      // 4035 spells\DeathHowl.s
     };
     StatusEffect statusEffect() const;
+
+    // M37: the spell entity's own entities.txt typeId, when the script set
+    // one with SetSpellType() -- 0 when it did not (every plain spells\*.s
+    // is loaded here by path, and only the scroll/unique wrappers such as
+    // spells\IgniteScroll.s carry an explicit SetSpellType).
+    int spellType() const { return m_SpellType; }
+
+    // M37: the Spell class's own SetLevel/GetLevel (`spell+0x1d0`), and
+    // SetScroll (`spell+0x1d4`). Together they are the *fallback* half of
+    // the real magnitude rule in FUN_100458e4:
+    //
+    //   if (!scroll && (caster == null || casterIsCharacter))
+    //        magnitude = casterLevel;      // stats+0x34
+    //   else magnitude = spell->level;     // spell+0x1d0
+    //
+    // which is why the shipped scroll and "unique" spell items
+    // (spells\IgniteScroll.s, spells\U_Blaze_lvl5.s, ...) are exactly the
+    // scripts that call SetLevel and no plain spell does: a scroll's power
+    // is fixed by the scroll, everything else scales with who cast it.
+    int spellLevel() const { return m_SpellLevel; }
+    bool scroll() const { return m_Scroll; }
 
     // Host-side accessors -- used by MenuExecutable's inventory-table
     // population (DisplayWeaponsPage etc.) and PlayerExecutable's equip
@@ -208,8 +243,18 @@ public:
     // to infer itemType() the way SetDamageMin/SetArmorValue/SetUsable
     // already do, unlike every other category setter in this class).
     // Never read back by any real script either (no GetRating() call
-    // anywhere in the corpus) -- host-side only, DoAttackRoll()'s own
-    // damage formula.
+    // anywhere in the corpus) -- host-side only, RollSpellDamage()'s
+    // from-scratch fallback for spells outside the real dispatcher.
+    //
+    // M37 retired it as the status-effect magnitude, which is what it used
+    // to stand in for. Reading the whole spells/ directory at once made
+    // the substitution untenable: the values are a dense, near-sequential
+    // run in alphabetical order (absorb 1, blind 3, bodytomind 5,
+    // curedisease 6, curepoison 7, ... azrasustenance 28) with duplicates
+    // across unrelated spells (bodytomind and disease are both 5, poison
+    // and daedricweapon both 8), and absent entirely from the scroll and
+    // u_*_lvlN.s variants -- an ordinal, not a power. The real magnitude
+    // is the caster's level; see spellLevel() above.
     int rating() const { return m_Rating; }
 
 private:
@@ -247,6 +292,10 @@ private:
 
     // M22: see rating()'s comment above.
     int m_Rating = 0;
+    // M37: see spellType()/spellLevel()/scroll().
+    int m_SpellType = 0;
+    int m_SpellLevel = 0;
+    bool m_Scroll = false;
     // M36: see destroyWhenEmpty()/templateId() above.
     bool m_DestroyWhenEmpty = false;
     int m_TemplateId = -1;

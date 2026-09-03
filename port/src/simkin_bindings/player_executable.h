@@ -163,6 +163,21 @@ public:
     // Clamps m_Health at 0 -- mirrors MonsterExecutable::ApplyDamage().
     void ApplyDamage(int amount);
 
+    // M37: the caster side of the real magic to-hit model (see combat.h).
+    //
+    // level() is the real `magnitude` behind every status-effect branch --
+    // FUN_100458e4 reads the caster's stats block `+0x34`, which
+    // FUN_10048244's own GetLevel/SetLevel bindings identify as the
+    // character level, and clamps it to 25. It is not the spell's
+    // SetRating(), which the same pass showed is a per-spell *ordinal*
+    // (absorb 1, blind 3, curedisease 6, ... azrasustenance 28 -- a dense
+    // run with duplicates, and absent entirely from the u_*_lvlN.s and
+    // scroll variants, which set SetLevel instead).
+    int level() const { return m_Level; }
+    int willpower() const { return m_Will; }
+    int spellToHit() const;
+    int spellResistance() const;
+
     // M34: the real stats-block SetHealth (FUN_1004bb88), which is three
     // instructions long and does exactly one interesting thing -- it
     // clamps into [0, maxHealth], so nothing can ever overheal:
@@ -252,7 +267,13 @@ private:
     int m_Will = 50, m_Speed = 50, m_Personality = 50;
     int m_Intelligence = 50, m_Agility = 50, m_Endurance = 50, m_Luck = 50;
     int m_BaseDefense = 10, m_BaseAttack = 10;
-    int m_SpellToHit = 50, m_SpellResistance = 0;
+    // M37: the two *base* stats the real spell to-hit / resistance
+    // formulas are built from (`+0x04` and `+0x06` of the stats block) --
+    // what statsscreen.s shows is the derived value, computed in
+    // spellToHit()/spellResistance() from these plus willpower, not a
+    // stored number. Same fixed-placeholder footing as the rest of the
+    // block (see the class comment); the *formulas* are recovered.
+    int m_Spellcast = 50, m_MagicResistance = 0;
 
     std::vector<std::unique_ptr<ItemExecutable>> m_Inventory;
     ItemExecutable* m_LeftItem = nullptr;

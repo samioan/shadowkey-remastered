@@ -124,6 +124,20 @@ int main(int argc, char** argv) {
     // not a damage spell at all: it applies -10 to attack and -10 to
     // defense and sets the blind flag. So the right assertion is that it
     // deals *no* damage and applies exactly those modifiers.
+    // M37: the real dispatcher gates the whole effect behind a hit roll
+    // (`power * 256 / (power + resistance)` against rand(0, 0x100)), so
+    // with the rat's real resistance of 3 this assertion would hold only
+    // ~97% of the time. Zeroing it makes the chance exactly 0x100, which
+    // the engine's own `== 0x100` special case turns into a certainty --
+    // the gate's own arithmetic is pinned in m37_spellpower_smoke instead,
+    // where the real resistance value can be asserted without a cast.
+    {
+        skRValueArray zero;
+        zero.append(skRValue(0));
+        skRValue r;
+        skExecutableContext c(&interpreter);
+        rat->method(skString("SetMagicResistance"), zero, r, c);
+    }
     int healthBefore = rat->currentHealth();
     blindRaw->InvokeHitTarget(rat.get());
     int healthAfter = rat->currentHealth();

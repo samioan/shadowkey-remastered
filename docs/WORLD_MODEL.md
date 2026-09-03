@@ -452,56 +452,149 @@ engine timer counts in. (A second, independent periodic channel lives at
 `+0x78`/`+0x7a`/`+0x7c`; `+0x7c == 7` regenerates health by `+0x34` and
 `+0x7c == 8` drains it by `+0x76`. IgniteFoe uses that one.)
 
-**Stat indices** come from `FUN_1004ad40`'s switch, which maps an index to
-a halfword in the stats block; `kind` 1 adds to the current value, 3
-subtracts, anything else assigns. Cross-checked against the character-stats
-dispatcher (0x10048244), where `SetAttack` writes the block's first
-halfword, `SetDefense` the second and `SetArmorValue` the seventh:
+#### The stats block's own layout
 
-| index | field | | index | field |
-|-------|-------|-|-------|-------|
-| 1 | attack (`+0x00`) | | 0x11-0x13 | max health / fatigue / magicka (`+0x24`/`+0x26`/`+0x28`) |
-| 2 | defense (`+0x02`) | | 0x14-0x16 | current health / fatigue / magicka (`+0x2a`/`+0x2c`/`+0x2e`), each clamped to its max and to >= 0 |
-| 4 | magic resistance (`+0x06`) | | 0x18 | spell power (`+0x34`) |
-| 7 | armor value (`+0x0c`) | | 0x20 | sets/clears effect flag bit 4 (blind) |
+Recovered in full by cross-referencing two independent switches:
+`FUN_1004ad40`, which maps a *stat index* to a halfword (`kind` 1 adds to
+the current value, 3 subtracts, anything else assigns), and the
+character-stats dispatcher `FUN_10048244`, whose 85 named bindings read
+and write those same halfwords by name. Where the two agree, the field is
+named by the shipped engine itself, not inferred:
 
-**Every branch, in the engine's own parameters:**
+| offset | field | named by | | offset | field | named by |
+|--------|-------|----------|-|--------|-------|----------|
+| `+0x00` | attack | `SetAttack` / index 1 | | `+0x1a` | **willpower** | `GetWill`/`GetWil`/`GetWillpower` / index 0xc |
+| `+0x02` | defense | `SetDefense` / index 2 | | `+0x1c` | speed | `GetSpeed` / index 0xd |
+| `+0x04` | **spellcast** | `GetSpellcast` / index 3 | | `+0x1e` | endurance | `GetEndurance` / index 0xe |
+| `+0x06` | **magic resistance** | `GetMagicResistance` / index 4 | | `+0x24`–`+0x28` | max health / fatigue / magicka | indices 0x11–0x13 |
+| `+0x08`/`+0x0a` | damage min / max | `GetDamageMin`/`Max` / indices 5, 6 | | `+0x2a`–`+0x2e` | current health / fatigue / magicka | indices 0x14–0x16, each clamped to its max and to >= 0 |
+| `+0x0c` | armor value | `SetArmorValue` / index 7 | | `+0x30` | experience (32-bit) | `GetExperience` / index 0x17 |
+| `+0x0e` | exp worth | `GetExpWorth` / index 8 | | `+0x34` | **character level** | `GetLevel`/`SetLevel` / index 0x18 |
+| `+0x14` | strength | `GetStrength` | | `+0x38` | gold (32-bit) | `GetGold`/`SetGold` / index 0x19 |
+| `+0x16` | intelligence | `GetIntelligence` / index 0xa | | — | — | index 0x20 sets/clears effect flag bit 4 (blind) |
+| `+0x18` | agility | `GetAgility` / index 0xb | | | | |
 
-| effect | typeId | what it does |
-|--------|--------|--------------|
-| Blind | 4010 | attack −10 **and** defense −10 for `magnitude + 5`s; plus effect flag 4, applied only when the target is not the player |
-| Drain | 4018 | attack −10 for `magnitude + 8`s |
-| Fear | 4020 | `FUN_10086b98(target, 4, magnitude * 5)` — the flee package |
-| HarmArmor | 4023 | armor −`magnitude` for `magnitude + 8`s |
-| IgniteFoe | 4024 | `(magnitude+1)*2 .. (magnitude+1)*5` damage, then the second periodic channel: `+0x7c = 8`, `+0x78 = magnitude << 9`, `+0x76 = 1` — 1 damage a second for `magnitude * 2`s |
-| Paralyze | 4025 | arms the target's `+0x294` action lockout via `(magnitude + 4) * 0x100` |
-| Disease | 4033 | attack −2 (when `magnitude < 7`) else −3, **and** defense −3, both for a fixed 30s — the only effect whose duration ignores magnitude |
-| Poison | 4034 | effect flag 8, DoT kind 3 → 3 damage per 256 units for `magnitude`s |
-| Absorb | 4009 | a fixed `magnitude + 12` damage, then heals the caster by `damage * magnitude / 25 + 6` (`FUN_1004bb88`) |
+Note that indices 0xa–0xc and 0xe–0x10 — the attribute block — are the
+only ones whose write path also calls `FUN_10049698`, i.e. a recompute of
+whatever is derived from them. Strength (`+0x14`) has no index at all and
+can only be set by name.
 
-**`magnitude` is not the script's argument.** It is read from the
-*caster's* spell-power stat (`stats+0x34`, index 0x18) and clamped to 25;
-the dispatcher never looks at what `DoAttackRoll` was passed. The proof is
-in the scripts: real `Poison.s` and `Disease.s` call `DoAttackRoll(target)`
-with no second argument at all, yet both apply fully-parameterised effects.
+> **Correction.** `+0x34` was previously recorded here as "spell power".
+> It is the **character level**: `FUN_10048244`'s `GetLevel` (binding
+> index 0x37) reads exactly that halfword and `SetLevel` writes it. Every
+> statement below that used to say "spell power" means the caster's level,
+> and the 25 that caps it is the level cap.
+
+#### The magic to-hit model
+
+The dispatcher does not subtract resistance from spell damage. It resolves
+resistance once, as a **hit chance in front of the whole effect** — damage
+and status alike are applied inside that branch, so a resisted Poison
+applies no poison at all rather than a weaker one:
+
+```c
+power  = casterStats ? GetSpellToHit(casterStats, caster) : 100;
+resist = targetStats ? GetSpellResistance(targetStats, caster) : 0;
+chance = power > 0 ? (power << 16) / ((power + resist) * 0x100) : 0;
+if (chance == 0x100 || rand(0, 0x100) < chance) { /* everything */ }
+```
+
+The `chance == 0x100` short-circuit is load-bearing: an unresisting target
+yields exactly 0x100, which the inclusive `rand(0, 0x100)` would otherwise
+still miss 1 time in 257.
+
+Both terms have a standalone helper *and* a script-callable binding that
+computes the same thing inline — two independent transcriptions of each:
+
+| | helper | binding | formula |
+|---|---|---|---|
+| caster | `FUN_1004bc60` | `GetSpellToHit` (index 3) | `spellcast + 2 × willpower` |
+| target | `FUN_1004bbd0` | `GetSpellResistance` (index 4) | `magicResistance + willpower / 5` |
+
+The `/5` is a `0x66666667` magic multiply with a 33-bit shift, not a
+written division. Both helpers take a second argument (the caster entity)
+and add a further enchantment term for an equipped item whose enchantment
+type is 4 (to-hit) or 7 (resistance) — a bonus, not part of the base
+formula.
+
+**Every branch, in the engine's own parameters.** The dispatcher is really
+two switches on the same typeId: one picks a `min`/`max` damage pair
+(`max` first, then `min`, then `if (max <= min) max = min`; the actual
+value is `rand(min, max)` **only when `min != max`**, and the `DoDamage`
+call is guarded by `if (0 < max)`), and a second applies the status. Four
+typeIds are in the first switch only, five in the second only, and two
+(Absorb, IgniteFoe) are in both:
+
+| effect | typeId | script | damage pair | status |
+|--------|--------|--------|-------------|--------|
+| Blaze | 50 | `blaze.s` | `3 .. magnitude*3+3` (`6` with no caster stats) | — |
+| Blaze (greater) | 4006 | `blaze.s` | `45 .. 50` — the one branch with no magnitude term | — |
+| DeadToDust | 4002 | `spells\DeadToDust.s` | `(magnitude+1)*2 .. (magnitude+1)*5` | — (returns immediately unless the target is undead) |
+| DoomHammer | 4012, 4017 | `spells\DoomHammer.s` | `r = rand(1,10); magnitude*r + r`, fixed | — |
+| DeathHowl | 4035 | `spells\DeathHowl.s` | `r = rand(1,10); r*8 + 1 + magnitude`, fixed | — |
+| Absorb | 4009 | `spells\Absorb.s` | `magnitude + 12`, fixed | heals the caster by `damage * magnitude / 25 + 6` (`FUN_1004bb88`) |
+| IgniteFoe | 4024 | `spells\IgniteFoe.s` | `(magnitude+1)*2 .. (magnitude+1)*5` | second periodic channel: `+0x7c = 8`, `+0x78 = magnitude << 9`, `+0x76 = 1` — 1 damage a second for `magnitude * 2`s |
+| Blind | 4010 | `spells\Blind.s` | — | attack −10 **and** defense −10 for `magnitude + 5`s; plus effect flag 4, applied only when the target is not the player |
+| Drain | 4018 | `spells\Drain.s` | — | attack −10 for `magnitude + 8`s |
+| Fear | 4020 | `spells\Fear.s` | — | `FUN_10086b98(target, 4, magnitude * 5)` — the flee package |
+| HarmArmor | 4023 | `spells\HarmArmor.s` | — | armor −`magnitude` for `magnitude + 8`s |
+| Paralyze | 4025 | `spells\Paralyze.s` | — | arms the target's `+0x294` action lockout via `(magnitude + 4) * 0x100` |
+| Disease | 4033 | `spells\Disease.s` | — | attack −2 (when `magnitude < 7`) else −3, **and** defense −3, both for a fixed 30s — the only effect whose duration ignores magnitude |
+| Poison | 4034 | `spells\Poison.s` | — | effect flag 8, DoT kind 3 → 3 damage per 256 units for `magnitude`s |
+
+The script column is `entities.txt`, which is also what makes the two
+duplicate pairs visible: 50 and 4006 both point at `blaze.s`, and 4012 and
+4017 both at `DoomHammer.s`, so the typeId — not the script — is what
+selects the branch. (4012 draws its `r` twice and throws the first away;
+4017 draws once. Same distribution.)
+
+**DeadToDust's target test.** `FUN_10086f88(target)` is `monster+0x2d0 ==
+2`, and `monster+0x2d0` is a single creature-kind field: `SetSpider`
+writes 1, `SetUndead` writes 2, and the `IsUndead` binding is literally
+`field == 2`.
+
+#### `magnitude` is the caster's level
+
+It is **not** the script's argument — the dispatcher never looks at what
+`DoAttackRoll` was passed. The proof is in the scripts: real `Poison.s` and
+`Disease.s` call `DoAttackRoll(target)` with no second argument at all, yet
+both apply fully-parameterised effects.
+
+What it *is*:
+
+```c
+if (!spell->scroll /* +0x1d4 */ && (caster == null || casterIsCharacter))
+     magnitude = casterStats->level;   // stats+0x34
+else magnitude = spell->level;         // spell+0x1d0, the Spell SetLevel
+if (0x18 < magnitude) magnitude = 0x19;   // clamped to the level cap, 25
+```
+
+The scroll fallback is corroborated straight out of the shipped corpus:
+the *only* spell scripts that call the Spell class's own `SetLevel` are
+the scroll and "unique" wrappers — `spells\IgniteScroll.s` (`SetLevel(8)`),
+`spells\U_Blaze_lvl5.s`, `U_Blaze_lvl10.s`, `U_DoomHammer_lvl10.s`,
+`U_Frenzy_lvl10.s`, `U_Heal_Wound_lvl10.s`, `U_Ignite_Foe_8_lvl8.s` — each
+a three-line `SetLevel(N); SetSpellType(typeId); RunScript(realSpell)`
+wrapper whose level matches its own filename. No plain `spells\*.s` calls
+it. A found scroll casts at the scroll's power; a memorised spell casts at
+yours.
+
+> **`SetRating` is not this.** Every plain spell script calls
+> `SetRating(N)`, and the values across the whole `spells/` directory are a
+> dense near-alphabetical run with duplicates — absorb 1, blind 3,
+> bodytomind 5, disease 5, curedisease 6, curepoison 7, daedricweapon 8,
+> poison 8, deadtodust 9, … azrawrath 27, azrasustenance 28 — and are
+> absent from the scroll/unique variants entirely. It is a per-spell
+> ordinal, not a power.
 
 #### The two damage-carrying branches: Absorb and IgniteFoe
 
-Every other branch in the table above is pure status. The dispatcher's
-shared damage pair (`min`/`max`, local `local_250`/`iVar11`) stays at 0/0
-for them, so the `if (0 < max)` that guards the `DoDamage` call never
-fires and only the effect lands. Absorb and IgniteFoe are the two branches
-that set both — they deal damage *and* do something further with it.
-
-**The roll.** `max` is picked first and `min` second, then
-`if (min > max) max = min`, and the actual value is
-`rand(min, max)` — but **only when `min != max`**. Absorb sets them equal,
-which is what makes it the one spell in the table with no variance:
-
-| | `min` | `max` |
-|---|---|---|
-| Absorb (4009) | `magnitude + 12` | `magnitude + 12` |
-| IgniteFoe (4024) | `(magnitude + 1) * 2` | `(magnitude + 1) * 5` |
+The four typeIds above them in the table are damage-*only*, and the five
+below are status-only: for those, the shared damage pair (`min`/`max`,
+local `local_250`/`iVar11`) stays at 0/0, so the `if (0 < max)` that guards
+the `DoDamage` call never fires and only the effect lands. Absorb and
+IgniteFoe are the two branches that appear in both switches — they deal
+damage *and* do something further with it.
 
 **Absorb's heal.** After the damage call, the caster's stats block is
 handed to `FUN_1004bb88` — a three-instruction `SetHealth` that clamps
@@ -521,7 +614,7 @@ top of the function. The whole expression collapses to:
 > **heal = damage × magnitude / 25 + 6**
 
 i.e. absorb a share of the damage proportional to how far the caster's
-spell power has come toward its maximum, plus a flat 6. At the cap the
+**level** has come toward the level cap, plus a flat 6. At the cap the
 caster recovers the full hit and then some.
 
 **IgniteFoe and the second periodic channel.** `FUN_10049780` runs *two*
@@ -532,8 +625,8 @@ is the effect-flag channel poison uses. The second
 
 | kind | per second |
 |------|-----------|
-| 6 | `+0x2c` (current magicka) += spell power |
-| 7 | current health += spell power, clamped to max and to >= 0 |
+| 6 | `+0x2c` (current magicka) += `+0x34` (the caster's level) |
+| 7 | current health += `+0x34`, clamped to max and to >= 0 |
 | 8 | current health −= **`+0x76`**, and on reaching 0 calls the actor's kill vtable slot (`+0x28`) directly |
 
 IgniteFoe is the *only* site in the whole status-effect dispatcher that
@@ -562,17 +655,10 @@ gives it a lifetime of `magnitude * 2 << 8` — exactly the burn duration,
 from a completely independent write. That is the corroboration for the
 duration reading.
 
-**The resistance gate (not implemented in the port).** Worth recording
-because it sits above every branch here: the dispatcher wraps the entire
-effect — status included, not just damage — in a hit roll:
-
-```c
-chance = casterPower * 0x100 / (casterPower + targetResistance);   // 1/256ths
-if (chance == 0x100 || rand(0, 0x100) < chance) { ...apply everything... }
-```
-
-`casterPower` comes from `FUN_1004bc60` (defaulting to 100 when there is
-no caster stats block) and `targetResistance` from `FUN_1004bbd0`. The
-port keeps its own flat resistance-subtraction model instead; adopting
-this would change every existing spell's behaviour and needs the same
-caster spell-power stat the port does not have.
+**The resistance gate.** See "The magic to-hit model" above for the full
+treatment — it sits above every branch here, wrapping the entire effect
+(status included, not just damage) in a single hit roll. `casterPower`
+comes from `FUN_1004bc60`, defaulting to 100 when there is no caster stats
+block, and `targetResistance` from `FUN_1004bbd0`. Implemented in the
+port as of M37, replacing the flat resistance-subtraction model it used
+before, which had no basis in the decompile.

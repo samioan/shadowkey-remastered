@@ -155,6 +155,33 @@ public:
     // DoAttackRoll()).
     int magicResistance() const { return m_MagicResistance; }
 
+    // M37: the target side of the real magic to-hit model (combat.h) --
+    // `magicResistance + willpower / 5`, the same formula as the player's,
+    // because both read the same stats-block layout. Creature scripts
+    // never call SetWillpower (the whole corpus has exactly two
+    // SetWillpower call sites, both on the player), so in practice a
+    // creature resists with its SetMagicResistance() alone -- which is
+    // what makes an unresisting creature's chance exactly 0x100 and
+    // exercises the gate's `== 0x100` special case constantly.
+    int spellResistance() const;
+    // The caster side, for the real case of a *monster* casting: the
+    // corpus has creature scripts that cast these same spells
+    // (crypt2/pergan_asuul_crypt2.s's `AddSpell(Level.CreateEntity(4024),
+    // 35)`), so the caster is not always the player.
+    int spellToHit() const;
+    int willpower() const { return m_Will; }
+    int spellcast() const { return m_Spellcast; }
+
+    // M37: `monster+0x2d0`, a single creature-kind field the real
+    // dispatcher writes 1 for SetSpider and 2 for SetUndead, and whose
+    // IsUndead() binding is literally `field == 2`. Both setters exist in
+    // the shipped corpus (15 SetUndead(true) call sites) and both used to
+    // soft-fail here. Needed by the DeadToDust spell, whose whole branch
+    // is skipped unless the target is undead.
+    enum CreatureKind { kCreatureNormal = 0, kCreatureSpider = 1, kCreatureUndead = 2 };
+    bool undead() const { return m_CreatureKind == kCreatureUndead; }
+    bool spider() const { return m_CreatureKind == kCreatureSpider; }
+
     // M28: the real animation clip numbers this creature's script set --
     // indices into its model resource's own clip table (world/
     // model_archive.h's AnimationClip). -1 means the script never set one,
@@ -382,6 +409,8 @@ private:
     int m_Defense = 0;
     int m_Spellcast = 0;
     int m_MagicResistance = 0;
+    int m_Will = 0;  // M37: stats+0x1a -- see spellResistance()
+    int m_CreatureKind = kCreatureNormal;  // M37: monster+0x2d0
     int m_DamageMin = 0;
     int m_DamageMax = 0;
     int m_ArmorValue = 0;

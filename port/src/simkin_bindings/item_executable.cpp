@@ -32,9 +32,32 @@ ItemExecutable::ItemExecutable(const skString& filename, skExecutableContext& ct
 }
 
 ItemExecutable::StatusEffect ItemExecutable::statusEffect() const {
-    // See the header: the real engine keys this off the spell entity's
-    // entities.txt typeId; this port loads spells by path, which
-    // entities.txt maps to those same typeIds.
+    // M37: when the script declared its own typeId, use it -- that is
+    // literally what FUN_100458e4 switches on, and it is the only way to
+    // separate the two typeIds that share blaze.s (50 scales with the
+    // caster, 4006 is a flat 45..50) and the two that share DoomHammer.s.
+    switch (m_SpellType) {
+        case 50: return kEffectBlaze;
+        case 4002: return kEffectDeadToDust;
+        case 4006: return kEffectBlazeGreater;
+        case 4009: return kEffectAbsorb;
+        case 4010: return kEffectBlind;
+        case 4012:
+        case 4017: return kEffectDoomHammer;
+        case 4018: return kEffectDrain;
+        case 4020: return kEffectFear;
+        case 4023: return kEffectHarmArmor;
+        case 4024: return kEffectIgniteFoe;
+        case 4025: return kEffectParalyze;
+        case 4033: return kEffectDisease;
+        case 4034: return kEffectPoison;
+        case 4035: return kEffectDeathHowl;
+        default: break;
+    }
+
+    // Otherwise fall back on the script path: the real engine keys this
+    // off the spell entity's entities.txt typeId, and entities.txt maps
+    // those same typeIds to exactly these script files.
     auto endsWith = [&](const char* suffix) {
         std::string s(suffix);
         return m_ScriptPath.size() >= s.size() &&
@@ -59,6 +82,19 @@ ItemExecutable::StatusEffect ItemExecutable::statusEffect() const {
         endsWith("spells/u_ignite_foe_8_lvl8.s")) {
         return kEffectIgniteFoe;
     }
+    // M37: the four damage-only branches. Blaze is the one spell the game
+    // hands out at the very start (menus/newgamemenu.s gives it to every
+    // new character), and until now it was the *only* spell falling
+    // through to the from-scratch RollSpellDamage() path.
+    if (endsWith("blaze.s") || endsWith("spells/u_blaze_lvl5.s") ||
+        endsWith("spells/u_blaze_lvl10.s")) {
+        return kEffectBlaze;
+    }
+    if (endsWith("spells/deadtodust.s")) return kEffectDeadToDust;
+    if (endsWith("spells/doomhammer.s") || endsWith("spells/u_doomhammer_lvl10.s")) {
+        return kEffectDoomHammer;
+    }
+    if (endsWith("spells/deathhowl.s")) return kEffectDeathHowl;
     return kEffectNone;
 }
 
@@ -219,6 +255,31 @@ bool ItemExecutable::method(const skString& methodName, skRValueArray& args,
         m_Rating = args[0].intValue();
         return true;
     }
+    // --- M37: the Spell class's own three fields (see the header) ---
+    if (methodName == skString("SetSpellType") && args.entries() == 1) {
+        // Previously soft-failed. The value is the entities.txt typeId
+        // FUN_100458e4 switches on, so this is the most direct possible
+        // statement of "which spell is this" -- and the shipped scroll
+        // wrappers are the scripts that carry it.
+        m_SpellType = args[0].intValue();
+        return true;
+    }
+    if (methodName == skString("SetLevel") && args.entries() == 1) {
+        m_SpellLevel = args[0].intValue();
+        return true;
+    }
+    if (methodName == skString("GetLevel") && args.entries() == 0) {
+        returnValue = skRValue(m_SpellLevel);
+        return true;
+    }
+    if (methodName == skString("SetScroll") && args.entries() == 1) {
+        // Set by the loot generators, not by the spell script itself
+        // (broken1/loot_random_a.s's `Scroll.SetScroll(true)` and ~20 more)
+        // -- a found scroll casts at the scroll's own level, not the
+        // reader's, which is exactly the branch this flag selects.
+        m_Scroll = args[0].boolValue();
+        return true;
+    }
     if (methodName == skString("SetMPUsable") && args.entries() == 1) {
         // M34: "usable in multiplayer", called by 49 real scripts
         // (absorb.s among them). The real engine's own multiplayer paths
@@ -246,24 +307,121 @@ bool ItemExecutable::method(const skString& methodName, skRValueArray& args,
         // (RollSpellDamage()'s own comment) -- only damage applies.
         auto* target = static_cast<MonsterExecutable*>(args[0].obj());
         if (target && target->alive()) {
-            // M33: the effect's magnitude is NOT args[1].
+            StatusEffect effect = statusEffect();
+            PlayerExecutable& caster = m_Stack.player();
+
+            // M33: the effect's magnitude is NOT args[1] -- FUN_100458e4
+            // never looks at the script's argument. The proof is in the
+            // scripts: real Poison.s and Disease.s call
+            // `DoAttackRoll(target)` with no second argument at all, yet
+            // both apply a fully-parameterised effect.
             //
-            // FUN_100458e4 derives it from the *caster's* own spell-power
-            // stat (the stats block's +0x34, stat index 0x18) and clamps it
-            // to 25 -- it never looks at the script's argument. The proof
-            // is in the scripts themselves: real Poison.s and Disease.s
-            // call `DoAttackRoll(target)` with no second argument at all,
-            // yet both apply a fully-parameterised effect.
+            // M37 recovers what it *is*. The dispatcher reads the caster's
+            // stats block `+0x34`, which M37's stats-layout pass identifies
+            // as the **character level** (FUN_10048244's GetLevel/SetLevel
+            // bindings read and write exactly that halfword) -- not the
+            // "spell power" earlier notes guessed at, and not the spell's
+            // SetRating() this port used to substitute (see rating()'s
+            // header comment for why that substitution had to go).
             //
-            // This port has no spell-power stat on the player, so the
-            // spell's own SetRating() stands in: it is a per-spell power
-            // number (poison 8, blind 3, drain 12, fear 14, harmarmor 17,
-            // paralyze 20), it is what RollSpellDamage() already scales
-            // damage by, and it is defined for every spell including the
-            // two that pass no argument. Documented substitution, not a
-            // recovered value -- and the real clamp is reproduced.
-            int magnitude = (std::min)(m_Rating, 25);
-            switch (statusEffect()) {
+            // The full real rule, including its fallback:
+            //
+            //   if (!scroll && (caster == null || casterIsCharacter))
+            //        magnitude = casterLevel;
+            //   else magnitude = spell->level;   // the Spell SetLevel
+            //
+            // That fallback is why the shipped scroll/unique wrappers
+            // (spells\IgniteScroll.s SetLevel(8), U_Blaze_lvl5.s
+            // SetLevel(5), ...) are precisely the spell scripts that call
+            // SetLevel and no plain spell does.
+            int magnitude = m_Scroll ? m_SpellLevel : caster.level();
+            // The real clamp, transcribed literally: `if (0x18 < mag) mag =
+            // 0x19` -- a ceiling of 25, and the same 25 that divides
+            // Absorb's heal, so "magnitude / 25" is a fraction of the level
+            // cap.
+            if (magnitude > 24) magnitude = 25;
+
+            // ---- M37: the shared damage pair. FUN_100458e4 picks `max`
+            // first and `min` second for every branch that carries damage,
+            // then clamps `max` up to `min`; the status switch further down
+            // is a *separate* switch on the same typeId, which is why
+            // several spells do both and four do damage only.
+            int dmgMax = 0;
+            int dmgMin = 0;
+            switch (effect) {
+                case kEffectBlaze:
+                    // `local_250 = 3; iVar11 = casterStats ? mag*3+3 : 6`.
+                    dmgMin = 3;
+                    dmgMax = magnitude * 3 + 3;
+                    break;
+                case kEffectBlazeGreater:
+                    // The one branch with no magnitude term at all.
+                    dmgMin = 45;
+                    dmgMax = 50;
+                    break;
+                case kEffectDeadToDust:
+                    // Guarded in the real code by "target is undead"
+                    // (`vtable+0xe4` and FUN_10086f88) -- it returns
+                    // without doing anything at all otherwise. This port
+                    // has SetUndead() stored on MonsterExecutable, so the
+                    // guard is real, see undead() below.
+                    dmgMin = (magnitude + 1) * 2;
+                    dmgMax = (magnitude + 1) * 5;
+                    break;
+                case kEffectAbsorb:
+                    // Equal bounds are load-bearing: the roll only happens
+                    // when min != max, so Absorb has no variance.
+                    dmgMax = magnitude + 12;
+                    dmgMin = dmgMax;
+                    break;
+                case kEffectDoomHammer: {
+                    // `r = rand(1,10); max = mag*r + r; min = max` -- the
+                    // variance is in `r`, not in a min..max roll. (Typeid
+                    // 4012 draws `r` twice and throws the first away; 4017
+                    // draws once. Same distribution, so not reproduced.)
+                    int r = 1 + std::rand() % 10;
+                    dmgMax = magnitude * r + r;
+                    dmgMin = dmgMax;
+                    break;
+                }
+                case kEffectIgniteFoe:
+                    dmgMin = (magnitude + 1) * 2;
+                    dmgMax = (magnitude + 1) * 5;
+                    break;
+                case kEffectDeathHowl: {
+                    int r = 1 + std::rand() % 10;
+                    dmgMax = r * 8 + 1 + magnitude;
+                    dmgMin = dmgMax;
+                    break;
+                }
+                default:
+                    // Every pure-status branch leaves the pair at 0/0.
+                    break;
+            }
+            if (dmgMax <= dmgMin) dmgMax = dmgMin;
+
+            // ---- M37: the hit gate. This is the real resistance model,
+            // and it gates the **whole** effect -- damage and status alike
+            // live inside this branch in FUN_100458e4, so a resisted Poison
+            // applies no poison at all rather than a weaker one. It
+            // replaces the flat resistance *subtraction* this port used
+            // until now, which had no basis in the decompile.
+            if (effect != kEffectNone &&
+                !RollSpellHit(caster.spellToHit(), target->spellResistance())) {
+                return true;
+            }
+            // DeadToDust's own target guard, which the real branch applies
+            // before anything else.
+            if (effect == kEffectDeadToDust && !target->undead()) return true;
+
+            // The roll, then the damage -- `if (0 < max)` is the real
+            // guard, which is exactly what keeps the pure-status branches
+            // from dealing 0 damage and printing a damage message.
+            int rolled = dmgMin;
+            if (dmgMin != dmgMax) rolled = dmgMin + std::rand() % (dmgMax - dmgMin + 1);
+            if (dmgMax > 0) target->ApplyDamage(rolled);
+
+            switch (effect) {
                 case kEffectFear:
                     // FUN_100458e4's Fear branch:
                     // FUN_10086b98(target, 4, magnitude * 5).
@@ -326,14 +484,10 @@ bool ItemExecutable::method(const skString& methodName, skRValueArray& args,
                 // are the two that set both -- they deal damage *and* do
                 // something else with it.
                 case kEffectAbsorb: {
-                    // The damage pair is `max = min = magnitude + 12`.
-                    // Equal bounds are load-bearing: the roll only happens
-                    // when `min != max`, so Absorb's damage is exactly
-                    // fixed, the one spell in the table with no variance.
-                    int rolled = magnitude + 12;
-                    target->ApplyDamage(SpellDamageAfterResistance(rolled,
-                                                                    target->magicResistance()));
-                    // Then the caster is healed, from the *pre-mitigation*
+                    // The damage itself is dealt above, from the shared
+                    // pair (M37); this branch is only the heal.
+                    //
+                    // The caster is healed from the *pre-mitigation*
                     // roll -- the real code reads the same `local_250` it
                     // passed to DoDamage, before DoDamage's own reductions:
                     //
@@ -353,25 +507,23 @@ bool ItemExecutable::method(const skString& methodName, skRValueArray& args,
                     //   heal = damage * magnitude / 25 + 6
                     //
                     // i.e. absorb a share of the damage proportional to
-                    // how far the caster's spell power is toward its
-                    // maximum, plus a flat 6. Kept in the real integer
-                    // order below so the truncation matches step for step
-                    // rather than only in the algebra.
+                    // how far the caster's **level** is toward the level
+                    // cap (M37 identified stats+0x34; the earlier "spell
+                    // power" reading was a guess), plus a flat 6. Kept in
+                    // the real integer order below so the truncation
+                    // matches step for step rather than only in the
+                    // algebra.
                     int q = (magnitude << 16) / 6400;
                     int drained = (rolled * 256 * q) >> 16;
-                    PlayerExecutable& caster = m_Stack.player();
                     caster.SetHealth(caster.health() + drained + 6);
                     break;
                 }
                 case kEffectIgniteFoe: {
-                    // `max = (magnitude+1)*5, min = (magnitude+1)*2` -- an
-                    // actual rolled range, unlike Absorb's.
-                    int lo = (magnitude + 1) * 2;
-                    int hi = (magnitude + 1) * 5;
-                    int rolled = lo + std::rand() % (hi - lo + 1);
-                    target->ApplyDamage(SpellDamageAfterResistance(rolled,
-                                                                    target->magicResistance()));
-                    // Then set the target on fire: 1 point per second for
+                    // The damage (an actual `(mag+1)*2 .. (mag+1)*5` roll,
+                    // unlike Absorb's fixed one) is dealt above from the
+                    // shared pair; this branch is only the burn.
+                    //
+                    // Set the target on fire: 1 point per second for
                     // `magnitude * 2` seconds, on the second periodic
                     // channel (MonsterExecutable::ApplyBurn). The real
                     // branch also spawns the flame itself -- FUN_10067f84
@@ -385,7 +537,26 @@ bool ItemExecutable::method(const skString& methodName, skRValueArray& args,
                     target->ApplyBurn(1, magnitude * 2);
                     break;
                 }
+                // ---- M37: the four damage-only branches. Their whole
+                // effect is the shared damage pair above; FUN_100458e4's
+                // status switch has no arm for any of them and simply
+                // falls off the end. Listed explicitly rather than left to
+                // `default:` so the compiler keeps flagging this switch if
+                // a new typeId is ever added.
+                case kEffectBlaze:
+                case kEffectBlazeGreater:
+                case kEffectDeadToDust:
+                case kEffectDoomHammer:
+                case kEffectDeathHowl:
+                    break;
                 case kEffectNone: {
+                    // Not a real dispatcher branch at all: in the shipped
+                    // engine an unrecognised typeId leaves the damage pair
+                    // at 0/0 and does nothing whatsoever. This is the
+                    // port's own fallback for a spell script it could not
+                    // resolve to a typeId, so it keeps the from-scratch
+                    // rating-scaled formula (and stays outside the real hit
+                    // gate, which has no meaning without a real branch).
                     int dmg = RollSpellDamage(m_Rating, target->magicResistance());
                     target->ApplyDamage(dmg);
                     break;

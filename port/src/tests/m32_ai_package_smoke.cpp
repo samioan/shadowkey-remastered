@@ -191,13 +191,28 @@ int main(int argc, char** argv) {
             skString((std::string(scriptRoot) + "/blaze.s").c_str()), loadCtxt, stack);
         Check(fear->statusEffect() == sk_bindings::ItemExecutable::kEffectFear,
               "real spells/Fear.s resolves to the fear effect (typeId 4020's branch)");
-        Check(blaze->statusEffect() == sk_bindings::ItemExecutable::kEffectNone,
-              "real blaze.s has no status effect branch -- it stays plain damage");
+        // M37: blaze.s used to fall through to the port's own from-scratch
+        // damage path. entities.txt gives it typeId 50, which FUN_100458e4
+        // does have a branch for (a 3 .. level*3+3 damage roll), so it is
+        // now a real dispatcher branch like every other spell -- just one
+        // with no status half.
+        Check(blaze->statusEffect() == sk_bindings::ItemExecutable::kEffectBlaze,
+              "real blaze.s resolves to typeId 50's own damage-only branch");
 
         // Casting real Fear.s at a real creature must put it to flight
         // rather than damage it.
         auto victim = LoadMonster(std::string(scriptRoot) + "/arat.s", interpreter, strings, stack);
         if (victim) {
+            // M37: zero the target's magic resistance so the real hit gate
+            // is a certainty rather than a 97% chance -- see the
+            // makeVulnerable() comment in the M33 block below.
+            {
+                skRValueArray zero;
+                zero.append(skRValue(0));
+                skRValue r;
+                skExecutableContext c(&interpreter);
+                victim->method(skString("SetMagicResistance"), zero, r, c);
+            }
             int hpBefore = victim->currentHealth();
             skRValueArray args;
             args.append(skRValue(static_cast<skiExecutable*>(victim.get()), false));
@@ -215,11 +230,36 @@ int main(int argc, char** argv) {
     // --- M33: the remaining real status effects ---
     //
     // Each is transcribed from FUN_100458e4's own branch; the parameters
-    // are the decompiled ones. Magnitude is the spell's SetRating() -- see
-    // the DoAttackRoll handler for why the real input is a caster stat
-    // this port doesn't model.
+    // are the decompiled ones.
+    //
+    // M37: magnitude is the **caster's level**, not the spell's
+    // SetRating() this used to substitute -- so every case below sets the
+    // caster's level explicitly and asserts against that, which is both the
+    // real input and a stronger test than a per-spell constant was.
     {
         using Item = sk_bindings::ItemExecutable;
+        auto setCasterLevel = [&](int lvl) {
+            skRValueArray a;
+            a.append(skRValue(lvl));
+            skRValue r;
+            skExecutableContext c(&interpreter);
+            stack.player().method(skString("SetLevel"), a, r, c);
+        };
+        // M37: the real resistance model is a *probability* gate in front
+        // of the whole effect, so a cast at a resistant target lands only
+        // most of the time. Zeroing the target's magic resistance makes the
+        // chance exactly 0x100, which the engine's own `== 0x100` special
+        // case turns into a guaranteed hit -- that is what keeps the
+        // effect assertions below exact instead of flaky. The gate's own
+        // arithmetic is pinned separately, on the creatures' real shipped
+        // resistances, in m37_spellpower_smoke.
+        auto makeVulnerable = [&](Monster& v) {
+            skRValueArray a;
+            a.append(skRValue(0));
+            skRValue r;
+            skExecutableContext c(&interpreter);
+            v.method(skString("SetMagicResistance"), a, r, c);
+        };
         auto cast = [&](const char* relPath) -> std::unique_ptr<Item> {
             skExecutableContext loadCtxt(&interpreter);
             auto spell = std::make_unique<Item>(
@@ -241,8 +281,10 @@ int main(int argc, char** argv) {
 
         // Drain: attack -10 for (magnitude + 8) seconds.
         {
+            setCasterLevel(8);
             auto spell = cast("spells/Drain.s");
             auto v = LoadMonster(std::string(scriptRoot) + "/arat.s", interpreter, strings, stack);
+            makeVulnerable(*v);
             int before = v->attack();
             hit(*spell, *v);
             Check(spell->statusEffect() == Item::kEffectDrain &&
@@ -253,22 +295,35 @@ int main(int argc, char** argv) {
         {
             auto spell = cast("spells/Blind.s");
             auto v = LoadMonster(std::string(scriptRoot) + "/arat.s", interpreter, strings, stack);
+            makeVulnerable(*v);
             hit(*spell, *v);
             Check(spell->statusEffect() == Item::kEffectBlind && v->blinded() &&
                       v->statModifier(Monster::kStatAttack) == -10 &&
                       v->statModifier(Monster::kStatDefense) == -10,
                   "Blind applies -10 attack and -10 defense, and sets the blind flag");
         }
-        // Disease: disease.s's rating is 5, so the magnitude<7 branch
-        // (-2 attack) plus a flat -3 defense, both for a fixed 30s.
+        // Disease: the `magnitude < 7` branch is -2 attack, otherwise -3,
+        // plus a flat -3 defense either way, both for a fixed 30s. M37
+        // pins *both* sides of that branch, which was impossible while the
+        // magnitude was a per-spell constant -- with the caster's level as
+        // the input, a level-5 and a level-8 caster take different arms.
         {
+            setCasterLevel(8);
             auto spell = cast("spells/Disease.s");
+            auto high = LoadMonster(std::string(scriptRoot) + "/arat.s", interpreter, strings,
+                                     stack);
+            makeVulnerable(*high);
+            hit(*spell, *high);
+            bool highArm = high->statModifier(Monster::kStatAttack) == -3;
+
+            setCasterLevel(5);
             auto v = LoadMonster(std::string(scriptRoot) + "/arat.s", interpreter, strings, stack);
+            makeVulnerable(*v);
             hit(*spell, *v);
-            Check(spell->statusEffect() == Item::kEffectDisease &&
+            Check(spell->statusEffect() == Item::kEffectDisease && highArm &&
                       v->statModifier(Monster::kStatAttack) == -2 &&
                       v->statModifier(Monster::kStatDefense) == -3,
-                  "Disease takes the magnitude<7 branch (-2 attack) plus a flat -3 defense");
+                  "Disease's -2/-3 attack arms follow the caster's level across the <7 boundary");
             int ticks30 = 30 * 256 / sk_bindings::kAiFrameDeltaUnits;
             for (int i = 0; i < ticks30 - 1; ++i) v->TickAi(sk_bindings::kAiFrameDeltaUnits);
             bool stillOn = v->statModifier(Monster::kStatDefense) == -3;
@@ -279,8 +334,10 @@ int main(int argc, char** argv) {
         }
         // Poison: 3 damage every 256 units, for `magnitude` seconds.
         {
+            setCasterLevel(8);
             auto spell = cast("spells/Poison.s");
             auto v = LoadMonster(std::string(scriptRoot) + "/arat.s", interpreter, strings, stack);
+            makeVulnerable(*v);
             int hp0 = v->currentHealth();
             hit(*spell, *v);
             Check(spell->statusEffect() == Item::kEffectPoison && v->poisoned(),
@@ -302,15 +359,19 @@ int main(int argc, char** argv) {
         // Absorb: fixed damage of `magnitude + 12` (its min and max are
         // equal, so the roll is skipped), then the caster is healed by
         // `damage * magnitude / 25 + 6` -- clamped, so it cannot overheal.
-        // Real absorb.s has SetRating(1), so magnitude is 1: 13 damage,
-        // less the rat's real SetMagicResistance(3), is 10; and the
-        // proportional term truncates to 0 at that magnitude, leaving the
-        // flat +6. (A caster at the real 25-point cap would instead absorb
-        // the damage in full -- see the DoAttackRoll handler's note on why
-        // this port substitutes the spell's own rating for a caster stat.)
+        //
+        // M37: at the level cap the proportional term is the whole damage,
+        // so a capped caster really does absorb the hit in full and then
+        // some -- 37 damage dealt, 37 + 6 healed. That is the case worth
+        // pinning, and it is only reachable now that the magnitude is a
+        // caster stat: the old rating substitution fixed it at 1 forever,
+        // where the term truncated to 0 and only the flat +6 ever showed.
         {
+            setCasterLevel(25);
             auto spell = cast("spells/Absorb.s");
-            auto v = LoadMonster(std::string(scriptRoot) + "/arat.s", interpreter, strings, stack);
+            auto v = LoadMonster(std::string(scriptRoot) + "/monsters/lakvan.s", interpreter,
+                                  strings, stack);
+            makeVulnerable(*v);
             // The heal is invisible at full health, by design -- the real
             // SetHealth clamps to maxHealth -- so open a wound first.
             stack.player().ApplyDamage(50);
@@ -318,10 +379,10 @@ int main(int argc, char** argv) {
             int hp0 = v->currentHealth();
             hit(*spell, *v);
             Check(spell->statusEffect() == Item::kEffectAbsorb &&
-                      v->currentHealth() == hp0 - 10,
-                  "Absorb deals its fixed magnitude+12 damage (13, less 3 resistance)");
-            Check(stack.player().health() == casterBefore + 6,
-                  "...and transfers it to the caster, who heals by the real flat +6");
+                      v->currentHealth() == hp0 - 37,
+                  "Absorb deals its fixed magnitude+12 damage (25 + 12 = 37, no variance)");
+            Check(stack.player().health() == casterBefore + 37 + 6,
+                  "...and at the level cap transfers the whole hit, plus the real flat +6");
             int full = stack.player().maxHealth();
             stack.player().SetHealth(full);
             hit(*spell, *v);
@@ -333,18 +394,22 @@ int main(int argc, char** argv) {
         // seconds. Cast at Lakvan (200 health) rather than the rat, whose
         // real 12 wouldn't survive the opening hit to be burned at all.
         {
+            const int kCasterLevel = 8;
+            setCasterLevel(kCasterLevel);
             auto spell = cast("spells/IgniteFoe.s");
             auto v = LoadMonster(std::string(scriptRoot) + "/monsters/lakvan.s", interpreter,
                                   strings, stack);
+            makeVulnerable(*v);
             int hp0 = v->currentHealth();
             hit(*spell, *v);
             int opening = hp0 - v->currentHealth();
-            // ignitefoe.s has SetRating(19), so the real roll is
-            // (19+1)*2 .. (19+1)*5, less Lakvan's SetMagicResistance(45),
-            // floored at 1. Asserted as the range rather than a value --
-            // this is the one status branch with genuine variance.
-            int lo = (std::max)(1, (19 + 1) * 2 - v->magicResistance());
-            int hi = (std::max)(1, (19 + 1) * 5 - v->magicResistance());
+            // The real roll is (magnitude+1)*2 .. (magnitude+1)*5, with no
+            // resistance subtraction at all -- M37 retired that step, which
+            // never existed in the decompile: resistance is the hit gate.
+            // Asserted as the range rather than a value -- this is the one
+            // status branch with genuine variance.
+            int lo = (kCasterLevel + 1) * 2;
+            int hi = (kCasterLevel + 1) * 5;
             Check(spell->statusEffect() == Item::kEffectIgniteFoe && opening >= lo &&
                       opening <= hi && v->burning(),
                   "IgniteFoe rolls its opening hit in the real range and sets the target alight");
@@ -355,7 +420,7 @@ int main(int argc, char** argv) {
             Check(v->currentHealth() == hp1 - 1,
                   "...then burns for exactly 1 a second -- the real +0x76 value it wrote");
 
-            // Duration is magnitude*2 == 38 seconds; run well past it.
+            // Duration is magnitude*2 == 16 seconds; run well past it.
             for (int i = 0; i < 45 * ticksPerSecond; ++i) {
                 v->TickAi(sk_bindings::kAiFrameDeltaUnits);
             }
@@ -370,10 +435,12 @@ int main(int argc, char** argv) {
         // poison writes, so poisoning a burning creature really does make
         // its flames tick for 3 instead of 1. Faithful, and easy to lose.
         {
+            setCasterLevel(8);
             auto ignite = cast("spells/IgniteFoe.s");
             auto poison = cast("spells/Poison.s");
             auto v = LoadMonster(std::string(scriptRoot) + "/monsters/lakvan.s", interpreter,
                                   strings, stack);
+            makeVulnerable(*v);
             hit(*ignite, *v);
             hit(*poison, *v);
             int ticksPerSecond = 256 / sk_bindings::kAiFrameDeltaUnits + 1;

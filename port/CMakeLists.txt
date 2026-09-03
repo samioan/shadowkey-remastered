@@ -301,3 +301,8 @@ target_link_libraries(ai_package_smoke PRIVATE sk_bindings)
 # weapon-swing restart guard -- see src/tests/m35_placement_menu_smoke.cpp.
 add_executable(placement_menu_smoke src/tests/m35_placement_menu_smoke.cpp)
 target_link_libraries(placement_menu_smoke PRIVATE sk_bindings sk_world)
+
+# Caster spell-power stat + the real magic to-hit/resistance gate -- see
+# src/tests/m37_spellpower_smoke.cpp.
+add_executable(spellpower_smoke src/tests/m37_spellpower_smoke.cpp)
+target_link_libraries(spellpower_smoke PRIVATE sk_bindings)

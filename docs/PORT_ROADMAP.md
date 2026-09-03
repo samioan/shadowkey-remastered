@@ -2664,6 +2664,83 @@ algorithms.
       wherever a creature happens to be -- which is what made M35's facing
       sign a guess in the first place.
 
+- [x] **M37 -- the caster stat and the real magic to-hit gate.** Closes the
+  status-effect system: every branch of `FUN_100458e4` is now implemented,
+  with its real input rather than a substitute.
+    - **The stats block's layout, recovered in full** -- the finding
+      everything else here rests on. `FUN_1004ad40`'s stat-index switch and
+      `FUN_10048244`'s 85 named getters/setters read and write the same
+      halfwords, so cross-referencing them names each field from the
+      shipped engine's own vocabulary rather than by inference:
+      `+0x04` spellcast, `+0x06` magic resistance, `+0x14`-`+0x22` the
+      attribute block (strength ... luck), `+0x30` experience,
+      **`+0x34` character level**, `+0x38` gold. Table in
+      `docs/WORLD_MODEL.md`.
+    - **Correction: `+0x34` is the character level, not "spell power."**
+      M33 recorded it as a spell-power stat because the dispatcher was the
+      only thing that had been read; `GetLevel`/`SetLevel` (binding index
+      0x37/0x38) read and write exactly that halfword. So the real
+      `magnitude` behind every effect is **the caster's level, clamped to
+      25** -- and the 25 that divides Absorb's heal is the level cap, which
+      is why "absorb a share proportional to how far you are toward the
+      cap" is the actual design.
+    - **The scroll fallback, and what killed the old substitution.** The
+      full rule is `if (!scroll && (caster == null || casterIsCharacter))
+      magnitude = casterLevel; else magnitude = spell->level`, where
+      `spell->level` is the Spell class's own `SetLevel` (`+0x1d0`) and
+      `scroll` its `SetScroll` (`+0x1d4`, set by the loot generators, e.g.
+      `broken1/loot_random_a.s`'s `Scroll.SetScroll(true)`). Reading the
+      whole `spells/` directory corroborates it from the data side: the
+      *only* spell scripts that call `SetLevel` are the scroll and unique
+      wrappers (`IgniteScroll.s` `SetLevel(8)`, `U_Blaze_lvl5.s`, ...),
+      each matching its own filename -- and the same read is what retired
+      the port's `SetRating()` substitution, whose values turn out to be a
+      dense near-alphabetical ordinal run with duplicates (absorb 1,
+      blind 3, bodytomind 5, disease 5, poison 8, daedricweapon 8, ...
+      azrasustenance 28), absent from those wrappers entirely. The
+      practical effect: IgniteFoe used to hit for `(19+1)*5 = 100` on a
+      level-1 character.
+    - **The resistance gate replaces the flat subtraction.** The real
+      engine never subtracts resistance from spell damage; it resolves
+      resistance once as a hit chance in front of the *whole* effect
+      (`power * 256 / (power + resistance)` against `rand(0, 0x100)`, with
+      an `== 0x100` certain-hit short-circuit), so a resisted Poison now
+      applies no poison at all rather than a weakened one. Both terms come
+      from formulas that are each confirmed twice -- a standalone helper
+      (`FUN_1004bc60`/`FUN_1004bbd0`) and a script-callable binding
+      (`GetSpellToHit`/`GetSpellResistance`) that computes the same thing
+      inline: `spellcast + 2*willpower` and
+      `magicResistance + willpower/5`.
+    - **The dispatcher's four remaining branches**, all damage-only and
+      all now nameable because `entities.txt` maps their typeIds to
+      shipped scripts: Blaze (50, `3 .. level*3+3`), Blaze-greater (4006, a
+      flat 45..50 with no magnitude term at all), DeadToDust (4002),
+      DoomHammer (4012/4017) and DeathHowl (4035). Blaze matters most --
+      it is the spell every new character is given, and it was the one
+      spell still falling through to this port's from-scratch damage path.
+    - **DeadToDust's target test**, and two more real natives with it:
+      `FUN_10086f88` is `monster+0x2d0 == 2`, and that field is a single
+      creature-kind selector -- `SetSpider` writes 1, `SetUndead` writes 2,
+      `IsUndead` is `== 2`. All three were soft-failing (15 real
+      `SetUndead(true)` call sites).
+    - Also implemented: `SetSpellType` (the typeId itself, which is the
+      only way to separate the two branch pairs that share a script file),
+      and the player-side `SetLevel`/`SetSpellcast`/`SetWillpower` plus the
+      `GetWil`/`GetWill`/`GetWillpower` alias trio the real class carries.
+    - New `m37_spellpower_smoke` (24 assertions, all against real shipped
+      scripts -- `Absorb.s`, `IgniteScroll.s`, `blaze.s`, `DeathHowl.s`,
+      `DoomHammer.s`, `DeadToDust.s`, `Azra_Rat.s`, `lakvan.s`); the M32
+      and M22 spell assertions rewritten around the caster level, which
+      makes them stronger than before (Disease's `< 7` branch can now be
+      pinned on *both* arms by casting at level 5 and level 8, impossible
+      while the magnitude was a per-spell constant). 31/31 smoke tests
+      pass.
+    - **Not attempted**: the enchantment terms both to-hit helpers add for
+      an equipped item of enchantment type 4 or 7, and the damage
+      reduction the dispatcher applies when the target's owner is in state
+      `+0xf3c == 6` -- all three read object graphs this port has no
+      equivalent of. Each is a missing *bonus*, not a wrong formula.
+
 ## Next milestones (not yet started)
 
 Roughly in priority order for reaching "actually playable," not commitments:
@@ -2680,29 +2757,17 @@ Roughly in priority order for reaching "actually playable," not commitments:
   (`AddEncounters`/`AddRandomSets`, random monster-group spawning --
   M24's own currently-inert stand-in); Zone effects beyond `SetZone`
   (`Vignette`/`SpawnWithinRadius`, ...).
-- **The caster's spell-power stat, and the resistance gate built on it**
-  -- all that is left of the status-effect system, whose nine branches are
-  now fully implemented (M32/M33/M34; the selector is the spell entity's
-  own `entities.txt` typeId via `FUN_100458e4`). Two connected gaps, both
-  rooted in one missing stat:
-    - The real `magnitude` behind every effect's parameters is the
-      *caster's* spell power (`stats+0x34`, index 0x18), clamped to 25.
-      This port has no such stat and substitutes the spell's own
-      `SetRating()` -- a documented substitution, not a recovered value.
-    - The dispatcher gates the **entire** effect, status included, behind
-      a hit roll of `casterPower * 0x100 / (casterPower + resistance)`
-      against `rand(0, 0x100)` (`FUN_1004bc60`/`FUN_1004bbd0`, defaulting
-      `casterPower` to 100 with no caster stats block). The port keeps a
-      flat resistance-subtraction model instead; adopting the real gate
-      needs the stat above and would change every existing spell.
-  Related: `pergan_asuul_crypt2.s` shows monsters casting these spells
-  themselves via `AddSpell(Level.CreateEntity(4024), 35)`, so a caster is
-  not always the player -- Absorb's heal currently always targets the
-  player, correct only because nothing but the player casts in this port.
+- **Monsters as spell casters.** M37 implemented the real caster stat and
+  hit gate, but always reads them off the *player*:
+  `MonsterExecutable::spellToHit()` exists and is correct, and
+  `crypt2/pergan_asuul_crypt2.s` really does cast these spells at the
+  player via `AddSpell(Level.CreateEntity(4024), 35)` -- but nothing in
+  this port routes a creature's own cast through `DoAttackRoll`, and
+  Absorb's heal unconditionally targets the player. Correct today only
+  because nothing but the player casts here.
 - **Small documented loose ends**, one call/argument each, left open in
   their own milestone's "Not attempted" note rather than guessed at:
-  M21's empty-bag despawn (`QuitAndDestroyOpener`/`QueryDestroy`) and
-  `SetLoot`'s trailing min/max args; M23's `SummonMe()`/`SummonMe2()`/
+  M21's `SetLoot` trailing min/max args; M23's `SummonMe()`/`SummonMe2()`/
   `CountInventory()`/`SetZone`'s real meaning; M24's `Level.Log(...)`.
 - **Real save file format** -- M5's save system is simulated in-memory
   only; no on-disk save format has been RE'd yet.

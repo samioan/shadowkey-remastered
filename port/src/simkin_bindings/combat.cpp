@@ -24,6 +24,22 @@ int RollSpellDamage(int rating, int targetMagicResistance) {
     return SpellDamageAfterResistance(rating * 3, targetMagicResistance);
 }
 
+// M37: see combat.h -- these four are transcribed, not designed.
+int SpellToHit(int spellcast, int willpower) { return spellcast + 2 * willpower; }
+
+int SpellResistance(int magicResistance, int willpower) { return magicResistance + willpower / 5; }
+
+int SpellHitChance(int casterPower, int targetResistance) {
+    if (casterPower <= 0) return 0;
+    return (casterPower << 16) / ((casterPower + targetResistance) * 0x100);
+}
+
+bool RollSpellHit(int casterPower, int targetResistance) {
+    int chance = SpellHitChance(casterPower, targetResistance);
+    if (chance == 0x100) return true;
+    return (std::rand() % 0x101) < chance;
+}
+
 int RollDamage(int attackerAttack, int defenderDefense, int defenderArmor, int dmgMin,
                 int dmgMax) {
     int hitChance = 50 + (attackerAttack - defenderDefense) * 5;
