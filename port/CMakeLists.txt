@@ -315,3 +315,7 @@ target_link_libraries(trap_trigger_smoke PRIVATE sk_bindings sk_world)
 # CountInventory, Level.Log) -- see src/tests/m39_loose_ends_smoke.cpp.
 add_executable(loose_ends_smoke src/tests/m39_loose_ends_smoke.cpp)
 target_link_libraries(loose_ends_smoke PRIVATE sk_bindings)
+
+# Real on-disk save container -- see src/tests/m40_save_archive_smoke.cpp.
+add_executable(save_archive_smoke src/tests/m40_save_archive_smoke.cpp src/assets/save_archive.cpp)
+target_include_directories(save_archive_smoke PRIVATE src)

@@ -2860,6 +2860,49 @@ algorithms.
       updated for the drop chance it was silently relying on being 100%.
       34/34 smoke tests pass.
 
+- [x] **M40 -- the save container, decoded and implemented.** The
+  roadmap item read "M5's save system is simulated in-memory only; no
+  on-disk save format has been RE'd yet". The container half is done --
+  see the new [`SAVE_FORMAT.md`](SAVE_FORMAT.md) for the full writeup.
+    - **The file set**, from the binary's own format strings:
+      `game00.sav`..`game03.sav` (the four slots), `current.sav` (the
+      in-progress game), `character.dat`, a per-zone `<level>.dat`
+      ("Using %s to save our previous level"), `levelinfo.txt` (a
+      two-line `"%d
+%d
+"`), and `dragonstar.cfg`/`.set`. A UTF-16
+      `v1023_1.0` version tag and the `SaveCorrupted` message sit in the
+      same code.
+    - **The format is a named-blob archive**, not a struct dump: a
+      256-entry table of contents of `(name, offset, length)` triples
+      followed by the blobs, handled for every file above by one class
+      (constructor `0x10009b2c`, instance size `0x1924`).
+    - **The leading `u32` is an integrity check, not a header field.** The
+      create path writes a placeholder, the close path seeks back to 0 and
+      patches in the real size, and the open path rejects the file when
+      that disagrees with the size on disk. A save interrupted mid-write
+      is caught by construction, with no checksum -- which is what
+      `SaveCorrupted` is for.
+    - Implemented as `assets/save_archive.h`/`.cpp` with
+      `m40_save_archive_smoke` (14 assertions). No real save file exists
+      to check against -- saves are created at runtime on the device and
+      none ships on the install image -- so the test asserts the encoding
+      **field by field against the decompiled writer** (the NUL-inclusive
+      name length, the `+4` offset bias the reader applies, the size
+      patch) plus the two corruption cases the real open path checks,
+      rather than only round-tripping with itself. 35/35 smoke tests pass.
+    - The whole script-facing API is mapped too (`SaveGame`/
+      `ActuallySaveGame`/`LoadGame`/`GetSaveSlot`/`GameAvailableForLoad`/
+      `DeleteGame`/... on the GameEngine root, plus Level's `AutoSave`/
+      `SaveLevelState`/`RestoreSaveLevel`), including where the current
+      slot lives (`engine+0x14a71`) and the in-memory slot-name table
+      (`engine+0xdf74`, 8 bytes per slot).
+    - **Not attempted**: what is *inside* each member. This is the
+      envelope, not the letter -- the serialization of player stats,
+      inventory, quest flags and per-level entity state is a separate and
+      larger job, and M5's in-memory slots are untouched by this
+      milestone.
+
 ## Next milestones (not yet started)
 
 Roughly in priority order for reaching "actually playable," not commitments:
@@ -2887,8 +2930,11 @@ Roughly in priority order for reaching "actually playable," not commitments:
   this port routes a creature's own cast through `DoAttackRoll`, and
   Absorb's heal unconditionally targets the player. Correct today only
   because nothing but the player casts here.
-- **Real save file format** -- M5's save system is simulated in-memory
-  only; no on-disk save format has been RE'd yet.
+- **What is inside a save file's members** -- M40 decoded the container
+  (an archive of named blobs, `SAVE_FORMAT.md`) and implemented it, but
+  not the serialization within each member: how `character.dat` lays out
+  player stats/inventory/quest flags, and how a `<level>.dat` stores a
+  zone's entity state. M5's four slots are still simulated in memory.
 - **Which scenario each of `FUN_1002c010`'s 4 gating modes means** -- the
   function itself is resolved (M26: a zone-transition loading-progress
   bar, not the earlier "enemy lock-on/target health bar" guess, corrected
