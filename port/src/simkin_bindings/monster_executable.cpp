@@ -191,6 +191,21 @@ bool MonsterExecutable::method(const skString& methodName, skRValueArray& args,
         m_Wimpy = args[0].intValue();
         return true;
     }
+    // M31: the real stand-off distance (monster+0x2dc). Same
+    // scaled-squared units as SetChaseRadius -- see monster_executable.h.
+    if (methodName == skString("SetAttackRange") && args.entries() == 1) {
+        m_AttackRange = args[0].intValue();
+        return true;
+    }
+    if (methodName == skString("SetMeleeAttackRange") && args.entries() == 1) {
+        // Accepted and deliberately ignored: the real dispatcher's case for
+        // this name falls straight through to its shared `break` and stores
+        // nothing, so it is a genuine no-op in the shipped game too (only
+        // one script in the whole corpus calls it). Handled explicitly so
+        // it stops being reported as "not implemented" when reproducing it
+        // faithfully means doing nothing.
+        return true;
+    }
     if (methodName == skString("SetChaseRadius") && args.entries() == 1) {
         m_ChaseRadius = args[0].intValue();
         return true;

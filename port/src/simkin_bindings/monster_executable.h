@@ -34,6 +34,7 @@
 // for that OpenMenu() call -- same MenuStack reference MenuExecutable's
 // own OpenMenu handler already routes through.
 
+#include <cmath>
 #include <string>
 
 #include "skScriptedExecutable.h"
@@ -78,7 +79,34 @@ public:
     int damageMin() const { return m_DamageMin; }
     int damageMax() const { return m_DamageMax; }
     int armorValue() const { return m_ArmorValue; }
-    float chaseRadius() const { return static_cast<float>(m_ChaseRadius); }
+    // M31 (decompiled): SetChaseRadius/SetAttackRange do NOT store a
+    // linear radius -- the AI compares them against
+    // `FUN_100683d4(self, target)`, which is
+    //     (dx*dx >> 8) + (dy*dy >> 8)   ==   (dx^2 + dy^2) / 256
+    // i.e. a **scaled squared** distance. So the real distance a script
+    // value means is `sqrt(value * 256)` == `16 * sqrt(value)` raw world
+    // units. That single fact is what made enemy aggro look unlimited:
+    // the corpus's dominant SetChaseRadius(18000) is **8.4 tiles**, not
+    // the 70 tiles the port got by treating it as a plain radius.
+    //
+    // Verified from the dispatcher (0x10084924): case 0x26 writes
+    // `monster+0x2b8` and case 0x21 reads it back -- a Set/Get pair on one
+    // field, which is what pins the switch cases as running 3 below the
+    // enumerated binding-table indices (0x26+3 = 0x29 = SetChaseRadius,
+    // 0x21+3 = 0x24 = GetChaseRadius). Consumers are in the AI tick
+    // (0x10082224): `+0x2b8` is the give-up distance (`if (chase < dist)`
+    // -> drop target, back to the idle package) and `+0x2dc` the
+    // stand-off (`if (dist < attackRange)` -> zero velocity and swing).
+    //
+    // Both accessors return **raw world units**, already converted.
+    float chaseRadius() const { return ScaledSquaredToUnits(m_ChaseRadius); }
+
+    // The distance at which the creature stops advancing and attacks --
+    // real field `monster+0x2dc`, written by SetAttackRange. Default
+    // 0x6a4, i.e. 660 world units (~0.8x a person's height, so roughly
+    // arm's length -- most monster scripts, arat.s included, never set it
+    // and use exactly this).
+    float attackRange() const { return ScaledSquaredToUnits(m_AttackRange); }
     bool aggressive() const { return m_Aggressive; }
     // M22: real SetMagicResistance() -- stored since M12, never read back
     // until now (spellcasting's own damage formula, ItemExecutable::
@@ -101,6 +129,13 @@ public:
     int skin() const { return m_Skin; }
     // SetScale()'s 8.8 fixed-point value as a plain multiplier (256 -> 1).
     float scale() const { return m_Scale > 0 ? static_cast<float>(m_Scale) / 256.0f : 1.0f; }
+
+    // See chaseRadius(): the real comparison value is (d^2)/256, so the
+    // distance it stands for is 16*sqrt(value).
+    static float ScaledSquaredToUnits(int scaledSquared) {
+        if (scaledSquared <= 0) return 0.0f;
+        return 16.0f * std::sqrt(static_cast<float>(scaledSquared));
+    }
 
     int currentHealth() const { return m_CurrentHealth; }
     int maxHealth() const { return m_MaxHealth; }
@@ -202,7 +237,10 @@ private:
     int m_MaxHealth = 1;
     int m_CurrentHealth = 1;
     int m_Wimpy = 0;
-    int m_ChaseRadius = 0;
+    // Real constructor defaults (FUN_100815e0): +0x2b8 = 0x7fff,
+    // +0x2dc = 0x6a4. Both in the scaled-squared form -- see chaseRadius().
+    int m_ChaseRadius = 0x7fff;
+    int m_AttackRange = 0x6a4;
     int m_Mob = 0;
     int m_Level = 0;  // M30: SetLevel/GetLevel, read by real spell damage formulas
     int m_Skin = 0;

@@ -243,3 +243,98 @@ pointer) rather than every function that sets it. This is how
   (0x21-0x23). Remaining unknowns: tile byte 7, the height fields'
   finer sub-structure (individual corners?), and those 3 trailing
   bytes.
+
+## The monster AI: packages, distances, and what the script values mean
+
+Decompiled this session (PC-port work), resolving what earlier passes of
+this project recorded as "the real AI state machine is opaque/native".
+Functions:
+
+- **`FUN_10082224`** — the per-tick AI update (target acquisition, pursuit,
+  stand-off, attack cadence, give-up).
+- **`FUN_100683d4`** — the actor-to-actor "distance" the AI compares
+  against, reached through actor vtable slot `+0x5c`
+  (vtable `0x100fe2b8`).
+- **`FUN_10082004`** — a 3D line-of-sight/reach raycast from the attacker's
+  eye toward the target, stepping a caller-supplied budget.
+- **`FUN_100815e0`** — the actor constructor, and therefore the source of
+  every default below.
+- **`FUN_10084924`** — the Monster class's Simkin dispatcher.
+- `FUN_10086454`/`FUN_10086514` are the AI block's save/load
+  serialisation; `FUN_100866c0`/`FUN_10086f9c` are two constructors.
+
+### The AI package field (`monster+0x2a8`)
+
+| value | meaning | set by |
+|-------|---------|--------|
+| `-1`  | asleep / no package | the actor constructor, and `AiSleep` |
+| `2`   | idle — look for a target | default after spawn; `AiDetect` |
+| `3`   | pursue/attack a target (`monster+0x20c`) | the tick, on acquiring a target; `AiAttack(target)` |
+| `4`   | flee | `AiFlee(target)` |
+| `6`   | spell-assist a target | `AiSpellAssistTarget(target)` |
+
+### **The distance unit — the key finding**
+
+`FUN_100683d4` is:
+
+```c
+int distance(self, other) {
+    int dy = other->y - self->y;
+    int dx = other->x - self->x;
+    return (dy*dy >> 8) + (dx*dx >> 8);     // == (dx^2 + dy^2) / 256
+}
+```
+
+So every AI distance threshold a script sets is a **scaled squared**
+distance, not a linear radius. The real separation a value stands for is:
+
+```
+worldUnits = sqrt(value * 256) = 16 * sqrt(value)
+```
+
+This matters a great deal, because read linearly the shipped values look
+absurd — and a port that reads them that way gives monsters map-wide
+aggro:
+
+| script call | occurrences | linear (wrong) | real |
+|-------------|-------------|----------------|------|
+| `SetChaseRadius(18000)` | 222 | 70 tiles | **8.4 tiles** (2147 units) |
+| `SetChaseRadius(10000)` | 31 | 39 tiles | 6.3 tiles |
+| `SetChaseRadius(50000)` | 2 | 195 tiles | 14.0 tiles |
+| `SetChaseRadius(1)` / `(15)` | 3 | — | ~0 — "never chase" sentinels |
+| `SetAttackRange(12000)` | 20 | 47 tiles | **6.9 tiles** |
+| `SetAttackRange(3000)` | 4 | 12 tiles | 3.4 tiles |
+| default `+0x2dc` = `0x6a4` | — | — | 2.6 tiles (660 units) |
+| default `+0x2b8` = `0x7fff` | — | — | 11.3 tiles |
+
+Note "tiles" is a fine-grained unit here: a real door model is ~1036 raw
+units tall (~4 tiles) and a person ~800, so the default 660-unit stand-off
+is roughly arm's length, not a room away.
+
+### Which field each script call writes
+
+The Monster dispatcher's `switch` cases run **3 below** the binding-table
+indices in `shadowkey/simkin_native_bindings.json`. That offset is pinned
+down by a Set/Get pair landing on one field — case `0x26` writes
+`monster+0x2b8` and case `0x21` reads it back, and `SetChaseRadius`/
+`GetChaseRadius` are table indices `0x29`/`0x24` — and corroborated by
+case `0x24` writing `+0x2b2`, the same field the death handler
+(`FUN_10083c04`) hands to a positional `PlaySound`, i.e. `SetDeathNoise`.
+
+| field | written by | role in the tick |
+|-------|-----------|------------------|
+| `+0x2b8` (u32) | `SetChaseRadius` | give-up distance: `if (chase < dist)` → drop target, back to package 2 |
+| `+0x2dc` (u16) | `SetAttackRange` | stand-off: `if (dist < attackRange)` → zero velocity, stop pathing, swing. Also supplies the LOS raycast's step budget as `>> 8` (i.e. the same threshold expressed in tiles²) |
+| `+0x2be`..`+0x2c1` (bytes) | the four `Set*Animation` calls | animation indices passed to vtable `+0x148` |
+| `+0x2b0`/`+0x2b2`/`+0x2b4` (u16) | `SetAttackNoise`/`SetDeathNoise`/`SetIsHitNoise` | sound ids |
+| — | `SetMeleeAttackRange` | **a genuine no-op** — its case falls straight through to the shared `break` and stores nothing (only one script in the corpus calls it). Same for `AiActivate` and `AiWounded`. |
+
+### Aggro is gated on line of sight, not distance alone
+
+In single-player the only candidate target is `engine+0x618` (the player).
+Acquiring it does **not** rest on the chase radius alone: the tick calls
+actor vtable `+0x21c` (`FUN_10004d70`) and `FUN_10082004`, a 3D raycast
+from the attacker's eye toward the target with a step budget of
+`attackRange >> 8`. The generous radii above only make sense alongside
+that check — which is why a port that skips it, however it scales the
+radius, ends up with the whole level converging on the player.

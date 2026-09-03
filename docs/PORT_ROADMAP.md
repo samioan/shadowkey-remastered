@@ -2317,6 +2317,48 @@ algorithms.
       creature's hand), `DetectOnKilled`, and a few
       character-creation/quest odds and ends.
 
+- [x] **M31 -- the monster AI cluster decompiled; the real distance unit
+      found** (this session). Follow-up to M30, which had capped
+      `SetChaseRadius` at a guessed 8 tiles because its shipped value
+      (18000) was implausible as a linear radius. Decompiling the AI
+      settles it: the value was never a linear radius at all.
+    - **`FUN_100683d4`** (actor vtable `+0x5c`) is the distance every AI
+      threshold is compared against, and it returns
+      `(dx*dx >> 8) + (dy*dy >> 8)` -- a **scaled squared** distance. So a
+      script value stands for `16 * sqrt(value)` raw world units. The
+      corpus's dominant `SetChaseRadius(18000)` is therefore **8.4 tiles**,
+      not 70; `SetAttackRange(12000)` is 6.9 tiles, not 47; and the
+      `SetChaseRadius(1)`/`(15)` outliers are "never chase" sentinels.
+      Every shipped value becomes sensible at once, which is the check that
+      makes this conclusive.
+    - **The AI packages** (`monster+0x2a8`): -1 asleep, 2 idle/detect
+      (the constructor default, and what `AiDetect` sets), 3 pursue/attack,
+      4 flee, 6 spell-assist.
+    - **Which call writes what**: `SetChaseRadius` -> `+0x2b8`, the
+      give-up distance; `SetAttackRange` -> `+0x2dc`, the stand-off at
+      which the tick zeroes the creature's velocity and swings.
+      `SetMeleeAttackRange` is a **genuine no-op** in the shipped game (its
+      dispatcher case stores nothing), as are `AiActivate` and `AiWounded`.
+      This also pinned the Monster dispatcher's case numbering as running
+      **3 below** the enumerated binding-table indices -- proven by a
+      Set/Get pair landing on one field (`SetChaseRadius`/`GetChaseRadius`
+      both on `+0x2b8`), which M30 had flagged as unresolved and a reason
+      not to trust conclusions drawn from that table.
+    - **Aggro really is line-of-sight gated**: acquisition runs a 3D
+      raycast from the attacker's eye (`FUN_10082004`, budget
+      `attackRange >> 8` = the same threshold in tiles^2) rather than
+      resting on distance alone -- confirming M30's sight-gating, which had
+      been a from-scratch design, as the right shape.
+    - Port changes: `MonsterExecutable::chaseRadius()`/`attackRange()` now
+      convert to real world units, M30's invented 8-tile cap is gone, and
+      creatures stop at their own real `attackRange` (660 units by default
+      -- roughly arm's length, since a person model is ~800 units tall)
+      instead of the port's invented 110. Full writeup:
+      `docs/WORLD_MODEL.md`'s new "The monster AI" section.
+    - **Not attempted**: the flee (4) and spell-assist (6) packages, the
+      `.pth` patrol-path system, and the attack cadence timer
+      (`monster+0x2c4`, accumulated per tick and reset to `rand & 0x1f`).
+
 ## Next milestones (not yet started)
 
 Roughly in priority order for reaching "actually playable," not commitments:

@@ -1515,23 +1515,19 @@ int main(int argc, char** argv) {
                 // either, so it would default to 0 and never trigger
                 // anyway -- this makes the intent explicit rather than
                 // relying on that coincidence).
-                // How far a creature can notice the player at all.
+                // M31: aggro and stand-off distances are now the real
+                // decompiled ones -- MonsterExecutable::chaseRadius() and
+                // attackRange() convert the script's scaled-squared value
+                // to raw world units (see monster_executable.h). The
+                // dominant SetChaseRadius(18000) is 8.4 tiles, not the 70
+                // the port previously computed by treating it as a linear
+                // radius, which is what made aggro look unlimited. The
+                // earlier 8-tile cap this replaces was a guess that landed
+                // close by luck; it is gone.
                 //
-                // Real scripts are no help here: 222 of the corpus's 270
-                // SetChaseRadius calls pass 18000 raw units, which on a
-                // 128x128 grid of 256-unit tiles is 70 tiles -- over half
-                // the map, and larger than any zone's playable extent. It
-                // cannot be a plain euclidean aggro radius at that scale
-                // (nor can SetAttackRange's 12000, ~47 tiles), so the value
-                // is either in units this project hasn't pinned down or is
-                // not consumed as a radius at all. Taking it literally is
-                // what gave enemies effectively unlimited aggro.
-                //
-                // So the script value is honoured only as an *upper bound*,
-                // capped to a sane sighting distance, and sight (below) is
-                // what really gates aggro. Documented port-side constant,
-                // not a recovered one.
-                constexpr float kMaxAggroRange = 8.0f * sk::kTileScale;  // 8 tiles
+                // kMeleeRange survives only as the reach for the *player's*
+                // bare fists (tryAttack below) -- monsters use their own
+                // real attackRange().
                 constexpr float kMeleeRange = 110.0f;      // world units
                 // M22: no real spell script ever calls SetRange() (only
                 // weapon scripts do -- M20's own corpus-verified bimodal
@@ -1604,8 +1600,7 @@ int main(int argc, char** argv) {
                     // Zone::HasLineOfSight()'s comment), so sight and
                     // vertical separation -- not the radius -- are what
                     // really bound aggro.
-                    bool inRadius =
-                        dist <= (std::min)(m.script->chaseRadius(), kMaxAggroRange);
+                    bool inRadius = dist <= m.script->chaseRadius();
                     bool sameLevel =
                         std::fabs(gameCamera.z - (m.z + sk::kEyeHeightOffset)) <=
                         kAggroMaxHeightDelta;
@@ -1632,13 +1627,16 @@ int main(int argc, char** argv) {
                         continue;
                     }
 
-                    // At arm's length the creature attacks whether or not
-                    // the centre-to-centre sightline happens to clip a wall
-                    // corner -- otherwise a monster standing in a doorway
-                    // would keep walking into the player instead of
-                    // stopping to swing, which is exactly the "doesn't stop
-                    // to attack" behaviour reported.
-                    if (dist <= kMeleeRange) {
+                    // The real stand-off: the AI tick zeroes the creature's
+                    // velocity and swings as soon as the distance drops
+                    // below `monster+0x2dc` (SetAttackRange, default 660
+                    // world units). Attacking whether or not the
+                    // centre-to-centre sightline clips a wall corner is
+                    // deliberate -- otherwise a monster in a doorway keeps
+                    // walking into the player instead of stopping to swing,
+                    // which is exactly the reported behaviour.
+                    float standAndAttack = m.script->attackRange();
+                    if (dist <= standAndAttack) {
                         m.aiState = MonsterInstance::AiState::Attacking;
                         setAnimClip(m, m.script->swingAnimation(), false);
                         if (dist > 1.0f) m.facingYaw = std::atan2(mdy, mdx);
@@ -1703,7 +1701,11 @@ int main(int argc, char** argv) {
                             // still must not walk *into* the player. Clamp
                             // this tick's step so it stops at the point
                             // where the two bounding circles touch.
-                            float standoff = kPlayerRadius + kMonsterRadius;
+                            // Stop where the real engine stops -- at the
+                            // creature's own attackRange -- but never
+                            // closer than bodily contact.
+                            float standoff = (std::max)(m.script->attackRange(),
+                                                         kPlayerRadius + kMonsterRadius);
                             float step = kMonsterMoveSpeed;
                             if (canSee) step = (std::min)(step, (std::max)(0.0f, dist - standoff));
                             for (float steer : kSteerAngles) {

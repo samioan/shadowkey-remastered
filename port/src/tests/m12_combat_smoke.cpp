@@ -122,7 +122,16 @@ int main(int argc, char** argv) {
     check("armorValue", rat->armorValue(), 2);
     check("maxHealth", rat->maxHealth(), 12);
     check("currentHealth (starts full)", rat->currentHealth(), 12);
-    check("chaseRadius", static_cast<int>(rat->chaseRadius()), 18000);
+    // M31: chaseRadius() now returns real world units, not the raw script
+    // value. SetChaseRadius/SetAttackRange are compared against
+    // `(dx^2 + dy^2) / 256` (the decompiled FUN_100683d4), so the script's
+    // 18000 stands for 16*sqrt(18000) == 2147 world units == 8.4 tiles --
+    // not the 70 tiles a linear reading gives, which is what made aggro
+    // look unlimited. arat.s/azra_rat.s never call SetAttackRange, so the
+    // stand-off is the real constructor default 0x6a4 -> 659.7 units.
+    // (Both checks truncate the float, hence 2146/659 not 2147/660.)
+    check("chaseRadius (18000 -> world units)", static_cast<int>(rat->chaseRadius()), 2146);
+    check("attackRange (default 0x6a4 -> world units)", static_cast<int>(rat->attackRange()), 659);
     check("aggressive", rat->aggressive() ? 1 : 0, 1);
 
     std::string expectedName = strings.Get(2030);
