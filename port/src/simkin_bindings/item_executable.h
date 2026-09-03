@@ -102,7 +102,16 @@ public:
     // This port loads a spell by script *path* rather than by typeId, but
     // that is the same relation -- entities.txt maps one to the other --
     // so the effect is resolved from the script filename.
-    enum StatusEffect { kEffectNone, kEffectFear, kEffectParalyze };
+    enum StatusEffect {
+        kEffectNone,
+        kEffectFear,       // 4020 spells\Fear.s
+        kEffectParalyze,   // 4025 spells\Paralyze.s
+        kEffectPoison,     // 4034 spells\Poison.s
+        kEffectDisease,    // 4033 spells\Disease.s
+        kEffectDrain,      // 4018 spells\Drain.s
+        kEffectBlind,      // 4010 spells\Blind.s
+        kEffectHarmArmor,  // 4023 spells\HarmArmor.s
+    };
     StatusEffect statusEffect() const;
 
     // Host-side accessors -- used by MenuExecutable's inventory-table

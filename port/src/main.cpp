@@ -1666,7 +1666,13 @@ int main(int argc, char** argv) {
                     bool sameLevel =
                         std::fabs(gameCamera.z - (m.z + sk::kEyeHeightOffset)) <=
                         kAggroMaxHeightDelta;
-                    bool canSee = inRadius && sameLevel &&
+                    // M33: the Blind effect (real effect flag 4) is what
+                    // its stat penalties imply -- the creature can't pick
+                    // the player out. It keeps whatever target it already
+                    // had (the real flag doesn't clear +0x20c) but stops
+                    // acquiring, so a blinded creature loses track once
+                    // the player moves.
+                    bool canSee = inRadius && sameLevel && !m.script->blinded() &&
                                    gameZone->HasLineOfSight(m.x, m.y, gameCamera.x, gameCamera.y);
                     if (canSee) {
                         m.ticksSinceSeen = 0;

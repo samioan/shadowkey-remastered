@@ -126,6 +126,39 @@ void MonsterExecutable::InvokeOnKilled() {
     }
 }
 
+int MonsterExecutable::statModifier(int statIndex) const {
+    for (const StatModifier& m : m_StatModifiers) {
+        if (m.statIndex == statIndex) return m.delta;
+    }
+    return 0;
+}
+
+void MonsterExecutable::ApplyStatModifier(int statIndex, int delta, int durationSeconds) {
+    // FUN_1004aa28's mode-1 path: if this stat already carries a
+    // modifier, the incoming one only takes effect when its magnitude is
+    // strictly greater (the real code compares absolute values and
+    // returns early otherwise, then unlinks the weaker record before
+    // adding the new one). So there is never more than one per stat.
+    int durationUnits = durationSeconds * 256;  // the real `duration * 0x100`
+    for (StatModifier& m : m_StatModifiers) {
+        if (m.statIndex != statIndex) continue;
+        if (std::abs(delta) <= std::abs(m.delta)) return;  // weaker -- rejected
+        m.delta = delta;
+        m.remaining = durationUnits;
+        return;
+    }
+    m_StatModifiers.push_back({statIndex, delta, durationUnits});
+}
+
+void MonsterExecutable::ApplyEffectFlag(int flagBit, int dotKind, int durationSeconds) {
+    // FUN_1004bae8: OR the flag into the bitmask, set the damage-over-time
+    // kind, and arm the shared effect timer as `duration << 8`.
+    m_EffectFlags |= flagBit;
+    m_DotKind = dotKind;
+    m_EffectTimer = durationSeconds * 256;
+    m_DotAccumulator = 0;
+}
+
 void MonsterExecutable::SetAiPackageTimed(int package, int durationUnits) {
     // FUN_10086b98, byte for byte in behaviour: set the package, arm the
     // countdown as `duration << 8`, and -- only for the flee package --
@@ -149,6 +182,46 @@ void MonsterExecutable::TickAi(int deltaUnits) {
     if (m_ParalysisTimer > 0) {
         m_ParalysisTimer -= deltaUnits;
         if (m_ParalysisTimer < 0) m_ParalysisTimer = 0;
+    }
+
+    // M33: timed stat modifiers expire independently of each other.
+    for (size_t i = 0; i < m_StatModifiers.size();) {
+        m_StatModifiers[i].remaining -= deltaUnits;
+        if (m_StatModifiers[i].remaining <= 0) {
+            m_StatModifiers.erase(m_StatModifiers.begin() + static_cast<long>(i));
+        } else {
+            ++i;
+        }
+    }
+
+    // M33: the shared effect timer (stats block +0x72). When it runs out
+    // the flags clear -- blindness lifts, poison stops.
+    if (m_EffectTimer > 0) {
+        m_EffectTimer -= deltaUnits;
+        if (m_EffectTimer <= 0) {
+            m_EffectTimer = 0;
+            m_EffectFlags = 0;
+            m_DotKind = 0;
+            m_DotAccumulator = 0;
+        } else if (m_DotKind > 0) {
+            // The real damage-over-time tick (FUN_10049780):
+            //
+            //   accumulator += frameDelta;
+            //   if ((accumulator >> 8) > 0) { accumulator = 0;
+            //                                 DoDamage(dotKind); }
+            //
+            // Note the `+0x76` field is both the effect kind *and* the
+            // damage dealt -- it is passed straight to DoDamage -- so
+            // poison's 3 means three points every 256 delta units, the
+            // same "one second" every other engine timer counts in. The
+            // real code zeroes the accumulator rather than subtracting,
+            // so a long frame cannot bank extra ticks; reproduced.
+            m_DotAccumulator += deltaUnits;
+            if (m_DotAccumulator >= 256) {
+                m_DotAccumulator = 0;
+                ApplyDamage(m_DotKind);
+            }
+        }
     }
 }
 

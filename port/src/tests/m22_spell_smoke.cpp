@@ -115,15 +115,32 @@ int main(int argc, char** argv) {
     if (!magicResistOk) ok = false;
 
     // --- Part 4: the payoff -- real HitTarget()/DoAttackRoll() ---
+    //
+    // CORRECTED in M33. This used to assert that blind.s deals
+    // RollSpellDamage() damage, which was only ever true because the port
+    // treated *every* spell as a damage spell. Decompiling the real
+    // status-effect dispatcher (FUN_100458e4) showed the effect is chosen
+    // by the spell entity's own entities.txt typeId, and Blind (4010) is
+    // not a damage spell at all: it applies -10 to attack and -10 to
+    // defense and sets the blind flag. So the right assertion is that it
+    // deals *no* damage and applies exactly those modifiers.
     int healthBefore = rat->currentHealth();
     blindRaw->InvokeHitTarget(rat.get());
     int healthAfter = rat->currentHealth();
-    int expectedDamage = 3 * 3 - 3;  // RollSpellDamage(rating=3, magicResistance=3)
-    bool damageOk = healthBefore - healthAfter == expectedDamage;
-    std::printf("Azra_Rat health after spells/blind.s's real HitTarget(): %d -> %d (expected -%d) "
-                "%s\n",
-                healthBefore, healthAfter, expectedDamage, damageOk ? "OK" : "FAILED");
-    if (!damageOk) ok = false;
+    bool noDamageOk = healthBefore == healthAfter;
+    std::printf("Azra_Rat health after spells/blind.s's real HitTarget(): %d -> %d (expected "
+                "unchanged -- Blind is not a damage spell) %s\n",
+                healthBefore, healthAfter, noDamageOk ? "OK" : "FAILED");
+    if (!noDamageOk) ok = false;
+
+    bool blindEffectOk =
+        rat->blinded() &&
+        rat->statModifier(sk_bindings::MonsterExecutable::kStatAttack) == -10 &&
+        rat->statModifier(sk_bindings::MonsterExecutable::kStatDefense) == -10;
+    std::printf("...and instead applies the real Blind effect (-10 attack, -10 defense, blind "
+                "flag): %s\n",
+                blindEffectOk ? "OK" : "FAILED");
+    if (!blindEffectOk) ok = false;
 
     // --- Part 5: robustness -- a real non-spell item's InvokeHitTarget()
     // must be a harmless no-op (nothing defines HitTarget, so DoAttackRoll

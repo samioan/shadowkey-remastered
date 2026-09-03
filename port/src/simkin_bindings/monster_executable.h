@@ -34,8 +34,10 @@
 // for that OpenMenu() call -- same MenuStack reference MenuExecutable's
 // own OpenMenu handler already routes through.
 
+#include <algorithm>
 #include <cmath>
 #include <string>
+#include <vector>
 
 #include "skScriptedExecutable.h"
 
@@ -88,11 +90,20 @@ public:
     // Init() call (see class comment) -- host-side accessors, not script
     // calls, so main.cpp's combat loop doesn't need to go through the
     // interpreter to read a number.
-    int attack() const { return m_Attack; }
-    int defense() const { return m_Defense; }
+    // M33: the *effective* values, with any active timed status modifier
+    // folded in (Drain and Blind subtract from attack, Blind and Disease
+    // from defense, HarmArmor from armor). Clamped at 0 -- the real stat
+    // setters are signed shorts, but a negative attack has no meaning in
+    // this port's damage roll.
+    int attack() const { return (std::max)(0, m_Attack + statModifier(kStatAttack)); }
+    int defense() const { return (std::max)(0, m_Defense + statModifier(kStatDefense)); }
+    // The unmodified script values, for tests and UI that want the base.
+    int baseAttack() const { return m_Attack; }
+    int baseDefense() const { return m_Defense; }
     int damageMin() const { return m_DamageMin; }
     int damageMax() const { return m_DamageMax; }
-    int armorValue() const { return m_ArmorValue; }
+    int armorValue() const { return (std::max)(0, m_ArmorValue + statModifier(kStatArmor)); }
+    int baseArmorValue() const { return m_ArmorValue; }
     // M31 (decompiled): SetChaseRadius/SetAttackRange do NOT store a
     // linear radius -- the AI compares them against
     // `FUN_100683d4(self, target)`, which is
@@ -150,6 +161,42 @@ public:
         if (scaledSquared <= 0) return 0.0f;
         return 16.0f * std::sqrt(static_cast<float>(scaledSquared));
     }
+
+    // ---- M33: the real timed status effects ----
+    //
+    // Decompiled from FUN_100458e4 (the status-effect dispatcher, which
+    // selects on the spell entity's own entities.txt typeId) and its two
+    // primitives, FUN_1004aa28 (a timed stat modifier) and FUN_1004bae8
+    // (a timed effect flag). See docs/WORLD_MODEL.md.
+    //
+    // The stat indices are the ones FUN_1004ad40 switches on; the three
+    // the status effects actually touch are confirmed against the
+    // character-stats dispatcher (0x10048244), where SetAttack writes the
+    // stat block's first short, SetDefense its second and SetArmorValue
+    // its seventh:
+    enum StatIndex { kStatAttack = 1, kStatDefense = 2, kStatArmor = 7 };
+
+    // FUN_1004bae8's effect-flag bits (stats block +0x44).
+    enum EffectFlag { kEffectFlagBlind = 4, kEffectFlagPoison = 8 };
+
+    // FUN_1004aa28 mode 1: apply a timed modifier to one stat, but only
+    // if it is *stronger* than whatever is already on that stat (the real
+    // function compares absolute deltas and returns early otherwise, then
+    // removes the weaker one before adding). Duration is in seconds; the
+    // real code stores an absolute expiry of `now + duration * 0x100`, the
+    // same <<8 convention every other engine timer uses.
+    void ApplyStatModifier(int statIndex, int delta, int durationSeconds);
+
+    // FUN_1004bae8: set an effect flag and arm the shared effect timer.
+    // `dotKind` is the real +0x76 value -- 3 for poison, 0 for a flag with
+    // no damage-over-time (blind).
+    void ApplyEffectFlag(int flagBit, int dotKind, int durationSeconds);
+
+    bool blinded() const { return (m_EffectFlags & kEffectFlagBlind) != 0; }
+    bool poisoned() const { return (m_EffectFlags & kEffectFlagPoison) != 0; }
+
+    // Net modifier currently applied to a stat (0 when nothing is active).
+    int statModifier(int statIndex) const;
 
     // ---- M32: the real AI package state machine (monster+0x2a8) ----
     //
@@ -307,6 +354,19 @@ private:
     int m_AiPackageTimer = 0;        // monster+0x300
     int m_ParalysisTimer = 0;        // monster+0x294
     int m_AttackCadence = 0;         // monster+0x2c4
+    // M33: status effects. At most one modifier per stat -- the real
+    // FUN_1004aa28 replaces a weaker one and rejects a weaker new one, so
+    // a list is never needed.
+    struct StatModifier {
+        int statIndex = 0;
+        int delta = 0;
+        int remaining = 0;  // engine delta units
+    };
+    std::vector<StatModifier> m_StatModifiers;
+    int m_EffectFlags = 0;    // stats block +0x44
+    int m_EffectTimer = 0;    // +0x72, `duration << 8`
+    int m_DotKind = 0;        // +0x76 -- 3 = poison
+    int m_DotAccumulator = 0; // host-side: paces poison damage, see the .cpp
     int m_Skin = 0;
     int m_Scale = 256;  // 8.8 fixed point, 256 == 1:1
     int m_IdleAnim = -1;

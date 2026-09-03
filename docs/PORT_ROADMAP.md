@@ -2415,6 +2415,62 @@ algorithms.
       reset a sub-frame jitter -- the proportions the real constants imply,
       but not a measured value.
 
+- [x] **M33 -- the remaining status effects: poison, disease, drain,
+      blind** (this session). Requested directly. M32 had identified all
+      nine branches of the real dispatcher but implemented only two; this
+      decodes the shared machinery underneath and implements five more.
+    - **Two primitives do all the work**, both decompiled:
+      `FUN_1004aa28` applies a **timed stat modifier** (a record carrying
+      `{stat, delta, expiry = now + duration * 0x100}` on a per-actor list,
+      with a **strongest-wins** rule -- a new modifier on a stat that
+      already has one is rejected unless its magnitude is strictly greater,
+      in which case it replaces it), and `FUN_1004bae8` sets a **timed
+      effect flag** plus the damage-over-time kind.
+    - **The damage-over-time tick is `FUN_10049780`**, and it settles what
+      poison actually does: `+0x76` is **both the effect kind and the
+      damage dealt** -- it is passed straight to `DoDamage` -- so poison's
+      `3` means three points every 256 delta units, the same "one second"
+      every other engine timer counts in.
+    - **Stat indices resolved** from `FUN_1004ad40`'s switch and
+      cross-checked against the character-stats dispatcher (0x10048244),
+      where `SetAttack` writes the stat block's first halfword,
+      `SetDefense` the second and `SetArmorValue` the seventh: **1 =
+      attack, 2 = defense, 7 = armor** -- exactly the stats Drain, Blind
+      and HarmArmor target, which is the corroboration that the mapping is
+      right.
+    - **Implemented, in the engine's own parameters**: Poison (flag 8, 3
+      damage per second for `magnitude`s), Disease (attack -2 when
+      `magnitude < 7` else -3, **and** defense -3, both for a fixed 30s --
+      the only effect whose duration ignores magnitude), Drain (attack -10
+      for `magnitude + 8`s), Blind (attack -10 **and** defense -10 for
+      `magnitude + 5`s, plus the blind flag). HarmArmor (armor
+      -`magnitude`) came free from the same machinery.
+    - **Blindness has teeth**: a blinded creature fails the perception
+      check, so it stops acquiring the player and loses track once they
+      move -- which is what its stat penalties imply.
+    - **`magnitude` is not `DoAttackRoll`'s argument.** The dispatcher
+      reads it from the *caster's* spell-power stat (`stats+0x34`, index
+      0x18) and clamps it to 25, never looking at what the script passed.
+      The proof is in the scripts: real `Poison.s` and `Disease.s` call
+      `DoAttackRoll(target)` with **no second argument at all** yet apply
+      fully-parameterised effects. This port has no spell-power stat, so
+      the spell's own `SetRating()` stands in (poison 8, blind 3, drain 12,
+      fear 14, harmarmor 17, paralyze 20) -- a documented substitution,
+      with the real clamp reproduced.
+    - **Corrected an older test**: `m22_spell_smoke` asserted that
+      `blind.s` deals `RollSpellDamage()` damage, which was only ever true
+      because the port treated every spell as a damage spell. Blind is not
+      a damage spell; it now asserts no damage plus the real -10/-10
+      modifiers.
+    - **Still unmodelled**: Absorb (4009, a health transfer to the caster)
+      and IgniteFoe (4024, which drives the stats block's *second* periodic
+      channel at `+0x78`/`+0x7c` rather than the `+0x72`/`+0x76` one every
+      other effect shares).
+    - `m32_ai_package_smoke` grew to 24 assertions against real
+      `Drain.s`/`Blind.s`/`Disease.s`/`Poison.s`/`arat.s` data -- 29/29
+      smoke tests pass. Full writeup: `docs/WORLD_MODEL.md`'s "The
+      status-effect primitives, decoded".
+
 ## Next milestones (not yet started)
 
 Roughly in priority order for reaching "actually playable," not commitments:
@@ -2435,10 +2491,10 @@ Roughly in priority order for reaching "actually playable," not commitments:
   selects~~ -- **resolved in M32**: the effect is chosen by the *spell
   entity's own `entities.txt` typeId* (`FUN_100458e4`), not by
   `DoAttackRoll`'s second argument, which is a magnitude. The "scripted
-  table" that was never found is `entities.txt` itself. Fear and Paralyze
-  are implemented; Absorb/Blind/Drain/HarmArmor/IgniteFoe/Disease/Poison
-  are identified but still unmodelled -- this port has no stat-drain,
-  blindness or damage-over-time systems to hang them on.
+  table" that was never found is `entities.txt` itself. Fear, Paralyze,
+  Poison, Disease, Drain, Blind and HarmArmor are all implemented (M32/M33);
+  Absorb and IgniteFoe remain, both needing systems this port doesn't have
+  (a caster health transfer and the stats block's second periodic channel).
 - **Small documented loose ends**, one call/argument each, left open in
   their own milestone's "Not attempted" note rather than guessed at:
   M21's empty-bag despawn (`QuitAndDestroyOpener`/`QueryDestroy`) and

@@ -41,9 +41,15 @@ ItemExecutable::StatusEffect ItemExecutable::statusEffect() const {
     };
     if (endsWith("spells/fear.s")) return kEffectFear;
     if (endsWith("spells/paralyze.s")) return kEffectParalyze;
-    // The remaining real branches (Absorb/Blind/Drain/HarmArmor/IgniteFoe/
-    // Disease/Poison) are identified but not modelled -- this port has no
-    // stat-drain, blindness or damage-over-time systems to hang them on.
+    if (endsWith("spells/poison.s")) return kEffectPoison;
+    if (endsWith("spells/disease.s")) return kEffectDisease;
+    if (endsWith("spells/drain.s")) return kEffectDrain;
+    if (endsWith("spells/blind.s")) return kEffectBlind;
+    if (endsWith("spells/harmarmor.s")) return kEffectHarmArmor;
+    // Still unmodelled: Absorb (4009, a health transfer from target to
+    // caster) and IgniteFoe (4024, which drives the stats block's *second*
+    // periodic-effect channel at +0x78/+0x7c rather than the +0x72/+0x76
+    // one the others share).
     return kEffectNone;
 }
 
@@ -214,10 +220,23 @@ bool ItemExecutable::method(const skString& methodName, skRValueArray& args,
         // (RollSpellDamage()'s own comment) -- only damage applies.
         auto* target = static_cast<MonsterExecutable*>(args[0].obj());
         if (target && target->alive()) {
-            // M32: args[1] is the spell's *magnitude*, not an effect
-            // selector -- the effect comes from which spell this is (see
-            // statusEffect()). Real Fear.s passes 10, real blaze.s passes 1.
-            int magnitude = args.entries() >= 2 ? args[1].intValue() : 1;
+            // M33: the effect's magnitude is NOT args[1].
+            //
+            // FUN_100458e4 derives it from the *caster's* own spell-power
+            // stat (the stats block's +0x34, stat index 0x18) and clamps it
+            // to 25 -- it never looks at the script's argument. The proof
+            // is in the scripts themselves: real Poison.s and Disease.s
+            // call `DoAttackRoll(target)` with no second argument at all,
+            // yet both apply a fully-parameterised effect.
+            //
+            // This port has no spell-power stat on the player, so the
+            // spell's own SetRating() stands in: it is a per-spell power
+            // number (poison 8, blind 3, drain 12, fear 14, harmarmor 17,
+            // paralyze 20), it is what RollSpellDamage() already scales
+            // damage by, and it is defined for every spell including the
+            // two that pass no argument. Documented substitution, not a
+            // recovered value -- and the real clamp is reproduced.
+            int magnitude = (std::min)(m_Rating, 25);
             switch (statusEffect()) {
                 case kEffectFear:
                     // FUN_100458e4's Fear branch:
@@ -229,6 +248,48 @@ bool ItemExecutable::method(const skString& methodName, skRValueArray& args,
                     // (monster+0x294) through a vtable call; the same
                     // magnitude-scaled duration shape is used here.
                     target->SetParalyzed(magnitude * 5 * 256);
+                    break;
+                // ---- M33: the remaining real branches, transcribed from
+                // FUN_100458e4. Each is a combination of the two decompiled
+                // primitives: a timed stat modifier (FUN_1004aa28) and/or a
+                // timed effect flag (FUN_1004bae8).
+                case kEffectDrain:
+                    // `iVar3 = -10; duration = magnitude + 8; stat = 1`
+                    // falling into the shared FUN_1004aa28 tail.
+                    target->ApplyStatModifier(MonsterExecutable::kStatAttack, -10,
+                                               magnitude + 8);
+                    break;
+                case kEffectHarmArmor:
+                    // `iVar3 = -magnitude; duration = magnitude + 8; stat = 7`.
+                    target->ApplyStatModifier(MonsterExecutable::kStatArmor, -magnitude,
+                                               magnitude + 8);
+                    break;
+                case kEffectBlind: {
+                    // Two -10 modifiers (attack and defense) for
+                    // `magnitude + 5`, plus effect flag 4 -- which the real
+                    // code applies only when the target is not the player.
+                    // Every target this port can cast at is a creature, so
+                    // the flag always applies here.
+                    int blindDuration = magnitude + 5;
+                    target->ApplyStatModifier(MonsterExecutable::kStatAttack, -10, blindDuration);
+                    target->ApplyStatModifier(MonsterExecutable::kStatDefense, -10, blindDuration);
+                    target->ApplyEffectFlag(MonsterExecutable::kEffectFlagBlind, 0, blindDuration);
+                    break;
+                }
+                case kEffectDisease:
+                    // `delta = (magnitude < 7) ? -2 : -3` on attack, a flat
+                    // -3 on defense, both for a fixed 0x1e (30) -- the only
+                    // effect with a duration that ignores magnitude.
+                    target->ApplyStatModifier(MonsterExecutable::kStatAttack,
+                                               magnitude < 7 ? -2 : -3, 30);
+                    target->ApplyStatModifier(MonsterExecutable::kStatDefense, -3, 30);
+                    break;
+                case kEffectPoison:
+                    // `FUN_1004bae8(target, 8, magnitude)` -- effect flag 8
+                    // with damage-over-time kind 3, which the DoT tick
+                    // passes straight to DoDamage: 3 points every 256 delta
+                    // units for `magnitude` seconds.
+                    target->ApplyEffectFlag(MonsterExecutable::kEffectFlagPoison, 3, magnitude);
                     break;
                 case kEffectNone: {
                     int dmg = RollSpellDamage(m_Rating, target->magicResistance());

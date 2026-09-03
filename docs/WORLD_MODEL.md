@@ -418,3 +418,69 @@ been found anywhere to decode `DoAttackRoll`'s `effectId` from": the table
 is `entities.txt`, keyed by typeId, and the argument scripts pass is the
 magnitude (real `Fear.s` passes `DoAttackRoll(target, 10)`, real `blaze.s`
 passes `1`).
+
+#### The status-effect primitives, decoded
+
+`FUN_100458e4`'s branches are all built from two shared primitives on the
+actor's stats block (`actor+0x224`).
+
+**`FUN_1004aa28(stats, mode, statIndex, kind, delta, durationSeconds, extra, name)`
+— a timed stat modifier.** Mode 1 allocates a 0x18-byte record
+`{statIndex, kind, delta, expiry = now + duration * 0x100, extra, name}`
+and links it onto the list at `stats+0x58`. **Strongest wins**: if that
+stat already carries a modifier, the incoming one is rejected outright
+unless its absolute delta is strictly greater, in which case the weaker
+record is unlinked first — so there is never more than one modifier per
+stat.
+
+**`FUN_1004bae8(stats, flagBit, durationSeconds)` — a timed effect flag.**
+
+```c
+stats->effectFlags /* +0x44 */ |= flagBit;
+stats->dotKind     /* +0x76 */  = (flagBit == 8) ? 3 : 0;
+stats->effectTimer /* +0x72 */  = duration << 8;
+stats->dotAccum    /* +0x74 */  = 0;
+```
+
+**The damage-over-time tick is `FUN_10049780`.** While `+0x72 > 0` and
+`+0x76 > 0` it accumulates the frame delta into `+0x74` and, each time the
+accumulator reaches 256, zeroes it and calls the stats vtable's
+`DoDamage(+0x76)`. Note that `+0x76` is **both the effect kind and the
+damage dealt** — it is passed straight through — so poison's `3` means
+three points every 256 delta units, the same "one second" every other
+engine timer counts in. (A second, independent periodic channel lives at
+`+0x78`/`+0x7a`/`+0x7c`; `+0x7c == 7` regenerates health by `+0x34` and
+`+0x7c == 8` drains it by `+0x76`. IgniteFoe uses that one.)
+
+**Stat indices** come from `FUN_1004ad40`'s switch, which maps an index to
+a halfword in the stats block; `kind` 1 adds to the current value, 3
+subtracts, anything else assigns. Cross-checked against the character-stats
+dispatcher (0x10048244), where `SetAttack` writes the block's first
+halfword, `SetDefense` the second and `SetArmorValue` the seventh:
+
+| index | field | | index | field |
+|-------|-------|-|-------|-------|
+| 1 | attack (`+0x00`) | | 0x11-0x13 | max health / fatigue / magicka (`+0x24`/`+0x26`/`+0x28`) |
+| 2 | defense (`+0x02`) | | 0x14-0x16 | current health / fatigue / magicka (`+0x2a`/`+0x2c`/`+0x2e`), each clamped to its max and to >= 0 |
+| 4 | magic resistance (`+0x06`) | | 0x18 | spell power (`+0x34`) |
+| 7 | armor value (`+0x0c`) | | 0x20 | sets/clears effect flag bit 4 (blind) |
+
+**Every branch, in the engine's own parameters:**
+
+| effect | typeId | what it does |
+|--------|--------|--------------|
+| Blind | 4010 | attack −10 **and** defense −10 for `magnitude + 5`s; plus effect flag 4, applied only when the target is not the player |
+| Drain | 4018 | attack −10 for `magnitude + 8`s |
+| Fear | 4020 | `FUN_10086b98(target, 4, magnitude * 5)` — the flee package |
+| HarmArmor | 4023 | armor −`magnitude` for `magnitude + 8`s |
+| IgniteFoe | 4024 | the second periodic channel: `+0x7c = 8`, `+0x78 = magnitude << 9` |
+| Paralyze | 4025 | arms the target's `+0x294` action lockout via `(magnitude + 4) * 0x100` |
+| Disease | 4033 | attack −2 (when `magnitude < 7`) else −3, **and** defense −3, both for a fixed 30s — the only effect whose duration ignores magnitude |
+| Poison | 4034 | effect flag 8, DoT kind 3 → 3 damage per 256 units for `magnitude`s |
+| Absorb | 4009 | a health transfer to the caster (`FUN_1004bb88`) |
+
+**`magnitude` is not the script's argument.** It is read from the
+*caster's* spell-power stat (`stats+0x34`, index 0x18) and clamped to 25;
+the dispatcher never looks at what `DoAttackRoll` was passed. The proof is
+in the scripts: real `Poison.s` and `Disease.s` call `DoAttackRoll(target)`
+with no second argument at all, yet both apply fully-parameterised effects.

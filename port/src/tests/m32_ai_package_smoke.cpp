@@ -197,6 +197,103 @@ int main(int argc, char** argv) {
         }
     }
 
+    // --- M33: the remaining real status effects ---
+    //
+    // Each is transcribed from FUN_100458e4's own branch; the parameters
+    // are the decompiled ones. Magnitude is the spell's SetRating() -- see
+    // the DoAttackRoll handler for why the real input is a caster stat
+    // this port doesn't model.
+    {
+        using Item = sk_bindings::ItemExecutable;
+        auto cast = [&](const char* relPath) -> std::unique_ptr<Item> {
+            skExecutableContext loadCtxt(&interpreter);
+            auto spell = std::make_unique<Item>(
+                skString((std::string(scriptRoot) + "/" + relPath).c_str()), loadCtxt, stack);
+            skRValueArray initArgs;
+            initArgs.append(skRValue(0));
+            skRValue initRet;
+            skExecutableContext initCtxt(&interpreter);
+            spell->method(skString("Init"), initArgs, initRet, initCtxt);
+            return spell;
+        };
+        auto hit = [&](Item& spell, Monster& victim) {
+            skRValueArray args;
+            args.append(skRValue(static_cast<skiExecutable*>(&victim), false));
+            skRValue ret;
+            skExecutableContext ctxt(&interpreter);
+            spell.method(skString("DoAttackRoll"), args, ret, ctxt);
+        };
+
+        // Drain: attack -10 for (magnitude + 8) seconds.
+        {
+            auto spell = cast("spells/Drain.s");
+            auto v = LoadMonster(std::string(scriptRoot) + "/arat.s", interpreter, strings, stack);
+            int before = v->attack();
+            hit(*spell, *v);
+            Check(spell->statusEffect() == Item::kEffectDrain &&
+                      v->statModifier(Monster::kStatAttack) == -10 && v->baseAttack() == before,
+                  "Drain applies -10 to attack, leaving the base stat untouched");
+        }
+        // Blind: attack -10 AND defense -10, plus the blind flag.
+        {
+            auto spell = cast("spells/Blind.s");
+            auto v = LoadMonster(std::string(scriptRoot) + "/arat.s", interpreter, strings, stack);
+            hit(*spell, *v);
+            Check(spell->statusEffect() == Item::kEffectBlind && v->blinded() &&
+                      v->statModifier(Monster::kStatAttack) == -10 &&
+                      v->statModifier(Monster::kStatDefense) == -10,
+                  "Blind applies -10 attack and -10 defense, and sets the blind flag");
+        }
+        // Disease: disease.s's rating is 5, so the magnitude<7 branch
+        // (-2 attack) plus a flat -3 defense, both for a fixed 30s.
+        {
+            auto spell = cast("spells/Disease.s");
+            auto v = LoadMonster(std::string(scriptRoot) + "/arat.s", interpreter, strings, stack);
+            hit(*spell, *v);
+            Check(spell->statusEffect() == Item::kEffectDisease &&
+                      v->statModifier(Monster::kStatAttack) == -2 &&
+                      v->statModifier(Monster::kStatDefense) == -3,
+                  "Disease takes the magnitude<7 branch (-2 attack) plus a flat -3 defense");
+            int ticks30 = 30 * 256 / sk_bindings::kAiFrameDeltaUnits;
+            for (int i = 0; i < ticks30 - 1; ++i) v->TickAi(sk_bindings::kAiFrameDeltaUnits);
+            bool stillOn = v->statModifier(Monster::kStatDefense) == -3;
+            v->TickAi(sk_bindings::kAiFrameDeltaUnits);
+            v->TickAi(sk_bindings::kAiFrameDeltaUnits);
+            Check(stillOn && v->statModifier(Monster::kStatDefense) == 0,
+                  "...for a fixed 30 seconds, after which the stats come back");
+        }
+        // Poison: 3 damage every 256 units, for `magnitude` seconds.
+        {
+            auto spell = cast("spells/Poison.s");
+            auto v = LoadMonster(std::string(scriptRoot) + "/arat.s", interpreter, strings, stack);
+            int hp0 = v->currentHealth();
+            hit(*spell, *v);
+            Check(spell->statusEffect() == Item::kEffectPoison && v->poisoned(),
+                  "real Poison.s (which passes DoAttackRoll no magnitude at all) still poisons");
+            int ticksPerSecond = 256 / sk_bindings::kAiFrameDeltaUnits + 1;
+            for (int i = 0; i < ticksPerSecond; ++i) v->TickAi(sk_bindings::kAiFrameDeltaUnits);
+            Check(v->currentHealth() == hp0 - 3,
+                  "...dealing exactly 3 per tick -- the real +0x76 value, passed to DoDamage");
+            for (int i = 0; i < 12 * ticksPerSecond; ++i) {
+                v->TickAi(sk_bindings::kAiFrameDeltaUnits);
+            }
+            int settled = v->currentHealth();
+            for (int i = 0; i < 40; ++i) v->TickAi(sk_bindings::kAiFrameDeltaUnits);
+            Check(!v->poisoned() && v->currentHealth() == settled,
+                  "...and expires after its duration instead of ticking forever");
+        }
+        // FUN_1004aa28's mode-1 "strongest wins" rule.
+        {
+            auto v = LoadMonster(std::string(scriptRoot) + "/arat.s", interpreter, strings, stack);
+            v->ApplyStatModifier(Monster::kStatAttack, -10, 30);
+            v->ApplyStatModifier(Monster::kStatAttack, -2, 30);   // weaker: rejected
+            bool keptStrong = v->statModifier(Monster::kStatAttack) == -10;
+            v->ApplyStatModifier(Monster::kStatAttack, -15, 30);  // stronger: replaces
+            Check(keptStrong && v->statModifier(Monster::kStatAttack) == -15,
+                  "a weaker modifier on the same stat is rejected; a stronger one replaces it");
+        }
+    }
+
     std::printf("\nm32_ai_package_smoke: %s (%d failure(s))\n", g_failures == 0 ? "OK" : "FAILED",
                 g_failures);
     return g_failures == 0 ? 0 : 1;
