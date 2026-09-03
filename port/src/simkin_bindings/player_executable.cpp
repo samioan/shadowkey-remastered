@@ -18,6 +18,17 @@ namespace sk_bindings {
 PlayerExecutable::PlayerExecutable(const sk::StringTable* strings)
     : NativeStubExecutable("Player"), m_Strings(strings) {}
 
+bool PlayerExecutable::setValue(const skString& fieldName, const skString&, const skRValue& value) {
+    m_Fields[ToStdString(fieldName)] = value;
+    return true;
+}
+
+bool PlayerExecutable::getValue(const skString& fieldName, const skString&, skRValue& value) {
+    auto it = m_Fields.find(ToStdString(fieldName));
+    value = it != m_Fields.end() ? it->second : skRValue(0);
+    return true;
+}
+
 void PlayerExecutable::LoadStartingInventory(MenuStack& stack) {
     // A small, curated starting kit -- one of each real category
     // (weapon/armor/consumable) this milestone's item native binding

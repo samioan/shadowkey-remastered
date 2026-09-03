@@ -89,6 +89,19 @@ public:
     int maxHealth() const { return m_MaxHealth; }
     bool alive() const { return m_Alive; }
 
+    // M23: a real, silent world-removal distinct from combat death (no
+    // OnKilled()/loot spawn) -- zone-root scripts call
+    // `Entity.DestroyObjectMirror(Entity)` on entities like azra.s's own
+    // "m1".."m20" (real, named .ent placements this session confirmed
+    // real -- docs/PORT_ROADMAP.md's M23 entry) once a real save flag
+    // (`saved_EndGame`) says they're no longer relevant. Checked
+    // alongside `alive()` everywhere a destroyed entity shouldn't act,
+    // render, or be targetable -- kept as its own flag rather than
+    // folded into `alive()` since the two have genuinely different real
+    // triggers and consequences (this one never runs `InvokeOnKilled()`
+    // or spawns loot).
+    bool destroyed() const { return m_Destroyed; }
+
     // M16: NPC-mode fields (see class comment) -- usable()/useTextId()
     // mirror door_executable.h's own accessors of the same name (same
     // native class, same SetUsable/SetUseText calls), invulnerable()
@@ -163,6 +176,7 @@ private:
     int m_UseTextId = -1;
     bool m_Invulnerable = false;
     std::string m_LootTag;  // M21: see lootTag()'s comment.
+    bool m_Destroyed = false;  // M23: see destroyed()'s comment.
 };
 
 }  // namespace sk_bindings

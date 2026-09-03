@@ -205,6 +205,15 @@ bool MonsterExecutable::method(const skString& methodName, skRValueArray& args,
         m_LootTag = ToStdString(args[1].str());
         return true;
     }
+    if (methodName == skString("DestroyObjectMirror")) {
+        // M23: see destroyed()'s comment -- azra.s's own
+        // `M1.DestroyObjectMirror(M1)` (self-passed, network/replication
+        // bookkeeping in the original, same `DoorOpened()`-style pattern
+        // -- this port has no multiplayer) after a real save flag says
+        // an entity is no longer relevant.
+        m_Destroyed = true;
+        return true;
+    }
     // SetAttackNoise/SetDeathNoise/SetIsHitNoise/SetWalkAnimation/
     // SetSwingAnimation/SetDeathAnimation/SetIdleAnimation/
     // PlayAnimationOffset/SetScale/AiDetect -- azra_rat.s calls all of

@@ -42,6 +42,7 @@
 #include "simkin_bindings/popup_menu_executable.h"
 #include "simkin_bindings/table_executable.h"
 #include "simkin_bindings/text_area_executable.h"
+#include "simkin_bindings/zone_script_executable.h"
 #include "skExecutableContext.h"
 #include "skInterpreter.h"
 #include "skParseException.h"
@@ -636,6 +637,14 @@ int main(int argc, char** argv) {
     // what each milestone does and doesn't reproduce from the real
     // engine.
     std::unique_ptr<sk::Zone> gameZone;
+    // M23: the real zone-root script (e.g. azra.s) -- Init() runs once,
+    // right after this zone's doors/monsters/pickups are loaded and
+    // registered into the Level global (see the zone-load block below).
+    // Kept alive for the whole time this zone is loaded even though
+    // nothing currently calls anything else on it (EnterZone() isn't
+    // wired up yet, see zone_script_executable.h's class comment) --
+    // matches gameZone/gameDoors/etc.'s own lifetime.
+    std::unique_ptr<sk_bindings::ZoneScriptExecutable> gameZoneScript;
     std::vector<sk::PlacedEntity> gameEntities;
     // Combat vertical-slice: live monsters, pulled out of gameEntities'
     // static-prop list at zone load (see below) -- see MonsterInstance's
@@ -848,6 +857,35 @@ int main(int argc, char** argv) {
                 std::printf("shadowkey-port: %zu live monster(s), %zu live door(s), %zu live "
                             "pickup(s) loaded\n",
                             gameMonsters.size(), gameDoors.size(), gamePickups.size());
+
+                // M23: the real zone-root script's own Init() -- run last,
+                // now that every real named door/monster/merchant this
+                // zone places is loaded and registered into the Level
+                // global (above), so its many real Level.GetEntity(...)
+                // calls (azra.s alone references "m1".."m20", "trinket",
+                // "birg", "skelos", "azra", "vil1".."vil4", "heather",
+                // "tanyin" -- every one a real, named .ent placement,
+                // confirmed this session) can actually resolve.
+                gameZoneScript.reset();
+                std::string zoneScriptPath = std::string(scriptRoot) + "/" + stack.requestedZone() +
+                                              ".s";
+                skExecutableContext zoneScriptCtxt(&interpreter);
+                try {
+                    auto zoneScript = std::make_unique<sk_bindings::ZoneScriptExecutable>(
+                        skString(zoneScriptPath.c_str()), zoneScriptCtxt, stack);
+                    skRValueArray args;
+                    args.append(skRValue(0));  // placeholder for Init's "(s)" parameter
+                    skRValue ret;
+                    skExecutableContext callCtxt(&interpreter);
+                    zoneScript->method(skString("Init"), args, ret, callCtxt);
+                    gameZoneScript = std::move(zoneScript);
+                } catch (skParseException& ex) {
+                    std::printf("shadowkey-port: PARSE ERROR loading zone script %s: %s\n",
+                                zoneScriptPath.c_str(), ex.toString().ptr());
+                } catch (skRuntimeException& ex) {
+                    std::printf("shadowkey-port: RUNTIME ERROR loading zone script %s: %s\n",
+                                zoneScriptPath.c_str(), ex.toString().ptr());
+                }
             } else {
                 std::printf("shadowkey-port: failed to load zone '%s', staying in menu\n",
                             stack.requestedZone().c_str());
@@ -982,7 +1020,13 @@ int main(int argc, char** argv) {
                 constexpr float kMonsterRadius = 40.0f;     // world units, wall-collision only
                 constexpr int kAttackCooldownTicks = 25;    // ~1s at the fixed 40ms tick
                 for (MonsterInstance& m : gameMonsters) {
-                    if (!m.script->alive() || !m.script->aggressive()) continue;
+                    // M23: destroyed() (a real zone-root script's
+                    // DestroyObjectMirror()) removes an entity from play
+                    // as fully as death does, everywhere alive() is
+                    // already checked.
+                    if (!m.script->alive() || m.script->destroyed() || !m.script->aggressive()) {
+                        continue;
+                    }
                     float mdx = gameCamera.x - m.x, mdy = gameCamera.y - m.y;
                     float dist = std::sqrt(mdx * mdx + mdy * mdy);
                     if (m.aiState == MonsterInstance::AiState::Idle) {
@@ -1113,7 +1157,9 @@ int main(int argc, char** argv) {
                         // no-op (ApplyDamage() already guards this too, but
                         // skipping targeting means the crosshair/prompt line
                         // never shows an NPC as attackable in the first place).
-                        if (!m.script->alive() || m.script->invulnerable()) continue;
+                        if (!m.script->alive() || m.script->destroyed() || m.script->invulnerable()) {
+                            continue;
+                        }
                         if (!sk_bindings::InAttackRange(gameCamera.x, gameCamera.y, gameCamera.yaw,
                                                          m.x, m.y, range)) {
                             continue;
@@ -1190,7 +1236,9 @@ int main(int argc, char** argv) {
                     MonsterInstance* nearest = nullptr;
                     float bestDist = kInteractRange + 1.0f;
                     for (MonsterInstance& m : gameMonsters) {
-                        if (!m.script->alive() || !m.script->usable()) continue;
+                        if (!m.script->alive() || m.script->destroyed() || !m.script->usable()) {
+                            continue;
+                        }
                         float ddx = m.x - gameCamera.x, ddy = m.y - gameCamera.y;
                         float dist = std::sqrt(ddx * ddx + ddy * ddy);
                         if (dist > kInteractRange || dist < 1.0f) continue;
@@ -1304,7 +1352,10 @@ int main(int argc, char** argv) {
                 // simplification).
                 std::vector<sk::PlacedEntity> frameEntities = gameEntities;
                 for (const MonsterInstance& m : gameMonsters) {
-                    if (m.script->alive()) {
+                    // M23: destroyed() (a real zone-root script's
+                    // DestroyObjectMirror()) hides an entity from the
+                    // world just as fully as death does.
+                    if (m.script->alive() && !m.script->destroyed()) {
                         frameEntities.push_back({m.x, m.y, m.z, m.modelArchiveIndex});
                     }
                 }
@@ -1350,7 +1401,9 @@ int main(int argc, char** argv) {
                                handRange(stack.player().rightItem())));
                 const MonsterInstance* facingMonster = nullptr;
                 for (const MonsterInstance& m : gameMonsters) {
-                    if (!m.script->alive() || !m.script->aggressive()) continue;
+                    if (!m.script->alive() || m.script->destroyed() || !m.script->aggressive()) {
+                        continue;
+                    }
                     if (!sk_bindings::InAttackRange(gameCamera.x, gameCamera.y, gameCamera.yaw, m.x,
                                                      m.y, playerAttackRange)) {
                         continue;

@@ -97,6 +97,7 @@ add_library(sk_bindings STATIC
   src/simkin_bindings/table_executable.cpp
   src/simkin_bindings/test_armor_executable.cpp
   src/simkin_bindings/text_area_executable.cpp
+  src/simkin_bindings/zone_script_executable.cpp
 )
 target_include_directories(sk_bindings PUBLIC src)
 target_link_libraries(sk_bindings PUBLIC simkin sk_entity_types)
@@ -232,3 +233,8 @@ target_link_libraries(loot_smoke PRIVATE sk_bindings)
 # Spellcasting smoke test -- see src/tests/m22_spell_smoke.cpp.
 add_executable(spell_smoke src/tests/m22_spell_smoke.cpp)
 target_link_libraries(spell_smoke PRIVATE sk_bindings)
+
+# Zone-root script loading smoke test -- see
+# src/tests/m23_zonescript_smoke.cpp.
+add_executable(zonescript_smoke src/tests/m23_zonescript_smoke.cpp)
+target_link_libraries(zonescript_smoke PRIVATE sk_bindings sk_world)

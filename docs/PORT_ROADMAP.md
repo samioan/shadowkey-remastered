@@ -1572,6 +1572,84 @@ algorithms.
     - Not independently confirmed in an actual windowed play session
       (same caveat every prior milestone's writeup already carries).
 
+- [x] **M23 -- zone-root `<zone>.s` script loading** (this session). Closes
+      M18's own "Not attempted" note -- `azra.s` itself (as opposed to
+      every per-entity script this port already runs) had never been
+      loaded at all.
+    - **Confirmed real, not dead code**: `azra.s`'s `Init()` references
+      `Level.GetEntity("m1")`..`("m20")`, `("trinket")`, `("birg")`,
+      `("skelos")`, `("azra")`, `("vil1")`..`("vil4")`, `("heather")`,
+      `("tanyin")` -- dumping every one of azra.ent's 282 real placements'
+      own 40-byte name field (same field M18 first decoded) found every
+      single one of these is a real, named placement, not a stale/
+      leftover reference. `"m1"` resolves to typeId 106
+      (`monsters/Bandit_Brawler.s`), `"m2"` to typeId 202 (`Azra_Rat.s`,
+      already loaded throughout this session) -- both ordinary category-2
+      monster scripts.
+    - **New `sk_bindings::ZoneScriptExecutable`** (`simkin_bindings/
+      zone_script_executable.h`/`.cpp`) -- same `skScriptedExecutable`-
+      backed shape every other class in this port uses, holding a
+      `MenuStack&`. Real handlers: `GetPlayer()`, `GetEntity(name)`
+      (`azra.s` calls this *both* bare and `Level.`-qualified in the same
+      script -- both delegate to the same `LevelExecutable` registry),
+      `isObject(x)` (a plain "is this a real found object, not `null`"
+      check -- `x.type() == T_Object`), and `SetZone(a,b)` (a real bare-
+      reachable "Zone effects" member per `docs/SIMKIN_NATIVE_API.md`'s
+      corpus research -- stored only, real meaning/consumer unconfirmed,
+      no getter anywhere reads it back). `main.cpp` loads and runs
+      `<zoneName>.s`'s real `Init()` once, right after that zone's doors/
+      monsters/pickups are loaded and registered into `Level` -- so its
+      many `GetEntity(...)` calls can actually resolve to the real
+      objects they reference.
+    - **A real, necessary, broadly-applicable fix along the way**:
+      `azra.s`'s `Init()` reads/writes dozens of arbitrary `GetPlayer().
+      saved_X` flags (`saved_EndGame`, `saved_Birgidda`, `saved_Skelos`,
+      `saved_Rescue1`-`4`, `saved_Heather`, `saved_SkelosDead`, ...) as
+      ad-hoc storage, never through a declared native method. Every other
+      `skScriptedExecutable`-backed class (Item/Door/Monster/Menu) gets
+      this for free (real TreeNode-backed field storage); `Player
+      Executable` doesn't (a native-only singleton, `NativeStubExecutable`
+      -derived), so every one of these would have thrown "Field ... not
+      found" without a fix. New `PlayerExecutable::setValue()`/
+      `getValue()` overrides add a generic scalar-field fallback
+      (`m_Fields`), with a never-written field reading back as a benign
+      `skRValue(0)` rather than throwing -- matching every real
+      `if (GetPlayer().saved_X = 1)` check's implied assumption that an
+      unset save flag is simply falsy. Almost certainly needed by other
+      not-yet-loaded scripts too, not just `azra.s`.
+    - **`MonsterExecutable` gained `DestroyObjectMirror(self)`** (real,
+      called as `M1.DestroyObjectMirror(M1)`) -- a silent world removal
+      distinct from combat death (no `OnKilled()`/loot spawn), new
+      `destroyed()` flag checked everywhere `alive()` already gates AI/
+      targeting/rendering (`main.cpp`, 5 call sites updated).
+    - **Verified end to end against real data, `zonescript_smoke`
+      (`src/tests/m23_zonescript_smoke.cpp`)**: confirms `"m1"`/`"m2"`'s
+      real typeIds structurally, then runs `azra.s`'s real `Init()` on a
+      completely fresh player -- every one of its dozens of real
+      `saved_X`/`QuestX` checks correctly false-by-default, so the whole
+      thing runs to completion without throwing despite the sheer number
+      of real native calls, only its own top-level `saved_SetZone[0]`
+      guard actually firing (`SetZone(1,2000)`, its own real literal
+      arguments) -- then sets `saved_EndGame=1` (via the new field
+      fallback, the same real mechanism an actual script assignment would
+      use) and reruns `Init()`, confirming the real `DestroyObjectMirror`
+      calls this time genuinely reach and mark the real `"m1"`/`"m2"`
+      objects `destroyed()`.
+    - **Not attempted**: `EnterZone(s)` (trigger-volume-driven -- `"Skelos
+      _Dead"`/`"YouSure"`/zone-transition triggers like `"ghasts"` ->
+      `Level.LoadLevel(...)` -- no real trigger-volume data source traced
+      yet: is it `.ent`-based, `.zcp`-cell-based, or something else
+      entirely, a separate investigation); `SummonMe()`/`SummonMe2()`
+      (called on entities in branches that never fire on a fresh game --
+      `saved_Birgidda`/`saved_Skelos`/`saved_RescueN`/`saved_Heather`/
+      `QuestCompleted(24)` all default false/unset -- plausibly the
+      inverse of `DestroyObjectMirror`, real semantics not chased);
+      `CountInventory(tag)` (soft-fails to 0, harmless for `azra.s`'s own
+      `= 7` check, but not a real implementation); `SetZone`'s own real
+      meaning/consumer.
+    - Not independently confirmed in an actual windowed play session
+      (same caveat every prior milestone's writeup already carries).
+
 ## Next milestones (not yet started)
 
 Roughly in priority order for reaching "actually playable," not commitments:
@@ -1593,16 +1671,21 @@ Roughly in priority order for reaching "actually playable," not commitments:
   out to be the same `ItemExecutable` class every weapon/armor/
   consumable already uses, casting reuses the same attack keys ranged
   weapons already do). Comparable in total scope to M0-M11 combined, as
-  originally sized up. Still open, not part of the original scoping
-  list: `Level`'s own trap/switch-controller side (`AddTrigger` and its
-  own further "Door/trap trigger" return-type class, `CreateEntity`/
-  `CreateEntityScript`'s non-item-shaped categories, save/load-level
-  state, ...) plus Zone effects (`Vignette`, `SpawnWithinRadius`,
-  `AddEncounters`, ...), a zone-root `<zone>.s` script loader (`azra.s`
-  itself is still never run -- see M18's "Not attempted" note), the real
-  status-effect system `DoAttackRoll`'s `effectId` argument selects
-  (M22's "Not attempted" note), and M21's own small loose ends
-  (empty-bag despawn, `SetLoot`'s trailing min/max args).
+  originally sized up. M23 then closed a further item flagged along the
+  way (M18's "Not attempted" note): zone-root `<zone>.s` script loading
+  -- `azra.s`'s real `Init()` now genuinely runs at zone load, its dozens
+  of real `Level.GetEntity(...)` calls resolving against real, named
+  placements. Still open: `Level`'s own trap/switch-controller side
+  (`AddTrigger` and its own further "Door/trap trigger" return-type
+  class, `CreateEntity`/`CreateEntityScript`'s non-item-shaped
+  categories, save/load-level state, ...) plus Zone effects (`Vignette`,
+  `SpawnWithinRadius`, `AddEncounters`, ...); `EnterZone(s)`'s trigger-
+  volume mechanism (M23's own "Not attempted" note -- no real trigger-
+  volume data source traced yet); the real status-effect system
+  `DoAttackRoll`'s `effectId` argument selects (M22's "Not attempted"
+  note); and two sets of small loose ends (M21's empty-bag despawn/
+  `SetLoot`'s trailing min/max args; M23's `SummonMe()`/`SummonMe2()`/
+  `CountInventory()`/`SetZone`'s real meaning).
 - **Real save file format** -- M5's save system is simulated in-memory
   only; no on-disk save format has been RE'd yet.
 - **`FUN_1002c010`'s big single vitals bar** -- confirmed real (appears

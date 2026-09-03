@@ -24,6 +24,7 @@
 #include <vector>
 
 #include "simkin_bindings/native_stub_executable.h"
+#include "skRValue.h"
 
 class skInterpreter;
 
@@ -42,6 +43,29 @@ public:
 
     bool method(const skString& methodName, skRValueArray& args, skRValue& returnValue,
                 skExecutableContext& context) override;
+
+    // M23: a generic scalar-field fallback -- real scripts (azra.s alone:
+    // saved_EndGame, saved_Birgidda, saved_Skelos, saved_Rescue1-4,
+    // saved_Heather, saved_SkelosDead, ...) read and write arbitrary
+    // "saved_X" flags directly on GetPlayer() as ad-hoc storage, not
+    // through any declared native method. An ordinary skScriptedExecutable
+    // -backed class (Item/Door/Monster/Menu) gets this for free -- it's
+    // TreeNode-backed, so an undeclared field read/write just works.
+    // PlayerExecutable derives from NativeStubExecutable instead (a
+    // native-only singleton, no `.s` file of its own), whose setValue()/
+    // getValue() both hardcode `return false` -- meaning every one of
+    // these real field accesses would throw "Field ... not found" without
+    // this override. A never-written field reads back as a benign
+    // skRValue(0) (found+defaulted, not "not found") -- matches every
+    // real `if (GetPlayer().saved_X = 1)` check's implied assumption that
+    // an unset save flag is falsy, not an error; the real engine's actual
+    // native player-state object almost certainly works the same way
+    // (a save-flag bucket defaulting unset entries to 0), inferred from
+    // this real usage pattern, not decompiled.
+    bool setValue(const skString& fieldName, const skString& attribute,
+                  const skRValue& value) override;
+    bool getValue(const skString& fieldName, const skString& attribute,
+                  skRValue& value) override;
 
     // Name-entry buffer that OpenEditText's on-screen keyboard would fill
     // character by character on the real device; namechar.s's Done()/
@@ -207,6 +231,9 @@ private:
     ItemExecutable* m_RightItem = nullptr;
     // M19: see TakePendingPickupItem()'s comment.
     skiExecutable* m_PendingPickupItem = nullptr;
+
+    // M23: see setValue()/getValue()'s comment above.
+    std::map<std::string, skRValue> m_Fields;
 
     // M17: quest state -- see questAssigned()/questSolved()/
     // questCompleted()/monstersKilled()'s comments above.
