@@ -72,6 +72,12 @@ struct Model {
     int frameCount = 1;
     int vertsPerFrame = 0;
     std::vector<AnimationClip> clips;
+    // Frame 0's local-space vertical extent (local Y is the model's up
+    // axis -- see render3d/zone_renderer.h's Y-up finding). Used to tell a
+    // rat or spider from a person without hardcoding a creature list.
+    int16_t minLocalY = 0, maxLocalY = 0;
+    // Height in raw world units at 1:1 scale.
+    int localHeight() const { return maxLocalY - minLocalY; }
 
     // Vertex `vertexIndex` of frame `frameIndex`, with the frame clamped
     // into range (a static prop is 1 frame, so every caller can pass a

@@ -183,7 +183,14 @@ bool Zone::Load(const std::string& scriptRoot, const std::string& zoneName) {
             const char* namePtr = reinterpret_cast<const char*>(p + 0x20);
             size_t nameLen = 0;
             while (nameLen < 40 && namePtr[nameLen] != '\0') ++nameLen;
-            entities_.push_back({x, y, z, typeId, std::string(namePtr, nameLen)});
+            EntPlacement placement;
+            placement.x = x;
+            placement.y = y;
+            placement.z = z;
+            placement.typeId = typeId;
+            placement.yawRaw = ReadU16(p + 0x14);  // see EntPlacement::yawRaw
+            placement.name.assign(namePtr, nameLen);
+            entities_.push_back(std::move(placement));
         }
     }
     if (!foundStart) {

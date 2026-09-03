@@ -31,6 +31,22 @@ int RollDamage(int attackerAttack, int defenderDefense, int defenderArmor, int d
 bool InAttackRange(float attackerX, float attackerY, float attackerYaw, float targetX,
                     float targetY, float range);
 
+// M30: the same nearest-in-cone rule for the **Use** action (doors, NPCs,
+// world items and containers), with the cone width made explicit --
+// `minFacing` is the minimum cosine of the angle between the player's
+// facing and the direction to the target, so 0.5 is a 60-degree cone and
+// 0.30 about 72.
+//
+// Factored out of main.cpp's three near-identical findNearby* lambdas so
+// the numbers are verifiable against real placement data without the
+// windowed game loop. The reach this is called with (384 raw world units)
+// is the game's own melee reach -- every real melee weapon in the corpus
+// calls SetRange(384) -- rather than an invented value; the previous 140
+// was barely half a tile, which is why interact prompts almost never
+// appeared.
+bool InInteractRange(float playerX, float playerY, float playerYaw, float targetX, float targetY,
+                      float range, float minFacing);
+
 // M22 (spellcasting): a spell's damage roll -- `rating` is the casting
 // item's own real SetRating() value (e.g. blaze.s's SetRating(2)),
 // `targetMagicResistance` the real monster's SetMagicResistance() (M12,

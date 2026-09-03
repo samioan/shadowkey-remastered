@@ -33,4 +33,16 @@ int RollDamage(int attackerAttack, int defenderDefense, int defenderArmor, int d
     return (std::max)(1, mitigated);
 }
 
+bool InInteractRange(float playerX, float playerY, float playerYaw, float targetX, float targetY,
+                      float range, float minFacing) {
+    float dx = targetX - playerX, dy = targetY - playerY;
+    float dist = std::sqrt(dx * dx + dy * dy);
+    if (dist > range) return false;
+    // Standing exactly on it counts -- there's no meaningful facing
+    // direction at zero distance, and refusing here is how a player
+    // standing on top of a small item ends up with no prompt at all.
+    if (dist < 1.0f) return true;
+    return (std::cos(playerYaw) * dx + std::sin(playerYaw) * dy) / dist >= minFacing;
+}
+
 }  // namespace sk_bindings

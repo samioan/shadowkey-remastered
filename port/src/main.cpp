@@ -124,6 +124,42 @@ std::string RowText(int textId, const std::string& literalText, const sk::String
 // separately for category 11/doors and category 2/monsters this
 // session). Shared by both the door and monster/NPC branches of the
 // zone-load loop below.
+// The real .ent per-placement heading (Zone::EntPlacement::yawRaw, a raw
+// 16-bit angle with 65536 == one full turn) as radians. Same units and
+// convention as DoorExecutable's AddRotationTurn() accumulator, so the two
+// simply add.
+float PlacementYawRadians(uint16_t yawRaw) {
+    constexpr float kTwoPi = 6.28318530718f;
+    return static_cast<float>(yawRaw) / 65536.0f * kTwoPi;
+}
+
+// M30: the entities.txt categories that are *item-shaped* -- a placement
+// the player walks up to and uses, whose script is an ordinary item
+// script (docs/ZONE_FORMAT.md's category table):
+//   3  misc loot/quest objects      4  weapons        5  spells
+//   6  armor pieces                 8  containers     9  consumables
+//   12 trapped container/door       14 spell scrolls  15 shields
+//   16 the one unique weapon
+// Before this only category 3 was loaded, so a weapon, spell, scroll,
+// shield, potion or **chest** lying in the world was an inert prop with no
+// interact prompt -- which is what "the prompt doesn't appear for a
+// lootable object" was. Categories 2/7 (monsters/merchants) and 11 (doors)
+// keep their own dedicated branches.
+bool IsPickupCategory(int category) {
+    switch (category) {
+        case 3: case 4: case 5: case 6:
+        case 8: case 9: case 12: case 14:
+        case 15: case 16:
+            return true;
+        default:
+            return false;
+    }
+}
+
+// Containers (and their trapped variant) open a real loot menu from
+// OnUse() rather than transferring themselves -- see PickupInstance.
+bool IsContainerCategory(int category) { return category == 8 || category == 12; }
+
 bool HasRealScript(const std::string& entityTypeName) {
     return entityTypeName.size() > 2 &&
            entityTypeName.compare(entityTypeName.size() - 2, 2, ".s") == 0;
@@ -157,6 +193,17 @@ struct MonsterInstance {
     std::unique_ptr<sk_bindings::MonsterExecutable> script;
     float x = 0, y = 0, z = 0;
     int modelArchiveIndex = -1;
+    // Real per-placement heading from the .ent record (Zone::EntPlacement::
+    // yawRaw), radians. Every live instance carries one now -- see the
+    // door struct's comment.
+    float placementYaw = 0.0f;
+    // Which way the creature is currently drawn facing, radians. Starts at
+    // its real .ent placement heading and turns to face where it is moving
+    // (or the player, while attacking). No RE ground truth for a model's
+    // own forward axis, so this may carry a constant offset per model --
+    // it is still far better than every creature staring in one fixed
+    // direction regardless of where it is walking.
+    float facingYaw = 0.0f;
     enum class AiState { Idle, Chasing, Attacking } aiState = AiState::Idle;
     int attackCooldownTicks = 0;
     // Ticks since this monster last actually had the player in sight.
@@ -215,6 +262,20 @@ int AdvanceMonsterAnimation(MonsterInstance& m, sk::ModelArchive& models) {
     return clip->startFrame + frameInClip;
 }
 
+// M30: the world-space height of a creature's centre of mass, from its
+// real model's own vertical extent scaled by its script's SetScale(). Used
+// to aim the camera at whatever the player is fighting -- a rat's centre
+// sits far below eye level, a person's does not, so "is this a small
+// enemy" is measured from the real art rather than hardcoded per monster.
+// Falls back to eye height (i.e. no pitch) if the model can't be resolved.
+float MonsterCenterZ(const MonsterInstance& m, sk::ModelArchive& models) {
+    const sk::Model* model = models.GetModel(m.modelArchiveIndex);
+    if (!model || model->localHeight() <= 0) return m.z + sk::kEyeHeightOffset;
+    float scale = m.script->scale();
+    return m.z + (static_cast<float>(model->minLocalY) +
+                  static_cast<float>(model->localHeight()) * 0.5f) * scale;
+}
+
 // M15: Action::Use interact binding, first (narrow) slice -- doors only,
 // same "one real category, not the whole native surface" precedent M12
 // set for combat (docs/PORT_ROADMAP.md's "generic Action::Use interact
@@ -228,6 +289,12 @@ struct DoorInstance {
     std::unique_ptr<sk_bindings::DoorExecutable> script;
     float x = 0, y = 0, z = 0;
     int modelArchiveIndex = -1;
+    // Real per-placement heading from the .ent record, radians. Composed
+    // with the script's own accumulated AddRotationTurn() so a door both
+    // sits in its wall correctly *and* swings when opened. Without this
+    // every door rendered face-on regardless of which wall it was in,
+    // which is what made them all look permanently open.
+    float placementYaw = 0.0f;
 };
 
 // M19: Action::Use interact binding's last remaining slice -- pickups.
@@ -245,6 +312,12 @@ struct PickupInstance {
     std::unique_ptr<sk_bindings::ItemExecutable> script;
     float x = 0, y = 0, z = 0;
     int modelArchiveIndex = -1;
+    float placementYaw = 0.0f;  // real .ent heading, radians
+    // M30: true for a container/loot category (8/12) rather than a
+    // directly-collectable world item -- its OnUse() opens a real loot
+    // menu instead of transferring itself. Kept explicitly rather than
+    // inferred, so an empty container still prompts correctly.
+    bool isContainer = false;
 };
 
 // M25: first-person weapon viewmodel -- state machine (WeaponViewmodel/
@@ -1071,6 +1144,7 @@ int main(int argc, char** argv) {
                 gameCamera.y = static_cast<float>(gameZone->playerStartY);
                 gameCamera.z = static_cast<float>(gameZone->playerStartZ) + sk::kEyeHeightOffset;
                 gameCamera.yaw = 0.0f;
+                gameCamera.pitch = 0.0f;
                 gameCamera.fovY = 1.2f;
                 gameVelZ = 0.0f;
                 onGround = true;
@@ -1125,6 +1199,7 @@ int main(int argc, char** argv) {
                             skExecutableContext callCtxt(&interpreter);
                             door->method(skString("Init"), args, ret, callCtxt);
                             DoorInstance inst;
+                            inst.placementYaw = PlacementYawRadians(e.yawRaw);
                             inst.x = static_cast<float>(e.x);
                             inst.y = static_cast<float>(e.y);
                             inst.z = static_cast<float>(e.z);
@@ -1141,11 +1216,14 @@ int main(int argc, char** argv) {
                         }
                         continue;
                     }
-                    // M19: category 3 (misc loot -- world pickups like
-                    // snowline/foxglove.s), same HasRealScript() gate as
-                    // every other category this loop pulls a live object
-                    // out for.
-                    if (desc->category == 3 && HasRealScript(desc->name)) {
+                    // M19/M30: every item-shaped category (see
+                    // IsPickupCategory() -- loot, weapons, spells, armor,
+                    // containers, consumables, scrolls, shields), same
+                    // HasRealScript() gate as every other category this
+                    // loop pulls a live object out for. M19 only covered
+                    // category 3, leaving chests and every world-dropped
+                    // weapon/potion as inert scenery with no prompt.
+                    if (IsPickupCategory(desc->category) && HasRealScript(desc->name)) {
                         std::string relPath = desc->name;
                         std::replace(relPath.begin(), relPath.end(), '\\', '/');
                         std::string fullPath = std::string(scriptRoot) + "/" + relPath;
@@ -1159,6 +1237,8 @@ int main(int argc, char** argv) {
                             skExecutableContext callCtxt(&interpreter);
                             item->method(skString("Init"), args, ret, callCtxt);
                             PickupInstance inst;
+                            inst.placementYaw = PlacementYawRadians(e.yawRaw);
+                            inst.isContainer = IsContainerCategory(desc->category);
                             inst.x = static_cast<float>(e.x);
                             inst.y = static_cast<float>(e.y);
                             inst.z = static_cast<float>(e.z);
@@ -1196,6 +1276,8 @@ int main(int argc, char** argv) {
                             skExecutableContext callCtxt(&interpreter);
                             monster->method(skString("Init"), args, ret, callCtxt);
                             MonsterInstance inst;
+                            inst.placementYaw = PlacementYawRadians(e.yawRaw);
+                            inst.facingYaw = inst.placementYaw;
                             inst.x = static_cast<float>(e.x);
                             inst.y = static_cast<float>(e.y);
                             inst.z = static_cast<float>(e.z);
@@ -1213,8 +1295,14 @@ int main(int argc, char** argv) {
                         }
                         continue;
                     }
-                    gameEntities.push_back({static_cast<float>(e.x), static_cast<float>(e.y),
-                                             static_cast<float>(e.z), desc->modelArchiveIndex});
+                    // Static scenery gets its real .ent heading as well --
+                    // barrels, urns, tables and wall fittings were all
+                    // being drawn face-on regardless of how the level
+                    // author placed them.
+                    sk::PlacedEntity prop{static_cast<float>(e.x), static_cast<float>(e.y),
+                                           static_cast<float>(e.z), desc->modelArchiveIndex};
+                    prop.yaw = PlacementYawRadians(e.yawRaw);
+                    gameEntities.push_back(prop);
                 }
                 std::printf("shadowkey-port: %zu live monster(s), %zu live door(s), %zu live "
                             "pickup(s) loaded\n",
@@ -1275,6 +1363,21 @@ int main(int argc, char** argv) {
                 // turning right means *decreasing* yaw.
                 if (input.GetButton(sk::ButtonSlot::Left)) gameCamera.yaw += kTurnSpeed;
                 if (input.GetButton(sk::ButtonSlot::Right)) gameCamera.yaw -= kTurnSpeed;
+                // The real default control scheme's own LookUp/LookDown
+                // (Key2/Key8, docs/INPUT_HANDLING.md) -- decoded long ago
+                // but never wired to anything, because the renderer had no
+                // pitch at all until now (see render3d/camera.h). Holding
+                // either overrides the automatic aim-assist below.
+                constexpr float kPitchSpeed = 0.05f;  // radians/tick
+                bool manualLook = false;
+                if (input.GetBoundButton(sk::Action::LookUp)) {
+                    gameCamera.pitch -= kPitchSpeed;
+                    manualLook = true;
+                }
+                if (input.GetBoundButton(sk::Action::LookDown)) {
+                    gameCamera.pitch += kPitchSpeed;
+                    manualLook = true;
+                }
                 float dx = std::cos(gameCamera.yaw) * kMoveSpeed;
                 float dy = std::sin(gameCamera.yaw) * kMoveSpeed;
                 // right = (sinYaw, -cosYaw), matching zone_renderer.cpp's
@@ -1295,6 +1398,22 @@ int main(int argc, char** argv) {
                 // collision already uses.
                 constexpr float kMonsterBodyRadius = 40.0f;
                 constexpr float kBlockHeightDelta = sk::kEyeHeightOffset * 2.0f;
+                // M30: a closed door is solid. door.s starts every door
+                // closed (`saved_Open [0]`) and only calls SetPassable(true)
+                // from OnUse(); the port stored that flag but never acted on
+                // it, so every door in the level was walk-through -- which,
+                // together with them being drawn at the wrong heading, is
+                // why they all read as permanently open.
+                constexpr float kDoorBodyRadius = 90.0f;  // a door leaf spans most of its tile
+                auto blockedByDoor = [&](float wx, float wy) {
+                    for (const DoorInstance& d : gameDoors) {
+                        if (d.script->passable()) continue;
+                        float dx = wx - d.x, dy = wy - d.y;
+                        float r = kPlayerRadius + kDoorBodyRadius;
+                        if (dx * dx + dy * dy < r * r) return true;
+                    }
+                    return false;
+                };
                 auto blockedByMonster = [&](float wx, float wy) {
                     for (const MonsterInstance& m : gameMonsters) {
                         if (!m.script->alive() || m.script->destroyed()) continue;
@@ -1311,12 +1430,14 @@ int main(int argc, char** argv) {
                 auto tryMove = [&](float mx, float my) {
                     float nx = gameCamera.x + mx;
                     if (!gameZone->CircleHitsWall(nx, gameCamera.y, kPlayerRadius) &&
-                        !blockedByMonster(nx, gameCamera.y)) {
+                        !blockedByMonster(nx, gameCamera.y) &&
+                        !blockedByDoor(nx, gameCamera.y)) {
                         gameCamera.x = nx;
                     }
                     float ny = gameCamera.y + my;
                     if (!gameZone->CircleHitsWall(gameCamera.x, ny, kPlayerRadius) &&
-                        !blockedByMonster(gameCamera.x, ny)) {
+                        !blockedByMonster(gameCamera.x, ny) &&
+                        !blockedByDoor(gameCamera.x, ny)) {
                         gameCamera.y = ny;
                     }
                 };
@@ -1394,6 +1515,23 @@ int main(int argc, char** argv) {
                 // either, so it would default to 0 and never trigger
                 // anyway -- this makes the intent explicit rather than
                 // relying on that coincidence).
+                // How far a creature can notice the player at all.
+                //
+                // Real scripts are no help here: 222 of the corpus's 270
+                // SetChaseRadius calls pass 18000 raw units, which on a
+                // 128x128 grid of 256-unit tiles is 70 tiles -- over half
+                // the map, and larger than any zone's playable extent. It
+                // cannot be a plain euclidean aggro radius at that scale
+                // (nor can SetAttackRange's 12000, ~47 tiles), so the value
+                // is either in units this project hasn't pinned down or is
+                // not consumed as a radius at all. Taking it literally is
+                // what gave enemies effectively unlimited aggro.
+                //
+                // So the script value is honoured only as an *upper bound*,
+                // capped to a sane sighting distance, and sight (below) is
+                // what really gates aggro. Documented port-side constant,
+                // not a recovered one.
+                constexpr float kMaxAggroRange = 8.0f * sk::kTileScale;  // 8 tiles
                 constexpr float kMeleeRange = 110.0f;      // world units
                 // M22: no real spell script ever calls SetRange() (only
                 // weapon scripts do -- M20's own corpus-verified bimodal
@@ -1402,9 +1540,16 @@ int main(int argc, char** argv) {
                 // "no RE ground truth" footing as kEyeHeightOffset
                 // (render3d/camera.h) or this port's gravity constants.
                 constexpr float kSpellRange = 300.0f;      // world units
-                constexpr float kMonsterMoveSpeed = 22.0f;  // world units/tick, slower than the
-                                                             // player's 40 -- a rat shouldn't
-                                                             // outrun a walking player
+                // World units/tick at the fixed 25Hz tick. The player
+                // walks at 40 (~3.9 tiles/s); 14 puts a creature at about a
+                // third of that (~1.4 tiles/s), which is enough to close on
+                // a player who stands and fights but leaves retreating a
+                // real option. The previous 22 read as "too fast" in play.
+                // No real constant exists to match: the corpus never calls
+                // SetSpeed with a literal (only `SetSpeed(GetPlayer()...)`,
+                // i.e. relative to the player), so this is a tuned
+                // port-side value.
+                constexpr float kMonsterMoveSpeed = 14.0f;
                 constexpr float kMonsterRadius = 40.0f;     // world units, wall-collision only
                 constexpr int kAttackCooldownTicks = 25;    // ~1s at the fixed 40ms tick
                 // How far above/below a monster the player can be and
@@ -1459,7 +1604,8 @@ int main(int argc, char** argv) {
                     // Zone::HasLineOfSight()'s comment), so sight and
                     // vertical separation -- not the radius -- are what
                     // really bound aggro.
-                    bool inRadius = dist <= m.script->chaseRadius();
+                    bool inRadius =
+                        dist <= (std::min)(m.script->chaseRadius(), kMaxAggroRange);
                     bool sameLevel =
                         std::fabs(gameCamera.z - (m.z + sk::kEyeHeightOffset)) <=
                         kAggroMaxHeightDelta;
@@ -1486,9 +1632,16 @@ int main(int argc, char** argv) {
                         continue;
                     }
 
-                    if (canSee && dist <= kMeleeRange) {
+                    // At arm's length the creature attacks whether or not
+                    // the centre-to-centre sightline happens to clip a wall
+                    // corner -- otherwise a monster standing in a doorway
+                    // would keep walking into the player instead of
+                    // stopping to swing, which is exactly the "doesn't stop
+                    // to attack" behaviour reported.
+                    if (dist <= kMeleeRange) {
                         m.aiState = MonsterInstance::AiState::Attacking;
                         setAnimClip(m, m.script->swingAnimation(), false);
+                        if (dist > 1.0f) m.facingYaw = std::atan2(mdy, mdx);
                         if (m.attackCooldownTicks > 0) {
                             --m.attackCooldownTicks;
                         } else {
@@ -1545,15 +1698,24 @@ int main(int argc, char** argv) {
                             static const float kSteerAngles[] = {0.0f,        0.6f,  -0.6f,
                                                                   1.2f,        -1.2f, 1.9f,
                                                                   -1.9f};
+                            // Never close past bodily contact: melee range
+                            // is the trigger to swing, but the creature
+                            // still must not walk *into* the player. Clamp
+                            // this tick's step so it stops at the point
+                            // where the two bounding circles touch.
+                            float standoff = kPlayerRadius + kMonsterRadius;
+                            float step = kMonsterMoveSpeed;
+                            if (canSee) step = (std::min)(step, (std::max)(0.0f, dist - standoff));
                             for (float steer : kSteerAngles) {
                                 float cs = std::cos(steer), sn = std::sin(steer);
                                 float sx = dirX * cs - dirY * sn;
                                 float sy = dirX * sn + dirY * cs;
-                                float nx = m.x + sx * kMonsterMoveSpeed;
-                                float ny = m.y + sy * kMonsterMoveSpeed;
+                                float nx = m.x + sx * step;
+                                float ny = m.y + sy * step;
                                 if (!gameZone->CircleHitsWall(nx, ny, kMonsterRadius)) {
                                     m.x = nx;
                                     m.y = ny;
+                                    if (step > 0.01f) m.facingYaw = std::atan2(sy, sx);
                                     break;
                                 }
                             }
@@ -1561,6 +1723,54 @@ int main(int argc, char** argv) {
                     }
                     m.z = gameZone->FloorHeightAt(m.x, m.y);
                 }
+
+                // M30: automatic aim-assist pitch. Requested behaviour:
+                // facing a small creature (a rat, a spider) the camera
+                // should tilt down to it and level off again once it is out
+                // of range.
+                //
+                // "Small" is measured, not listed: MonsterCenterZ() takes
+                // the creature's real model height (scaled by its script's
+                // own SetScale) so the camera aims at its actual centre of
+                // mass. A rat's is far below eye level and produces a real
+                // downward tilt; a humanoid's is near eye level and
+                // produces almost none, which is why this needs no
+                // per-creature special-casing.
+                //
+                // No RE ground truth: the original's own camera pitch is
+                // real (render3d/camera.h) but nothing has been traced that
+                // aims it automatically, so this is a port-side design,
+                // documented as such. Manual LookUp/LookDown overrides it
+                // while held.
+                if (!manualLook) {
+                    constexpr float kAutoAimRange = 3.0f * sk::kTileScale;
+                    constexpr float kAutoAimEase = 0.18f;  // fraction closed per tick
+                    const MonsterInstance* aimTarget = nullptr;
+                    float aimBest = kAutoAimRange;
+                    float fwdX = std::cos(gameCamera.yaw), fwdY = std::sin(gameCamera.yaw);
+                    for (const MonsterInstance& m : gameMonsters) {
+                        if (!m.script->alive() || m.script->destroyed()) continue;
+                        if (!m.script->aggressive()) continue;
+                        float dx = m.x - gameCamera.x, dy = m.y - gameCamera.y;
+                        float d = std::sqrt(dx * dx + dy * dy);
+                        if (d > aimBest || d < 1.0f) continue;
+                        if ((fwdX * dx + fwdY * dy) / d < 0.5f) continue;  // roughly ahead
+                        aimBest = d;
+                        aimTarget = &m;
+                    }
+                    float desiredPitch = 0.0f;
+                    if (aimTarget) {
+                        float centerZ = MonsterCenterZ(*aimTarget, modelArchive);
+                        desiredPitch = std::atan2(gameCamera.z - centerZ, (std::max)(1.0f, aimBest));
+                    }
+                    desiredPitch = std::clamp(desiredPitch, -sk::kMaxCameraPitch,
+                                               sk::kMaxCameraPitch);
+                    // Ease rather than snap, so acquiring or losing a target
+                    // reads as the camera panning, not cutting.
+                    gameCamera.pitch += (desiredPitch - gameCamera.pitch) * kAutoAimEase;
+                }
+                gameCamera.pitch =
+                    std::clamp(gameCamera.pitch, -sk::kMaxCameraPitch, sk::kMaxCameraPitch);
 
                 // M21: monster-death loot-bag spawning -- see docs/
                 // PORT_ROADMAP.md's M21 entry for the full real-corpus
@@ -1707,6 +1917,17 @@ int main(int argc, char** argv) {
                         if (gameZoneScript) gameZoneScript->NotifyKilled(target->typeId);
                     }
                 };
+                // Whichever hand actually holds a weapon provides the
+                // visible swing, so attacking bare-handed with one hand
+                // while the other holds the club still animates the club
+                // rather than silently drawing nothing.
+                auto swingItemFor = [&](sk_bindings::ItemExecutable* hand) {
+                    if (hand && hand->weaponSprite() >= 0) return hand;
+                    sk_bindings::ItemExecutable* other = stack.player().rightItem() == hand
+                                                              ? stack.player().leftItem()
+                                                              : stack.player().rightItem();
+                    return (other && other->weaponSprite() >= 0) ? other : hand;
+                };
                 if (input.ConsumeBoundJustPressed(sk::Action::UseLeftAction)) {
                     // M25: the swing pose plays on the keypress itself, not
                     // only when tryAttack actually finds a target in range --
@@ -1714,12 +1935,31 @@ int main(int argc, char** argv) {
                     // connects (see WeaponViewmodel's comment; a no-op for a
                     // non-weapon/no weaponSprite() item, e.g. bare fists or a
                     // spell).
-                    sk_bindings::StartWeaponSwing(gameWeaponViewmodel, stack.player().leftItem());
+                    sk_bindings::StartWeaponSwing(gameWeaponViewmodel,
+                                                   swingItemFor(stack.player().leftItem()));
                     tryAttack(stack.player().leftItem());
                 }
                 if (input.ConsumeBoundJustPressed(sk::Action::UseRightAction)) {
-                    sk_bindings::StartWeaponSwing(gameWeaponViewmodel, stack.player().rightItem());
+                    sk_bindings::StartWeaponSwing(gameWeaponViewmodel,
+                                                   swingItemFor(stack.player().rightItem()));
                     tryAttack(stack.player().rightItem());
+                }
+                // M30: the viewmodel now shows the equipped weapon *all
+                // the time*, not only for the moment after an attack key.
+                // Before this, `vm.item` was assigned solely inside
+                // StartWeaponSwing(), so equipping a weapon showed nothing
+                // at all -- and if the weapon had landed in the hand whose
+                // attack key you weren't pressing (UpdateEquipStatus fills
+                // whichever hand is empty), the swing drew nothing either.
+                // Every real weapon script carries the art for this:
+                // weapons/club.s does SetWeaponSprite(88) +
+                // SetAnimationFrames(5), and those global.spr slots are in
+                // the per-zone manifest the port already loads.
+                if (gameWeaponViewmodel.phase == sk_bindings::WeaponViewmodel::Phase::Idle) {
+                    sk_bindings::ItemExecutable* shown = stack.player().rightItem();
+                    if (!shown || shown->weaponSprite() < 0) shown = stack.player().leftItem();
+                    if (shown && shown->weaponSprite() < 0) shown = nullptr;
+                    gameWeaponViewmodel.item = shown;
                 }
                 sk_bindings::TickWeaponViewmodel(gameWeaponViewmodel);
 
@@ -1732,17 +1972,32 @@ int main(int argc, char** argv) {
                 // range-and-facing-cone targeting tryAttack uses above,
                 // reused here (and again below for the on-screen use-text
                 // prompt).
-                constexpr float kInteractRange = 140.0f;  // world units, slightly past melee range
+                // Reach for the Use action. 384 raw world units is the
+                // game's own melee reach: **every** real melee weapon in the
+                // corpus calls SetRange(384) (64 of them; the other 16 are
+                // bows/thrown at 16384), so it is the one corpus-verified
+                // "arm's length" constant available rather than an invented
+                // number. The previous 140 was barely half a tile -- you had
+                // to stand almost exactly on an entity's placement point for
+                // its prompt to appear, which is why doors only responded to
+                // a very precise approach and chests/NPCs essentially never
+                // did.
+                constexpr float kInteractRange = 384.0f;
+                // ~72 degrees off-centre, up from the old ~60. Entities sit
+                // at a tile's centre while the player walks its edges, so a
+                // tight cone misses things plainly on screen.
+                constexpr float kInteractFacing = 0.30f;
                 auto findNearbyDoor = [&]() -> DoorInstance* {
-                    float fwdX = std::cos(gameCamera.yaw), fwdY = std::sin(gameCamera.yaw);
                     DoorInstance* nearest = nullptr;
                     float bestDist = kInteractRange + 1.0f;
                     for (DoorInstance& d : gameDoors) {
+                        if (!sk_bindings::InInteractRange(gameCamera.x, gameCamera.y,
+                                                           gameCamera.yaw, d.x, d.y,
+                                                           kInteractRange, kInteractFacing)) {
+                            continue;
+                        }
                         float ddx = d.x - gameCamera.x, ddy = d.y - gameCamera.y;
                         float dist = std::sqrt(ddx * ddx + ddy * ddy);
-                        if (dist > kInteractRange || dist < 1.0f) continue;
-                        float facing = (fwdX * ddx + fwdY * ddy) / dist;
-                        if (facing < 0.5f) continue;  // ~60 degree forward cone
                         if (dist < bestDist) {
                             bestDist = dist;
                             nearest = &d;
@@ -1755,18 +2010,19 @@ int main(int argc, char** argv) {
                 // sets it, so this naturally only ever finds NPCs, not
                 // hostile creatures the player is fighting.
                 auto findNearbyUsableMonster = [&]() -> MonsterInstance* {
-                    float fwdX = std::cos(gameCamera.yaw), fwdY = std::sin(gameCamera.yaw);
                     MonsterInstance* nearest = nullptr;
                     float bestDist = kInteractRange + 1.0f;
                     for (MonsterInstance& m : gameMonsters) {
                         if (!m.script->alive() || m.script->destroyed() || !m.script->usable()) {
                             continue;
                         }
+                        if (!sk_bindings::InInteractRange(gameCamera.x, gameCamera.y,
+                                                           gameCamera.yaw, m.x, m.y,
+                                                           kInteractRange, kInteractFacing)) {
+                            continue;
+                        }
                         float ddx = m.x - gameCamera.x, ddy = m.y - gameCamera.y;
                         float dist = std::sqrt(ddx * ddx + ddy * ddy);
-                        if (dist > kInteractRange || dist < 1.0f) continue;
-                        float facing = (fwdX * ddx + fwdY * ddy) / dist;
-                        if (facing < 0.5f) continue;  // ~60 degree forward cone
                         if (dist < bestDist) {
                             bestDist = dist;
                             nearest = &m;
@@ -1776,15 +2032,16 @@ int main(int argc, char** argv) {
                 };
                 // M19: same shape again for pickups.
                 auto findNearbyPickup = [&]() -> PickupInstance* {
-                    float fwdX = std::cos(gameCamera.yaw), fwdY = std::sin(gameCamera.yaw);
                     PickupInstance* nearest = nullptr;
                     float bestDist = kInteractRange + 1.0f;
                     for (PickupInstance& p : gamePickups) {
+                        if (!sk_bindings::InInteractRange(gameCamera.x, gameCamera.y,
+                                                           gameCamera.yaw, p.x, p.y,
+                                                           kInteractRange, kInteractFacing)) {
+                            continue;
+                        }
                         float ddx = p.x - gameCamera.x, ddy = p.y - gameCamera.y;
                         float dist = std::sqrt(ddx * ddx + ddy * ddy);
-                        if (dist > kInteractRange || dist < 1.0f) continue;
-                        float facing = (fwdX * ddx + fwdY * ddy) / dist;
-                        if (facing < 0.5f) continue;  // ~60 degree forward cone
                         if (dist < bestDist) {
                             bestDist = dist;
                             nearest = &p;
@@ -1887,22 +2144,27 @@ int main(int argc, char** argv) {
                     // Real per-instance appearance from the creature's own
                     // script (SetSkin/SetScale) -- see
                     // monster_executable.h.
-                    sk::PlacedEntity pe{m.x, m.y, m.z, m.modelArchiveIndex};
+                    sk::PlacedEntity pe{m.x, m.y, m.z, m.modelArchiveIndex, m.facingYaw};
                     pe.skinIndex = m.script->skin();
                     pe.scale = m.script->scale();
                     pe.frameIndex = AdvanceMonsterAnimation(m, modelArchive);
                     frameEntities.push_back(pe);
                 }
                 for (const DoorInstance& d : gameDoors) {
-                    frameEntities.push_back(
-                        {d.x, d.y, d.z, d.modelArchiveIndex, d.script->yawRadians()});
+                    // Real wall-facing heading from the .ent placement, plus
+                    // whatever the script's own AddRotationTurn() has
+                    // accumulated (the 90-degree swing door.s applies on
+                    // open). Both use the same 65536-per-turn convention.
+                    frameEntities.push_back({d.x, d.y, d.z, d.modelArchiveIndex,
+                                              d.placementYaw + d.script->yawRadians()});
                 }
                 // M19: still-in-world pickups -- gamePickups shrinks as
                 // items are actually picked up (see the Action::Use
                 // handling above), so this naturally stops drawing one the
                 // instant it's gone.
                 for (const PickupInstance& p : gamePickups) {
-                    frameEntities.push_back({p.x, p.y, p.z, p.modelArchiveIndex});
+                    frameEntities.push_back(
+                        {p.x, p.y, p.z, p.modelArchiveIndex, p.placementYaw});
                 }
                 zoneRenderer.Render(backbuffer, *gameZone, gameCamera, frameEntities, &modelArchive);
                 RenderHud(backbuffer, stack.player(), spriteArchive, gameCamera.yaw);
@@ -2016,6 +2278,7 @@ int main(int argc, char** argv) {
             // already on left it with nothing highlighted and Enter doing
             // nothing. See MenuExecutable::EnsureValidSelection().
             menu->EnsureValidSelection();
+            sk_bindings::MenuExecutable* before = menu;
             try {
                 if (sk_bindings::PopupMenuExecutable* popup = menu->activePopup()) {
                     // A visible confirmation popup captures input ahead of
@@ -2090,6 +2353,28 @@ int main(int argc, char** argv) {
                 std::printf("shadowkey-port: RUNTIME ERROR: %s\n", e.toString().ptr());
             }
             menu = stack.currentMenu();  // a callback may have opened a new one
+
+            // M30: a script's own Quit() (MenuStack::closeMenuRequested()).
+            // Handled here, after the whole callback chain has returned, so
+            // a handler that does `Quit(); OpenMenu(...)` -- which several
+            // real screens do -- still ends up on the menu it asked for
+            // rather than being closed out from under itself.
+            if (stack.closeMenuRequested()) {
+                stack.ClearCloseMenuRequest();
+                if (menu == before && menu) {
+                    // Nothing else navigated: close for real. Back to
+                    // gameplay if this screen was opened from the 3D view
+                    // (an NPC conversation's "Goodbye"), otherwise to the
+                    // screen's own SetPrevMenu target.
+                    if (gamePausedForMenu && gameZone) {
+                        gamePausedForMenu = false;
+                        inGame = true;
+                    } else if (!menu->prevMenuPath().empty()) {
+                        stack.OpenMenu(menu->prevMenuPath());
+                        menu = stack.currentMenu();
+                    }
+                }
+            }
         }
 
         // A freshly opened menu (via OpenMenu()) starts with no selection

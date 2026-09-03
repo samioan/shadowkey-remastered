@@ -267,7 +267,8 @@ add_executable(trigger_smoke src/tests/m24_trigger_smoke.cpp)
 target_link_libraries(trigger_smoke PRIVATE sk_bindings)
 
 # Weapon viewmodel smoke test -- see src/tests/m25_weapon_viewmodel_smoke.cpp.
-add_executable(weapon_viewmodel_smoke src/tests/m25_weapon_viewmodel_smoke.cpp)
+add_executable(weapon_viewmodel_smoke src/tests/m25_weapon_viewmodel_smoke.cpp
+                                       src/assets/sprite_archive.cpp)
 target_link_libraries(weapon_viewmodel_smoke PRIVATE sk_bindings)
 
 # Real zone-transition loading screen smoke test -- see

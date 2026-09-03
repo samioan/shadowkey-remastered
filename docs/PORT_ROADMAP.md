@@ -2229,6 +2229,94 @@ algorithms.
       traced to a consumer -- observed values are 1/3/5/6/10/11/15/17/29),
       and looping every clip except death.
 
+- [x] **M30 -- interaction, doors, weapon viewmodel, camera pitch, and AI
+      behaviour** (this session). A second round of player-reported bugs.
+      As in M28, most were port-side gaps in front of data that was already
+      decoded.
+    - **Interact prompts almost never appeared.** Two causes. (a) The Use
+      reach was **140 raw world units** -- barely half a 256-unit tile --
+      so you had to stand nearly on an entity's placement point. Raised to
+      **384**, which is the game's own melee reach: every real melee weapon
+      in the corpus calls `SetRange(384)` (64 of them; the other 16 are
+      bows/thrown at 16384), so it's a corpus-verified "arm's length"
+      rather than an invented number. The forward cone widened from ~60 to
+      ~72 degrees. (b) Only `entities.txt` **category 3** was loaded as a
+      world pickup, so weapons (4), spells (5), armor (6), **containers
+      (8)**, consumables (9), trapped containers (12), scrolls (14),
+      shields (15) and the unique weapon (16) placed in a level were inert
+      scenery with no script and no prompt -- which is exactly "the prompt
+      doesn't appear for a lootable object". All ten item-shaped categories
+      now load (`IsPickupCategory`), with containers routed to the existing
+      M21 loot-menu path. azra goes from 0 live pickups to 1 (its real
+      `blaze.s` placement); zones like `broken1` have many more.
+      The targeting rule moved into `sk_bindings::InInteractRange()` so it
+      is testable: `m15_interact_smoke` now asserts all **10/10** real azra
+      door placements are reachable from one tile away, and that the same
+      approach failed under the old 140-unit reach.
+    - **Every door looked permanently open, and none of them blocked.**
+      `.ent`'s per-placement heading was decoded long ago
+      (`docs/ZONE_FORMAT.md`: record offset `0x14`'s low u16 feeds the
+      object's `+0xb6` orientation channel, the same field and 65536-per-turn
+      format the player's compass heading uses) but **never used** -- every
+      entity rendered at yaw 0, so a door authored into an east-west wall was
+      drawn face-on and read as a gap. Real azra doors carry 0 / 16640 /
+      16768 / 33152 / 49408 / 49472 / 49536, i.e. the four axis directions.
+      Now applied to doors (composed with the script's own
+      `AddRotationTurn` swing, same units), monsters, pickups **and** static
+      scenery. Separately, `SetPassable` was stored but inert: `door.s`
+      starts every door closed (`saved_Open [0]`) and only calls
+      `SetPassable(true)` from `OnUse()`, so closed doors are now solid.
+    - **An equipped weapon showed no viewmodel.** `WeaponViewmodel::item`
+      was only ever assigned inside `StartWeaponSwing()`, i.e. on an attack
+      keypress -- and only for the hand you pressed, while
+      `UpdateEquipStatus` fills whichever hand is *empty*. So equipping
+      showed nothing, and attacking with the empty hand showed nothing
+      either. The viewmodel now tracks the equipped weapon every idle tick,
+      and a swing falls back to whichever hand actually holds one. The art
+      was always there: `weapons/club.s` sets `SetWeaponSprite(88)` +
+      `SetAnimationFrames(5)`, and `m25_weapon_viewmodel_smoke` now asserts
+      slot 88 and all five swing frames decode from the real archive.
+    - **Camera pitch, which the renderer never had.** The original supports
+      it -- `SurfaceFace_BuildAndProject`'s vertex transform has a
+      full-3x3-matrix path and a yaw-only fast path, gated on
+      `engine+0x5d4` -- and the real default control scheme's own
+      `LookUp`/`LookDown` (Key2/Key8) were decoded but bound to nothing
+      because there was no pitch to drive. Added `Camera::pitch` through
+      both projection paths, wired those two keys, and added the requested
+      automatic aim-assist: the camera eases down onto a nearby hostile and
+      levels off again when it leaves range. "Small" is *measured* --
+      `Model::minLocalY/maxLocalY` (new) gives the creature's real height,
+      scaled by its own `SetScale`, so a rat produces a real downward tilt
+      and a humanoid almost none, with no per-creature special-casing.
+      Manual look overrides it while held. The auto-aim itself is a
+      port-side design; nothing has been traced that aims the original's
+      camera automatically.
+    - **Enemy behaviour.** Aggro was driven directly by `SetChaseRadius`,
+      whose value is **18000 raw units** in 222 of the corpus's 270 calls --
+      70 tiles on a 128x128 grid, more than half the map and larger than any
+      zone's playable extent (`SetAttackRange`'s 12000 is ~47 tiles, equally
+      implausible). Whatever those units are, they are not a euclidean
+      radius, so the script value is now honoured only as an upper bound,
+      capped at 8 tiles, with line of sight doing the real gating. Movement
+      speed dropped 22 -> 14 world units/tick (the player walks 40); a
+      chaser now clamps its step so it stops exactly at bodily contact
+      instead of walking into the player; and melee no longer requires a
+      clean centre-to-centre sightline, which is what made a creature in a
+      doorway keep advancing instead of stopping to swing. Creatures also
+      turn to face where they are going.
+    - **Soft-fails cleared** (from the play-session log): `Menu::Quit()` --
+      30+ real scripts call it and every NPC conversation's "Goodbye" row is
+      just `Quit()`, so choosing it did nothing; it now closes the screen,
+      resuming gameplay if it was opened from the 3D view, else falling back
+      to `SetPrevMenu`. Also `Monster::SetLevel`/`GetLevel`, which real
+      spell damage formulas read (`Random(3, (GetOwner().GetLevel()+1)*2)`).
+    - **Still soft-failing, deliberately**: `AiDetect` (the real AI state
+      machine is native and opaque -- it's the only Ai\* call any script
+      makes), `AddProduct`/`ClearProducts` (the buy/sell shop screens, out
+      of scope since M10), `SetAttachedWeapon` (a second model in a
+      creature's hand), `DetectOnKilled`, and a few
+      character-creation/quest odds and ends.
+
 ## Next milestones (not yet started)
 
 Roughly in priority order for reaching "actually playable," not commitments:

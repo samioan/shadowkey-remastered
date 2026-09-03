@@ -76,6 +76,17 @@ public:
     bool muteOnCall() const { return m_MuteOnCall; }
     void SetMuteOnCall(bool mute) { m_MuteOnCall = mute; }
 
+    // M30: a script's own Quit() -- "close this screen". 30+ real scripts
+    // call it, most visibly every NPC conversation's own "Goodbye" row
+    // (e.g. almatheaconvo.s's `MenuQuit[ (s) { Quit(); } ]`). It was
+    // soft-failing, so choosing Goodbye did nothing at all. The host
+    // decides what "close" means -- resume gameplay if the screen was
+    // opened from the 3D view, otherwise fall back to the screen's own
+    // SetPrevMenu target -- so this only records the request.
+    bool closeMenuRequested() const { return m_CloseMenuRequested; }
+    void RequestCloseMenu() { m_CloseMenuRequested = true; }
+    void ClearCloseMenuRequest() { m_CloseMenuRequested = false; }
+
     // Loads (or returns the already-loaded) menu for `simkinPath`, running
     // its Init() the first time it's created. Returns nullptr (logged) if
     // the target .s file doesn't exist or fails to parse.
@@ -204,6 +215,7 @@ private:
     sk::SoundArchive* m_Sounds;  // M27: see sounds()/audio()'s own comment above
     sk::AudioEngine* m_Audio;
     bool m_MuteOnCall = false;  // M28: see muteOnCall() above
+    bool m_CloseMenuRequested = false;  // M30: see closeMenuRequested() above
     std::map<std::string, std::unique_ptr<MenuExecutable>> m_Menus;
     std::unique_ptr<PlayerExecutable> m_Player;
     std::unique_ptr<LevelExecutable> m_Level;

@@ -324,6 +324,15 @@ bool MenuExecutable::method(const skString& methodName, skRValueArray& args,
         returnValue = skRValue(static_cast<skiExecutable*>(&m_TitleHandle), false);
         return true;
     }
+    if (methodName == skString("Quit") && args.entries() == 0) {
+        // See MenuStack::closeMenuRequested(). Deliberately does not
+        // navigate here: a real Quit() is often followed immediately by an
+        // OpenMenu(...) in the same handler (charactermanager.s's
+        // OnRightSoftKey does exactly that), and acting instantly would
+        // fight that second call.
+        m_Stack.RequestCloseMenu();
+        return true;
+    }
     if (methodName == skString("SetPrevMenu") && args.entries() == 1) {
         // Where the back/cancel softkey goes when this screen defines no
         // handler of its own -- see GoBack(). The argument is a Simkin

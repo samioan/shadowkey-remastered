@@ -527,8 +527,9 @@ void RasterizeModelTriangle(Backbuffer& backbuffer, std::vector<float>& depthBuf
 // sinEntityYaw=0 reduces the new rotation to a no-op.
 void SubmitModel(Backbuffer& backbuffer, std::vector<float>& depthBuffer, const Model& model,
                   int skinIndex, float offsetTileX, float offsetTileY, float offsetZ, float camX,
-                  float camY, float camZ, float cosYaw, float sinYaw, float focalX, float focalY,
-                  float entityYaw = 0.0f, float scale = 1.0f, int frameIndex = 0) {
+                  float camY, float camZ, float cosYaw, float sinYaw, float cosPitch,
+                  float sinPitch, float focalX, float focalY, float entityYaw = 0.0f,
+                  float scale = 1.0f, int frameIndex = 0) {
     float cosEntityYaw = std::cos(entityYaw), sinEntityYaw = std::sin(entityYaw);
     for (const ModelFace& face : model.faces) {
         if (face.vA < 0 || face.vB < 0 || face.vC < 0 ||
@@ -567,8 +568,10 @@ void SubmitModel(Backbuffer& backbuffer, std::vector<float>& depthBuffer, const 
             float rz = (offsetZ + syv) / kTileScale - camZ;
 
             vv3[i].right = rx * sinYaw - ry * cosYaw;
-            vv3[i].forward = rx * cosYaw + ry * sinYaw;
-            vv3[i].up = rz;
+            float flatForward = rx * cosYaw + ry * sinYaw;
+            // Pitch rotates the (forward, up) pair -- see Camera::pitch.
+            vv3[i].forward = flatForward * cosPitch - rz * sinPitch;
+            vv3[i].up = rz * cosPitch + flatForward * sinPitch;
             vv3[i].u = uv[i]->u / 256.0f;
             vv3[i].v = uv[i]->v / 256.0f;
         }
@@ -612,6 +615,7 @@ void ZoneRenderer::Render(Backbuffer& backbuffer, const Zone& zone, const Camera
 
     float camX = camera.x / kTileScale, camY = camera.y / kTileScale, camZ = camera.z / kTileScale;
     float cosYaw = std::cos(camera.yaw), sinYaw = std::sin(camera.yaw);
+    float cosPitch = std::cos(camera.pitch), sinPitch = std::sin(camera.pitch);
     // forward = (cosYaw, sinYaw, 0); right = (sinYaw, -cosYaw, 0); up = (0,0,1)
     float aspect = static_cast<float>(Backbuffer::kWidth) / static_cast<float>(Backbuffer::kHeight);
     float focalY = (Backbuffer::kHeight * 0.5f) / std::tan(camera.fovY * 0.5f);
@@ -639,8 +643,9 @@ void ZoneRenderer::Render(Backbuffer& backbuffer, const Zone& zone, const Camera
             float rz = worldZ / kTileScale - camZ;
 
             vv[i].right = rx * sinYaw - ry * cosYaw;
-            vv[i].forward = rx * cosYaw + ry * sinYaw;
-            vv[i].up = rz;
+            float flatForward = rx * cosYaw + ry * sinYaw;
+            vv[i].forward = flatForward * cosPitch - rz * sinPitch;
+            vv[i].up = rz * cosPitch + flatForward * sinPitch;
 
             zone.SurfaceUv(sur, face.orient, worldX, worldY, worldZ, &vv[i].u, &vv[i].v);
 
@@ -721,8 +726,8 @@ void ZoneRenderer::Render(Backbuffer& backbuffer, const Zone& zone, const Camera
             // past the pixel buffer.
             int skin = (pe.skinIndex >= 0 && pe.skinIndex < model->skinCount) ? pe.skinIndex : 0;
             SubmitModel(backbuffer, depthBuffer, *model, skin, baseTileX, baseTileY, baseZ, camX,
-                        camY, camZ, cosYaw, sinYaw, focalX, focalY, pe.yaw, pe.scale,
-                        pe.frameIndex);
+                        camY, camZ, cosYaw, sinYaw, cosPitch, sinPitch, focalX, focalY, pe.yaw,
+                        pe.scale, pe.frameIndex);
         }
     }
 
@@ -735,7 +740,7 @@ void ZoneRenderer::Render(Backbuffer& backbuffer, const Zone& zone, const Camera
     // entities: skin 0 only, unlit (no lighting reaches models yet).
     if (const Model* room = zone.RoomMesh()) {
         SubmitModel(backbuffer, depthBuffer, *room, 0, 0.0f, 0.0f, 0.0f, camX, camY, camZ, cosYaw,
-                    sinYaw, focalX, focalY);
+                    sinYaw, cosPitch, sinPitch, focalX, focalY);
     }
 }
 

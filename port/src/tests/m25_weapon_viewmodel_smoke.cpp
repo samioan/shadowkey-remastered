@@ -16,6 +16,7 @@
 #include <memory>
 #include <string>
 
+#include "assets/sprite_archive.h"
 #include "assets/string_table.h"
 #include "simkin_bindings/item_executable.h"
 #include "simkin_bindings/menu_stack.h"
@@ -134,6 +135,43 @@ int main(int argc, char** argv) {
     std::printf("idle ticking advances idleSwayTick without leaving Idle -- %s\n",
                 idleAdvances ? "OK" : "FAILED");
     if (!idleAdvances) ok = false;
+
+    // --- Part 4 (M30): the real club's viewmodel art actually resolves.
+    // The bug this guards: the viewmodel used to be attached to the
+    // WeaponViewmodel only inside StartWeaponSwing(), so equipping a weapon
+    // showed nothing until you attacked -- and nothing at all if the weapon
+    // sat in the hand whose attack key you weren't pressing. main.cpp now
+    // points vm.item at the equipped weapon every idle tick, which is only
+    // useful if the sprite the script names really decodes.
+    bool spriteOk = club->weaponSprite() == 88 && club->animationFrames() == 5;
+    std::printf("real weapons/club.s: SetWeaponSprite(88)/SetAnimationFrames(5) stored -- %s\n",
+                spriteOk ? "OK" : "FAILED");
+    if (!spriteOk) ok = false;
+
+    sk::SpriteArchive sprites;
+    if (sprites.Load(scriptRoot)) {
+        // The weapon-sprite slots live in the per-zone manifest, which is
+        // what the game loads on entering a zone.
+        sprites.LoadCategory(scriptRoot, "azra");
+        const sk::Sprite* base = sprites.GetSprite(club->weaponSprite());
+        bool baseOk = base != nullptr && base->width > 0 && base->height > 0;
+        std::printf("global.spr slot %d (the club's viewmodel art) decodes -- %s\n",
+                    club->weaponSprite(), baseOk ? "OK" : "FAILED");
+        if (!baseOk) ok = false;
+
+        // Every swing frame the state machine will ask for must exist too,
+        // or the swing would visibly drop frames.
+        bool framesOk = true;
+        for (int f = 0; f < club->animationFrames(); ++f) {
+            if (!sprites.GetSprite(club->weaponSprite() + f)) framesOk = false;
+        }
+        std::printf("all %d swing frames (slots %d..%d) decode -- %s\n", club->animationFrames(),
+                    club->weaponSprite(), club->weaponSprite() + club->animationFrames() - 1,
+                    framesOk ? "OK" : "FAILED");
+        if (!framesOk) ok = false;
+    } else {
+        std::printf("global.spr not loadable -- skipping viewmodel art checks\n");
+    }
 
     std::printf("\nm25_weapon_viewmodel_smoke: %s\n", ok ? "OK" : "FAILED");
     return ok ? 0 : 1;

@@ -9,8 +9,21 @@ namespace sk {
 struct Camera {
     float x = 0.0f, y = 0.0f, z = 0.0f;  // world position, z = height
     float yaw = 0.0f;                    // radians, 0 = +x axis, increases toward +y
+    // Radians, positive = looking down. The real engine genuinely supports
+    // this: SurfaceFace_BuildAndProject's vertex transform has two paths --
+    // when `engine+0x5d4 == 0` the vertical component comes out of the full
+    // 3x3 rotation matrix, otherwise it passes the raw height through
+    // unrotated (a yaw-only fast path). This port had only ever implemented
+    // the yaw-only path, so the real default control scheme's own LookUp /
+    // LookDown actions (Key2/Key8, docs/INPUT_HANDLING.md) had nothing to
+    // drive and were left unbound.
+    float pitch = 0.0f;
     float fovY = 1.0f;                   // radians, vertical field of view
 };
+
+// Clamp for Camera::pitch. No original limit was recovered; this keeps the
+// horizon in frame rather than allowing a full somersault.
+constexpr float kMaxCameraPitch = 0.85f;  // radians, ~49 degrees
 
 // How far above a .ent placement's raw Z (e.g. playerStartZ) the camera's
 // eye sits, in the same raw world units as everything else. NOT the real

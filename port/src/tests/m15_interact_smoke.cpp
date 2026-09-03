@@ -18,6 +18,7 @@
 #include "graphics/backbuffer.h"
 #include "render3d/camera.h"
 #include "render3d/zone_renderer.h"
+#include "simkin_bindings/combat.h"
 #include "simkin_bindings/door_executable.h"
 #include "simkin_bindings/menu_stack.h"
 #include "skExecutableContext.h"
@@ -225,6 +226,78 @@ int main(int argc, char** argv) {
         WriteBackbufferPpm(backbuffer, "door_open.ppm");
     } else {
         std::printf("m15_interact_smoke: (visual dump skipped -- models.idx/.huge not loaded)\n");
+    }
+
+    // --- M30: the interact-targeting rule, against real azra placements.
+    //
+    // The bug this guards: the Use reach was 140 raw world units -- barely
+    // half a 256-unit tile -- so a player standing next to a door, chest or
+    // NPC was still out of range and no prompt appeared. Anyone who ever
+    // saw one had walked almost exactly onto its placement point.
+    {
+        constexpr float kRange = 384.0f;   // main.cpp's kInteractRange
+        constexpr float kFacing = 0.30f;   // main.cpp's kInteractFacing
+        constexpr float kTile = 256.0f;
+
+        // Standing one tile short of a target, looking straight at it, must
+        // register. This is the everyday case that used to fail.
+        bool oneTileAhead = sk_bindings::InInteractRange(0.0f, 0.0f, 0.0f, kTile, 0.0f, kRange,
+                                                         kFacing);
+        std::printf("a target one full tile ahead is in interact range -- %s\n",
+                    oneTileAhead ? "OK" : "FAILED");
+        if (!oneTileAhead) ok = false;
+
+        // ...and would NOT have been under the old 140-unit reach, which is
+        // the regression this pins down.
+        bool oldReachMissed =
+            !sk_bindings::InInteractRange(0.0f, 0.0f, 0.0f, kTile, 0.0f, 140.0f, kFacing);
+        std::printf("...and was out of reach at the old 140-unit range -- %s\n",
+                    oldReachMissed ? "OK" : "FAILED");
+        if (!oldReachMissed) ok = false;
+
+        // Well past reach still misses -- the fix widens the cone, it
+        // doesn't remove the limit.
+        bool tooFar = !sk_bindings::InInteractRange(0.0f, 0.0f, 0.0f, 3.0f * kTile, 0.0f, kRange,
+                                                    kFacing);
+        // Facing away misses.
+        bool behind = !sk_bindings::InInteractRange(0.0f, 0.0f, 0.0f, -kTile, 0.0f, kRange,
+                                                    kFacing);
+        // Standing on top of it counts (no meaningful facing at zero range).
+        bool onTop = sk_bindings::InInteractRange(0.0f, 0.0f, 0.0f, 0.0f, 0.0f, kRange, kFacing);
+        // Roughly 45 degrees off-centre still counts under the wider cone.
+        bool offAxis = sk_bindings::InInteractRange(0.0f, 0.0f, 0.0f, 200.0f, 200.0f, kRange,
+                                                    kFacing);
+        std::printf("out of range rejected / behind rejected / on-top accepted / 45deg accepted "
+                    "-- %s %s %s %s\n",
+                    tooFar ? "OK" : "FAILED", behind ? "OK" : "FAILED", onTop ? "OK" : "FAILED",
+                    offAxis ? "OK" : "FAILED");
+        if (!tooFar || !behind || !onTop || !offAxis) ok = false;
+
+        // Against the zone's own real door placements: from a spot one tile
+        // away on each axis, at least one approach must produce a prompt.
+        // (A door the player physically cannot get within a tile of would
+        // be a level-design problem, not a targeting one.)
+        int reachableDoors = 0, totalDoors = 0;
+        for (const sk::Zone::EntPlacement& e : zone.entities()) {
+            const sk::EntityTypeDescriptor* d = entityTypes.Lookup(e.typeId);
+            if (!d || d->category != 11) continue;
+            ++totalDoors;
+            const float approach[4][3] = {{-kTile, 0.0f, 0.0f},
+                                           {kTile, 0.0f, 3.14159265f},
+                                           {0.0f, -kTile, 1.5707963f},
+                                           {0.0f, kTile, -1.5707963f}};
+            for (const auto& a : approach) {
+                if (sk_bindings::InInteractRange(e.x + a[0], e.y + a[1], a[2],
+                                                  static_cast<float>(e.x),
+                                                  static_cast<float>(e.y), kRange, kFacing)) {
+                    ++reachableDoors;
+                    break;
+                }
+            }
+        }
+        std::printf("real azra doors reachable from one tile away: %d/%d -- %s\n", reachableDoors,
+                    totalDoors, (totalDoors > 0 && reachableDoors == totalDoors) ? "OK" : "FAILED");
+        if (totalDoors == 0 || reachableDoors != totalDoors) ok = false;
     }
 
     std::printf("\nm15_interact_smoke: %s\n", ok ? "OK" : "FAILED");

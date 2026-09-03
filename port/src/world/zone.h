@@ -144,6 +144,21 @@ public:
     struct EntPlacement {
         int32_t x = 0, y = 0, z = 0;
         int32_t typeId = 0;
+        // Per-placement heading, raw 16-bit angle (65536 == one full turn)
+        // -- the record's `unkA` low u16 at offset 0x14, which
+        // docs/ZONE_FORMAT.md already identifies as feeding the object's
+        // `+0xb6` orientation channel (the same field and format the
+        // player's own compass heading uses). Same units as
+        // `AddRotationTurn`'s argument, so a door's scripted -64*256
+        // quarter-turn composes with it directly.
+        //
+        // This was decoded but never used: every entity rendered at yaw 0,
+        // which is why *doors looked permanently open* -- a door in an
+        // east-west wall is authored at ~90 degrees and was being drawn
+        // face-on, reading as a gap in the wall. Real azra door placements
+        // carry 0 / 16640 / 16768 / 33152 / 49408 / 49472 / 49536, i.e.
+        // the four axis directions.
+        uint16_t yawRaw = 0;
         // M18: the record's own 40-byte instance name (offset 0x20) --
         // distinct from entities.txt's per-typeId descriptor name (a
         // script path). Empty for the overwhelming majority of placements

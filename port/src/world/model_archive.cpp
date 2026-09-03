@@ -119,6 +119,17 @@ bool ParseModelResource(const uint8_t* blob, size_t size, Model& out) {
         }
     }
 
+    // Frame 0's vertical extent (see Model::minLocalY).
+    if (h2 > 0) {
+        out.minLocalY = out.vertices[0].y;
+        out.maxLocalY = out.vertices[0].y;
+        for (int v = 1; v < h2; ++v) {
+            int16_t y = out.vertices[static_cast<size_t>(v)].y;
+            if (y < out.minLocalY) out.minLocalY = y;
+            if (y > out.maxLocalY) out.maxLocalY = y;
+        }
+    }
+
     out.uvs.resize(static_cast<size_t>(h3));
     for (int u = 0; u < h3; ++u) {
         size_t off = static_cast<size_t>(uvBase) * 2 + static_cast<size_t>(u) * 4;

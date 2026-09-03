@@ -195,6 +195,17 @@ bool MonsterExecutable::method(const skString& methodName, skRValueArray& args,
         m_ChaseRadius = args[0].intValue();
         return true;
     }
+    // M30: a creature's level. Real spell scripts scale their damage off
+    // it (`Random(3, (GetOwner().GetLevel() + 1) * 2)`), so leaving the
+    // setter soft-failing meant GetLevel() had nothing to return.
+    if (methodName == skString("SetLevel") && args.entries() == 1) {
+        m_Level = args[0].intValue();
+        return true;
+    }
+    if (methodName == skString("GetLevel") && args.entries() == 0) {
+        returnValue = skRValue(m_Level);
+        return true;
+    }
     if (methodName == skString("SetMob") && args.entries() == 1) {
         m_Mob = args[0].intValue();
         return true;
