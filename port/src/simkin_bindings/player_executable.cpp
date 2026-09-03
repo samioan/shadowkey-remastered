@@ -36,7 +36,7 @@ void PlayerExecutable::LoadStartingInventory(const std::string& scriptRoot,
         skExecutableContext loadCtxt(&interpreter);
         try {
             auto item = std::make_unique<ItemExecutable>(skString(fullPath.c_str()), loadCtxt,
-                                                           m_Strings);
+                                                           m_Strings, *this);
             skRValueArray args;
             args.append(skRValue(0));  // placeholder for Init's "(s)" parameter
             skRValue ret;
@@ -57,6 +57,10 @@ void PlayerExecutable::LoadStartingInventory(const std::string& scriptRoot,
 
 void PlayerExecutable::RemoveItem(ItemExecutable* item) {
     if (item) item->MarkForRemoval();
+}
+
+void PlayerExecutable::AddItem(std::unique_ptr<ItemExecutable> item) {
+    m_Inventory.push_back(std::move(item));
 }
 
 void PlayerExecutable::PurgeRemovedItems() {
@@ -257,6 +261,16 @@ bool PlayerExecutable::method(const skString& methodName, skRValueArray& args,
     }
     if (methodName == skString("AddExperience") && args.entries() == 1) {
         m_Experience += args[0].intValue();
+        return true;
+    }
+    if (methodName == skString("PickupItem") && args.entries() == 1) {
+        // M19: a real world pickup's OnUse() calls this as
+        // "GetPlayer().PickupItem(self)" -- only records which live
+        // ItemExecutable asked (main.cpp still owns it via a
+        // std::unique_ptr in gamePickups, mid-call here), see
+        // TakePendingPickupItem()'s comment for why ownership transfer
+        // itself has to happen back on the host side, not in here.
+        m_PendingPickupItem = args[0].obj();
         return true;
     }
 

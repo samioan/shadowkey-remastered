@@ -201,3 +201,8 @@ target_link_libraries(quest_smoke PRIVATE sk_bindings)
 # Level/Zone global object smoke test -- see src/tests/m18_level_smoke.cpp.
 add_executable(level_smoke src/tests/m18_level_smoke.cpp)
 target_link_libraries(level_smoke PRIVATE sk_bindings sk_world)
+
+# Pickups (Action::Use interact binding) smoke test -- see
+# src/tests/m19_pickup_smoke.cpp.
+add_executable(pickup_smoke src/tests/m19_pickup_smoke.cpp)
+target_link_libraries(pickup_smoke PRIVATE sk_bindings sk_world)

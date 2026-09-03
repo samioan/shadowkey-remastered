@@ -22,22 +22,40 @@
 #include "simkin_bindings/native_stub_executable.h"
 #include "skScriptedExecutable.h"
 
+class skInterpreter;
+
 namespace sk {
 class StringTable;
 }
 
 namespace sk_bindings {
 
+class PlayerExecutable;
+
 class ItemExecutable : public skScriptedExecutable {
 public:
     // `strings` may be null (e.g. a context with no real stringtable.eng
     // loaded, like some smoke tests) -- GetName()/GetItemDescription()
     // fall back to a placeholder rather than crash.
+    //
+    // M19: `player` -- a real world-pickup script's OnUse() calls
+    // GetPlayer() bare (self-receiver, same convention every other
+    // binding class's own OnUse()/Init() already relies on), needed to
+    // resolve `GetPlayer().PickupItem(self)` (snowline/foxglove.s etc.).
+    // Every existing call site (PlayerExecutable::LoadStartingInventory)
+    // already has a real PlayerExecutable to pass (itself).
     ItemExecutable(const skString& filename, skExecutableContext& ctxt,
-                    const sk::StringTable* strings);
+                    const sk::StringTable* strings, PlayerExecutable& player);
 
     bool method(const skString& methodName, skRValueArray& args, skRValue& returnValue,
                 skExecutableContext& context) override;
+
+    // M19: runs the real script's OnUse() handler -- same host-triggered-
+    // call convention (placeholder "(s)" arg, catch+log
+    // skParseException/skRuntimeException) DoorExecutable/
+    // MonsterExecutable's own InvokeOnUse() already establish, for a real
+    // world pickup's Action::Use (main.cpp).
+    void InvokeOnUse();
 
     // Host-side accessors -- used by MenuExecutable's inventory-table
     // population (DisplayWeaponsPage etc.) and PlayerExecutable's equip
@@ -45,6 +63,10 @@ public:
     int itemType() const { return m_ItemType; }
     std::string name() const;
     int icon() const { return m_Icon; }
+    // M19: a world pickup's real SetUseText() (e.g. snowline/foxglove.s's
+    // "Pick up"-style prompt) -- main.cpp's interact-prompt line reads this
+    // the same way it already reads DoorExecutable/MonsterExecutable's.
+    int useTextId() const { return m_UseTextId; }
     int cost() const { return m_Cost; }
     int armorValue() const { return m_ArmorValue; }
     int damageMin() const { return m_DamageMin; }
@@ -67,6 +89,8 @@ public:
 
 private:
     const sk::StringTable* m_Strings;
+    PlayerExecutable& m_Player;
+    skInterpreter* m_Interpreter;
     int m_ItemType = 0;  // kItemTypeMisc until a category setter fires
     int m_NameId = -1;
     int m_ShortNameId = -1;

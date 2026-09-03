@@ -1,16 +1,41 @@
 #include "simkin_bindings/item_executable.h"
 
+#include <cstdio>
+
 #include "assets/string_table.h"
 #include "simkin_bindings/game_constants.h"
 #include "simkin_bindings/native_binding_common.h"
+#include "simkin_bindings/player_executable.h"
+#include "skExecutableContext.h"
+#include "skParseException.h"
 #include "skRValue.h"
 #include "skRValueArray.h"
+#include "skRuntimeException.h"
 
 namespace sk_bindings {
 
 ItemExecutable::ItemExecutable(const skString& filename, skExecutableContext& ctxt,
-                                const sk::StringTable* strings)
-    : skScriptedExecutable(filename, ctxt), m_Strings(strings) {}
+                                const sk::StringTable* strings, PlayerExecutable& player)
+    : skScriptedExecutable(filename, ctxt),
+      m_Strings(strings),
+      m_Player(player),
+      m_Interpreter(ctxt.getInterpreter()) {}
+
+void ItemExecutable::InvokeOnUse() {
+    if (!m_Interpreter) return;
+    skRValueArray args;
+    args.append(skRValue(0));  // placeholder for OnUse's "(s)" parameter, same convention every
+                                // other InvokeOnUse() in this codebase already uses.
+    skRValue ret;
+    skExecutableContext ctxt(m_Interpreter);
+    try {
+        method(skString("OnUse"), args, ret, ctxt);
+    } catch (skParseException& e) {
+        std::printf("ItemExecutable: PARSE ERROR in OnUse(): %s\n", e.toString().ptr());
+    } catch (skRuntimeException& e) {
+        std::printf("ItemExecutable: RUNTIME ERROR in OnUse(): %s\n", e.toString().ptr());
+    }
+}
 
 std::string ItemExecutable::name() const {
     if (m_Strings && m_NameId >= 0) return m_Strings->Get(m_NameId);
@@ -168,6 +193,24 @@ bool ItemExecutable::method(const skString& methodName, skRValueArray& args,
         // Called as "DestroyObject(self)" from within the item's own
         // OnUse handler -- already covered by OnUsedBy() marking
         // m_Consumed above, this just needs to not throw.
+        return true;
+    }
+    if (methodName == skString("GetPlayer") && args.entries() == 0) {
+        // M19: a world pickup's real OnUse() calls this bare (self-
+        // receiver) -- same handler shape Door/Monster/Menu already have.
+        returnValue = skRValue(static_cast<skiExecutable*>(&m_Player), false);
+        return true;
+    }
+    if (methodName == skString("MirrorDestroyObject") && args.entries() == 1) {
+        // M19: called as "MirrorDestroyObject(self)" from a real world
+        // pickup's own OnUse() (snowline/foxglove.s etc.), right after
+        // GetPlayer().PickupItem(self) -- network/replication bookkeeping
+        // in the original (this port has no multiplayer, same DoorOpened()
+        // precedent), but the removal-from-world intent is real: reuses
+        // the same markedForRemoval flag OnUsedBy() sets for a consumed
+        // inventory item -- main.cpp's Action::Use handling reads it to
+        // erase this instance from gamePickups after InvokeOnUse() returns.
+        m_MarkedForRemoval = true;
         return true;
     }
     if (skScriptedExecutable::method(methodName, args, returnValue, context)) {

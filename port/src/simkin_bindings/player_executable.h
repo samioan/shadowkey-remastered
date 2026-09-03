@@ -66,6 +66,12 @@ public:
     // Marks `item` for removal -- see item_executable.h's
     // markedForRemoval() comment for why this doesn't erase immediately.
     void RemoveItem(ItemExecutable* item);
+    // M19: takes ownership of a real world pickup's ItemExecutable --
+    // main.cpp's Action::Use handling calls this (moving it out of
+    // gamePickups) once a real OnUse() call has both invoked PickupItem()
+    // (see TakePendingPickupItem()'s comment) and marked itself for
+    // removal from the world (MirrorDestroyObject()).
+    void AddItem(std::unique_ptr<ItemExecutable> item);
     // Erases every inventory entry marked for removal (and clears
     // m_LeftItem/m_RightItem if either pointed at one of them) -- call
     // once per tick, after any in-flight script call chain for that tick
@@ -147,6 +153,23 @@ public:
     }
     int experience() const { return m_Experience; }
 
+    // M19: PickupItem()'s handler only records *which* live object asked
+    // (a raw, non-owning skiExecutable*) -- it's called from mid-way
+    // through a script call chain main.cpp itself triggered
+    // (ItemExecutable::InvokeOnUse()), which still holds the real
+    // std::unique_ptr<ItemExecutable> in gamePickups at that point, so the
+    // actual ownership transfer into m_Inventory has to happen back on the
+    // host side, after InvokeOnUse() returns -- same "defer the tricky
+    // move to a safe point outside the live call frame" precedent
+    // markedForRemoval()/PurgeRemovedItems() already established for a
+    // different (but structurally identical) reason. Clears on read, so a
+    // stale value can never leak into a later, unrelated Action::Use.
+    skiExecutable* TakePendingPickupItem() {
+        skiExecutable* p = m_PendingPickupItem;
+        m_PendingPickupItem = nullptr;
+        return p;
+    }
+
 private:
     const sk::StringTable* m_Strings;
     std::string m_Name;
@@ -176,6 +199,8 @@ private:
     std::vector<std::unique_ptr<ItemExecutable>> m_Inventory;
     ItemExecutable* m_LeftItem = nullptr;
     ItemExecutable* m_RightItem = nullptr;
+    // M19: see TakePendingPickupItem()'s comment.
+    skiExecutable* m_PendingPickupItem = nullptr;
 
     // M17: quest state -- see questAssigned()/questSolved()/
     // questCompleted()/monstersKilled()'s comments above.

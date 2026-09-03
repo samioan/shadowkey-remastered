@@ -166,6 +166,23 @@ struct DoorInstance {
     int modelArchiveIndex = -1;
 };
 
+// M19: Action::Use interact binding's last remaining slice -- pickups.
+// Same "one real category" precedent (docs/PORT_ROADMAP.md) -- category 3
+// (misc loot) real .s scripts like snowline/foxglove.s, not the broader
+// loot-menu/container pattern (category 8, still unbound -- see
+// item_executable.h's class comment). Like DoorInstance/MonsterInstance,
+// a live world pickup carries its own real ItemExecutable (Init() genuinely
+// runs), separate from gameEntities' untouched static-prop list -- but
+// unlike a door/monster, a pickup's script instance doesn't live for the
+// zone's whole lifetime: a successful real OnUse() (PickupItem(self) +
+// MirrorDestroyObject(self)) moves script's ownership into the player's
+// inventory and erases this entry (see the Action::Use handling below).
+struct PickupInstance {
+    std::unique_ptr<sk_bindings::ItemExecutable> script;
+    float x = 0, y = 0, z = 0;
+    int modelArchiveIndex = -1;
+};
+
 void RenderPopup(sk::Backbuffer& backbuffer, sk_bindings::PopupMenuExecutable& popup,
                   const sk::StringTable& strings) {
     int x0 = 10, y0 = 60, x1 = sk::Backbuffer::kWidth - 10, y1 = 150;
@@ -624,6 +641,11 @@ int main(int argc, char** argv) {
     // M15: live doors, pulled out of gameEntities the same way gameMonsters
     // is -- see DoorInstance's comment.
     std::vector<DoorInstance> gameDoors;
+    // M19: live world pickups, pulled out of gameEntities the same way --
+    // see PickupInstance's comment. Shrinks as items are actually picked
+    // up (unlike gameDoors/gameMonsters, which stay fixed-size for a
+    // zone's whole lifetime).
+    std::vector<PickupInstance> gamePickups;
     sk::Camera gameCamera;
     sk::ZoneRenderer zoneRenderer;
     bool inGame = false;
@@ -688,22 +710,25 @@ int main(int argc, char** argv) {
                 // cache.
                 //
                 // Combat vertical-slice (M12) + interact binding (M15/
-                // M16/M18): category 2 (monster, including named NPCs --
-                // see monster_executable.h's class comment), category 7
-                // (merchant, e.g. Gravel_Trothgar -- M18), and category 11
-                // (door) placements whose entities.txt `name` is a real
-                // loadable script (HasRealScript() above) are pulled out
-                // into gameMonsters/gameDoors instead -- a live
-                // MonsterExecutable/DoorExecutable actually runs that
-                // real script's Init(), same load pattern
+                // M16/M18/M19): category 2 (monster, including named NPCs
+                // -- see monster_executable.h's class comment), category 7
+                // (merchant, e.g. Gravel_Trothgar -- M18), category 11
+                // (door), and category 3 (misc loot/world pickups, e.g.
+                // snowline/foxglove.s -- M19) placements whose
+                // entities.txt `name` is a real loadable script
+                // (HasRealScript() above) are pulled out into
+                // gameMonsters/gameDoors/gamePickups instead -- a live
+                // MonsterExecutable/DoorExecutable/ItemExecutable actually
+                // runs that real script's Init(), same load pattern
                 // PlayerExecutable::LoadStartingInventory established for
                 // real item scripts. Everything else (including the
-                // "!label"-only majority of both categories) still goes
+                // "!label"-only majority of every category) still goes
                 // into gameEntities as a static, unanimated prop,
                 // unchanged.
                 gameEntities.clear();
                 gameMonsters.clear();
                 gameDoors.clear();
+                gamePickups.clear();
                 // M18: every live object this loop is about to (re)create
                 // is stale after this point -- drop any name -> object
                 // registrations from the previous zone before repopulating
@@ -739,6 +764,39 @@ int main(int argc, char** argv) {
                                         fullPath.c_str(), ex.toString().ptr());
                         } catch (skRuntimeException& ex) {
                             std::printf("shadowkey-port: RUNTIME ERROR loading door %s: %s\n",
+                                        fullPath.c_str(), ex.toString().ptr());
+                        }
+                        continue;
+                    }
+                    // M19: category 3 (misc loot -- world pickups like
+                    // snowline/foxglove.s), same HasRealScript() gate as
+                    // every other category this loop pulls a live object
+                    // out for.
+                    if (desc->category == 3 && HasRealScript(desc->name)) {
+                        std::string relPath = desc->name;
+                        std::replace(relPath.begin(), relPath.end(), '\\', '/');
+                        std::string fullPath = std::string(scriptRoot) + "/" + relPath;
+                        skExecutableContext loadCtxt(&interpreter);
+                        try {
+                            auto item = std::make_unique<sk_bindings::ItemExecutable>(
+                                skString(fullPath.c_str()), loadCtxt, &strings, stack.player());
+                            skRValueArray args;
+                            args.append(skRValue(0));  // placeholder for Init's "(s)" parameter
+                            skRValue ret;
+                            skExecutableContext callCtxt(&interpreter);
+                            item->method(skString("Init"), args, ret, callCtxt);
+                            PickupInstance inst;
+                            inst.x = static_cast<float>(e.x);
+                            inst.y = static_cast<float>(e.y);
+                            inst.z = static_cast<float>(e.z);
+                            inst.modelArchiveIndex = desc->modelArchiveIndex;
+                            inst.script = std::move(item);
+                            gamePickups.push_back(std::move(inst));
+                        } catch (skParseException& ex) {
+                            std::printf("shadowkey-port: PARSE ERROR loading pickup %s: %s\n",
+                                        fullPath.c_str(), ex.toString().ptr());
+                        } catch (skRuntimeException& ex) {
+                            std::printf("shadowkey-port: RUNTIME ERROR loading pickup %s: %s\n",
                                         fullPath.c_str(), ex.toString().ptr());
                         }
                         continue;
@@ -784,8 +842,9 @@ int main(int argc, char** argv) {
                     gameEntities.push_back({static_cast<float>(e.x), static_cast<float>(e.y),
                                              static_cast<float>(e.z), desc->modelArchiveIndex});
                 }
-                std::printf("shadowkey-port: %zu live monster(s), %zu live door(s) loaded\n",
-                            gameMonsters.size(), gameDoors.size());
+                std::printf("shadowkey-port: %zu live monster(s), %zu live door(s), %zu live "
+                            "pickup(s) loaded\n",
+                            gameMonsters.size(), gameDoors.size(), gamePickups.size());
             } else {
                 std::printf("shadowkey-port: failed to load zone '%s', staying in menu\n",
                             stack.requestedZone().c_str());
@@ -993,11 +1052,12 @@ int main(int argc, char** argv) {
                     tryAttack(stack.player().rightItem());
                 }
 
-                // M15/M16: Action::Use (Key3, docs/INPUT_HANDLING.md's
-                // default scheme) interact binding -- doors (M15) and
-                // usable NPCs (M16, e.g. Tanyin Aldwyr's real dialogue,
-                // see monster_executable.h's class comment); pickups
-                // stay unbound (docs/PORT_ROADMAP.md). Same nearest-in-
+                // M15/M16/M19: Action::Use (Key3, docs/INPUT_HANDLING.md's
+                // default scheme) interact binding -- doors (M15), usable
+                // NPCs (M16, e.g. Tanyin Aldwyr's real dialogue, see
+                // monster_executable.h's class comment), and world pickups
+                // (M19, e.g. snowline/foxglove.s -- the last remaining
+                // unbound category, docs/PORT_ROADMAP.md). Same nearest-in-
                 // range-and-facing-cone targeting tryAttack uses above,
                 // reused here (and again below for the on-screen use-text
                 // prompt).
@@ -1041,10 +1101,28 @@ int main(int argc, char** argv) {
                     }
                     return nearest;
                 };
-                // Doors and usable NPCs are two separate lists -- pick
-                // whichever real placement is actually nearer when both
-                // are in range at once, same "nearest wins" rule each
-                // list already uses internally.
+                // M19: same shape again for pickups.
+                auto findNearbyPickup = [&]() -> PickupInstance* {
+                    float fwdX = std::cos(gameCamera.yaw), fwdY = std::sin(gameCamera.yaw);
+                    PickupInstance* nearest = nullptr;
+                    float bestDist = kInteractRange + 1.0f;
+                    for (PickupInstance& p : gamePickups) {
+                        float ddx = p.x - gameCamera.x, ddy = p.y - gameCamera.y;
+                        float dist = std::sqrt(ddx * ddx + ddy * ddy);
+                        if (dist > kInteractRange || dist < 1.0f) continue;
+                        float facing = (fwdX * ddx + fwdY * ddy) / dist;
+                        if (facing < 0.5f) continue;  // ~60 degree forward cone
+                        if (dist < bestDist) {
+                            bestDist = dist;
+                            nearest = &p;
+                        }
+                    }
+                    return nearest;
+                };
+                // Doors, usable NPCs, and pickups are three separate lists
+                // -- pick whichever real placement is actually nearer when
+                // more than one is in range at once, same "nearest wins"
+                // rule each list already uses internally.
                 auto distanceTo = [&](float x, float y) {
                     float dx = x - gameCamera.x, dy = y - gameCamera.y;
                     return std::sqrt(dx * dx + dy * dy);
@@ -1052,7 +1130,32 @@ int main(int argc, char** argv) {
                 if (input.ConsumeBoundJustPressed(sk::Action::Use)) {
                     DoorInstance* door = findNearbyDoor();
                     MonsterInstance* npc = findNearbyUsableMonster();
-                    if (npc && (!door || distanceTo(npc->x, npc->y) < distanceTo(door->x, door->y))) {
+                    PickupInstance* pickup = findNearbyPickup();
+                    // Nearest of the (up to) three candidates wins.
+                    float doorDist = door ? distanceTo(door->x, door->y) : kInteractRange + 1.0f;
+                    float npcDist = npc ? distanceTo(npc->x, npc->y) : kInteractRange + 1.0f;
+                    float pickupDist =
+                        pickup ? distanceTo(pickup->x, pickup->y) : kInteractRange + 1.0f;
+                    if (pickup && pickupDist <= doorDist && pickupDist <= npcDist) {
+                        // M19: real OnUse() (PickupItem(self) +
+                        // MirrorDestroyObject(self)) leaves the item marked
+                        // for removal from the world; if it also actually
+                        // asked to be picked up (TakePendingPickupItem()
+                        // matches this exact instance -- a script could in
+                        // principle destroy itself without ever granting
+                        // the item, though no real corpus script does),
+                        // move its real ItemExecutable into the player's
+                        // inventory before erasing the world instance.
+                        pickup->script->InvokeOnUse();
+                        if (pickup->script->markedForRemoval()) {
+                            skiExecutable* pending = stack.player().TakePendingPickupItem();
+                            if (pending == static_cast<skiExecutable*>(pickup->script.get())) {
+                                stack.player().AddItem(std::move(pickup->script));
+                            }
+                            gamePickups.erase(gamePickups.begin() +
+                                               (pickup - gamePickups.data()));
+                        }
+                    } else if (npc && npcDist <= doorDist) {
                         // A real NPC's OnUse() (e.g. tanyinconvo.s) calls
                         // OpenMenu(...) -- detect that by comparing
                         // currentMenu() before/after (robust to whatever
@@ -1096,6 +1199,13 @@ int main(int argc, char** argv) {
                     frameEntities.push_back(
                         {d.x, d.y, d.z, d.modelArchiveIndex, d.script->yawRadians()});
                 }
+                // M19: still-in-world pickups -- gamePickups shrinks as
+                // items are actually picked up (see the Action::Use
+                // handling above), so this naturally stops drawing one the
+                // instant it's gone.
+                for (const PickupInstance& p : gamePickups) {
+                    frameEntities.push_back({p.x, p.y, p.z, p.modelArchiveIndex});
+                }
                 zoneRenderer.Render(backbuffer, *gameZone, gameCamera, frameEntities, &modelArchive);
                 RenderHud(backbuffer, stack.player(), spriteArchive, gameCamera.yaw);
                 // Minimal combat/interact feedback -- name + HP of
@@ -1128,8 +1238,15 @@ int main(int argc, char** argv) {
                 } else {
                     DoorInstance* door = findNearbyDoor();
                     MonsterInstance* npc = findNearbyUsableMonster();
+                    PickupInstance* pickup = findNearbyPickup();
+                    float doorDist = door ? distanceTo(door->x, door->y) : kInteractRange + 1.0f;
+                    float npcDist = npc ? distanceTo(npc->x, npc->y) : kInteractRange + 1.0f;
+                    float pickupDist =
+                        pickup ? distanceTo(pickup->x, pickup->y) : kInteractRange + 1.0f;
                     int useTextId = -1;
-                    if (npc && (!door || distanceTo(npc->x, npc->y) < distanceTo(door->x, door->y))) {
+                    if (pickup && pickupDist <= doorDist && pickupDist <= npcDist) {
+                        useTextId = pickup->script->useTextId();
+                    } else if (npc && npcDist <= doorDist) {
                         useTextId = npc->script->useTextId();
                     } else if (door) {
                         useTextId = door->script->useTextId();

@@ -1203,6 +1203,88 @@ algorithms.
     - Not independently confirmed in an actual windowed play session
       (same caveat every prior milestone's writeup already carries).
 
+- [x] **M19 -- Action::Use interact binding: pickups, the last unbound
+      category** (this session). Closes the "Not attempted: pickups"
+      note M15/M16/M18 all repeated -- doors, NPC talk, and now world
+      pickups are all real.
+    - **Real placement, not reachable in `azra`**: a scoping pass found
+      the currently-tested `azra` zone genuinely has zero real category-3/
+      8/9 (misc loot/container/consumable) `.s`-scripted placements at
+      all (only two "!label"-only category-8 stubs) -- confirming the
+      earlier "chest scripts appear orphaned" finding wasn't azra-
+      specific bad luck. Widened the corpus scan to every zone's `.ent`
+      and found `snowline` has 20 real category-3 placements across 5
+      distinct scripts (`foxglove.s`, `mountaintail.s`, `snowblossom.s`,
+      `trefoilflower.s`, `yuinroot.s` -- an herb-gathering set, all
+      structurally identical); `level_smoke`'s M18 work already
+      established loading a non-`azra` zone by name is a supported test
+      shape, reused here.
+    - **Real script, `snowline/foxglove.s`** (and its 4 siblings, byte-
+      for-byte identical shape): `Init(s) { SetID("herb5");
+      SetName(2287); SetIcon(211); SetUseText(2288);
+      SetItemDescription(2287); SetCanDrop(false); SetMPUsable(true); }
+      OnUse(s) { GetPlayer().PickupItem(self); MirrorDestroyObject(self);
+      }` -- every `Init()` setter already had a real `ItemExecutable`
+      handler except `SetCanDrop`/`SetMPUsable` (soft-fail, same "nothing
+      reads this back yet" status `CanDrop()`'s existing hardcoded-true
+      comment already documents). `OnUse()` needed two new ones:
+      `GetPlayer()` (bare self-receiver, same shape Door/Monster/Menu
+      already have) and `MirrorDestroyObject(self)` (network/replication
+      bookkeeping in the original, same `DoorOpened()`-style no-op
+      precedent -- but reuses the real, already-existing
+      `markedForRemoval` flag `OnUsedBy()` sets for a consumed inventory
+      item, so the *removal* intent is real, not faked).
+    - **`ItemExecutable` gained a `PlayerExecutable&` constructor
+      parameter** (its one existing call site,
+      `PlayerExecutable::LoadStartingInventory`, updated to pass `*this`)
+      -- needed to resolve `GetPlayer()`, same reason `MonsterExecutable`
+      gained a `MenuStack&` parameter back in M16.
+    - **The real ownership-transfer problem, and how it's solved**: unlike
+      a door/monster/merchant, a picked-up item's `ItemExecutable` has to
+      actually move from the world (`main.cpp`'s new `gamePickups`,
+      mirroring `gameDoors`/`gameMonsters`) into
+      `PlayerExecutable::m_Inventory` -- but `PickupItem()`'s handler
+      only runs mid-script-call, while `main.cpp` still holds the real
+      `std::unique_ptr<ItemExecutable>`. Same "defer the tricky move to a
+      safe point outside the live call frame" shape M10's
+      `markedForRemoval()`/`PurgeRemovedItems()` already established for
+      a structurally identical reason: `PlayerExecutable::PickupItem()`'s
+      handler only records *which* object asked (a raw, non-owning
+      pointer, `TakePendingPickupItem()`); `main.cpp`'s `Action::Use`
+      handling, after `InvokeOnUse()` returns, checks
+      `markedForRemoval()` and, if the recorded pointer matches this
+      exact instance, moves ownership via the new
+      `PlayerExecutable::AddItem()` before erasing the world entry.
+    - **`Action::Use` (Key3) now picks the nearest of three lists**
+      (doors, usable NPCs, pickups) instead of two -- same "nearest wins"
+      rule each list already used internally, now applied across all
+      three. The on-screen use-text prompt (y=34) gained the same
+      three-way check. Picked-up pickups also naturally stop rendering
+      the instant `gamePickups` shrinks (no separate "hide it" step
+      needed -- the per-frame render list is rebuilt from `gamePickups`
+      every tick, same as every other live-entity list).
+    - **Verified end to end against real data, `pickup_smoke`
+      (`src/tests/m19_pickup_smoke.cpp`)**: confirms the real 3 typeId-
+      1008 placements and category-3 classification (structural), runs
+      `foxglove.s`'s real `Init()` and checks its literal `icon`/
+      `useTextId` values, then runs the real `OnUse()` and confirms
+      `markedForRemoval()` is true, `TakePendingPickupItem()` returns
+      exactly this item (and clears on read), and -- mirroring
+      `main.cpp`'s own flow -- that `AddItem()` genuinely lands the same
+      real object in `player.inventory()`.
+    - **Not attempted**: the broader loot-menu/container pattern
+      (category 8, `PickupItem(Item)` called from a loot-selection menu
+      rather than directly from a world object's own `OnUse()` -- 126
+      corpus call sites vs. this pass's 18, a materially different UI
+      flow); monster-death loot-bag spawning (`SetLoot`'s params still
+      just stored, unused -- needs the native RE M12 already flagged as
+      not done, `FUN_1002c3a8`/`FUN_10084438`); dropping a picked-up item
+      back into the world with a real position (inventory.s's `DropRow`
+      already marks an item for removal on drop, but nothing spawns a new
+      world placement for it).
+    - Not independently confirmed in an actual windowed play session
+      (same caveat every prior milestone's writeup already carries).
+
 ## Next milestones (not yet started)
 
 Roughly in priority order for reaching "actually playable," not commitments:
@@ -1229,14 +1311,17 @@ Roughly in priority order for reaching "actually playable," not commitments:
   progress across repeated visits); M18 took a fifth (a first, narrow
   slice of the `Zone/Level`-root global object -- `GetEntity`/`GetPlayer`/
   `PlayAmbient` only -- which closed M17's own documented gap:
-  `azra_rat.s`'s 8-kill quest now genuinely completes). Still open:
-  spellcasting, ranged weapons, loot spawning, the rest of `Zone/Level`
-  (`AddTrigger` and its own further "Door/trap trigger" return-type
-  class, `CreateEntity`/`CreateEntityScript`, save/load-level state, ...)
-  plus Zone effects (`Vignette`, `SpawnWithinRadius`, `AddEncounters`,
-  ...), a zone-root `<zone>.s` script loader (`azra.s` itself is still
-  never run -- see M18's "Not attempted" note), and `Action::Use`'s one
-  remaining unbound category, pickups (world-to-inventory transfer).
+  `azra_rat.s`'s 8-kill quest now genuinely completes); M19 took a sixth
+  (pickups, `Action::Use`'s last unbound category -- world items like
+  `snowline/foxglove.s` now genuinely transfer into the player's real
+  inventory). Still open: spellcasting, ranged weapons, monster-death
+  loot-bag spawning, the broader loot-menu/container pattern (category 8,
+  M19's "Not attempted" note), the rest of `Zone/Level` (`AddTrigger` and
+  its own further "Door/trap trigger" return-type class,
+  `CreateEntity`/`CreateEntityScript`, save/load-level state, ...) plus
+  Zone effects (`Vignette`, `SpawnWithinRadius`, `AddEncounters`, ...),
+  and a zone-root `<zone>.s` script loader (`azra.s` itself is still
+  never run -- see M18's "Not attempted" note).
 - **Real save file format** -- M5's save system is simulated in-memory
   only; no on-disk save format has been RE'd yet.
 - **`FUN_1002c010`'s big single vitals bar** -- confirmed real (appears
