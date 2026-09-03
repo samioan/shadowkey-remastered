@@ -181,6 +181,23 @@ public:
     // AddObject()/GetFirst()/GetNext()/RemoveObject() implement the bag's
     // own Collection of contained ItemExecutables (`m_Contents`) that
     // lootmenu.s's real UpdateMenu()/SelectItem() walk.
+    // M36: lootmenu.s's own emptied-container branch,
+    //   `if ((GetOpener().GetFirst() = null) and (GetOpener().GetDestroy()))`
+    // -- "should this container disappear once it has been emptied?".
+    // Real callers set it only on *spawned* loot bags (monsters/arat.s's
+    // `Loot.SetDestroy(true)`, fearfrst/goblin_hero.s,
+    // crypt1/shadowkeygate.s); a placed chest never does, so a chest stays
+    // in the world (just `SetUsable(false)`) while a dropped bag vanishes.
+    bool destroyWhenEmpty() const { return m_DestroyWhenEmpty; }
+
+    // M36: lootmenu.s's `Opener.GetTemplate() != 306` (which suppresses the
+    // pickup sound for one specific container type). The real value is the
+    // entities.txt typeId an object was created from -- known only when it
+    // came through Level.CreateEntity(), so -1 ("not created from a
+    // template") for anything loaded directly from a script path.
+    int templateId() const { return m_TemplateId; }
+    void SetTemplateId(int typeId) { m_TemplateId = typeId; }
+
     int quantity() const { return m_Quantity; }
     const std::vector<std::unique_ptr<ItemExecutable>>& contents() const { return m_Contents; }
 
@@ -230,6 +247,9 @@ private:
 
     // M22: see rating()'s comment above.
     int m_Rating = 0;
+    // M36: see destroyWhenEmpty()/templateId() above.
+    bool m_DestroyWhenEmpty = false;
+    int m_TemplateId = -1;
 };
 
 }  // namespace sk_bindings

@@ -116,6 +116,7 @@ bool LevelExecutable::method(const skString& methodName, skRValueArray& args,
                 skRValue initRet;
                 skExecutableContext callCtxt(&m_Stack.interpreter());
                 item->method(skString("Init"), initArgs, initRet, callCtxt);
+                item->SetTemplateId(typeId);  // M36, see ItemExecutable::templateId()
                 returnValue = skRValue(static_cast<skiExecutable*>(item.get()), false);
                 m_PendingCreatedEntity = std::move(item);
                 return true;

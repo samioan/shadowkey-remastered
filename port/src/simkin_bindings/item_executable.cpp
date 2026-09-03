@@ -527,6 +527,18 @@ bool ItemExecutable::method(const skString& methodName, skRValueArray& args,
         }
         return true;
     }
+    if (methodName == skString("SetDestroy") && args.entries() == 1) {
+        m_DestroyWhenEmpty = args[0].boolValue();  // M36, see destroyWhenEmpty()
+        return true;
+    }
+    if (methodName == skString("GetDestroy") && args.entries() == 0) {
+        returnValue = skRValue(m_DestroyWhenEmpty);
+        return true;
+    }
+    if (methodName == skString("GetTemplate") && args.entries() == 0) {
+        returnValue = skRValue(m_TemplateId);  // M36, see templateId()
+        return true;
+    }
     if (methodName == skString("RemoveObject") && args.entries() == 1) {
         // M21: lootmenu.s's SelectItem() calls
         // "GetPlayer().PickupItem(Object); GetOpener().RemoveObject(Object);"

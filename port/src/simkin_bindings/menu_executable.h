@@ -243,6 +243,16 @@ public:
         // rectangle using w/h above, matching the real screenshot's boxed
         // 2x2 grid.
         bool showBorder = false;
+        // M36: AddButton's real 5th/6th arguments -- global.spr slot ids
+        // for the button's normal and highlighted art. -1 when the script
+        // used the 4-arg text-only form. See the AddButton handler.
+        int spriteNormal = -1;
+        int spriteSelected = -1;
+        // M36: AddQuitButton() rather than AddButton()/AddMenuItem() --
+        // the real screens' bottom-centred softkey label ("Back"), which
+        // has no x/y of its own and so used to land in the middle of the
+        // vertical flow, on top of whatever was there.
+        bool isQuitButton = false;
     };
     const std::vector<MenuRow>& rows() const { return m_Rows; }
     int backgroundId() const { return m_BackgroundId; }

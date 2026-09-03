@@ -2616,6 +2616,54 @@ algorithms.
       these (facing, fog, chests, prompts) is verified by tests and offline
       renders rather than by play.
 
+- [x] **M36 -- follow-up on four reported regressions/misses from M35.**
+    - **Creature facing: sign corrected.** M35 established the axis (a
+      model's forward is its local Z, decompiled from the real actor
+      transform) but guessed the direction along it, turning a reported
+      flank into a reported back -- half a turn, the signature of exactly
+      that. Forward is local **-Z**: models are authored facing the viewer.
+      Verified live this time, with a creature spawned in front of the
+      player (see the debug aid below): it looks straight back.
+    - **Emptying a container left a blank menu.** lootmenu.s's UpdateMenu()
+      calls LootExit() and returns *before adding any rows* once GetFirst()
+      is null, so the screen is meant to be closed by LootExit's own two
+      natives -- and the port implemented neither, leaving the player on an
+      empty page with the "Okay" row (string 528) gone. Now implemented:
+      `QueryDestroy()` closes it (the container stays, already made
+      unusable), and `QuitAndDestroyOpener()` closes it and condemns the
+      container, which is the branch a *dropped loot bag* takes because
+      real spawn scripts (monsters/arat.s's own `Loot.SetDestroy(true)`,
+      fearfrst/goblin_hero.s, crypt1/shadowkeygate.s) set that flag while a
+      placed chest never does. `SetDestroy`/`GetDestroy` and `GetTemplate`
+      are implemented alongside; the world instance is erased on the next
+      world tick, not inside the handler, for the usual deferred-removal
+      reason. Closes M21's long-standing "empty-bag despawn" open item.
+    - **The equip screen's category tabs were invisible.** `AddButton`'s
+      real 5th/6th arguments are global.spr slot ids for the button's
+      normal and highlighted art, and both were being discarded -- and
+      inventory.s builds its five tabs with an *empty* label
+      (`AddButton("", "WeaponsMenu", x, y, 47, 48)`), so there was nothing
+      on screen at all and M35's Left/Right navigation was moving a
+      selection the player could not see. The art is drawn now, with the
+      selection outline the real screen shows. Two placement misses fixed
+      with it: `AddTable` had its real x/y recorded but unused (the item
+      list drew over the icons instead of below them), and AddQuitButton's
+      "Back" label drew inline in the vertical flow instead of at the
+      bottom of the page. Checked against the shipped screen.
+    - **The reported crash was not reproduced** and is not fixed. A
+      creature spawned in melee range, attacking a player with a weapon
+      equipped, ran clean; reading every path M35 touched found nothing.
+      What was added instead is a crash reporter
+      (`platform/win32/crash_report.h`): an unhandled-exception filter that
+      writes the fault, the faulting address and a symbolized stack into
+      shadowkey_port.log, so the next occurrence names its own location.
+    - **Debug aids** (`SK_DEBUG_SPAWN`, `SK_DEBUG_EQUIP`, env-gated and
+      inert unless set): spawn a named monster script in front of the
+      player start, and equip the first weapon in the starting inventory.
+      Added because verifying an in-world fix otherwise means playing to
+      wherever a creature happens to be -- which is what made M35's facing
+      sign a guess in the first place.
+
 ## Next milestones (not yet started)
 
 Roughly in priority order for reaching "actually playable," not commitments:

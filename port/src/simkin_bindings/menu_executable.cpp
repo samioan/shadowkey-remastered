@@ -425,6 +425,34 @@ bool MenuExecutable::method(const skString& methodName, skRValueArray& args,
         returnValue = skRValue(static_cast<skiExecutable*>(&m_TitleHandle), false);
         return true;
     }
+    // M36: the two natives lootmenu.s uses instead of a plain Quit() once
+    // its container has been emptied. Both branches of its LootExit()
+    // carry a commented-out `//Quit();` next to the call that replaced it,
+    // so both of these close the screen -- and the port implementing
+    // neither is why emptying a chest left the player on a blank menu with
+    // the "Okay" row gone: UpdateMenu() calls LootExit() and *returns
+    // before adding any rows at all* when GetFirst() is null.
+    if (methodName == skString("QueryDestroy") && args.entries() == 0) {
+        // Container stays in the world (lootmenu.s has already called
+        // SetUsable(false) on it) -- just close.
+        m_Stack.RequestCloseMenu();
+        return true;
+    }
+    if (methodName == skString("QuitAndDestroyOpener") && args.entries() == 0) {
+        // Close, and take the container with it. Only reached when the
+        // opener's own SetDestroy(true) was set, which real scripts do
+        // solely for *spawned* loot bags (monsters/arat.s's own
+        // `Loot.SetDestroy(true)`), never for a placed chest.
+        if (auto* opener = dynamic_cast<ItemExecutable*>(m_Opener)) {
+            opener->MarkForRemoval();
+        }
+        // Dropped immediately so nothing here can outlive the object it
+        // just condemned -- main.cpp erases the world instance on its next
+        // tick, once this whole script call chain has returned.
+        m_Opener = nullptr;
+        m_Stack.RequestCloseMenu();
+        return true;
+    }
     if (methodName == skString("Quit") && args.entries() == 0) {
         // See MenuStack::closeMenuRequested(). Deliberately does not
         // navigate here: a real Quit() is often followed immediately by an
@@ -724,6 +752,17 @@ bool MenuExecutable::method(const skString& methodName, skRValueArray& args,
         // RowOwnerRef writeback).
         row.x = args[2].intValue();
         row.y = args[3].intValue();
+        // M36: AddButton's real 6-arg form carries two global.spr slot ids
+        // -- the button's normal and highlighted art. Both were being
+        // discarded, which is why the inventory/equip screen's category
+        // strip was *invisible*: inventory.s builds those five tabs as
+        // AddButton("", "WeaponsMenu", x, y, 47, 48) and friends, with an
+        // empty label, so with the art dropped there was nothing at all to
+        // draw and Left/Right moved a selection the player could not see.
+        if (args.entries() >= 6) {
+            row.spriteNormal = args[4].intValue();
+            row.spriteSelected = args[5].intValue();
+        }
         row.widget.reset(new ButtonExecutable(*this, m_Rows.size() - 1));
         returnValue = skRValue(static_cast<skiExecutable*>(row.widget.get()), false);
         return true;
@@ -731,6 +770,7 @@ bool MenuExecutable::method(const skString& methodName, skRValueArray& args,
     if (methodName == skString("AddQuitButton") && args.entries() == 2) {
         MenuRow& row =
             AddRow(RowKind::MenuItem, args[0].intValue(), ToStdString(args[1].str()), true);
+        row.isQuitButton = true;  // M36: bottom-centred softkey, see MenuRow
         row.widget.reset(new ButtonExecutable(*this, m_Rows.size() - 1));
         returnValue = skRValue(static_cast<skiExecutable*>(row.widget.get()), false);
         return true;

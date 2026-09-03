@@ -155,6 +155,7 @@ add_executable(shadowkey_port
   src/assets/zone_display_names.cpp
   src/graphics/bitmap_font.cpp
   src/platform/win32/console_tee.cpp
+  src/platform/win32/crash_report.cpp
   src/platform/win32/exe_dir.cpp
   src/platform/win32/window.cpp
 )

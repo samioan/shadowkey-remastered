@@ -135,6 +135,50 @@ int main(int argc, char** argv) {
         // main.cpp's native default is the fallback for a usable container
         // whose script omits the handler, not what makes these work.
         Check(hadOnUse, "...and whose own OnUse opens the loot menu, once the script is found");
+
+        // ---- M36: what happens once that container is emptied ----
+        //
+        // lootmenu.s's UpdateMenu() calls LootExit() and returns *before
+        // adding any rows* when GetFirst() is null, so the screen's whole
+        // content -- including its "Okay" row (string 528) -- is gone by
+        // design, and LootExit()'s two natives are what close it. With
+        // neither implemented the player was left staring at a blank menu.
+        auto call = [&](skiExecutable& obj, const char* name) {
+            skRValueArray a;
+            skRValue r;
+            skExecutableContext c(&interpreter);
+            obj.method(skString(name), a, r, c);
+            return r;
+        };
+        // GetDestroy defaults false -- a placed chest stays in the world.
+        Check(!chest->destroyWhenEmpty(),
+              "a placed chest does not set SetDestroy, so it survives being emptied");
+        {
+            skRValueArray a;
+            a.append(skRValue(true));
+            skRValue r;
+            skExecutableContext c(&interpreter);
+            chest->method(skString("SetDestroy"), a, r, c);
+        }
+        Check(chest->destroyWhenEmpty() && call(*chest, "GetDestroy").boolValue(),
+              "...but SetDestroy(true) (what a monster's dropped loot bag does) reads back");
+
+        stack.ClearCloseMenuRequest();
+        stack.OpenMenu("LootMenu", chest.get());
+        sk_bindings::MenuExecutable* loot = stack.currentMenu();
+        bool haveLoot = loot != nullptr;
+        if (haveLoot) {
+            stack.ClearCloseMenuRequest();
+            call(*loot, "QueryDestroy");
+            Check(stack.closeMenuRequested(),
+                  "QueryDestroy closes the loot screen (the chest-stays branch)");
+            stack.ClearCloseMenuRequest();
+            call(*loot, "QuitAndDestroyOpener");
+            Check(stack.closeMenuRequested() && chest->markedForRemoval(),
+                  "QuitAndDestroyOpener closes it and condemns the container too");
+        } else {
+            Check(false, "loot menu opened for the destroy-branch checks");
+        }
     }
 
     // ---- Part 2: the equip screen's real layout navigation ----

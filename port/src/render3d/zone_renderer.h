@@ -222,7 +222,15 @@ struct PlacedEntity {
 // This port was rotating local +X to the heading instead, so every
 // creature was drawn a quarter-turn off: they turned to track the player
 // but always presented their flank.
-constexpr float kModelForwardYawOffset = -1.57079632679f;  // -pi/2
+//
+// **Sign corrected in M36, from observation.** The derivation above fixes
+// the axis but not which way along it a model faces, and the first
+// attempt (-pi/2, reading component 3 as pointing *away* from the camera
+// at heading zero) turned the reported flank into a reported back -- half
+// a turn out, which is the signature of exactly this sign. Models are
+// authored facing the viewer, so forward is local **-Z**: at heading zero
+// component 3 grows *toward* the camera. Everything else stands.
+constexpr float kModelForwardYawOffset = 1.57079632679f;  // +pi/2
 
 class ZoneRenderer {
 public:

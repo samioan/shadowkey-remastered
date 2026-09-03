@@ -31,6 +31,7 @@
 #include "graphics/backbuffer.h"
 #include "graphics/bitmap_font.h"
 #include "platform/win32/console_tee.h"
+#include "platform/win32/crash_report.h"
 #include "platform/win32/exe_dir.h"
 #include "platform/win32/window.h"
 #include "render3d/camera.h"
@@ -463,6 +464,43 @@ void RenderMenu(sk::Backbuffer& backbuffer, sk_bindings::MenuExecutable& menu,
             case RowKind::StaticItem: {
                 std::string label = RowText(row.textId, row.literalText, strings);
                 int textW = sk::BitmapFont::TextWidth(label);
+                // M36: a real AddButton() that carries art draws that art
+                // rather than its (usually empty) label -- the
+                // inventory/equip screen's five category tabs are exactly
+                // this shape. The two slot ids are the button's normal and
+                // highlighted states; which of the pair is which isn't
+                // recorded anywhere, so the selected tab additionally gets
+                // the outline the real screen shows around it, making the
+                // selection unambiguous either way round.
+                if (row.x >= 0 && row.spriteNormal >= 0) {
+                    int slot = isSelected && row.spriteSelected >= 0 ? row.spriteSelected
+                                                                      : row.spriteNormal;
+                    const sk::Sprite* art = sprites.GetSprite(slot);
+                    if (!art) art = sprites.GetSprite(row.spriteNormal);
+                    if (art) {
+                        backbuffer.Blit(row.x, row.y, *art);
+                        if (isSelected) {
+                            DrawRectOutline(backbuffer, row.x - 1, row.y - 1, art->width + 2,
+                                             art->height + 2, kSelectedTextColor);
+                        }
+                        if (!label.empty()) {
+                            sk::BitmapFont::DrawString(backbuffer, row.x, row.y + art->height,
+                                                        label, color);
+                        }
+                        break;
+                    }
+                }
+                if (row.isQuitButton) {
+                    // M36: the real screens put this softkey label at the
+                    // bottom of the page (see the shipped equip screen),
+                    // not inline in the vertical flow -- which is where it
+                    // used to land, printing "Back" straight over the
+                    // category icons.
+                    sk::BitmapFont::DrawString(backbuffer, (sk::Backbuffer::kWidth - textW) / 2,
+                                                sk::Backbuffer::kHeight - lineHeight - 4, label,
+                                                color);
+                    break;
+                }
                 if (row.x >= 0) {
                     // M25: a real AddButton()/AddFloatingText() position
                     // (charactermanager.s's whole real layout) -- centered
@@ -533,6 +571,14 @@ void RenderMenu(sk::Backbuffer& backbuffer, sk_bindings::MenuExecutable& menu,
                 // table (a real scrollable viewport, docs/PORT_ROADMAP.md
                 // flags this table widget's layout as simplified overall).
                 constexpr int kVisibleRows = 6;
+                // M36: AddTable's own real x/y (now recorded -- see the
+                // AddTable handler) instead of a hardcoded x with the
+                // shared vertical cursor. On the equip screen that is the
+                // difference between the item list starting below the
+                // category icons, where the script put it, and starting on
+                // top of them.
+                int tableX = row.x >= 0 ? row.x : 16;
+                if (row.y >= 0) y = row.y;
                 int selected = table->selectedRow();
                 // Parenthesized -- this file transitively includes the
                 // vendored Simkin headers (skGeneral.h), which '#define
@@ -549,11 +595,11 @@ void RenderMenu(sk::Backbuffer& backbuffer, sk_bindings::MenuExecutable& menu,
                     }
                     uint16_t rowColor = (isSelected && r == selected) ? kSelectedTextColor
                                                                        : kTextColor;
-                    sk::BitmapFont::DrawString(backbuffer, 16, y, line, rowColor);
+                    sk::BitmapFont::DrawString(backbuffer, tableX, y, line, rowColor);
                     y += lineHeight;
                 }
                 if (table->rowCount() == 0) {
-                    sk::BitmapFont::DrawString(backbuffer, 16, y, "(empty)", kStaticTextColor);
+                    sk::BitmapFont::DrawString(backbuffer, tableX, y, "(empty)", kStaticTextColor);
                     y += lineHeight;
                 }
                 break;
@@ -861,6 +907,8 @@ int main(int argc, char** argv) {
     // `freopen`. As early as possible -- anything printed before this
     // call only reaches the console, not the log.
     sk::StartConsoleTeeLog("shadowkey_port.log");
+    // M36: right after the tee, so a crash report lands in the log too.
+    sk::InstallCrashReporter();
 
     // Both this and fontPath's default below are resolved relative to the
     // executable's own location (exe_dir.h), not the process's current
@@ -1351,6 +1399,68 @@ int main(int argc, char** argv) {
                     prop.yaw = PlacementYawRadians(e.yawRaw);
                     gameEntities.push_back(prop);
                 }
+                // M36: opt-in test aid -- SK_DEBUG_EQUIP equips the first
+                // real weapon in the starting inventory, so the weapon
+                // viewmodel/swing path can be exercised without walking
+                // the inventory UI first.
+                if (std::getenv("SK_DEBUG_EQUIP")) {
+                    for (const auto& item : stack.player().inventory()) {
+                        if (item->itemType() != sk_bindings::kItemTypeWeapon) continue;
+                        stack.player().UpdateEquipStatus(item.get(), true);
+                        std::printf("shadowkey-port: SK_DEBUG_EQUIP equipped \"%s\"\n",
+                                    item->name().c_str());
+                        break;
+                    }
+                }
+                // M36: opt-in test spawn. Set SK_DEBUG_SPAWN to a real
+                // monster script path (relative to the script root, e.g.
+                // "arat.s") to drop one two tiles in front of the player
+                // start, facing them. Purely a development aid -- nothing
+                // reads this variable unless it is set, so a normal run is
+                // byte-identical. It exists because the in-world bugs in
+                // this port are otherwise reachable only by playing to
+                // wherever a creature happens to be, which makes verifying
+                // a fix to creature facing/attacking slow and unreliable.
+                if (const char* spawnScript = std::getenv("SK_DEBUG_SPAWN")) {
+                    std::string rel = spawnScript;
+                    std::replace(rel.begin(), rel.end(), '\\', '/');
+                    std::string fullPath = std::string(scriptRoot) + "/" + rel;
+                    skExecutableContext loadCtxt(&interpreter);
+                    try {
+                        auto monster = std::make_unique<sk_bindings::MonsterExecutable>(
+                            skString(fullPath.c_str()), loadCtxt, &strings, stack.player(), stack);
+                        skRValueArray args;
+                        args.append(skRValue(0));
+                        skRValue ret;
+                        skExecutableContext callCtxt(&interpreter);
+                        monster->method(skString("Init"), args, ret, callCtxt);
+                        MonsterInstance inst;
+                        // Far enough to be fully in frame on arrival, and
+                        // to be watched walking in.
+                        // Inside a default attack range (660 world units,
+                        // MonsterExecutable's own SetAttackRange default),
+                        // so the creature is swinging from the first tick
+                        // instead of having to path its way in.
+                        constexpr float kDebugSpawnDistance = 300.0f;
+                        inst.x = gameCamera.x + std::cos(gameCamera.yaw) * kDebugSpawnDistance;
+                        inst.y = gameCamera.y + std::sin(gameCamera.yaw) * kDebugSpawnDistance;
+                        inst.z = gameZone->FloorHeightAt(inst.x, inst.y);
+                        inst.placementYaw = gameCamera.yaw + 3.14159265f;  // looking back at us
+                        inst.facingYaw = inst.placementYaw;
+                        inst.modelArchiveIndex = 18;  // Azra_Rat's own models.idx index
+                        inst.typeId = 0;
+                        inst.script = std::move(monster);
+                        std::printf("shadowkey-port: SK_DEBUG_SPAWN %s at (%.0f,%.0f)\n", rel.c_str(),
+                                    inst.x, inst.y);
+                        gameMonsters.push_back(std::move(inst));
+                    } catch (skParseException& ex) {
+                        std::printf("shadowkey-port: SK_DEBUG_SPAWN parse error: %s\n",
+                                    ex.toString().ptr());
+                    } catch (skRuntimeException& ex) {
+                        std::printf("shadowkey-port: SK_DEBUG_SPAWN runtime error: %s\n",
+                                    ex.toString().ptr());
+                    }
+                }
                 std::printf("shadowkey-port: %zu live monster(s), %zu live door(s), %zu live "
                             "pickup(s) loaded\n",
                             gameMonsters.size(), gameDoors.size(), gamePickups.size());
@@ -1627,6 +1737,23 @@ int main(int argc, char** argv) {
                     m.animTime = 0.0f;
                     m.animHoldLastFrame = holdLastFrame;
                 };
+
+                // M36: world objects a script has condemned -- currently
+                // only an emptied loot bag whose own SetDestroy(true) made
+                // lootmenu.s call QuitAndDestroyOpener() on it. Erased here
+                // at the top of the world tick rather than inside that
+                // handler, so the whole script call chain (and the menu
+                // frame it ran under) has fully returned first -- the same
+                // deferred-removal rule PlayerExecutable::PurgeRemovedItems
+                // already follows for inventory items, and for the same
+                // use-after-free reason.
+                for (size_t i = 0; i < gamePickups.size();) {
+                    if (gamePickups[i].script && gamePickups[i].script->markedForRemoval()) {
+                        gamePickups.erase(gamePickups.begin() + static_cast<long>(i));
+                    } else {
+                        ++i;
+                    }
+                }
 
                 // M34: creatures that died to a damage-over-time this tick
                 // (poison, or IgniteFoe's burn) rather than to a player
