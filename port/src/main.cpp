@@ -47,6 +47,7 @@
 #include "simkin_bindings/monster_executable.h"
 #include "simkin_bindings/player_executable.h"
 #include "simkin_bindings/popup_menu_executable.h"
+#include "simkin_bindings/slider_executable.h"
 #include "simkin_bindings/table_executable.h"
 #include "simkin_bindings/text_area_executable.h"
 #include "simkin_bindings/weapon_viewmodel.h"
@@ -158,12 +159,61 @@ struct MonsterInstance {
     int modelArchiveIndex = -1;
     enum class AiState { Idle, Chasing, Attacking } aiState = AiState::Idle;
     int attackCooldownTicks = 0;
+    // Ticks since this monster last actually had the player in sight.
+    // Chasing survives brief losses of sight (the player ducking round a
+    // pillar) but not indefinitely -- see the AI block in the tick loop.
+    int ticksSinceSeen = 0;
+    // Where the player last was when seen; a chaser steers toward this
+    // rather than freezing the instant sight breaks.
+    float lastSeenX = 0, lastSeenY = 0;
+    // M28: vertex-animation playback state. `animClip` is the clip index
+    // the creature's own script named (idle/walk/swing/death); `animTime`
+    // counts seconds into it, and the death clip latches (plays once and
+    // holds its last frame) instead of looping.
+    int animClip = -1;
+    float animTime = 0.0f;
+    bool animHoldLastFrame = false;
     // M24: the real entities.txt typeId this placement resolved from --
     // ZoneScriptExecutable::NotifyKilled() (a real zone-root script's own
     // AddTrigger()...SetEntityID(id) kill-count trigger, e.g. ghstpass.s's
     // zombieTrigger.SetEntityID(104)) matches kills against this.
     int typeId = -1;
 };
+
+// M28: advances one live creature's vertex animation by a tick and
+// returns the model frame to draw.
+//
+// The clip table itself is real, decoded data (world/model_archive.h's
+// AnimationClip): a monster script's SetIdleAnimation/SetWalkAnimation/
+// SetSwingAnimation/SetDeathAnimation numbers index straight into it. Two
+// things here are this port's own choices, not recovered behaviour:
+// reading the record's third field as frames-per-second (its units were
+// never confirmed), and looping every clip except the death one, which
+// holds its final frame so a corpse stays down.
+int AdvanceMonsterAnimation(MonsterInstance& m, sk::ModelArchive& models) {
+    const sk::Model* model = models.GetModel(m.modelArchiveIndex);
+    if (!model || model->frameCount <= 1) return 0;
+    // Fall back to whatever pose the script's own PlayAnimation() asked
+    // for at Init() before the AI has picked a clip.
+    int clipIndex = m.animClip >= 0 ? m.animClip : m.script->currentAnimation();
+    const sk::AnimationClip* clip = model->clip(clipIndex);
+    if (!clip || clip->frameCount() <= 0) return 0;
+
+    constexpr float kTickSeconds = 0.04f;  // the fixed 25Hz tick, engine/game_clock.h
+    m.animTime += kTickSeconds;
+    float rate = clip->rate > 0 ? static_cast<float>(clip->rate) : 10.0f;
+    int advanced = static_cast<int>(m.animTime * rate);
+    int frameInClip;
+    if (m.animHoldLastFrame) {
+        frameInClip = (std::min)(advanced, clip->frameCount() - 1);
+    } else {
+        frameInClip = advanced % clip->frameCount();
+        // Keep animTime from growing without bound over a long session.
+        float clipSeconds = static_cast<float>(clip->frameCount()) / rate;
+        if (clipSeconds > 0.0f && m.animTime >= clipSeconds) m.animTime -= clipSeconds;
+    }
+    return clip->startFrame + frameInClip;
+}
 
 // M15: Action::Use interact binding, first (narrow) slice -- doors only,
 // same "one real category, not the whole native surface" precedent M12
@@ -256,16 +306,20 @@ void RenderPopup(sk::Backbuffer& backbuffer, sk_bindings::PopupMenuExecutable& p
         }
     }
     int y = y0 + 6;
-    int itemIndex = 1;
-    for (const auto& item : popup.items()) {
+    for (size_t i = 0; i < popup.items().size(); ++i) {
+        const auto& item = popup.items()[i];
         if (item.blanked) continue;  // M10: UpdatePopupItem(index, "") hides this row entirely
         bool selectable = sk_bindings::PopupMenuExecutable::IsSelectable(item);
-        bool isSelected = selectable && itemIndex == popup.selectedItem();
+        // popup.selectedItem() indexes ALL items, blanked/static ones
+        // included -- see PopupMenuExecutable::IsItemSelected(). This used
+        // to recount only the selectable, non-blanked items, which put the
+        // highlight on the wrong line for every confirm popup in the game
+        // (they all open with a non-selectable message line).
+        bool isSelected = selectable && popup.IsItemSelected(i);
         uint16_t color = isSelected ? kSelectedTextColor : kTextColor;
         std::string text = !item.literalText.empty() ? item.literalText : strings.Get(item.textId);
         int lines = DrawWrappedText(backbuffer, x0 + 6, y, text, 22, color);
         y += lines * (sk::BitmapFont::kGlyphHeight + 3) + 2;
-        if (selectable) ++itemIndex;
     }
 }
 
@@ -302,9 +356,17 @@ void RenderMenu(sk::Backbuffer& backbuffer, sk_bindings::MenuExecutable& menu,
         y += lineHeight + 2;
     }
 
-    int itemIndex = 1;
-    for (const auto& row : menu.rows()) {
-        bool isSelected = row.selectable && itemIndex == menu.selectedItem();
+    for (size_t rowIndex = 0; rowIndex < menu.rows().size(); ++rowIndex) {
+        const auto& row = menu.rows()[rowIndex];
+        // menu.selectedItem() is a 1-based index into ALL rows (see
+        // MenuExecutable::IsRowSelected() -- it's the number
+        // AddMenuItem()/AddStaticItem() hand back to scripts). The old code
+        // here compared it against a counter that only advanced on
+        // selectable rows, so every screen mixing static and selectable
+        // rows -- character creation, the character manager, inventory --
+        // drew the highlight on a different row than the one Enter would
+        // actually activate.
+        bool isSelected = row.selectable && menu.IsRowSelected(rowIndex);
         uint16_t color = !row.selectable      ? kStaticTextColor
                           : isSelected         ? kSelectedTextColor
                                                 : kTextColor;
@@ -409,6 +471,36 @@ void RenderMenu(sk::Backbuffer& backbuffer, sk_bindings::MenuExecutable& menu,
                 }
                 break;
             }
+            case RowKind::Slider: {
+                // M28: the real Options screen's volume rows. Drawn as
+                // "< Label ####------ >" -- the angle brackets match the
+                // combo-box row's own convention for "Left/Right adjusts
+                // this", and the bar is a plain character meter (no real
+                // slider art was found in global.spr; the two slots
+                // options.s references are text ids, not sprite ids).
+                auto* slider = static_cast<sk_bindings::SliderExecutable*>(row.widget.get());
+                std::string name = RowText(row.textId, row.literalText, strings);
+                // Shrink the meter until the whole row fits the real
+                // 176px screen -- the font is proportional and the real
+                // labels ("Sound Volume", "Music Volume") are long, so a
+                // fixed cell count runs off the right edge.
+                constexpr int kLeftMargin = 6;
+                int maxWidth = sk::Backbuffer::kWidth - kLeftMargin * 2;
+                std::string label;
+                for (int cells = 10; cells >= 3; --cells) {
+                    int filled = slider->maxValue() > 0
+                                      ? slider->value() * cells / slider->maxValue()
+                                      : 0;
+                    filled = std::clamp(filled, 0, cells);
+                    std::string bar(static_cast<size_t>(filled), '#');
+                    bar += std::string(static_cast<size_t>(cells - filled), '-');
+                    label = "<" + name + " " + bar + ">";
+                    if (sk::BitmapFont::TextWidth(label) <= maxWidth) break;
+                }
+                sk::BitmapFont::DrawString(backbuffer, kLeftMargin, y, label, color);
+                y += lineHeight;
+                break;
+            }
             case RowKind::ComboBox: {
                 auto* combo = static_cast<sk_bindings::ComboBoxExecutable*>(row.widget.get());
                 int value = combo->currentOptionValue();
@@ -456,7 +548,6 @@ void RenderMenu(sk::Backbuffer& backbuffer, sk_bindings::MenuExecutable& menu,
                 break;
             }
         }
-        if (row.selectable) ++itemIndex;
     }
 
     if (auto* popup = menu.activePopup()) {
@@ -901,6 +992,11 @@ int main(int argc, char** argv) {
         if (window.ShouldClose()) return;
         if (!clock.PollTick()) return;
 
+        // Drives held-key auto-repeat for menu navigation only -- see
+        // InputState::TickRepeats(). Must run before any Consume* call
+        // this tick.
+        input.TickRepeats();
+
         // M10: erase any inventory items marked for removal last tick
         // (UseItem/DropItem) -- safe here since any script call chain
         // that marked them has long since returned. See item_executable.h.
@@ -1188,13 +1284,39 @@ int main(int argc, char** argv) {
                 // Axis-separated collision (try X, then Y, independently)
                 // gives a simple wall-slide instead of a hard stop the
                 // instant either component would clip a wall.
+                // Live monsters are solid too -- the player used to walk
+                // straight through them, which (together with the aggro
+                // fixes below) is the other half of "enemies ignore
+                // collision". Vertical separation is honoured so a
+                // creature on a different floor of the same tile column
+                // doesn't block. No RE ground truth for the real actor-vs-
+                // actor radius (docs/WORLD_MODEL.md), so this reuses the
+                // same bounding-circle constants the rest of this port's
+                // collision already uses.
+                constexpr float kMonsterBodyRadius = 40.0f;
+                constexpr float kBlockHeightDelta = sk::kEyeHeightOffset * 2.0f;
+                auto blockedByMonster = [&](float wx, float wy) {
+                    for (const MonsterInstance& m : gameMonsters) {
+                        if (!m.script->alive() || m.script->destroyed()) continue;
+                        if (std::fabs(gameCamera.z - (m.z + sk::kEyeHeightOffset)) >
+                            kBlockHeightDelta) {
+                            continue;
+                        }
+                        float dx = wx - m.x, dy = wy - m.y;
+                        float r = kPlayerRadius + kMonsterBodyRadius;
+                        if (dx * dx + dy * dy < r * r) return true;
+                    }
+                    return false;
+                };
                 auto tryMove = [&](float mx, float my) {
                     float nx = gameCamera.x + mx;
-                    if (!gameZone->CircleHitsWall(nx, gameCamera.y, kPlayerRadius)) {
+                    if (!gameZone->CircleHitsWall(nx, gameCamera.y, kPlayerRadius) &&
+                        !blockedByMonster(nx, gameCamera.y)) {
                         gameCamera.x = nx;
                     }
                     float ny = gameCamera.y + my;
-                    if (!gameZone->CircleHitsWall(gameCamera.x, ny, kPlayerRadius)) {
+                    if (!gameZone->CircleHitsWall(gameCamera.x, ny, kPlayerRadius) &&
+                        !blockedByMonster(gameCamera.x, ny)) {
                         gameCamera.y = ny;
                     }
                 };
@@ -1285,22 +1407,88 @@ int main(int argc, char** argv) {
                                                              // outrun a walking player
                 constexpr float kMonsterRadius = 40.0f;     // world units, wall-collision only
                 constexpr int kAttackCooldownTicks = 25;    // ~1s at the fixed 40ms tick
+                // How far above/below a monster the player can be and
+                // still be considered "on the same level". Real zones
+                // stack rooms vertically at very different floor heights
+                // (docs/RENDERER_3D.md's ~6800-raw-unit room heights), so
+                // without this a monster two storeys below aggroes on a
+                // player it can never reach. A generous 2x the eye-height
+                // constant -- enough to cover stairs and slopes within one
+                // room, far short of a whole floor.
+                constexpr float kAggroMaxHeightDelta = sk::kEyeHeightOffset * 2.0f;
+                // Chasing survives this many ticks of lost sight before
+                // the monster gives up and returns to Idle (~2s at the
+                // fixed 40ms tick). Previously monsters never de-aggroed
+                // at all, by design ("no real data on leash behaviour") --
+                // but combined with an un-gated 70-tile radius that meant
+                // the whole level permanently converging on the player.
+                constexpr int kLoseInterestTicks = 50;
+                // Monsters push apart at this range so a pack doesn't
+                // collapse into one shared point on top of the player.
+                constexpr float kMonsterSeparation = 70.0f;
+
+                // M28: picks the clip a creature should be playing from
+                // its own AI state, and latches the death clip so a corpse
+                // holds its final pose instead of looping.
+                auto setAnimClip = [](MonsterInstance& m, int clip, bool holdLastFrame) {
+                    if (clip < 0 || m.animClip == clip) return;
+                    m.animClip = clip;
+                    m.animTime = 0.0f;
+                    m.animHoldLastFrame = holdLastFrame;
+                };
+
                 for (MonsterInstance& m : gameMonsters) {
                     // M23: destroyed() (a real zone-root script's
                     // DestroyObjectMirror()) removes an entity from play
                     // as fully as death does, everywhere alive() is
                     // already checked.
-                    if (!m.script->alive() || m.script->destroyed() || !m.script->aggressive()) {
+                    if (!m.script->alive()) {
+                        setAnimClip(m, m.script->deathAnimation(), true);
+                        continue;
+                    }
+                    if (m.script->destroyed() || !m.script->aggressive()) {
+                        // Idle NPCs and merchants still breathe.
+                        setAnimClip(m, m.script->idleAnimation(), false);
                         continue;
                     }
                     float mdx = gameCamera.x - m.x, mdy = gameCamera.y - m.y;
                     float dist = std::sqrt(mdx * mdx + mdy * mdy);
-                    if (m.aiState == MonsterInstance::AiState::Idle) {
-                        if (dist <= m.script->chaseRadius()) m.aiState = MonsterInstance::AiState::Chasing;
+
+                    // Can this monster actually perceive the player right
+                    // now? Real chase radii are enormous (see
+                    // Zone::HasLineOfSight()'s comment), so sight and
+                    // vertical separation -- not the radius -- are what
+                    // really bound aggro.
+                    bool inRadius = dist <= m.script->chaseRadius();
+                    bool sameLevel =
+                        std::fabs(gameCamera.z - (m.z + sk::kEyeHeightOffset)) <=
+                        kAggroMaxHeightDelta;
+                    bool canSee = inRadius && sameLevel &&
+                                   gameZone->HasLineOfSight(m.x, m.y, gameCamera.x, gameCamera.y);
+                    if (canSee) {
+                        m.ticksSinceSeen = 0;
+                        m.lastSeenX = gameCamera.x;
+                        m.lastSeenY = gameCamera.y;
+                    } else {
+                        ++m.ticksSinceSeen;
                     }
-                    if (m.aiState == MonsterInstance::AiState::Idle) continue;
-                    if (dist <= kMeleeRange) {
+
+                    if (m.aiState == MonsterInstance::AiState::Idle) {
+                        if (canSee) m.aiState = MonsterInstance::AiState::Chasing;
+                    } else if (m.ticksSinceSeen > kLoseInterestTicks) {
+                        // Lost it -- back to standing post rather than
+                        // homing on the player forever through geometry.
+                        m.aiState = MonsterInstance::AiState::Idle;
+                        m.attackCooldownTicks = 0;
+                    }
+                    if (m.aiState == MonsterInstance::AiState::Idle) {
+                        setAnimClip(m, m.script->idleAnimation(), false);
+                        continue;
+                    }
+
+                    if (canSee && dist <= kMeleeRange) {
                         m.aiState = MonsterInstance::AiState::Attacking;
+                        setAnimClip(m, m.script->swingAnimation(), false);
                         if (m.attackCooldownTicks > 0) {
                             --m.attackCooldownTicks;
                         } else {
@@ -1314,14 +1502,61 @@ int main(int argc, char** argv) {
                         }
                     } else {
                         m.aiState = MonsterInstance::AiState::Chasing;
+                        setAnimClip(m, m.script->walkAnimation(), false);
                         m.attackCooldownTicks = 0;
-                        if (dist > 1.0f) {
-                            float step = kMonsterMoveSpeed / dist;
-                            float mmx = mdx * step, mmy = mdy * step;
-                            float nx = m.x + mmx;
-                            if (!gameZone->CircleHitsWall(nx, m.y, kMonsterRadius)) m.x = nx;
-                            float ny = m.y + mmy;
-                            if (!gameZone->CircleHitsWall(m.x, ny, kMonsterRadius)) m.y = ny;
+                        // Head for the player if currently visible, else
+                        // for wherever they were last seen.
+                        float goalX = canSee ? gameCamera.x : m.lastSeenX;
+                        float goalY = canSee ? gameCamera.y : m.lastSeenY;
+                        float gx = goalX - m.x, gy = goalY - m.y;
+                        float goalDist = std::sqrt(gx * gx + gy * gy);
+                        if (goalDist > 1.0f) {
+                            float dirX = gx / goalDist, dirY = gy / goalDist;
+                            // Crowd separation: push away from any other
+                            // live monster that's too close, so a group
+                            // spreads out instead of stacking in one spot.
+                            for (const MonsterInstance& other : gameMonsters) {
+                                if (&other == &m) continue;
+                                if (!other.script->alive() || other.script->destroyed()) continue;
+                                float ox = m.x - other.x, oy = m.y - other.y;
+                                float od = std::sqrt(ox * ox + oy * oy);
+                                if (od > 0.001f && od < kMonsterSeparation) {
+                                    float push = (kMonsterSeparation - od) / kMonsterSeparation;
+                                    dirX += (ox / od) * push;
+                                    dirY += (oy / od) * push;
+                                }
+                            }
+                            float dirLen = std::sqrt(dirX * dirX + dirY * dirY);
+                            if (dirLen > 0.001f) {
+                                dirX /= dirLen;
+                                dirY /= dirLen;
+                            }
+                            // Try straight ahead; if a wall blocks it, try
+                            // progressively wider turns to either side
+                            // before giving up this tick. Not a real
+                            // pathfinder (the original's own .pth
+                            // spawn/patrol data is still undecoded past
+                            // its header, docs/ZONE_FORMAT.md) -- but
+                            // enough that a monster follows a corridor
+                            // round a corner instead of grinding face-first
+                            // into the wall between it and the player,
+                            // which is what the previous straight-line
+                            // beeline did.
+                            static const float kSteerAngles[] = {0.0f,        0.6f,  -0.6f,
+                                                                  1.2f,        -1.2f, 1.9f,
+                                                                  -1.9f};
+                            for (float steer : kSteerAngles) {
+                                float cs = std::cos(steer), sn = std::sin(steer);
+                                float sx = dirX * cs - dirY * sn;
+                                float sy = dirX * sn + dirY * cs;
+                                float nx = m.x + sx * kMonsterMoveSpeed;
+                                float ny = m.y + sy * kMonsterMoveSpeed;
+                                if (!gameZone->CircleHitsWall(nx, ny, kMonsterRadius)) {
+                                    m.x = nx;
+                                    m.y = ny;
+                                    break;
+                                }
+                            }
                         }
                     }
                     m.z = gameZone->FloorHeightAt(m.x, m.y);
@@ -1429,6 +1664,13 @@ int main(int argc, char** argv) {
                         }
                         if (!sk_bindings::InAttackRange(gameCamera.x, gameCamera.y, gameCamera.yaw,
                                                          m.x, m.y, range)) {
+                            continue;
+                        }
+                        // Closes the documented M20 gap: a bow/crossbow's
+                        // real 16384-unit range (64 tiles) previously let
+                        // a shot pass straight through walls. Same tile-
+                        // grid sightline the AI now uses.
+                        if (!gameZone->HasLineOfSight(gameCamera.x, gameCamera.y, m.x, m.y)) {
                             continue;
                         }
                         float ddx = m.x - gameCamera.x, ddy = m.y - gameCamera.y;
@@ -1632,13 +1874,24 @@ int main(int argc, char** argv) {
                 // death animation/pose (M8's own "frame 0/skin 0 only"
                 // simplification).
                 std::vector<sk::PlacedEntity> frameEntities = gameEntities;
-                for (const MonsterInstance& m : gameMonsters) {
+                for (MonsterInstance& m : gameMonsters) {
                     // M23: destroyed() (a real zone-root script's
                     // DestroyObjectMirror()) hides an entity from the
-                    // world just as fully as death does.
-                    if (m.script->alive() && !m.script->destroyed()) {
-                        frameEntities.push_back({m.x, m.y, m.z, m.modelArchiveIndex});
-                    }
+                    // world entirely -- unlike death, which now plays the
+                    // creature's own real SetDeathAnimation() clip and
+                    // leaves the body in its final pose. Before M28 a
+                    // killed monster simply blinked out of existence,
+                    // which is also why the death clip every real monster
+                    // script sets had nothing to play it.
+                    if (m.script->destroyed()) continue;
+                    // Real per-instance appearance from the creature's own
+                    // script (SetSkin/SetScale) -- see
+                    // monster_executable.h.
+                    sk::PlacedEntity pe{m.x, m.y, m.z, m.modelArchiveIndex};
+                    pe.skinIndex = m.script->skin();
+                    pe.scale = m.script->scale();
+                    pe.frameIndex = AdvanceMonsterAnimation(m, modelArchive);
+                    frameEntities.push_back(pe);
                 }
                 for (const DoorInstance& d : gameDoors) {
                     frameEntities.push_back(
@@ -1739,8 +1992,10 @@ int main(int argc, char** argv) {
         }
 
         if (stack.creditsActive()) {
-            if (input.ConsumeJustPressed(sk::ButtonSlot::Up) && creditsScroll > 0) --creditsScroll;
-            if (input.ConsumeJustPressed(sk::ButtonSlot::Down)) ++creditsScroll;
+            if (input.ConsumeJustPressedOrRepeat(sk::ButtonSlot::Up) && creditsScroll > 0) {
+                --creditsScroll;
+            }
+            if (input.ConsumeJustPressedOrRepeat(sk::ButtonSlot::Down)) ++creditsScroll;
             if (input.ConsumeJustPressed(sk::ButtonSlot::LeftSelectionKey) ||
                 input.ConsumeJustPressed(sk::ButtonSlot::RightSelectionKey)) {
                 stack.CloseCredits();
@@ -1753,12 +2008,24 @@ int main(int argc, char** argv) {
 
         sk_bindings::MenuExecutable* menu = stack.currentMenu();
         if (menu) {
+            // A screen whose OnDisplay() rebuilt its rows (ClearMenu +
+            // repopulate -- the common pattern across the real corpus)
+            // comes back with selectedItem() == 0, and the "new menu"
+            // snap below only fires when the *identity* of the current
+            // menu changes. Without this, reopening a screen you were
+            // already on left it with nothing highlighted and Enter doing
+            // nothing. See MenuExecutable::EnsureValidSelection().
+            menu->EnsureValidSelection();
             try {
                 if (sk_bindings::PopupMenuExecutable* popup = menu->activePopup()) {
                     // A visible confirmation popup captures input ahead of
                     // the underlying menu's own row navigation.
-                    if (input.ConsumeJustPressed(sk::ButtonSlot::Up)) popup->MoveSelection(-1);
-                    if (input.ConsumeJustPressed(sk::ButtonSlot::Down)) popup->MoveSelection(1);
+                    if (input.ConsumeJustPressedOrRepeat(sk::ButtonSlot::Up)) {
+                        popup->MoveSelection(-1);
+                    }
+                    if (input.ConsumeJustPressedOrRepeat(sk::ButtonSlot::Down)) {
+                        popup->MoveSelection(1);
+                    }
                     if (input.ConsumeJustPressed(sk::ButtonSlot::LeftSelectionKey)) {
                         popup->ActivateSelected();
                     }
@@ -1768,18 +2035,14 @@ int main(int argc, char** argv) {
                 } else if (menu->textEntryActive()) {
                     // Typed characters land via SetCharCallback above; here
                     // just the two control actions matter -- confirm and
-                    // back. The corpus spells the back handler both
-                    // "OnRightSoftkey" and "OnRightSoftKey" depending on
-                    // the file (a genuine authoring inconsistency in the
-                    // original scripts, not something to "fix") --
-                    // TryInvoke no-ops silently on whichever name a given
-                    // screen doesn't define, so trying both is harmless.
+                    // back. MenuExecutable::GoBack() handles both real
+                    // spellings of the back handler plus the SetPrevMenu()
+                    // fallback (see its comment).
                     if (input.ConsumeJustPressed(sk::ButtonSlot::LeftSelectionKey)) {
                         menu->TryInvoke("Done");
                     }
                     if (input.ConsumeJustPressed(sk::ButtonSlot::RightSelectionKey)) {
-                        menu->TryInvoke("OnRightSoftkey");
-                        menu->TryInvoke("OnRightSoftKey");
+                        menu->GoBack();
                     }
                 } else {
                     // M10: Up/Down on a Table row (inventory/stats/quest-
@@ -1787,23 +2050,27 @@ int main(int argc, char** argv) {
                     // to the next outer row -- TryMoveTableSelection()
                     // only does something (and returns true) when the
                     // current selection actually is a Table.
-                    if (input.ConsumeJustPressed(sk::ButtonSlot::Up)) {
+                    if (input.ConsumeJustPressedOrRepeat(sk::ButtonSlot::Up)) {
                         if (!menu->TryMoveTableSelection(-1)) menu->MoveSelection(-1);
                     }
-                    if (input.ConsumeJustPressed(sk::ButtonSlot::Down)) {
+                    if (input.ConsumeJustPressedOrRepeat(sk::ButtonSlot::Down)) {
                         if (!menu->TryMoveTableSelection(1)) menu->MoveSelection(1);
                     }
                     if (menu->useHoriz()) {
                         // Portrait/name-entry-style screens: Left/Right
                         // navigate rows instead of cycling a combo (there
                         // isn't one on these screens anyway).
-                        if (input.ConsumeJustPressed(sk::ButtonSlot::Left)) menu->MoveSelection(-1);
-                        if (input.ConsumeJustPressed(sk::ButtonSlot::Right)) menu->MoveSelection(1);
+                        if (input.ConsumeJustPressedOrRepeat(sk::ButtonSlot::Left)) {
+                            menu->MoveSelection(-1);
+                        }
+                        if (input.ConsumeJustPressedOrRepeat(sk::ButtonSlot::Right)) {
+                            menu->MoveSelection(1);
+                        }
                     } else {
-                        if (input.ConsumeJustPressed(sk::ButtonSlot::Left)) {
+                        if (input.ConsumeJustPressedOrRepeat(sk::ButtonSlot::Left)) {
                             menu->CycleSelectedCombo(-1);
                         }
-                        if (input.ConsumeJustPressed(sk::ButtonSlot::Right)) {
+                        if (input.ConsumeJustPressedOrRepeat(sk::ButtonSlot::Right)) {
                             menu->CycleSelectedCombo(1);
                         }
                     }
@@ -1816,8 +2083,7 @@ int main(int argc, char** argv) {
                         if (!menu->TryActivateTable()) menu->ActivateSelected();
                     }
                     if (input.ConsumeJustPressed(sk::ButtonSlot::RightSelectionKey)) {
-                        menu->TryInvoke("OnRightSoftkey");
-                        menu->TryInvoke("OnRightSoftKey");
+                        menu->GoBack();
                     }
                 }
             } catch (skRuntimeException& e) {
@@ -1827,9 +2093,11 @@ int main(int argc, char** argv) {
         }
 
         // A freshly opened menu (via OpenMenu()) starts with no selection
-        // of its own -- snap to its first selectable row.
+        // of its own -- snap to its first selectable row. (Also covered by
+        // EnsureValidSelection() above from the next tick on; kept so the
+        // very first frame a new menu is drawn already has a highlight.)
         if (menu && menu != lastMenu) {
-            menu->MoveSelection(0);
+            menu->EnsureValidSelection();
             lastMenu = menu;
         }
 

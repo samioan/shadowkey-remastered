@@ -75,6 +75,43 @@ public:
         return wasPressed;
     }
 
+    // Call exactly once per game tick, before any Consume* call. Drives
+    // key auto-repeat for held buttons.
+    //
+    // Why this exists: Windows does send repeated WM_KEYDOWN messages
+    // while a key is held, but SetButton() deliberately only latches the
+    // 0->1 edge, so a held direction key produced exactly one menu move
+    // and then nothing. Menus were effectively tap-only -- moving several
+    // rows meant several separate presses. Gameplay actions must NOT
+    // repeat (holding the attack key shouldn't machine-gun), so repeat is
+    // exposed as a *separate* query (ConsumeJustPressedOrRepeat) that only
+    // menu/list navigation calls; ConsumeJustPressed keeps its exact old
+    // edge-only meaning everywhere else.
+    void TickRepeats() {
+        for (size_t i = 0; i < current_.size(); ++i) {
+            if (!current_[i]) {
+                holdTicks_[i] = 0;
+                repeat_[i] = false;
+                continue;
+            }
+            ++holdTicks_[i];
+            if (holdTicks_[i] >= kRepeatDelayTicks &&
+                (holdTicks_[i] - kRepeatDelayTicks) % kRepeatPeriodTicks == 0) {
+                repeat_[i] = true;
+            }
+        }
+    }
+
+    // Edge OR auto-repeat -- for menu/list navigation only, see
+    // TickRepeats().
+    bool ConsumeJustPressedOrRepeat(ButtonSlot slot) {
+        size_t i = static_cast<size_t>(slot);
+        bool fired = justPressed_[i] || repeat_[i];
+        justPressed_[i] = false;
+        repeat_[i] = false;
+        return fired;
+    }
+
     // Goes through the remappable binding indirection, exactly like the
     // real engine's InputState_GetBoundButton/_Prev -- gameplay/UI code
     // should call these, not the raw slot accessors above, so a future
@@ -114,8 +151,18 @@ private:
         Rebind(Action::CharacterManager, ButtonSlot::KeyHash);
     }
 
+    // At the fixed 40ms tick (engine/game_clock.h, matching the real
+    // engine's CPeriodic -- docs/RENDER_LOOP.md): ~320ms before the first
+    // repeat, then one every ~120ms. Ordinary UI feel; no original value
+    // was recovered for this, and the real device's own key repeat was a
+    // Symbian setting rather than something the game shipped.
+    static constexpr int kRepeatDelayTicks = 8;
+    static constexpr int kRepeatPeriodTicks = 3;
+
     std::array<bool, static_cast<size_t>(ButtonSlot::kCount)> current_{};
     std::array<bool, static_cast<size_t>(ButtonSlot::kCount)> justPressed_{};
+    std::array<bool, static_cast<size_t>(ButtonSlot::kCount)> repeat_{};
+    std::array<int, static_cast<size_t>(ButtonSlot::kCount)> holdTicks_{};
     std::array<int, static_cast<size_t>(Action::kCount)> bindingOffset_{};
 };
 

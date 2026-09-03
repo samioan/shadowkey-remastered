@@ -67,6 +67,15 @@ public:
     sk::SoundArchive* sounds() const { return m_Sounds; }
     sk::AudioEngine* audio() const { return m_Audio; }
 
+    // M28: options.s's real "mute audio during an incoming call" setting
+    // (MuteOnCall()/SetMuteOnCall(), previously soft-failed). Lives on the
+    // stack rather than on the Options MenuExecutable because the screen
+    // is rebuilt on every visit; nothing in this port consumes it beyond
+    // showing the correct Mute On/Mute Off row, since there's no telephony
+    // to mute on PC.
+    bool muteOnCall() const { return m_MuteOnCall; }
+    void SetMuteOnCall(bool mute) { m_MuteOnCall = mute; }
+
     // Loads (or returns the already-loaded) menu for `simkinPath`, running
     // its Init() the first time it's created. Returns nullptr (logged) if
     // the target .s file doesn't exist or fails to parse.
@@ -194,6 +203,7 @@ private:
     const sk::StringTable* m_Strings;
     sk::SoundArchive* m_Sounds;  // M27: see sounds()/audio()'s own comment above
     sk::AudioEngine* m_Audio;
+    bool m_MuteOnCall = false;  // M28: see muteOnCall() above
     std::map<std::string, std::unique_ptr<MenuExecutable>> m_Menus;
     std::unique_ptr<PlayerExecutable> m_Player;
     std::unique_ptr<LevelExecutable> m_Level;

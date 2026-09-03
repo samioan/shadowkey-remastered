@@ -15,199 +15,358 @@ struct Vec3 {
 struct Face {
     Vec3 corners[4];  // winding: 0,1,2,3 around the quad
     int surIndex = 0xff;
-    uint16_t lightLevel = 0;  // M9/this session: the owning tile's raw baked
-                               // ZmpCell::lightLevel -- see zone.h's
-                               // PaletteColor() comment on why this is the
-                               // real .zlu rung selector directly (a >>8),
-                               // not a pre-converted [0,1] brightness float.
     uint8_t hueGroup = 0;      // This session (decompiled confirmation): the
                                // relevant tile's own ZmpCell::flags bits 4-5
                                // -- the *blocking neighbor's* cell for a wall
                                // face, the current tile's own cell for
                                // floor/ceiling. See zone.h's PaletteColor().
+    // Which world axis drives this face's U (and V) -- SurfaceFace_
+    // BuildAndProject's `param_5`, chosen per wall direction by
+    // Render3DScene. See zone.h's FaceOrient.
+    FaceOrient orient = FaceOrient::Floor;
 };
 
-// One quad per direction/band; corner order matches a consistent
-// counter-clockwise winding when viewed from the outward-facing side --
-// exact winding doesn't matter here since the rasterizer below doesn't
-// backface-cull (small faces are cheap enough at this screen/tile scale
-// to just always draw and let the z-buffer sort it out).
+// Real corner-index -> corner-position convention, decompiled this
+// session from Render3DScene (0x100166c8) by reading which world X/Y each
+// vertex slot is assigned in the floor block and in all four wall blocks:
+//
+//     index 0 = (x0, y1)   index 1 = (x1, y1)
+//     index 2 = (x1, y0)   index 3 = (x0, y0)
+//
+// i.e. starting at the tile's -X/+Y corner and going clockwise in
+// (X right, Y down) terms. This port previously assumed the exact
+// *reverse* order (0 = (x0,y0) ... 3 = (x0,y1)), which mirrors every
+// sloped tile's floor and ceiling about its diagonal. Invisible on the
+// flat tiles that make up most of a zone -- which is why it survived this
+// long -- but wrong wherever ZcpEntry::floorHeight[4] genuinely varies,
+// and it also flowed into Zone::FloorHeightAt()'s bilinear sample, so the
+// ground the player physically stood on was mirrored too.
+constexpr float kCornerDx[4] = {0.0f, 1.0f, 1.0f, 0.0f};
+constexpr float kCornerDy[4] = {1.0f, 1.0f, 0.0f, 0.0f};
+
+// A floor or ceiling quad: the tile's four stored corner heights placed at
+// the four corner positions above.
 void AddFloorCeiling(std::vector<Face>& faces, const Zone& zone, int tx, int ty,
-                      const int16_t heights[4], uint8_t surIndex, uint16_t lightLevel,
-                      uint8_t hueGroup) {
+                      const int16_t heights[4], uint8_t surIndex, uint8_t hueGroup,
+                      FaceOrient orient) {
     if (surIndex == 0xff || zone.surfaceDisabled(surIndex)) return;
     Face f;
     f.surIndex = surIndex;
-    f.lightLevel = lightLevel;
     f.hueGroup = hueGroup;
-    float x0 = static_cast<float>(tx), x1 = x0 + 1.0f;
-    float y0 = static_cast<float>(ty), y1 = y0 + 1.0f;
-    f.corners[0] = {x0, y0, heights[0] / 1.0f};
-    f.corners[1] = {x1, y0, heights[1] / 1.0f};
-    f.corners[2] = {x1, y1, heights[2] / 1.0f};
-    f.corners[3] = {x0, y1, heights[3] / 1.0f};
+    f.orient = orient;
+    for (int i = 0; i < 4; ++i) {
+        f.corners[i] = {static_cast<float>(tx) + kCornerDx[i],
+                        static_cast<float>(ty) + kCornerDy[i],
+                        static_cast<float>(heights[i])};
+    }
     faces.push_back(f);
 }
 
-// Wall face spanning the boundary edge (ex0,ey0)-(ex1,ey1), from
-// floorZ0/floorZ1 (the two edge-endpoint floor heights) up to
-// ceilZ0/ceilZ1 -- lets a wall follow a sloped/stepped neighbor rather
-// than assuming a flat rectangle.
-void AddWall(std::vector<Face>& faces, const Zone& zone, float ex0, float ey0, float ex1, float ey1,
-             float floorZ0, float floorZ1, float ceilZ0, float ceilZ1, uint8_t surIndex,
-             uint16_t lightLevel, uint8_t hueGroup) {
+// One vertical wall band spanning the shared edge between two tiles. The
+// edge has two endpoints (each a corner position both tiles share); at
+// each, the band runs from `lo` up to `hi`. Skipped entirely when it has
+// no vertical extent at either endpoint, matching the real code's own
+// "both edges degenerate" early-out.
+void AddWallBand(std::vector<Face>& faces, const Zone& zone, float ax, float ay, float bx, float by,
+                  float loA, float hiA, float loB, float hiB, uint8_t surIndex, uint8_t hueGroup,
+                  FaceOrient orient) {
     if (surIndex == 0xff || zone.surfaceDisabled(surIndex)) return;
-    if (floorZ0 >= ceilZ0 && floorZ1 >= ceilZ1) return;  // degenerate (no vertical extent)
+    if (hiA <= loA && hiB <= loB) return;
     Face f;
     f.surIndex = surIndex;
-    f.lightLevel = lightLevel;
     f.hueGroup = hueGroup;
-    f.corners[0] = {ex0, ey0, floorZ0};
-    f.corners[1] = {ex1, ey1, floorZ1};
-    f.corners[2] = {ex1, ey1, ceilZ1};
-    f.corners[3] = {ex0, ey0, ceilZ0};
+    f.orient = orient;
+    f.corners[0] = {ax, ay, loA};
+    f.corners[1] = {bx, by, loB};
+    f.corners[2] = {bx, by, hiB};
+    f.corners[3] = {ax, ay, hiA};
     faces.push_back(f);
+}
+
+// One of the four wall directions, as Render3DScene's four near-identical
+// blocks actually implement them.
+struct WallDirection {
+    int dx, dy;
+    // The two shared corner positions along this edge, given as
+    // (current tile's corner index, neighbouring tile's corner index).
+    // Both indices name the same physical point under the corner
+    // convention above.
+    int curA, nbrA;
+    int curB, nbrB;
+    // Byte offsets into the *neighbour's* ZcpEntry. `main` is the band
+    // that runs from the neighbour's ceiling up to this tile's ceiling
+    // (the bulk of an ordinary wall); `step` is the one from this tile's
+    // floor up to a raised neighbour floor (a ledge/kick wall).
+    //
+    // NOTE the roles are the opposite way round from what
+    // docs/ZONE_FORMAT.md's field names suggest: `*_lo` (0x16-0x19) is the
+    // *main/upper* band and `*_hi` (0x1a-0x1d) is the *lower* floor-step
+    // band. Confirmed directly -- the 0x1a-family index is the one passed
+    // for the floor-height-comparison draw in every one of the four
+    // blocks.
+    int mainOffset, stepOffset;
+};
+
+// Direction -> (edge corners, neighbour byte offsets). Derived corner by
+// corner from the decompile, not by assumption: e.g. the +X block pairs
+// this tile's floor[2]/floor[1] against the neighbour's floor[3]/floor[0],
+// which under the corner convention above are exactly the two points
+// (x1,y0) and (x1,y1) that the two tiles share.
+constexpr WallDirection kWallDirections[4] = {
+    // +X: neighbour cell is `pbVar36 + 8`, indices 0x16 / 0x1a.
+    {1, 0, 2, 3, 1, 0, 0x16, 0x1a},
+    // -X: neighbour cell is `pbVar36 - 8`, indices 0x17 / 0x1b.
+    {-1, 0, 0, 1, 3, 2, 0x17, 0x1b},
+    // +Y: neighbour row +1, indices 0x18 / 0x1c.
+    {0, 1, 1, 2, 0, 3, 0x18, 0x1c},
+    // -Y: neighbour row -1, indices 0x19 / 0x1d.
+    {0, -1, 3, 0, 2, 1, 0x19, 0x1d},
+};
+
+// The per-direction `.sur` index bytes, addressed the way the real code
+// does (a raw byte offset into the 36-byte entry) rather than by field
+// name, so kWallDirections above can stay a plain table.
+uint8_t SurIndexAt(const ZcpEntry& e, int byteOffset) {
+    switch (byteOffset) {
+        case 0x16: return e.surIndexE_lo;
+        case 0x17: return e.surIndexW_lo;
+        case 0x18: return e.surIndexS_lo;
+        case 0x19: return e.surIndexN_lo;
+        case 0x1a: return e.surIndexE_hi;
+        case 0x1b: return e.surIndexW_hi;
+        case 0x1c: return e.surIndexS_hi;
+        case 0x1d: return e.surIndexN_hi;
+        default: return 0xff;
+    }
 }
 
 // Collects the faces to draw around the camera's tile.
 //
-// SIMPLIFICATION (see zone_renderer.h): the real engine reads a wall
-// face's .sur index from the *neighboring* tile's ZcpEntry (per
-// docs/RENDERER_3D.md's traversal writeup) with a camera-side gate; here
-// every open (non-wall) tile just draws its own E/W/S/N "lower band"
-// index toward any neighbor that's a wall or out of bounds, using that
-// edge's two real corner heights from the current tile's own
-// floorHeight/ceilingHeight arrays. This produces a real, textured,
-// correctly-occluded dungeon corridor from the same source data; it
-// just isn't a guaranteed pixel-for-pixel match to the original's exact
-// per-direction indexing convention (untraced in this pass -- corners 0-3's
-// mapping to NE/SE/SW/NW isn't independently confirmed either, so getting
-// this "exactly" right isn't possible yet without more RE work).
-std::vector<Face> CollectFaces(const Zone& zone, int centerX, int centerY, int radius) {
+// **Rewritten this session against a full decompile of Render3DScene's
+// (0x100166c8) tile-grid traversal**, replacing an approximation that had
+// stood since M6. What the port used to do: for each open tile, if a
+// neighbour was a wall tile (or out of bounds), draw one full-height quad
+// from that tile's *own* `surIndex<dir>_lo`. What the real engine
+// actually does, and what this now does:
+//
+//  * A face's `.sur` index comes from the **neighbouring** tile's `.zcp`
+//    entry, never the current tile's. Measured against real shipped data,
+//    the two disagree for 100% of azra's wall boundaries, 98% of
+//    snowline's, 92% of ghstpass's and 12% of crypt1's -- so most walls in
+//    most zones were being drawn with the wrong material outright. (Real
+//    example: azra's wall tiles hand back a surface whose flags bit5 marks
+//    it *disabled*, i.e. the real game deliberately draws nothing there
+//    and shows the open sky beyond a canyon edge; the port was filling it
+//    in with the grass texture off the tile the player was standing on.)
+//  * Faces are not gated on "is the neighbour a wall". Every tile
+//    boundary can carry a face; `0xff` in the neighbour's index byte means
+//    "no face here", and the geometry is gated purely by comparing the two
+//    tiles' corner heights. A flat corridor's boundaries produce
+//    zero-height bands and simply draw nothing, which is why this doesn't
+//    fill open floors with walls.
+//  * Each direction fires up to two bands: a floor **step** band (this
+//    tile's floor up to a raised neighbour floor) and a **main** band
+//    (from `max(this floor, neighbour ceiling)` up to this tile's
+//    ceiling). A solid wall neighbour -- floor high, ceiling low -- makes
+//    the two together span the full opening, which is where ordinary
+//    walls come from.
+//  * Wall tiles are iterated too (only their floor/ceiling is suppressed).
+//    The height comparisons make this self-consistent rather than
+//    double-drawing: for a boundary between an open tile and a solid one,
+//    every band on the solid tile's side comes out degenerate.
+//  * A face only draws when the camera is on the current tile's own side
+//    of that edge (an implicit already-passed/backface cull), unless the
+//    tile's `flags` bit3 forces it.
+//  * The floor draws only when `ceilingBandThreshold < cameraZ` or
+//    `flags` bit2 is set; the ceiling picks band A or B by the same
+//    comparison. Both were previously unconditional/always-A.
+//
+// Still a simplification: the tile scan is a fixed radius rather than the
+// real `TileGrid_RaycastVisibility` fan (docs/WORLD_MODEL.md), and an
+// out-of-bounds neighbour is skipped (the real code reads past the grid
+// there; its visibility raycast never reaches those tiles in practice).
+std::vector<Face> CollectFaces(const Zone& zone, int centerX, int centerY, int radius,
+                                float cameraWorldX, float cameraWorldY, float cameraWorldZ) {
     std::vector<Face> faces;
     for (int ty = centerY - radius; ty <= centerY + radius; ++ty) {
         for (int tx = centerX - radius; tx <= centerX + radius; ++tx) {
             if (!zone.InBounds(tx, ty)) continue;
             const ZmpCell& cell = zone.CellAt(tx, ty);
-            if (cell.IsWall()) continue;  // walls themselves aren't walked into/drawn from
             const ZcpEntry& t = zone.TypeOf(cell);
-            // M9: every face this tile owns (floor/ceiling/its own walls)
-            // uses its own baked light level -- the real engine blends
-            // per-vertex across tiles (docs/RENDERER_3D.md's fade/light
-            // discussion); this is flat per-face instead, a deliberate
-            // simplification (see zone_renderer.h). Passed as the raw
-            // baked value now (not a pre-converted brightness float) --
-            // see zone.h's PaletteColor() comment on why that's what the
-            // real .zlu rung selector actually wants.
-            uint16_t lightLevel = cell.lightLevel;
-            // This session (decompiled confirmation, see zone.h's
-            // PaletteColor() comment): floor/ceiling faces use the
-            // *current* tile's own ZmpCell::flags bits 4-5 as the .zlu
-            // hue-family selector -- wall faces use the blocking
-            // neighbor's instead, see hueGroupOf() below.
+            // Floor/ceiling take their `.zlu` hue family from this tile's
+            // own cell; a wall face takes it from the neighbour whose
+            // material it is drawing (see zone.h's PaletteColor()).
             uint8_t ownHueGroup = static_cast<uint8_t>((cell.flags >> 4) & 0x3);
 
-            AddFloorCeiling(faces, zone, tx, ty, t.floorHeight, t.surIndexFloor, lightLevel,
-                             ownHueGroup);
-            AddFloorCeiling(faces, zone, tx, ty, t.ceilingHeight, t.surIndexCeilingA, lightLevel,
-                             ownHueGroup);
+            const float x0 = static_cast<float>(tx) * kTileScale;
+            const float x1 = x0 + kTileScale;
+            const float y0 = static_cast<float>(ty) * kTileScale;
+            const float y1 = y0 + kTileScale;
 
-            float x0 = static_cast<float>(tx), x1 = x0 + 1.0f;
-            float y0 = static_cast<float>(ty), y1 = y0 + 1.0f;
-
-            auto neighborBlocks = [&](int nx, int ny) {
-                return !zone.InBounds(nx, ny) || zone.CellAt(nx, ny).IsWall();
-            };
-            // Real per-face rule (decompiled from Render3DScene's E/W/S/N
-            // wall blocks): the hue family for a wall face always comes
-            // from whichever neighbor tile is actually blocking that
-            // direction, not the current tile -- out-of-bounds neighbors
-            // have no cell to read, so default to family 0 there.
-            auto hueGroupOf = [&](int nx, int ny) -> uint8_t {
-                if (!zone.InBounds(nx, ny)) return 0;
-                return static_cast<uint8_t>((zone.CellAt(nx, ny).flags >> 4) & 0x3);
-            };
-
-            // M11: an open (non-blocking) neighbor with a different
-            // floor/ceiling height than this tile draws up to two
-            // *stepped* wall segments instead of the single full-span
-            // wall above -- a "lower band" kick wall up to the
-            // neighbor's floor (when it's raised) using this tile's own
-            // *_lo index, and an "upper band" lintel down to the
-            // neighbor's ceiling (when it's lower) using its own *_hi
-            // index (docs/ZONE_FORMAT.md: "each wall direction actually
-            // fires up to two draws... a stepped-height wall segment").
-            // Only fires when the neighbor's mirrored edge height
-            // actually differs, so an ordinary flat, same-height
-            // corridor continuation (the common case) draws nothing
-            // extra. The neighbor-corner mirroring below follows this
-            // function's own corner-index convention per direction (see
-            // this file's header comment on corners 0-3's mapping not
-            // being independently confirmed against the real engine) --
-            // self-consistent with it, not separately verified.
-            auto steppedBands = [&](float ex0, float ey0, float ex1, float ey1, int16_t fA,
-                                     int16_t fB, int16_t cA, int16_t cB, int16_t nfA, int16_t nfB,
-                                     int16_t ncA, int16_t ncB, uint8_t surLo, uint8_t surHi,
-                                     uint8_t neighborHueGroup) {
-                if (nfA != fA || nfB != fB) {
-                    AddWall(faces, zone, ex0, ey0, ex1, ey1, fA, fB, std::min(nfA, cA),
-                            std::min(nfB, cB), surLo, lightLevel, neighborHueGroup);
+            if (!cell.IsWall()) {
+                // Real floor gate: `(flags & 2) == 0 && (ZcpEntry+2 <
+                // cameraEyeZ || (flags & 4))`. Note it reads the entry's
+                // *floor* threshold at offset 2, NOT the ceiling one at
+                // offset 4 -- see ZcpEntry's comment. bit2 forces the draw
+                // regardless of the height comparison, mechanically like
+                // bit3's wall force-draw.
+                bool floorVisible = cameraWorldZ > static_cast<float>(t.floorBandThreshold) ||
+                                     (cell.flags & 0x04) != 0;
+                if (floorVisible) {
+                    AddFloorCeiling(faces, zone, tx, ty, t.floorHeight, t.surIndexFloor,
+                                     ownHueGroup, FaceOrient::Floor);
                 }
-                if (ncA != cA || ncB != cB) {
-                    AddWall(faces, zone, ex0, ey0, ex1, ey1, std::max(fA, ncA), std::max(fB, ncB), cA,
-                            cB, surHi, lightLevel, neighborHueGroup);
-                }
-            };
+                // Real ceiling A/B band selection: the threshold is this
+                // tile's ceilingBandThreshold, or its ceilingHeight[3]
+                // when flags bit6 is set. Below it you are under the
+                // ceiling and see band A; at or above it you are on top of
+                // it and see band B.
+                int16_t ceilThreshold =
+                    (cell.flags & 0x40) ? t.ceilingHeight[3] : t.ceilingBandThreshold;
+                uint8_t ceilSur = cameraWorldZ < static_cast<float>(ceilThreshold)
+                                       ? t.surIndexCeilingA
+                                       : t.surIndexCeilingB;
+                AddFloorCeiling(faces, zone, tx, ty, t.ceilingHeight, ceilSur, ownHueGroup,
+                                 FaceOrient::Ceiling);
+            }
 
-            if (neighborBlocks(tx + 1, ty)) {  // east edge: corners 1 (NE) / 2 (SE)
-                AddWall(faces, zone, x1, y0, x1, y1, t.floorHeight[1], t.floorHeight[2],
-                        t.ceilingHeight[1], t.ceilingHeight[2], t.surIndexE_lo, lightLevel,
-                        hueGroupOf(tx + 1, ty));
-            } else {
-                const ZcpEntry& n = zone.TypeOf(zone.CellAt(tx + 1, ty));
-                steppedBands(x1, y0, x1, y1, t.floorHeight[1], t.floorHeight[2], t.ceilingHeight[1],
-                             t.ceilingHeight[2], n.floorHeight[0], n.floorHeight[3], n.ceilingHeight[0],
-                             n.ceilingHeight[3], t.surIndexE_lo, t.surIndexE_hi, hueGroupOf(tx + 1, ty));
-            }
-            if (neighborBlocks(tx - 1, ty)) {  // west edge: corners 3 (SW) / 0 (NW)
-                AddWall(faces, zone, x0, y1, x0, y0, t.floorHeight[3], t.floorHeight[0],
-                        t.ceilingHeight[3], t.ceilingHeight[0], t.surIndexW_lo, lightLevel,
-                        hueGroupOf(tx - 1, ty));
-            } else {
-                const ZcpEntry& n = zone.TypeOf(zone.CellAt(tx - 1, ty));
-                steppedBands(x0, y1, x0, y0, t.floorHeight[3], t.floorHeight[0], t.ceilingHeight[3],
-                             t.ceilingHeight[0], n.floorHeight[2], n.floorHeight[1], n.ceilingHeight[2],
-                             n.ceilingHeight[1], t.surIndexW_lo, t.surIndexW_hi, hueGroupOf(tx - 1, ty));
-            }
-            if (neighborBlocks(tx, ty + 1)) {  // south edge: corners 2 (SE) / 3 (SW)
-                AddWall(faces, zone, x1, y1, x0, y1, t.floorHeight[2], t.floorHeight[3],
-                        t.ceilingHeight[2], t.ceilingHeight[3], t.surIndexS_lo, lightLevel,
-                        hueGroupOf(tx, ty + 1));
-            } else {
-                const ZcpEntry& n = zone.TypeOf(zone.CellAt(tx, ty + 1));
-                steppedBands(x1, y1, x0, y1, t.floorHeight[2], t.floorHeight[3], t.ceilingHeight[2],
-                             t.ceilingHeight[3], n.floorHeight[1], n.floorHeight[0], n.ceilingHeight[1],
-                             n.ceilingHeight[0], t.surIndexS_lo, t.surIndexS_hi, hueGroupOf(tx, ty + 1));
-            }
-            if (neighborBlocks(tx, ty - 1)) {  // north edge: corners 0 (NW) / 1 (NE)
-                AddWall(faces, zone, x0, y0, x1, y0, t.floorHeight[0], t.floorHeight[1],
-                        t.ceilingHeight[0], t.ceilingHeight[1], t.surIndexN_lo, lightLevel,
-                        hueGroupOf(tx, ty - 1));
-            } else {
-                const ZcpEntry& n = zone.TypeOf(zone.CellAt(tx, ty - 1));
-                steppedBands(x0, y0, x1, y0, t.floorHeight[0], t.floorHeight[1], t.ceilingHeight[0],
-                             t.ceilingHeight[1], n.floorHeight[3], n.floorHeight[2], n.ceilingHeight[3],
-                             n.ceilingHeight[2], t.surIndexN_lo, t.surIndexN_hi, hueGroupOf(tx, ty - 1));
+            for (const WallDirection& d : kWallDirections) {
+                int nx = tx + d.dx, ny = ty + d.dy;
+                if (!zone.InBounds(nx, ny)) continue;
+
+                // Camera-side gate: the face only draws when the camera is
+                // still on this tile's side of the shared edge. flags bit3
+                // forces it regardless (plausibly "always double-sided",
+                // exact intent unconfirmed -- docs/RENDERER_3D.md).
+                bool cameraSide;
+                if (d.dx > 0) {
+                    cameraSide = cameraWorldX < x1;
+                } else if (d.dx < 0) {
+                    cameraSide = cameraWorldX > x0;
+                } else if (d.dy > 0) {
+                    cameraSide = cameraWorldY < y1;
+                } else {
+                    cameraSide = cameraWorldY > y0;
+                }
+                if (!cameraSide && (cell.flags & 0x08) == 0) continue;
+
+                const ZmpCell& nCell = zone.CellAt(nx, ny);
+                const ZcpEntry& n = zone.TypeOf(nCell);
+                uint8_t mainIdx = SurIndexAt(n, d.mainOffset);
+                // The real code gates the *whole* direction on the main
+                // index alone -- a 0xff there skips the step band too.
+                if (mainIdx == 0xff) continue;
+                uint8_t stepIdx = SurIndexAt(n, d.stepOffset);
+                uint8_t nbrHueGroup = static_cast<uint8_t>((nCell.flags >> 4) & 0x3);
+
+                // Both bands share one orientation code, taken from the
+                // *main* index's flip-U bit (the real code computes
+                // `uVar9` once, before either draw). For the two X-facing
+                // directions that bit swaps which of the two U forms is
+                // used; the Y-facing directions pass a literal 2/3.
+                FaceOrient orient;
+                if (d.dx > 0) {
+                    orient = zone.surface(mainIdx).flipU() ? FaceOrient::UPlusY
+                                                            : FaceOrient::UMinusY;
+                } else if (d.dx < 0) {
+                    orient = zone.surface(mainIdx).flipU() ? FaceOrient::UMinusY
+                                                            : FaceOrient::UPlusY;
+                } else if (d.dy > 0) {
+                    orient = FaceOrient::UPlusX;
+                } else {
+                    orient = FaceOrient::UMinusX;
+                }
+
+                // The two shared corner positions along this edge.
+                float ax = static_cast<float>(tx) + kCornerDx[d.curA];
+                float ay = static_cast<float>(ty) + kCornerDy[d.curA];
+                float bx = static_cast<float>(tx) + kCornerDx[d.curB];
+                float by = static_cast<float>(ty) + kCornerDy[d.curB];
+
+                float curFloorA = static_cast<float>(t.floorHeight[d.curA]);
+                float curFloorB = static_cast<float>(t.floorHeight[d.curB]);
+                float curCeilA = static_cast<float>(t.ceilingHeight[d.curA]);
+                float curCeilB = static_cast<float>(t.ceilingHeight[d.curB]);
+                float nbrFloorA = static_cast<float>(n.floorHeight[d.nbrA]);
+                float nbrFloorB = static_cast<float>(n.floorHeight[d.nbrB]);
+                float nbrCeilA = static_cast<float>(n.ceilingHeight[d.nbrA]);
+                float nbrCeilB = static_cast<float>(n.ceilingHeight[d.nbrB]);
+
+                // Step band: this tile's floor up to a raised neighbour
+                // floor. Real condition is an OR across the two edge
+                // endpoints, so a band that only rises at one end still
+                // draws.
+                if (curFloorA < nbrFloorA || curFloorB < nbrFloorB) {
+                    AddWallBand(faces, zone, ax, ay, bx, by, curFloorA, nbrFloorA, curFloorB,
+                                 nbrFloorB, stepIdx, nbrHueGroup, orient);
+                }
+                // Main band: from max(this floor, neighbour ceiling) up to
+                // this tile's ceiling.
+                float loA = std::max(curFloorA, nbrCeilA);
+                float loB = std::max(curFloorB, nbrCeilB);
+                AddWallBand(faces, zone, ax, ay, bx, by, loA, curCeilA, loB, curCeilB, mainIdx,
+                             nbrHueGroup, orient);
             }
         }
     }
     return faces;
 }
 
+// A vertex in camera space, before the perspective divide -- the stage the
+// real engine's Poly3D_ClipAgainstPlane operates on. Keeping this separate
+// from ProjectedVertex lets the near plane actually *clip* a polygon
+// (producing new vertices along the plane) instead of dropping it whole,
+// which is what M6-M27 did and what left a hole in the floor/ceiling
+// around the camera's own tile: those quads always have corners behind the
+// eye, so they were culled entirely every frame.
+struct ViewVertex {
+    float right = 0, forward = 0, up = 0;
+    float u = 0, v = 0;   // texel units, NOT yet divided by w
+    float light = 0;
+};
+
+// Near-plane clip, Sutherland-Hodgman against `forward >= kNearPlane` --
+// the same operation Poly3D_ClipAgainstPlane performs in the original
+// (which this port deliberately does not reproduce instruction-for-
+// instruction, per docs/ROADMAP.md's Phase 2 decision). Returns the
+// clipped vertex count; `out` must have room for `count + 1`.
+constexpr float kNearPlane = 0.05f;  // tile units
+
+int ClipNear(const ViewVertex* in, int count, ViewVertex* out) {
+    int n = 0;
+    for (int i = 0; i < count; ++i) {
+        const ViewVertex& a = in[i];
+        const ViewVertex& b = in[(i + 1) % count];
+        bool aIn = a.forward >= kNearPlane;
+        bool bIn = b.forward >= kNearPlane;
+        if (aIn) out[n++] = a;
+        if (aIn != bIn) {
+            float t = (kNearPlane - a.forward) / (b.forward - a.forward);
+            ViewVertex m;
+            m.right = a.right + (b.right - a.right) * t;
+            m.forward = kNearPlane;
+            m.up = a.up + (b.up - a.up) * t;
+            m.u = a.u + (b.u - a.u) * t;
+            m.v = a.v + (b.v - a.v) * t;
+            m.light = a.light + (b.light - a.light) * t;
+            out[n++] = m;
+        }
+    }
+    return n;
+}
+
 struct ProjectedVertex {
     float sx = 0, sy = 0;  // screen space
     float invW = 0;        // 1/viewForward, for perspective-correct interpolation
     float u = 0, v = 0;    // texture-space, already divided by w (i.e. u/w, v/w)
+    // Real per-vertex light/fog scalar (SurfaceFace_BuildAndProject writes
+    // it to `vertex+6`; SurfaceFace_RasterizeTextured_v3 interpolates it
+    // across each scanline to pick the `.zlu` brightness rung per pixel).
+    // Kept in the raw ZmpCell::lightLevel fixed-point, already clamped to
+    // the real [0x400, 0x3f00] range. Interpolated affinely in screen
+    // space, matching the original -- not perspective-divided like u/v.
+    float light = 0;
+    float depthWorld = 0;  // view-forward distance, raw world units
 };
 
 // 4-bit-per-channel color (docs/GRAPHICS_FORMAT.md), 0x0RGB -> RGB565 for
@@ -223,12 +382,28 @@ uint16_t ExpandRGB444(uint16_t raw444, float brightness) {
     return PackRGB565(shade(r), shade(g), shade(b));
 }
 
+// The real detail-reduction mask (SurfaceFace_ClipAndDispatch, 0x1005d074):
+// the texel index is AND-ed with 0x7f/0x7e/0x7c/0x78 depending on the
+// triangle's own average view depth (its three vertices weighted 1:2:1,
+// >>2), thresholded at 0x400/0x800/0xc00 raw world units -- i.e. 4/8/12
+// tiles. Far geometry therefore samples a coarser texel grid, which is
+// both what the original looks like and a cheap anti-aliasing measure at
+// this resolution.
+int SurfaceDetailMask(float depthA, float depthB, float depthC) {
+    float avg = (depthA + 2.0f * depthB + depthC) * 0.25f;
+    if (avg < 1024.0f) return 0x7f;
+    if (avg < 2048.0f) return 0x7e;
+    if (avg < 3072.0f) return 0x7c;
+    return 0x78;
+}
+
 void RasterizeTriangle(Backbuffer& backbuffer, std::vector<float>& depthBuffer,
                         const ProjectedVertex& a, const ProjectedVertex& b,
                         const ProjectedVertex& c, const Zone& zone, int textureIndex,
-                        uint8_t hueGroup, uint16_t lightLevel) {
+                        uint8_t hueGroup) {
     float area = (b.sx - a.sx) * (c.sy - a.sy) - (b.sy - a.sy) * (c.sx - a.sx);
     if (std::fabs(area) < 1e-6f) return;
+    const int detailMask = SurfaceDetailMask(a.depthWorld, b.depthWorld, c.depthWorld);
 
     int minX = std::max(0, static_cast<int>(std::floor(std::min({a.sx, b.sx, c.sx}))));
     int maxX =
@@ -256,14 +431,26 @@ void RasterizeTriangle(Backbuffer& backbuffer, std::vector<float>& depthBuffer,
 
             float u = (l0 * a.u + l1 * b.u + l2 * c.u) / invW;
             float v = (l0 * a.v + l1 * b.v + l2 * c.v) / invW;
-            int tx = std::clamp(static_cast<int>(u * 128.0f), 0, 127);
-            int ty = std::clamp(static_cast<int>(v * 128.0f), 0, 127);
+            // Real texel addressing: `mask & (uv >> 8)` -- a *wrap*, not a
+            // clamp, so a surface whose real .sur shift makes its texture
+            // repeat several times across a face genuinely tiles (see
+            // zone.h's SurfaceUv()). u/v already carry texel units here,
+            // so the >>8 is folded into that conversion; floor() handles
+            // negative coordinates (real uOffset/vOffset values are often
+            // negative) correctly before the mask wraps them.
+            int tx = static_cast<int>(std::floor(u)) & detailMask;
+            int ty = static_cast<int>(std::floor(v)) & detailMask;
 
             uint8_t texel = zone.TexelAt(textureIndex, tx, ty);
-            // Brightness is baked into the .zlu rung selection itself now
-            // (zone.h's PaletteColor() comment) -- no separate post-hoc
-            // scale needed, so ExpandRGB444 gets a flat 1.0 here, same as
-            // the (unlit) model rasterizer below.
+            // Per-pixel light, affinely interpolated across the triangle
+            // exactly like the original's per-scanline interpolation of
+            // the same value -- this is what selects the `.zlu` brightness
+            // rung, so brightness is baked into the palette lookup rather
+            // than applied as a post-hoc RGB scale (ExpandRGB444 gets a
+            // flat 1.0 below, same as the unlit model rasterizer).
+            float lightF = l0 * a.light + l1 * b.light + l2 * c.light;
+            uint16_t lightLevel = static_cast<uint16_t>(
+                std::clamp(lightF, 0.0f, static_cast<float>(kMaxLightLevel)));
             uint16_t raw444 = zone.PaletteColor(hueGroup, lightLevel, texel);
             if (raw444 == 0x0f0f) continue;  // chroma-key cutout (docs/GRAPHICS_FORMAT.md)
 
@@ -341,56 +528,72 @@ void RasterizeModelTriangle(Backbuffer& backbuffer, std::vector<float>& depthBuf
 void SubmitModel(Backbuffer& backbuffer, std::vector<float>& depthBuffer, const Model& model,
                   int skinIndex, float offsetTileX, float offsetTileY, float offsetZ, float camX,
                   float camY, float camZ, float cosYaw, float sinYaw, float focalX, float focalY,
-                  float entityYaw = 0.0f) {
+                  float entityYaw = 0.0f, float scale = 1.0f, int frameIndex = 0) {
     float cosEntityYaw = std::cos(entityYaw), sinEntityYaw = std::sin(entityYaw);
     for (const ModelFace& face : model.faces) {
         if (face.vA < 0 || face.vB < 0 || face.vC < 0 ||
-            static_cast<size_t>(face.vC) >= model.vertices.size() ||
-            static_cast<size_t>(face.vB) >= model.vertices.size() ||
-            static_cast<size_t>(face.vA) >= model.vertices.size() || face.uA < 0 || face.uB < 0 ||
+            face.vC >= model.vertsPerFrame || face.vB >= model.vertsPerFrame ||
+            face.vA >= model.vertsPerFrame || face.uA < 0 || face.uB < 0 ||
             face.uC < 0 || static_cast<size_t>(face.uC) >= model.uvs.size() ||
             static_cast<size_t>(face.uB) >= model.uvs.size() ||
             static_cast<size_t>(face.uA) >= model.uvs.size()) {
             continue;  // shouldn't happen (MODEL_FORMAT.md's index invariant), guard anyway
         }
 
-        const ModelVertex* mv[3] = {&model.vertices[static_cast<size_t>(face.vA)],
-                                     &model.vertices[static_cast<size_t>(face.vB)],
-                                     &model.vertices[static_cast<size_t>(face.vC)]};
+        // M28: sample the *current animation frame's* vertex block, not
+        // always frame 0 -- see world/model_archive.h's AnimationClip.
+        const ModelVertex* mv[3] = {&model.VertexAt(frameIndex, face.vA),
+                                     &model.VertexAt(frameIndex, face.vB),
+                                     &model.VertexAt(frameIndex, face.vC)};
         const ModelUv* uv[3] = {&model.uvs[static_cast<size_t>(face.uA)],
                                  &model.uvs[static_cast<size_t>(face.uB)],
                                  &model.uvs[static_cast<size_t>(face.uC)]};
 
-        ProjectedVertex pv3[3];
-        bool anyBehindModel = false;
+        ViewVertex vv3[3];
         for (int i = 0; i < 3; ++i) {
             // Local X/Z rotated about the model's own origin before the
             // world-space offset/camera transform -- local Y (up) is
             // untouched, matching a door swinging on a vertical hinge.
-            float lx = mv[i]->x * cosEntityYaw - mv[i]->z * sinEntityYaw;
-            float lz = mv[i]->x * sinEntityYaw + mv[i]->z * cosEntityYaw;
+            // Uniform per-instance scale about the model's own origin
+            // (SetScale's 8.8 value, PlacedEntity::scale) applied before
+            // the yaw rotation and world offset -- so a scaled creature
+            // still stands on the same ground point.
+            float sxv = mv[i]->x * scale, syv = mv[i]->y * scale, szv = mv[i]->z * scale;
+            float lx = sxv * cosEntityYaw - szv * sinEntityYaw;
+            float lz = sxv * sinEntityYaw + szv * cosEntityYaw;
 
             float rx = offsetTileX + lx / kTileScale - camX;
             float ry = offsetTileY + lz / kTileScale - camY;
-            float rz = (offsetZ + mv[i]->y) / kTileScale - camZ;
+            float rz = (offsetZ + syv) / kTileScale - camZ;
 
-            float viewRight = rx * sinYaw - ry * cosYaw;
-            float viewForward = rx * cosYaw + ry * sinYaw;
-            float viewUp = rz;
-
-            if (viewForward < 0.05f) {
-                anyBehindModel = true;
-                break;
-            }
-            pv3[i].invW = 1.0f / viewForward;
-            pv3[i].sx = Backbuffer::kWidth * 0.5f + viewRight * focalX * pv3[i].invW;
-            pv3[i].sy = Backbuffer::kHeight * 0.5f - viewUp * focalY * pv3[i].invW;
-            pv3[i].u = (uv[i]->u / 256.0f) * pv3[i].invW;
-            pv3[i].v = (uv[i]->v / 256.0f) * pv3[i].invW;
+            vv3[i].right = rx * sinYaw - ry * cosYaw;
+            vv3[i].forward = rx * cosYaw + ry * sinYaw;
+            vv3[i].up = rz;
+            vv3[i].u = uv[i]->u / 256.0f;
+            vv3[i].v = uv[i]->v / 256.0f;
         }
-        if (anyBehindModel) continue;
 
-        RasterizeModelTriangle(backbuffer, depthBuffer, pv3[0], pv3[1], pv3[2], model, skinIndex);
+        // Same real near-plane clip the tile-grid pipeline above uses --
+        // previously a model triangle with any vertex behind the eye was
+        // dropped whole, which made a model visibly vanish in chunks the
+        // moment the player walked up to it.
+        ViewVertex clipped[4];
+        int clippedCount = ClipNear(vv3, 3, clipped);
+        if (clippedCount < 3) continue;
+
+        ProjectedVertex pvc[4];
+        for (int i = 0; i < clippedCount; ++i) {
+            pvc[i].invW = 1.0f / clipped[i].forward;
+            pvc[i].sx = Backbuffer::kWidth * 0.5f + clipped[i].right * focalX * pvc[i].invW;
+            pvc[i].sy = Backbuffer::kHeight * 0.5f - clipped[i].up * focalY * pvc[i].invW;
+            pvc[i].depthWorld = clipped[i].forward * kTileScale;
+            pvc[i].u = clipped[i].u * pvc[i].invW;
+            pvc[i].v = clipped[i].v * pvc[i].invW;
+        }
+        for (int i = 1; i + 1 < clippedCount; ++i) {
+            RasterizeModelTriangle(backbuffer, depthBuffer, pvc[0], pvc[i], pvc[i + 1], model,
+                                    skinIndex);
+        }
     }
 }
 
@@ -404,7 +607,8 @@ void ZoneRenderer::Render(Backbuffer& backbuffer, const Zone& zone, const Camera
 
     int centerX = static_cast<int>(camera.x / kTileScale);
     int centerY = static_cast<int>(camera.y / kTileScale);
-    std::vector<Face> faces = CollectFaces(zone, centerX, centerY, renderRadius);
+    std::vector<Face> faces =
+        CollectFaces(zone, centerX, centerY, renderRadius, camera.x, camera.y, camera.z);
 
     float camX = camera.x / kTileScale, camY = camera.y / kTileScale, camZ = camera.z / kTileScale;
     float cosYaw = std::cos(camera.yaw), sinYaw = std::sin(camera.yaw);
@@ -414,38 +618,70 @@ void ZoneRenderer::Render(Backbuffer& backbuffer, const Zone& zone, const Camera
     float focalX = focalY;  // square-ish texel assumption; aspect handled via screen center only
     (void)aspect;
 
-    static const float kUV[4][2] = {{0, 0}, {1, 0}, {1, 1}, {0, 1}};
-
     for (const Face& face : faces) {
-        uint8_t texIdx = zone.surfaceTextureIndex(face.surIndex);
+        const SurfaceRecord& sur = zone.surface(face.surIndex);
 
-        ProjectedVertex pv[4];
-        bool anyBehind = false;
+        ViewVertex vv[4];
         for (int i = 0; i < 4; ++i) {
-            float rx = face.corners[i].x - camX;
-            float ry = face.corners[i].y - camY;
-            float rz = face.corners[i].z / kTileScale - camZ;
+            // Raw world units -- the frame the real engine does all of
+            // this in (positions, the .sur UV offsets, and the half-tile
+            // corner nudge are all expressed in it).
+            float worldX = face.corners[i].x * kTileScale;
+            float worldY = face.corners[i].y * kTileScale;
+            float worldZ = face.corners[i].z;
+            // Real half-tile vertex nudge (ZcpEntry::cornerNudge) -- moves
+            // the vertex itself, so it feeds both the projection below and
+            // the UV computation, exactly as in BuildAndProject.
+            zone.ApplyCornerNudge(&worldX, &worldY);
 
-            float viewRight = rx * sinYaw - ry * cosYaw;
-            float viewForward = rx * cosYaw + ry * sinYaw;
-            float viewUp = rz;
+            float rx = worldX / kTileScale - camX;
+            float ry = worldY / kTileScale - camY;
+            float rz = worldZ / kTileScale - camZ;
 
-            if (viewForward < 0.05f) {
-                anyBehind = true;
-                break;
-            }
-            pv[i].invW = 1.0f / viewForward;
-            pv[i].sx = Backbuffer::kWidth * 0.5f + viewRight * focalX * pv[i].invW;
-            pv[i].sy = Backbuffer::kHeight * 0.5f - viewUp * focalY * pv[i].invW;
-            pv[i].u = kUV[i][0] * pv[i].invW;
-            pv[i].v = kUV[i][1] * pv[i].invW;
+            vv[i].right = rx * sinYaw - ry * cosYaw;
+            vv[i].forward = rx * cosYaw + ry * sinYaw;
+            vv[i].up = rz;
+
+            zone.SurfaceUv(sur, face.orient, worldX, worldY, worldZ, &vv[i].u, &vv[i].v);
+
+            // Real per-vertex light (SurfaceFace_BuildAndProject):
+            //     vertex.light = engine+0x484 + cellLight - (viewDepth >> 1)
+            // clamped to [0x400, 0x3f00]. `engine+0x484` is read exactly
+            // once in the entire binary (this one site) and written
+            // nowhere -- a whole-program decompiled grep this session
+            // found zero writers -- so on EKA1's zeroed heap it is
+            // effectively 0, the same "never explicitly initialised"
+            // pattern already established for the eye-height field
+            // (render3d/camera.h). The `- depth/2` term is the engine's
+            // real distance fog; the port had no distance falloff at all
+            // before this.
+            int cellTx = static_cast<int>(std::floor(worldX / kTileScale));
+            int cellTy = static_cast<int>(std::floor(worldY / kTileScale));
+            float cellLight = static_cast<float>(zone.CellAt(cellTx, cellTy).lightLevel);
+            float depthWorld = vv[i].forward * kTileScale;
+            vv[i].light = std::clamp(cellLight - depthWorld * 0.5f,
+                                      static_cast<float>(kMinLightLevel),
+                                      static_cast<float>(kMaxLightLevel));
         }
-        if (anyBehind) continue;  // whole-quad near-plane cull, see header comment
 
-        RasterizeTriangle(backbuffer, depthBuffer, pv[0], pv[1], pv[2], zone, texIdx, face.hueGroup,
-                           face.lightLevel);
-        RasterizeTriangle(backbuffer, depthBuffer, pv[0], pv[2], pv[3], zone, texIdx, face.hueGroup,
-                           face.lightLevel);
+        ViewVertex clipped[5];
+        int clippedCount = ClipNear(vv, 4, clipped);
+        if (clippedCount < 3) continue;
+
+        ProjectedVertex pv[5];
+        for (int i = 0; i < clippedCount; ++i) {
+            pv[i].invW = 1.0f / clipped[i].forward;
+            pv[i].sx = Backbuffer::kWidth * 0.5f + clipped[i].right * focalX * pv[i].invW;
+            pv[i].sy = Backbuffer::kHeight * 0.5f - clipped[i].up * focalY * pv[i].invW;
+            pv[i].depthWorld = clipped[i].forward * kTileScale;
+            pv[i].u = clipped[i].u * pv[i].invW;
+            pv[i].v = clipped[i].v * pv[i].invW;
+            pv[i].light = clipped[i].light;
+        }
+        for (int i = 1; i + 1 < clippedCount; ++i) {
+            RasterizeTriangle(backbuffer, depthBuffer, pv[0], pv[i], pv[i + 1], zone,
+                               sur.textureIndex, face.hueGroup);
+        }
     }
 
     // M8: placed entities (props, monsters, doors, ...) resolved via
@@ -479,8 +715,14 @@ void ZoneRenderer::Render(Backbuffer& backbuffer, const Zone& zone, const Camera
             float baseTileY = pe.y / kTileScale;
             float baseZ = pe.z;
 
-            SubmitModel(backbuffer, depthBuffer, *model, 0, baseTileX, baseTileY, baseZ, camX, camY,
-                        camZ, cosYaw, sinYaw, focalX, focalY, pe.yaw);
+            // Real per-instance skin/scale (PlacedEntity), clamped to what
+            // this resource actually has -- a script naming a skin the
+            // model doesn't carry falls back to skin 0 rather than reading
+            // past the pixel buffer.
+            int skin = (pe.skinIndex >= 0 && pe.skinIndex < model->skinCount) ? pe.skinIndex : 0;
+            SubmitModel(backbuffer, depthBuffer, *model, skin, baseTileX, baseTileY, baseZ, camX,
+                        camY, camZ, cosYaw, sinYaw, focalX, focalY, pe.yaw, pe.scale,
+                        pe.frameIndex);
         }
     }
 

@@ -78,6 +78,7 @@ bool Zone::Load(const std::string& scriptRoot, const std::string& zoneName) {
         const uint8_t* p = &zcp[4 + static_cast<size_t>(i) * kZcpEntrySize];
         ZcpEntry& e = zcpEntries_[i];
         e.lightDelta = static_cast<int8_t>(p[0]);
+        e.floorBandThreshold = ReadI16(p + 2);
         e.ceilingBandThreshold = ReadI16(p + 4);
         for (int c = 0; c < 4; ++c) e.floorHeight[c] = ReadI16(p + 6 + c * 2);
         for (int c = 0; c < 4; ++c) e.ceilingHeight[c] = ReadI16(p + 0xe + c * 2);
@@ -92,6 +93,7 @@ bool Zone::Load(const std::string& scriptRoot, const std::string& zoneName) {
         e.surIndexCeilingA = p[0x1e];
         e.surIndexCeilingB = p[0x1f];
         e.surIndexFloor = p[0x20];
+        e.cornerNudge = p[0x23];
     }
 
     // M9: replace the on-disk lightLevel (an unused editor leftover, see
@@ -99,18 +101,17 @@ bool Zone::Load(const std::string& scriptRoot, const std::string& zoneName) {
     // and zcpEntries_, so this is the earliest point both are ready.
     BakeLighting();
 
-    // --- .sur: u8 count + 8-byte records. Byte[7] (the .ztx texture slot
-    // index) and byte[6] (flags -- bit0 flip V, bit1 flip U, bit5
-    // disable-this-face, see zone.h's surfaceDisabled()/PaletteColor()
-    // comments) are used here; bytes[0..5] (UV shift/offset) are still
-    // approximated rather than reproduced exactly (each wall/floor quad
-    // already spans a full 0..1 UV range over its dedicated 128x128 atlas
-    // slot). Field layout confirmed this session by fully decompiling
-    // SurfaceFace_BuildAndProject (0x1005d784,
-    // shadowkey/extracted/decomp_1005d784.c): byte[0]/[1] = U/V
-    // bit-shift, byte[2..3]/[4..5] = two signed-16-bit UV offsets,
-    // byte[6] = flags, byte[7] = texture index (all read via
-    // `iVar4 = surIndex*8 + tableBase` then `*(char*)(iVar4+N)`).
+    // --- .sur: u8 count + 8-byte records, ALL SIX fields now parsed and
+    // used. Layout is decompiled ground truth (SurfaceFace_BuildAndProject,
+    // 0x1005d784, shadowkey/extracted/decomp_1005d784.c -- read via
+    // `iVar4 = surIndex*8 + tableBase` then `*(char*)(iVar4+N)`):
+    // byte[0]/[1] = U/V bit-shift (signed char), byte[2..3]/[4..5] = two
+    // signed-16-bit UV offsets in raw world units, byte[6] = flags,
+    // byte[7] = texture index. Until this session only byte[6]/[7] were
+    // used and the UV fields were approximated away entirely (a flat
+    // 0..1 UV per quad) -- see zone.h's SurfaceUv() for the real formula
+    // and why that approximation was the cause of visibly wrong/misaligned
+    // wall textures.
     std::vector<uint8_t> sur;
     if (!ReadWholeFile(base + ".sur", sur) || sur.empty()) {
         std::printf("Zone: %s.sur missing/empty\n", zoneName.c_str());
@@ -121,12 +122,16 @@ bool Zone::Load(const std::string& scriptRoot, const std::string& zoneName) {
         std::printf("Zone: %s.sur too short for %u records\n", zoneName.c_str(), surCount);
         return false;
     }
-    surTextureIndex_.resize(surCount);
-    surFlags_.resize(surCount);
+    surfaces_.resize(surCount);
     for (uint8_t i = 0; i < surCount; ++i) {
         const uint8_t* rec = &sur[1 + static_cast<size_t>(i) * 8];
-        surTextureIndex_[i] = rec[7];
-        surFlags_[i] = rec[6];
+        SurfaceRecord& s = surfaces_[i];
+        s.uShift = static_cast<int8_t>(rec[0]);
+        s.vShift = static_cast<int8_t>(rec[1]);
+        s.uOffset = ReadI16(rec + 2);
+        s.vOffset = ReadI16(rec + 4);
+        s.flags = rec[6];
+        s.textureIndex = rec[7];
     }
 
     // --- .ztx: 1 header byte + N * 0x4000-byte 128x128 8bpp texture slots ---
@@ -206,14 +211,62 @@ const ZcpEntry& Zone::TypeOf(const ZmpCell& cell) const {
     return zcpEntries_[cell.zcpIndex];
 }
 
-uint8_t Zone::surfaceTextureIndex(int surIndex) const {
-    if (surIndex < 0 || static_cast<size_t>(surIndex) >= surTextureIndex_.size()) return 0;
-    return surTextureIndex_[static_cast<size_t>(surIndex)];
+const SurfaceRecord& Zone::surface(int surIndex) const {
+    // Matches SurfaceFace_BuildAndProject's own `engine+0x6918 == 0`
+    // fallback: shift 5/5, zero offsets, no flags.
+    static const SurfaceRecord kDefault{};
+    if (surIndex < 0 || static_cast<size_t>(surIndex) >= surfaces_.size()) return kDefault;
+    return surfaces_[static_cast<size_t>(surIndex)];
 }
 
-bool Zone::surfaceDisabled(int surIndex) const {
-    if (surIndex < 0 || static_cast<size_t>(surIndex) >= surFlags_.size()) return false;
-    return (surFlags_[static_cast<size_t>(surIndex)] & 0x20) != 0;
+uint8_t Zone::surfaceTextureIndex(int surIndex) const { return surface(surIndex).textureIndex; }
+
+bool Zone::surfaceDisabled(int surIndex) const { return surface(surIndex).disabled(); }
+
+void Zone::SurfaceUv(const SurfaceRecord& sur, FaceOrient orient, float worldX, float worldY,
+                     float worldZ, float* outU, float* outV) const {
+    float uRaw = 0.0f;
+    float vAxis = worldZ;
+    switch (orient) {
+        case FaceOrient::UPlusY:  uRaw = worldY + sur.uOffset; break;
+        case FaceOrient::UMinusY: uRaw = sur.uOffset - worldY; break;
+        case FaceOrient::UPlusX:  uRaw = worldX + sur.uOffset; break;
+        case FaceOrient::UMinusX: uRaw = sur.uOffset - worldX; break;
+        case FaceOrient::Ceiling:
+        case FaceOrient::Floor:
+            uRaw = worldX + sur.uOffset;
+            vAxis = worldY;
+            break;
+    }
+    float vRaw = vAxis + sur.vOffset;
+    // `<< shift` on the raw world value, then the consumer's `>> 8` to
+    // reach texels -- i.e. a net scale of 2^(shift-8). See zone.h.
+    float u = std::ldexp(uRaw, sur.uShift - 8);
+    float v = std::ldexp(vRaw, sur.vShift - 8);
+    if (sur.flipU()) u = -u;
+    if (sur.flipV()) v = -v;
+    *outU = u;
+    *outV = v;
+}
+
+void Zone::ApplyCornerNudge(float* worldX, float* worldY) const {
+    int tx = static_cast<int>(std::floor(*worldX / kTileScale));
+    int ty = static_cast<int>(std::floor(*worldY / kTileScale));
+    if (!InBounds(tx, ty)) return;
+    // The real engine indexes the grid with a plain `pos >> 8` on the
+    // vertex's own raw world coordinate, exactly as above.
+    constexpr float kHalfTile = 128.0f;  // 0x80, the real constant
+    switch (TypeOf(CellAt(tx, ty)).cornerNudge) {
+        case 1: *worldX += kHalfTile; *worldY += kHalfTile; break;
+        case 2: *worldX -= kHalfTile; *worldY += kHalfTile; break;
+        case 3: *worldX -= kHalfTile; *worldY -= kHalfTile; break;
+        case 4: *worldX += kHalfTile; *worldY -= kHalfTile; break;
+        case 5: *worldX += kHalfTile; break;
+        case 6: *worldX -= kHalfTile; break;
+        case 7: *worldY += kHalfTile; break;
+        case 8: *worldY -= kHalfTile; break;
+        default: break;
+    }
 }
 
 uint8_t Zone::TexelAt(int surfaceTextureIndex, int x, int y) const {
@@ -265,14 +318,70 @@ bool Zone::CircleHitsWall(float worldX, float worldY, float radius) const {
     return false;
 }
 
+bool Zone::HasLineOfSight(float x0, float y0, float x1, float y1) const {
+    // Amanatides-Woo grid traversal: visits exactly the tiles the segment
+    // crosses, no more, so a sightline that only clips a wall's corner
+    // isn't wrongly reported as blocked (and none is ever skipped, which a
+    // fixed-step march can do at glancing angles).
+    int tx = static_cast<int>(std::floor(x0 / kTileScale));
+    int ty = static_cast<int>(std::floor(y0 / kTileScale));
+    const int endTx = static_cast<int>(std::floor(x1 / kTileScale));
+    const int endTy = static_cast<int>(std::floor(y1 / kTileScale));
+    if (!InBounds(tx, ty) || !InBounds(endTx, endTy)) return false;
+
+    float dx = x1 - x0, dy = y1 - y0;
+    int stepX = dx > 0 ? 1 : (dx < 0 ? -1 : 0);
+    int stepY = dy > 0 ? 1 : (dy < 0 ? -1 : 0);
+    // Parametric distance (in [0,1] along the segment) to the next tile
+    // boundary on each axis, and the increment per whole tile crossed.
+    constexpr float kInf = 1e30f;
+    float tMaxX = kInf, tDeltaX = kInf;
+    if (stepX != 0) {
+        float nextBoundary = (stepX > 0 ? (tx + 1) : tx) * kTileScale;
+        tMaxX = (nextBoundary - x0) / dx;
+        tDeltaX = kTileScale / std::fabs(dx);
+    }
+    float tMaxY = kInf, tDeltaY = kInf;
+    if (stepY != 0) {
+        float nextBoundary = (stepY > 0 ? (ty + 1) : ty) * kTileScale;
+        tMaxY = (nextBoundary - y0) / dy;
+        tDeltaY = kTileScale / std::fabs(dy);
+    }
+
+    // Bounded so a degenerate input can never spin: the longest possible
+    // traversal of a w*h grid crosses at most w+h tiles.
+    const int maxSteps = width_ + height_ + 2;
+    for (int i = 0; i < maxSteps; ++i) {
+        if (tx == endTx && ty == endTy) return true;
+        if (tMaxX < tMaxY) {
+            tx += stepX;
+            tMaxX += tDeltaX;
+        } else {
+            ty += stepY;
+            tMaxY += tDeltaY;
+        }
+        if (!InBounds(tx, ty)) return false;
+        if (CellAt(tx, ty).IsWall()) return false;
+    }
+    return false;
+}
+
 namespace {
 
 // Shared by FloorHeightAt/CeilingHeightAt: bilinear blend of a tile's 4
-// stored corner values (0=NW,1=NE,2=SE,3=SW) at fractional position
-// (u,v) within the tile, u/v in [0,1].
+// stored corner values at fractional position (u,v) within the tile,
+// u/v in [0,1] measured from the tile's (x0,y0) corner.
+//
+// CORRECTED this session against the decompile (see
+// render3d/zone_renderer.cpp's kCornerDx/kCornerDy): the real corner
+// order is 0=(x0,y1), 1=(x1,y1), 2=(x1,y0), 3=(x0,y0) -- the exact
+// reverse of the 0=NW,1=NE,2=SE,3=SW this previously assumed. The old
+// order mirrored every sloped tile about its diagonal, both in the
+// renderer and here, where it decides the ground height the player
+// actually stands on.
 float BilinearCorner(const int16_t h[4], float u, float v) {
-    return (1.0f - u) * (1.0f - v) * h[0] + u * (1.0f - v) * h[1] + u * v * h[2] +
-           (1.0f - u) * v * h[3];
+    return (1.0f - u) * (1.0f - v) * h[3] + u * (1.0f - v) * h[2] + u * v * h[1] +
+           (1.0f - u) * v * h[0];
 }
 
 }  // namespace

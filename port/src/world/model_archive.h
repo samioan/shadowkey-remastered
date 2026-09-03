@@ -5,11 +5,9 @@
 // 226 non-empty real entries by tools/parse_model_resource.py) and
 // parses individual model resources on demand.
 //
-// SIMPLIFICATION: only frame 0 (the MD2-style vertex-animation base
-// pose) is kept -- animated creature models render in their resting
-// pose. Per-instance keyframe selection (actor+0x70, MODEL_FORMAT.md) is
-// a separate follow-up, not attempted in this first entity-rendering
-// pass (port/docs/PORT_ROADMAP.md's M8).
+// M28: **all** animation frames are now kept (M8 kept only frame 0, so
+// every creature rendered as a static resting-pose statue), along with the
+// per-model animation clip table -- see AnimationClip below.
 
 #include <cstdint>
 #include <memory>
@@ -31,12 +29,61 @@ struct ModelFace {
     int16_t uA = 0, uB = 0, uC = 0;
 };
 
+// One named animation range, from the resource's trailer.
+//
+// **Decoded this session against real data**, resolving what
+// docs/MODEL_FORMAT.md flagged as unresolved ("the trailer's purpose ...
+// is unresolved -- flagged as an open follow-up"). The trailer is always a
+// whole number of 6-byte records, and each record is
+// `(startFrame u16, endFrame u16, rate u16)`:
+//
+//   entry 18  (57 frames, 4 clips): (0,11,3) (11,22,10) (22,42,10) (42,57,10)
+//   entry 59 (157 frames, 9 clips): (0,1,10) (1,19,10) ... (135,157,1)
+//   entry 20 (144 frames, 11 clips): (0,1,10) (1,22,10) ... (138,144,10)
+//
+// The records **exactly partition** `[0, frameCount)` -- each one's start
+// is the previous one's end, and the last end equals the header's own
+// frame count -- in every animated entry in the archive, which is what
+// pins this down rather than leaving it a guess. The clip *count* also
+// matches how real scripts index them: `arat.s` names clips 0-3 and its
+// model carries 4; the monsters that name clip 8 resolve to models with 9
+// or 11. That is exactly what `SetIdleAnimation`/`SetWalkAnimation`/
+// `SetSwingAnimation`/`SetDeathAnimation`/`PlayAnimation` pass.
+//
+// `rate`'s units are **not** confirmed -- observed values are 1, 3, 5, 6,
+// 10, 11, 15, 17, 29, and this port reads them as frames per second (see
+// world/model_archive.cpp), which produces sane-looking playback but is an
+// interpretation, not a decompiled fact.
+struct AnimationClip {
+    int startFrame = 0;
+    int endFrame = 0;  // exclusive
+    int rate = 10;     // frames per second, unconfirmed -- see above
+    int frameCount() const { return endFrame - startFrame; }
+};
+
 struct Model {
-    std::vector<ModelVertex> vertices;  // frame 0 only, vertsPerFrame entries
+    // All frames back to back: `frameCount * vertsPerFrame` entries, so
+    // frame N's vertices start at `N * vertsPerFrame`. Use VertexAt().
+    std::vector<ModelVertex> vertices;
     std::vector<ModelUv> uvs;
     std::vector<ModelFace> faces;
     int skinCount = 0;
     int width = 0, height = 0;
+    int frameCount = 1;
+    int vertsPerFrame = 0;
+    std::vector<AnimationClip> clips;
+
+    // Vertex `vertexIndex` of frame `frameIndex`, with the frame clamped
+    // into range (a static prop is 1 frame, so every caller can pass a
+    // frame index unconditionally).
+    const ModelVertex& VertexAt(int frameIndex, int vertexIndex) const;
+
+    // The clip a script's animation number names, or nullptr if this model
+    // doesn't carry that many.
+    const AnimationClip* clip(int index) const {
+        if (index < 0 || static_cast<size_t>(index) >= clips.size()) return nullptr;
+        return &clips[static_cast<size_t>(index)];
+    }
 
     // Raw 16bpp texel at (x,y) within skin `skinIndex` -- same 4-bit-per-
     // channel 0x0RGB convention as everything else in the engine's

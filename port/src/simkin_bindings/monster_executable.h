@@ -85,6 +85,22 @@ public:
     // DoAttackRoll()).
     int magicResistance() const { return m_MagicResistance; }
 
+    // M28: the real animation clip numbers this creature's script set --
+    // indices into its model resource's own clip table (world/
+    // model_archive.h's AnimationClip). -1 means the script never set one,
+    // in which case the caller should leave the pose alone.
+    int idleAnimation() const { return m_IdleAnim; }
+    int walkAnimation() const { return m_WalkAnim; }
+    int swingAnimation() const { return m_SwingAnim; }
+    int deathAnimation() const { return m_DeathAnim; }
+    // The starting pose a real Init()'s PlayAnimation() asked for.
+    int currentAnimation() const { return m_CurrentAnim; }
+
+    // Real per-instance appearance (see the SetSkin/SetScale handlers).
+    int skin() const { return m_Skin; }
+    // SetScale()'s 8.8 fixed-point value as a plain multiplier (256 -> 1).
+    float scale() const { return m_Scale > 0 ? static_cast<float>(m_Scale) / 256.0f : 1.0f; }
+
     int currentHealth() const { return m_CurrentHealth; }
     int maxHealth() const { return m_MaxHealth; }
     bool alive() const { return m_Alive; }
@@ -187,6 +203,13 @@ private:
     int m_Wimpy = 0;
     int m_ChaseRadius = 0;
     int m_Mob = 0;
+    int m_Skin = 0;
+    int m_Scale = 256;  // 8.8 fixed point, 256 == 1:1
+    int m_IdleAnim = -1;
+    int m_WalkAnim = -1;
+    int m_SwingAnim = -1;
+    int m_DeathAnim = -1;
+    int m_CurrentAnim = -1;
     bool m_Aggressive = false;
     bool m_Alive = true;
     bool m_Usable = false;

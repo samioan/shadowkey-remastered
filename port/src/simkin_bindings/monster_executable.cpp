@@ -199,6 +199,58 @@ bool MonsterExecutable::method(const skString& methodName, skRValueArray& args,
         m_Mob = args[0].intValue();
         return true;
     }
+    // M28: the real animation clip numbers. Every monster script sets all
+    // four; they index the model resource's own clip table (see
+    // world/model_archive.h's AnimationClip -- decoded this session). All
+    // of these soft-failed before, so creatures rendered as static
+    // resting-pose statues sliding around the level.
+    if (methodName == skString("SetIdleAnimation") && args.entries() == 1) {
+        m_IdleAnim = args[0].intValue();
+        return true;
+    }
+    if (methodName == skString("SetWalkAnimation") && args.entries() == 1) {
+        m_WalkAnim = args[0].intValue();
+        return true;
+    }
+    if (methodName == skString("SetSwingAnimation") && args.entries() == 1) {
+        m_SwingAnim = args[0].intValue();
+        return true;
+    }
+    if (methodName == skString("SetDeathAnimation") && args.entries() == 1) {
+        m_DeathAnim = args[0].intValue();
+        return true;
+    }
+    // `PlayAnimation(n)` / `PlayAnimationOffset(n)` -- both appear in real
+    // Init() bodies to set the creature's starting pose (e.g. arat.s's
+    // `PlayAnimation(0)`). Treated identically here: the host AI loop
+    // overrides the clip every tick from the creature's own state anyway,
+    // so this only decides what it looks like before it first acts.
+    if ((methodName == skString("PlayAnimation") ||
+         methodName == skString("PlayAnimationOffset")) &&
+        args.entries() == 1) {
+        m_CurrentAnim = args[0].intValue();
+        return true;
+    }
+    // Real per-instance appearance, previously soft-failed and therefore
+    // invisible in the port (every creature rendered as skin 0 at 1:1
+    // scale). Both showed up in a real play session's own soft-fail log.
+    if (methodName == skString("SetSkin") && args.entries() == 1) {
+        // A models.idx resource genuinely carries several skins
+        // (Model::skinCount, docs/MODEL_FORMAT.md) -- e.g. the real
+        // corpus picks skin 9/10 for some creature variants, which the
+        // port was drawing with skin 0's texture.
+        m_Skin = args[0].intValue();
+        return true;
+    }
+    if (methodName == skString("SetScale") && args.entries() == 1) {
+        // 8.8 fixed point, so 256 == 1:1 -- consistent with every real
+        // call site: literal values cluster at 230-306, and azra_rat.s
+        // uses `SetScale(Random(206,306))` to vary rat size around 256.
+        // A value of exactly 256 being the identity is what makes that
+        // range read as "0.8x to 1.2x".
+        m_Scale = args[0].intValue();
+        return true;
+    }
     if (methodName == skString("GetPlayer") && args.entries() == 0) {
         returnValue = skRValue(static_cast<skiExecutable*>(&m_Player), false);
         return true;

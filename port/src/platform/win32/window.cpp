@@ -39,10 +39,24 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         case WM_DESTROY:
             PostQuitMessage(0);
             return 0;
+        // WM_SYSKEYDOWN/UP carry the same keys when Alt is held (and F10
+        // unconditionally) -- without these, a key press that happens to
+        // overlap an Alt tap silently never reaches InputState, leaving
+        // the slot latched "down" forever if the release arrived as a
+        // SYS message.
+        case WM_SYSKEYDOWN:
+        case WM_SYSKEYUP:
         case WM_KEYDOWN:
         case WM_KEYUP:
             if (impl && impl->keyCallback) {
-                impl->keyCallback(static_cast<int>(wParam), msg == WM_KEYDOWN);
+                bool down = (msg == WM_KEYDOWN || msg == WM_SYSKEYDOWN);
+                impl->keyCallback(static_cast<int>(wParam), down);
+            }
+            // Alt+F4 and the system menu still need DefWindowProc for the
+            // SYS variants, or the window can't be closed with the
+            // keyboard.
+            if (msg == WM_SYSKEYDOWN || msg == WM_SYSKEYUP) {
+                return DefWindowProcW(hwnd, msg, wParam, lParam);
             }
             return 0;
         case WM_CHAR:
@@ -132,6 +146,14 @@ void Window::RunMessageLoop(const IdleCallback& onIdle) {
         }
         if (impl_->closed) break;
         if (onIdle) onIdle();
+        // The tick callback returns immediately whenever the fixed 40ms
+        // tick isn't due yet (engine/game_clock.h), so without this the
+        // loop spun a full CPU core flat out between frames -- ~25 useful
+        // ticks a second and millions of wasted no-op iterations. Waiting
+        // on the message queue with a 1ms timeout keeps input latency
+        // unchanged (any keystroke wakes it immediately) while dropping
+        // idle CPU to roughly nothing.
+        MsgWaitForMultipleObjectsEx(0, nullptr, 1, QS_ALLINPUT, MWMO_INPUTAVAILABLE);
     }
     shouldClose_ = true;
 }

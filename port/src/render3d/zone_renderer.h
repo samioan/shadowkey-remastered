@@ -179,6 +179,18 @@ struct PlacedEntity {
     // other placed entity keeps 0, matching this file's existing "no
     // orientation" scope note above (still true for everything but doors).
     float yaw = 0.0f;
+    // Real per-instance appearance, from a monster script's own
+    // SetSkin()/SetScale() (simkin_bindings/monster_executable.h) -- both
+    // were soft-failed and unused before, so every creature drew as skin 0
+    // at 1:1. Defaults keep every other placement (props, doors, pickups,
+    // the room mesh) rendering exactly as before.
+    int skinIndex = 0;
+    float scale = 1.0f;
+    // M28: which of the model's animation frames to draw. 0 (the resting
+    // pose) for every static prop, and what M8-M27 drew for everything --
+    // live creatures now advance it through their current clip, see
+    // world/model_archive.h's AnimationClip and main.cpp's AI loop.
+    int frameIndex = 0;
 };
 
 class ZoneRenderer {

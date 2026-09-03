@@ -32,12 +32,72 @@ constexpr float kTileScale = 256.0f;
 // ZONE_FORMAT.md itself alongside this parser landing.
 struct ZcpEntry {
     int8_t lightDelta = 0;
+    // Two separate authored eye-height thresholds, decompiled this session
+    // from Render3DScene (0x100166c8):
+    //   +2 gates the FLOOR  -- it draws only when `floorBandThreshold <
+    //      cameraZ` (or ZmpCell flags bit2 forces it).
+    //   +4 gates the CEILING -- `cameraZ < ceilingBandThreshold` picks
+    //      band A (its underside), otherwise band B (its top).
+    // Offset 2 was previously unparsed and the floor drew unconditionally.
+    // Checked against real data: `+4` equals min(ceilingHeight[4]) for
+    // 100% of entries in every shipped zone, while `+2` equals
+    // min(floorHeight[4]) for only 8% of azra's and 23% of snowline's --
+    // i.e. it is a genuinely authored value, not a copy of the floor
+    // height, which is exactly what a designer-controlled "is the player
+    // above this floor" cutoff would look like.
+    int16_t floorBandThreshold = 0;
     int16_t ceilingBandThreshold = 0;
     int16_t floorHeight[4] = {0, 0, 0, 0};
     int16_t ceilingHeight[4] = {0, 0, 0, 0};
     uint8_t surIndexE_lo = 0xff, surIndexW_lo = 0xff, surIndexS_lo = 0xff, surIndexN_lo = 0xff;
     uint8_t surIndexE_hi = 0xff, surIndexW_hi = 0xff, surIndexS_hi = 0xff, surIndexN_hi = 0xff;
     uint8_t surIndexCeilingA = 0xff, surIndexCeilingB = 0xff, surIndexFloor = 0xff;
+    // Byte 0x23 -- a per-tile *vertex nudge* code, decompiled this session
+    // from SurfaceFace_BuildAndProject (0x1005d784)'s per-vertex switch:
+    // the real engine looks up the grid cell each face vertex falls in
+    // (`engine+0x690c + zcpIndex*0x24 + 0x23`, i.e. exactly this byte of
+    // this 36-byte record) and shifts that vertex by half a tile (0x80 =
+    // 128 raw units) along X and/or Y before projecting it. That's what
+    // produces the game's diagonal/bevelled wall corners -- geometry the
+    // port drew as hard 90-degree corners until now. Codes:
+    //   0 = none
+    //   1 = +X +Y   2 = -X +Y   3 = -X -Y   4 = +X -Y
+    //   5 = +X      6 = -X      7 = +Y      8 = -Y
+    // Real-data frequency: ~7% of all .zcp entries across the 21 shipped
+    // zones are non-zero (982 of azra's 11828), so this is a real but
+    // minority feature -- see Zone::CornerNudge().
+    uint8_t cornerNudge = 0;
+};
+
+// One .sur record, 8 bytes on disk. **Fully decompiled** from
+// SurfaceFace_BuildAndProject (0x1005d784) -- see docs/ZONE_FORMAT.md and
+// Zone::SurfaceUv() below for how these drive the real UV computation.
+struct SurfaceRecord {
+    int8_t uShift = 5;   // byte[0], read as a *signed* char by the real code
+    int8_t vShift = 5;   // byte[1]
+    int16_t uOffset = 0;  // byte[2..3], signed 16, in raw world units
+    int16_t vOffset = 0;  // byte[4..5]
+    uint8_t flags = 0;    // byte[6]: bit0 = flip V, bit1 = flip U, bit5 = disable face
+    uint8_t textureIndex = 0;  // byte[7], index into .ztx's 0x4000-byte slot array
+
+    bool flipU() const { return (flags & 0x02) != 0; }
+    bool flipV() const { return (flags & 0x01) != 0; }
+    bool disabled() const { return (flags & 0x20) != 0; }
+};
+
+// Which world axis drives U (and V) for a face, matching
+// SurfaceFace_BuildAndProject's `param_5` switch exactly. Render3DScene
+// (0x100166c8) picks these per wall direction: the +Y/-Y ("south"/"north")
+// blocks pass a literal 2/3, the floor/ceiling blocks pass 5/4, and the
+// +X/-X ("east"/"west") blocks pass 0 or 1 *chosen by the surface's own
+// flip-U bit* (east: flipU ? 0 : 1; west: flipU ? 1 : 0).
+enum class FaceOrient : uint8_t {
+    UPlusY = 0,   // u = ( worldY + uOffset)
+    UMinusY = 1,  // u = (uOffset - worldY)
+    UPlusX = 2,   // u = ( worldX + uOffset)
+    UMinusX = 3,  // u = (uOffset - worldX)
+    Ceiling = 4,  // u = ( worldX + uOffset), v = (worldY + vOffset)
+    Floor = 5,    // identical math to Ceiling -- the real switch falls through
 };
 
 // One .zmp cell, 6 bytes on disk (docs/ZONE_FORMAT.md's ZmpCell).
@@ -179,6 +239,56 @@ public:
 
     uint8_t surfaceTextureIndex(int surIndex) const;
 
+    // The whole decoded .sur record. Out-of-range indices return a default-
+    // constructed record (shift 5/5, no offset, no flags) -- which is
+    // exactly what the real engine falls back to when a zone has no .sur
+    // table loaded at all (`engine+0x6918 == 0` in
+    // SurfaceFace_BuildAndProject).
+    const SurfaceRecord& surface(int surIndex) const;
+
+    // The real per-vertex UV, in **texel units** (already divided by the
+    // 8 fractional bits the real fixed-point carries -- see below), for a
+    // vertex at raw world (worldX, worldY, worldZ) on a face with this
+    // orientation and surface record.
+    //
+    // Decompiled ground truth, SurfaceFace_BuildAndProject (0x1005d784)'s
+    // tail:
+    //     switch (param_5) {
+    //       case 0: u = (worldY + uOffset) << uShift; break;
+    //       case 1: u = (uOffset - worldY) << uShift; break;
+    //       case 2: u = (worldX + uOffset) << uShift; break;
+    //       case 3: u = (uOffset - worldX) << uShift; break;
+    //       case 4: case 5: u = (worldX + uOffset) << uShift; vAxis = worldY; break;
+    //     }
+    //     v = (vAxis + vOffset) << vShift;   // vAxis = worldZ for cases 0-3
+    //     if (flags & 2) u = -u;             // flip U
+    //     if (flags & 1) v = -v;             // flip V
+    // ...and the fixed-point scale is pinned down by the consumer: the
+    // rasterizer (SurfaceFace_RasterizeTextured_v3, 0x1005bbc8) fetches
+    // `texture[(mask & (u >> 8)) + ((mask & (v >> 8)) << widthShift)]`,
+    // with SurfaceFace_ClipAndDispatch (0x1005d074) passing widthShift = 7
+    // and mask = 0x7f/0x7e/0x7c/0x78 (a distance-driven detail reduction).
+    // So **one texel = 2^(8 - shift) raw world units**: the dominant real
+    // shift of 6 gives 64 texels per 256-unit tile (one 128x128 texture
+    // per 2x2 tiles), 7 gives one texture per tile, and 4 (used by real
+    // mural surfaces, e.g. azra.sur records 14/15) stretches one texture
+    // across 8 tiles.
+    //
+    // This replaces the port's original flat 0..1-per-quad UV, which
+    // stretched one whole texture over each face regardless of its real
+    // world size -- the direct cause of walls looking wrongly textured and
+    // misaligned (a 26-tile-tall wall got one vertical texture repeat
+    // instead of the real ~26).
+    void SurfaceUv(const SurfaceRecord& sur, FaceOrient orient, float worldX, float worldY,
+                   float worldZ, float* outU, float* outV) const;
+
+    // The real per-vertex half-tile nudge (ZcpEntry::cornerNudge, see its
+    // comment): given a vertex's raw world position, adds the nudge the
+    // cell that vertex falls in asks for. Applied by the real engine to
+    // the vertex's *position* before both projection and UV computation,
+    // so both callers here pass through it.
+    void ApplyCornerNudge(float* worldX, float* worldY) const;
+
     // `.sur` byte 6, bit 5 (decompiled confirmation above) -- when set,
     // `SurfaceFace_BuildAndProject` skips the face entirely (no vertices
     // built, no draw call). A real azra.sur record has this set (the
@@ -199,11 +309,33 @@ public:
     // wall-sliding feel.
     bool CircleHitsWall(float worldX, float worldY, float radius) const;
 
+    // True if a straight line between two world positions crosses no wall
+    // tile (and stays in bounds) -- a grid DDA over the same
+    // `ZmpCell::IsWall()` flag CircleHitsWall and the renderer already use.
+    //
+    // The real engine has exactly this facility as a per-frame system
+    // (`TileGrid_RaycastVisibility`, docs/WORLD_MODEL.md -- it stamps a
+    // per-cell "visible this frame" byte the surface pipeline then reads,
+    // see SurfaceFace_BuildAndProject's `vertex+6` frame-stamp check), so
+    // sight-gating is a mechanism the original demonstrably has; how its
+    // *AI* consumes it was never traced, so the specific use below (gating
+    // monster aggro) is this port's own design, documented as such.
+    //
+    // Why it matters: every real monster script in the corpus sets a
+    // chase radius of 18000 raw world units (222 of the 270 SetChaseRadius
+    // calls shipped) -- 70 tiles, on a 128x128 grid. Taken as a bare
+    // euclidean radius that is over half the map, which is what made the
+    // port's monsters aggro from across the level, through walls and
+    // floors. A radius that generous only makes sense as "anywhere the
+    // creature can actually see", which is what this restores.
+    bool HasLineOfSight(float x0, float y0, float x1, float y1) const;
+
     // Bilinearly interpolated floor/ceiling height (raw world units, same
     // convention as playerStartZ/Camera::z -- NOT tile units) at a world
     // (x,y), read from the containing tile's own ZcpEntry::floorHeight/
-    // ceilingHeight[4] corner array (corner order 0=NW,1=NE,2=SE,3=SW,
-    // matching render3d/zone_renderer.cpp's AddFloorCeiling -- these are
+    // ceilingHeight[4] corner array (real corner order 0=(x0,y1),
+    // 1=(x1,y1), 2=(x1,y0), 3=(x0,y0) -- decompiled this session, see
+    // render3d/zone_renderer.cpp's kCornerDx/kCornerDy; these are
     // the same 4 values that pipeline already draws the floor/ceiling
     // quad from, just sampled here instead of rendered). No cross-tile
     // blending: each tile's 4 corners are its own stored values, not
@@ -219,9 +351,7 @@ private:
     int width_ = 0, height_ = 0;
     std::vector<ZmpCell> cells_;
     std::vector<ZcpEntry> zcpEntries_;
-    std::vector<uint8_t> surTextureIndex_;  // .sur's byte[7] per record -- see zone.cpp
-    std::vector<uint8_t> surFlags_;         // .sur's byte[6] -- bit0/1 flip V/U, bit5 disable
-                                             // (decompiled confirmation, see PaletteColor())
+    std::vector<SurfaceRecord> surfaces_;   // the whole decoded .sur table -- see surface()
     std::vector<uint8_t> ztxData_;          // 1 header byte + N*0x4000 texture slots
     std::vector<uint8_t> zluData_;          // N*2048-byte palette sets
     std::vector<EntPlacement> entities_;
@@ -242,6 +372,10 @@ private:
 // tweak (see the comment in zone.cpp's BakeLighting) -- the real engine
 // has no such floor, so fully unlit cells there would render pure black.
 constexpr uint16_t kMaxLightLevel = 0x3f00;
+// The real per-vertex light/fog scalar's lower clamp, straight out of
+// SurfaceFace_BuildAndProject (`if (light < 0x400) light = 0x400;`) --
+// i.e. `.zlu` rung 4 is the darkest the tile-grid renderer ever goes.
+constexpr uint16_t kMinLightLevel = 0x400;
 float LightLevelToBrightness(uint16_t lightLevel);
 
 }  // namespace sk

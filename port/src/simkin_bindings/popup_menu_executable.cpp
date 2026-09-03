@@ -84,11 +84,24 @@ void PopupMenuExecutable::MoveSelection(int delta) {
     if (selectableIndices.empty()) return;
 
     size_t currentPos = 0;
+    bool found = false;
     for (size_t i = 0; i < selectableIndices.size(); ++i) {
         if (static_cast<int>(selectableIndices[i]) + 1 == m_SelectedItem) {
             currentPos = i;
+            found = true;
             break;
         }
+    }
+    if (!found) {
+        // Real scripts genuinely start some popups on a non-selectable
+        // item -- deletesavedgames.s's confirm popups do
+        // `SetSelectable(0,false)` then `SetSelectedItem(1)`, i.e. they
+        // point at the prompt line. Land on the *first* selectable choice
+        // when the player then presses a direction, instead of applying
+        // `delta` from an assumed position 0 and skipping it (which, on
+        // exactly those popups, skipped "Cancel" straight onto "Delete").
+        m_SelectedItem = static_cast<int>(selectableIndices[0]) + 1;
+        return;
     }
     int count = static_cast<int>(selectableIndices.size());
     int nextPos = (static_cast<int>(currentPos) + delta % count + count) % count;

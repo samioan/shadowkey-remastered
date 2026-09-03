@@ -149,14 +149,50 @@ resource has a small trailer before the next entry begins:
 
 - **6 bytes** in 209 of 226 entries (92.5%) — all single-animation-frame
   (`H1==1`) models: static props, furniture, room geometry.
-- **12, 24, or 54 bytes** (always a multiple of 6) in the other 17 entries
-  — all heavily multi-frame animated models (`H1` from 57 up to 157).
+- **12, 24, 54 or 66 bytes** (always a multiple of 6) in the other entries
+  — all heavily multi-frame animated models.
 
-The trailer's purpose (and why it scales with frame count for animated
-models but isn't simply `H1 * 6` or `skinCount * 6`) is unresolved — flagged
-as an open follow-up. It's clearly real structure, not slack/padding: the
-`models.idx` size fields account for it exactly, with zero slop, in every
-one of the 226 entries checked.
+### RESOLVED: it's the animation clip table
+
+**Decoded (PC-port session), against the whole real archive.** Each 6-byte
+record is:
+
+```c
+struct AnimationClip {   // 6 bytes
+    uint16 startFrame;   // 0x00
+    uint16 endFrame;     // 0x02, exclusive
+    uint16 rate;         // 0x04, playback speed -- units unconfirmed
+};
+```
+
+What pins this down is that the records **exactly partition** `[0, H1)`:
+each one's `startFrame` is the previous record's `endFrame`, the first
+starts at 0, and the last one's `endFrame` equals the header's own frame
+count `H1`. That holds for **every** multi-frame entry in the archive (33
+of the 226 non-empty resources, up to 200 frames and 11 clips), which a
+coincidental misreading of unrelated bytes would not do. Real examples:
+
+```
+entry  18   57 frames,  4 clips: (0,11,3) (11,22,10) (22,42,10) (42,57,10)
+entry  59  157 frames,  9 clips: (0,1,10) (1,19,10) (19,35,10) ... (135,157,1)
+entry  20  144 frames, 11 clips: (0,1,10) (1,22,10) (22,31,10) ... (138,144,10)
+```
+
+This is also what the scripts have been indexing all along. Every monster
+script calls `SetIdleAnimation(n)`/`SetWalkAnimation(n)`/
+`SetSwingAnimation(n)`/`SetDeathAnimation(n)` (plus `PlayAnimation(n)` for
+the starting pose), and those numbers are clip indices: `arat.s` names
+clips 0-3 and its model carries 4 records; the creatures that name clip 8
+resolve to models carrying 9 or 11. That correspondence was the original
+reason to look at the trailer at all.
+
+**Still unconfirmed:** `rate`'s units. Observed values are 1, 3, 5, 6, 10,
+11, 15, 17 and 29. Frames per second is the reading that produces sane
+playback (and what the PC port uses), but nothing in the decompiled code
+has been traced to it yet.
+
+Verified by `port/src/tests/m29_animation_smoke.cpp`, which walks the real
+archive and asserts the partition property for every animated entry.
 
 ## What this confirms from the earlier (code-only) pass
 
@@ -173,8 +209,13 @@ argument) is now doubly confirmed by real bytes agreeing with both.
 
 - The UV table's exact fixed-point scale (some `V` values exceed a simple
   `height*256` bound).
-- The unaccounted texture-header halfword (`+3`) and the trailer's exact
-  size formula for multi-frame (`H1>1`) models.
+- The unaccounted texture-header halfword (`+3`). ~~The trailer's exact
+  size formula for multi-frame (`H1>1`) models.~~ — **resolved**: the
+  trailer is the animation clip table, one 6-byte record per clip, so its
+  size tracks clip count (not frame count, which is why `H1 * 6` never
+  fitted). See "The trailer" above.
+- `AnimationClip::rate`'s units — frames per second is the working reading,
+  not yet traced to a decompiled consumer.
 - `azra.sta`'s format is still unresolved — but the "per-zone entity/actor
   placement" guess below was **wrong**: that role is `.ent` (see
   `ZONE_FORMAT.md`), and `.sta` isn't even one-per-zone (only `azra.sta`

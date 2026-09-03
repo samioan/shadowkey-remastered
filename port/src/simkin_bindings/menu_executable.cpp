@@ -3,6 +3,7 @@
 #include <cstdio>
 
 #include "assets/string_table.h"
+#include "audio/audio_engine.h"
 #include "simkin_bindings/button_executable.h"
 #include "simkin_bindings/combo_box_executable.h"
 #include "simkin_bindings/floating_sprite_executable.h"
@@ -14,6 +15,7 @@
 #include "simkin_bindings/native_binding_common.h"
 #include "simkin_bindings/player_executable.h"
 #include "simkin_bindings/popup_menu_executable.h"
+#include "simkin_bindings/slider_executable.h"
 #include "simkin_bindings/table_executable.h"
 #include "simkin_bindings/text_area_executable.h"
 #include "skRValue.h"
@@ -137,11 +139,23 @@ void MenuExecutable::MoveSelection(int delta) {
     // scripts' own SetSelectedItem(1)-style convention) -- find where the
     // current selection sits among just the selectable ones.
     size_t currentPos = 0;
+    bool found = false;
     for (size_t i = 0; i < selectableIndices.size(); ++i) {
         if (static_cast<int>(selectableIndices[i]) + 1 == m_SelectedItem) {
             currentPos = i;
+            found = true;
             break;
         }
+    }
+    if (!found) {
+        // The selection points at a static row, a row that no longer
+        // exists, or nothing at all (a fresh/ClearMenu'd screen) -- land on
+        // the first selectable row rather than applying `delta` from an
+        // assumed position 0, which used to silently skip that first row
+        // whenever the player's first keypress was Down.
+        m_PrevSelectedItem = m_SelectedItem;
+        m_SelectedItem = static_cast<int>(selectableIndices[0]) + 1;
+        return;
     }
     int count = static_cast<int>(selectableIndices.size());
     int nextPos = (static_cast<int>(currentPos) + delta % count + count) % count;
@@ -149,13 +163,50 @@ void MenuExecutable::MoveSelection(int delta) {
     m_SelectedItem = static_cast<int>(selectableIndices[static_cast<size_t>(nextPos)]) + 1;
 }
 
+void MenuExecutable::EnsureValidSelection() {
+    if (m_SelectedItem >= 1 && static_cast<size_t>(m_SelectedItem) <= m_Rows.size() &&
+        m_Rows[static_cast<size_t>(m_SelectedItem - 1)].selectable) {
+        return;
+    }
+    for (size_t i = 0; i < m_Rows.size(); ++i) {
+        if (m_Rows[i].selectable) {
+            m_SelectedItem = static_cast<int>(i) + 1;
+            return;
+        }
+    }
+    m_SelectedItem = 0;  // nothing selectable on this screen at all
+}
+
 void MenuExecutable::CycleSelectedCombo(int delta) {
     if (m_SelectedItem < 1 || static_cast<size_t>(m_SelectedItem) > m_Rows.size()) return;
     MenuRow& row = m_Rows[static_cast<size_t>(m_SelectedItem - 1)];
+    if (row.kind == RowKind::Slider) {
+        // M28: the real Options screen's SoundFXSlider/MusicSlider rows.
+        auto* slider = static_cast<SliderExecutable*>(row.widget.get());
+        slider->Adjust(delta);
+        ApplySliderValue(*slider);
+        TryInvoke(slider->callback());
+        return;
+    }
     if (row.kind != RowKind::ComboBox) return;
     auto* combo = static_cast<ComboBoxExecutable*>(row.widget.get());
     combo->CycleSelection(delta);
     TryInvoke(combo->onChangeCallback());
+}
+
+void MenuExecutable::ApplySliderValue(const SliderExecutable& slider) {
+    // options.s names its two sliders in their AddMenuSlider() call; the
+    // real engine dispatches the behaviour off that name (neither
+    // callback is defined by any script in the corpus). Percent maps
+    // straight through -- both real calls pass a max of 100.
+    sk::AudioEngine* audio = m_Stack.audio();
+    if (!audio) return;
+    int percent = slider.maxValue() > 0 ? slider.value() * 100 / slider.maxValue() : 0;
+    if (slider.callback() == "SoundFXSlider") {
+        audio->SetSfxVolumePercent(percent);
+    } else if (slider.callback() == "MusicSlider") {
+        audio->SetMusicVolumePercent(percent);
+    }
 }
 
 void MenuExecutable::ActivateSelected() {
@@ -199,16 +250,61 @@ PopupMenuExecutable* MenuExecutable::activePopup() const {
     return nullptr;
 }
 
-void MenuExecutable::TryInvoke(const std::string& handlerName) {
-    if (handlerName.empty()) return;
+bool MenuExecutable::TryInvoke(const std::string& handlerName) {
+    if (handlerName.empty()) return false;
     skRValueArray args;
     skRValue ret;
     skExecutableContext ctxt(&m_Stack.interpreter());
     // Calls the base class directly (not this->method()) so an
     // undefined handler name just quietly does nothing instead of
     // spamming the soft-fail log for what's an optional hook, not an
-    // unresolved native call.
-    skScriptedExecutable::method(skString(handlerName.c_str()), args, ret, ctxt);
+    // unresolved native call. The return value says whether the script
+    // actually defined it -- GoBack() below needs to know.
+    return skScriptedExecutable::method(skString(handlerName.c_str()), args, ret, ctxt);
+}
+
+bool MenuExecutable::GoBack() {
+    // The real back/cancel softkey, in the order the evidence supports.
+    //
+    // 1. The screen's own handler, if it has one. The corpus spells the
+    //    name both "OnRightSoftkey" and "OnRightSoftKey" depending on the
+    //    file (a genuine authoring inconsistency in the original scripts,
+    //    not something to "fix"), so both are tried.
+    // 2. Otherwise the screen's own SetPrevMenu() target.
+    //
+    // Step 2 is the fix for a real, badly user-visible bug: 15 real
+    // screens call SetPrevMenu(...) in their Init(), and **no script
+    // anywhere in the corpus ever reads it back** -- there is no
+    // GetPrevMenu() call in the whole corpus -- so it can only ever have
+    // been consumed natively by the engine's own back key. 11 of those 15
+    // (Options, ConfigKeys, LoadGameMenu, SaveGameMenu, DeleteSavedGames,
+    // ChooseCharacterMenu, NameChar's chain, MultiPlayerMenu and friends)
+    // define no OnRightSoftkey handler at all. This port soft-failed
+    // SetPrevMenu and had no fallback, so pressing back on any of them did
+    // nothing whatsoever and the player was stranded on that screen with
+    // no way out.
+    MenuExecutable* before = m_Stack.currentMenu();
+    bool handled = TryInvoke("OnRightSoftkey") || TryInvoke("OnRightSoftKey");
+    // A handler that actually navigated somewhere is done.
+    if (handled && m_Stack.currentMenu() != before) return true;
+    if (m_Stack.quitRequested() || m_Stack.gameStartRequested()) return true;
+    // Otherwise fall through to SetPrevMenu -- including when the screen
+    // *did* define a handler. That is not a fallback for sloppy scripts,
+    // it is what the real game does: options.s's OnRightSoftkey body is a
+    // single call to `OptionsMenuBack()`, and `OptionsMenuBack` is
+    // **absent from the fully-enumerated real 702-entry native table**
+    // (shadowkey/simkin_native_bindings.json) -- so is `MenuBack()`, which
+    // inventory.s / questlog.s / buysell.s / actionqueue.s call, and
+    // `HostGameMenuBack()`. They were never registered, so those calls
+    // miss and do nothing in the real binary too, exactly like the
+    // already-documented `UpdateTextItems`/`GetLastItem`/`IsRightQueue`
+    // case. The only thing left that can move a player off those screens
+    // is the SetPrevMenu target the engine records.
+    if (!m_PrevMenuPath.empty()) {
+        m_Stack.OpenMenu(m_PrevMenuPath);
+        return true;
+    }
+    return handled;
 }
 
 bool MenuExecutable::method(const skString& methodName, skRValueArray& args,
@@ -226,6 +322,15 @@ bool MenuExecutable::method(const skString& methodName, skRValueArray& args,
         // MenuBackground stand-in).
         m_TitleTextId = args[0].intValue();
         returnValue = skRValue(static_cast<skiExecutable*>(&m_TitleHandle), false);
+        return true;
+    }
+    if (methodName == skString("SetPrevMenu") && args.entries() == 1) {
+        // Where the back/cancel softkey goes when this screen defines no
+        // handler of its own -- see GoBack(). The argument is a Simkin
+        // script path in the corpus's usual escaped-backslash form
+        // ("Menus\\\\NewGameMenu"); MenuStack::OpenMenu normalises it the
+        // same way every other CreateMenu/OpenMenu path argument is.
+        m_PrevMenuPath = ToStdString(args[0].str());
         return true;
     }
     if (methodName == skString("SetUseHoriz") && args.entries() == 1) {
@@ -254,6 +359,49 @@ bool MenuExecutable::method(const skString& methodName, skRValueArray& args,
         if (args.entries() == 3) row.associatedObject = args[2].obj();
         row.widget.reset(new MenuItemHandle(*this, m_Rows.size() - 1));
         returnValue = skRValue(static_cast<skiExecutable*>(row.widget.get()), false);
+        return true;
+    }
+    // M28: the real Options screen's two volume rows,
+    // `AddMenuSlider(labelId, callbackName, maxValue, step)` -- the only
+    // AddMenuSlider call sites in the whole corpus (options.s). These
+    // soft-failed before, so the rows simply didn't exist and the Options
+    // screen had no volume controls at all. See slider_executable.h.
+    if (methodName == skString("AddMenuSlider") && args.entries() >= 2) {
+        MenuRow& row = AddRow(RowKind::Slider, args[0].intValue(), "", true);
+        int maxValue = args.entries() >= 3 ? args[2].intValue() : 100;
+        int step = args.entries() >= 4 ? args[3].intValue() : 10;
+        auto* slider = new SliderExecutable(ToStdString(args[1].str()), maxValue, step);
+        row.widget.reset(slider);
+        // Seed the row from the engine's current gain so reopening
+        // Options shows where the sliders were actually left, rather than
+        // snapping both back to full.
+        if (sk::AudioEngine* audio = m_Stack.audio()) {
+            int percent = slider->callback() == "MusicSlider" ? audio->musicVolumePercent()
+                                                               : audio->sfxVolumePercent();
+            slider->SetValue(percent * slider->maxValue() / 100);
+        }
+        returnValue = skRValue(static_cast<skiExecutable*>(row.widget.get()), false);
+        return true;
+    }
+    // Same screen, same "previously soft-failed" story. options.s branches
+    // on both: GetLanguageStr() gates the God Mode row (`GameActive() and
+    // langStr = "ENGLISH"`) and also fills the language popup's first,
+    // non-selectable line; MuteOnCall() picks between the Mute On/Mute Off
+    // row. This port ships the English stringtable (stringtable.eng), so
+    // "ENGLISH" is the honest answer rather than a guess.
+    if (methodName == skString("GetLanguageStr") && args.entries() == 0) {
+        returnValue = skRValue(skString("ENGLISH"));
+        return true;
+    }
+    if (methodName == skString("MuteOnCall") && args.entries() == 0) {
+        returnValue = skRValue(m_Stack.muteOnCall());
+        return true;
+    }
+    if (methodName == skString("SetMuteOnCall") && args.entries() == 1) {
+        // Real setting, stored for the round trip options.s expects. This
+        // port has no telephony to mute, so nothing consumes it beyond
+        // showing the correct Mute On/Mute Off label.
+        m_Stack.SetMuteOnCall(args[0].boolValue());
         return true;
     }
     if (methodName == skString("AddComboBox") && args.entries() == 2) {

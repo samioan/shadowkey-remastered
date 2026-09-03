@@ -41,6 +41,19 @@ public:
     // tick (main.cpp) so PlaySfx() doesn't leak a voice per call.
     void Update();
 
+    // Master gains, driven by the real Options screen's own two
+    // `AddMenuSlider(4062,"SoundFXSlider",100,10)` /
+    // `AddMenuSlider(4063,"MusicSlider",100,10)` rows (options.s). Both
+    // are 0-100 in the script's own units; every PlaySfx/PlayMusic
+    // `volume01` is scaled by the matching one. Music takes effect on the
+    // next PlayMusic() -- there's no live re-gain of an already-playing
+    // voice, which is enough for a settings screen that is only reachable
+    // between (or paused out of) play.
+    void SetSfxVolumePercent(int percent);
+    void SetMusicVolumePercent(int percent);
+    int sfxVolumePercent() const;
+    int musicVolumePercent() const;
+
 private:
     struct Impl;
     Impl* impl_;

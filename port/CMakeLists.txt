@@ -110,6 +110,7 @@ add_library(sk_bindings STATIC
   src/simkin_bindings/native_binding_common.cpp
   src/simkin_bindings/player_executable.cpp
   src/simkin_bindings/popup_menu_executable.cpp
+  src/simkin_bindings/slider_executable.cpp
   src/simkin_bindings/row_owner_ref.cpp
   src/simkin_bindings/table_executable.cpp
   src/simkin_bindings/test_armor_executable.cpp
@@ -278,3 +279,13 @@ target_link_libraries(loading_screen_smoke PRIVATE sk_bindings)
 # Real audio pipeline smoke test -- see src/tests/m27_audio_smoke.cpp.
 add_executable(audio_smoke src/tests/m27_audio_smoke.cpp)
 target_link_libraries(audio_smoke PRIVATE sk_bindings)
+
+# Real .sur UV pipeline / .zcp corner nudge / line-of-sight smoke test --
+# see src/tests/m28_surface_uv_smoke.cpp.
+add_executable(surface_uv_smoke src/tests/m28_surface_uv_smoke.cpp)
+target_link_libraries(surface_uv_smoke PRIVATE sk_world)
+
+# Model animation frames + clip table smoke test -- see
+# src/tests/m29_animation_smoke.cpp.
+add_executable(animation_smoke src/tests/m29_animation_smoke.cpp)
+target_link_libraries(animation_smoke PRIVATE sk_world)

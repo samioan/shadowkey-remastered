@@ -15,6 +15,11 @@ struct AudioEngine::Impl {
     IXAudio2MasteringVoice* mastering = nullptr;
     IXAudio2SourceVoice* musicVoice = nullptr;
     std::vector<IXAudio2SourceVoice*> sfxVoices;
+    // Real Options-screen slider values, 0-100 (see the header). Both
+    // start at full so audio behaves exactly as before until the player
+    // actually moves a slider.
+    int sfxVolumePercent = 100;
+    int musicVolumePercent = 100;
 
     IXAudio2SourceVoice* CreateVoiceFor(const Sound& sound) {
         WAVEFORMATEX fmt = {};
@@ -72,7 +77,8 @@ void AudioEngine::PlaySfx(const Sound& sound, float volume01) {
     buf.pAudioData = reinterpret_cast<const BYTE*>(sound.samples.data());
     buf.Flags = XAUDIO2_END_OF_STREAM;
     voice->SubmitSourceBuffer(&buf);
-    voice->SetVolume(volume01);
+    // Scaled by the real Options screen's SoundFXSlider value.
+    voice->SetVolume(volume01 * static_cast<float>(impl_->sfxVolumePercent) / 100.0f);
     voice->Start();
     impl_->sfxVoices.push_back(voice);
 }
@@ -87,10 +93,27 @@ void AudioEngine::PlayMusic(const Sound& sound, float volume01) {
     buf.pAudioData = reinterpret_cast<const BYTE*>(sound.samples.data());
     buf.LoopCount = XAUDIO2_LOOP_INFINITE;
     voice->SubmitSourceBuffer(&buf);
-    voice->SetVolume(volume01);
+    // Scaled by the real Options screen's MusicSlider value.
+    voice->SetVolume(volume01 * static_cast<float>(impl_->musicVolumePercent) / 100.0f);
     voice->Start();
     impl_->musicVoice = voice;
 }
+
+void AudioEngine::SetSfxVolumePercent(int percent) {
+    impl_->sfxVolumePercent = percent < 0 ? 0 : (percent > 100 ? 100 : percent);
+}
+
+void AudioEngine::SetMusicVolumePercent(int percent) {
+    impl_->musicVolumePercent = percent < 0 ? 0 : (percent > 100 ? 100 : percent);
+    // Re-gain an already-looping track so a music slider is audible while
+    // it's being dragged, not only on the next PlayMusic().
+    if (impl_->musicVoice) {
+        impl_->musicVoice->SetVolume(static_cast<float>(impl_->musicVolumePercent) / 100.0f);
+    }
+}
+
+int AudioEngine::sfxVolumePercent() const { return impl_->sfxVolumePercent; }
+int AudioEngine::musicVolumePercent() const { return impl_->musicVolumePercent; }
 
 void AudioEngine::StopMusic() {
     if (!impl_->musicVoice) return;

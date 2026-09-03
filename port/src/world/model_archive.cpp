@@ -73,15 +73,13 @@ bool ParseModelResource(const uint8_t* blob, size_t size, Model& out) {
     if (size < 14) return false;
 
     int16_t h0 = ReadI16(blob + 0x00);
-    int16_t h1 = ReadI16(blob + 0x02);  // frame count, unused beyond frame 0 here
-    int16_t h2 = ReadI16(blob + 0x04);
+    int16_t h1 = ReadI16(blob + 0x02);  // animation frame count
+    int16_t h2 = ReadI16(blob + 0x04);  // vertices per frame
     int16_t h3 = ReadI16(blob + 0x06);
     int16_t h4 = ReadI16(blob + 0x08);
-    int16_t h5 = ReadI16(blob + 0x0a);
-    (void)h1;
-    (void)h5;
+    int16_t h5 = ReadI16(blob + 0x0a);  // halfwords per frame's vertex block
 
-    if (h2 < 0 || h3 < 0 || h4 < 0) return false;
+    if (h2 < 0 || h3 < 0 || h4 < 0 || h1 < 1) return false;
 
     // uv_base = h0 + h1*h5 (halfwords); face_base = uv_base + h3*2;
     // tex_hdr_base = face_base + h4*6 -- see docs/MODEL_FORMAT.md and
@@ -103,12 +101,22 @@ bool ParseModelResource(const uint8_t* blob, size_t size, Model& out) {
     out.width = width;
     out.height = height;
 
-    out.vertices.resize(static_cast<size_t>(h2));
-    for (int v = 0; v < h2; ++v) {
-        size_t off = static_cast<size_t>(h0) * 2 + static_cast<size_t>(v) * 6;  // frame 0
-        if (off + 6 > size) return false;
-        out.vertices[static_cast<size_t>(v)] = {ReadI16(blob + off), ReadI16(blob + off + 2),
-                                                  ReadI16(blob + off + 4)};
+    out.frameCount = h1;
+    out.vertsPerFrame = h2;
+    // M28: every frame, not just frame 0. The real per-frame byte offset
+    // (docs/MODEL_FORMAT.md, and both real consumer functions compute it
+    // identically) is `(frameIndex * H5 + H0) * 2`.
+    out.vertices.resize(static_cast<size_t>(h1) * static_cast<size_t>(h2));
+    for (int f = 0; f < h1; ++f) {
+        size_t frameBase = (static_cast<size_t>(f) * static_cast<size_t>(h5) +
+                            static_cast<size_t>(h0)) * 2;
+        for (int v = 0; v < h2; ++v) {
+            size_t off = frameBase + static_cast<size_t>(v) * 6;
+            if (off + 6 > size) return false;
+            out.vertices[static_cast<size_t>(f) * static_cast<size_t>(h2) +
+                         static_cast<size_t>(v)] = {ReadI16(blob + off), ReadI16(blob + off + 2),
+                                                     ReadI16(blob + off + 4)};
+        }
     }
 
     out.uvs.resize(static_cast<size_t>(h3));
@@ -136,7 +144,60 @@ bool ParseModelResource(const uint8_t* blob, size_t size, Model& out) {
         out.pixels[i] = ReadU16(blob + pixStart + i * 2);
     }
 
+    // M28: the trailer -- a whole number of 6-byte animation clip records,
+    // `(startFrame, endFrame, rate)`. See AnimationClip's comment in
+    // world/model_archive.h for how this was pinned down. Only accepted
+    // when the records actually partition [0, frameCount): anything else
+    // means this interpretation doesn't hold for that entry, and it's
+    // safer to fall back to "one implicit whole-model clip" than to seek
+    // to a bogus frame.
+    out.clips.clear();
+    size_t trailerStart = pixStart + pixTotal;
+    size_t trailerBytes = size - trailerStart;
+    if (trailerBytes >= 6 && trailerBytes % 6 == 0) {
+        size_t recordCount = trailerBytes / 6;
+        std::vector<AnimationClip> parsed;
+        parsed.reserve(recordCount);
+        bool contiguous = true;
+        int expectedStart = 0;
+        for (size_t r = 0; r < recordCount; ++r) {
+            const uint8_t* p = blob + trailerStart + r * 6;
+            AnimationClip c;
+            c.startFrame = ReadU16(p);
+            c.endFrame = ReadU16(p + 2);
+            c.rate = ReadU16(p + 4);
+            if (c.startFrame != expectedStart || c.endFrame <= c.startFrame ||
+                c.endFrame > out.frameCount) {
+                contiguous = false;
+                break;
+            }
+            expectedStart = c.endFrame;
+            parsed.push_back(c);
+        }
+        if (contiguous && expectedStart == out.frameCount) {
+            out.clips = std::move(parsed);
+        }
+    }
+    if (out.clips.empty()) {
+        // Static props (the 92.5% of entries with one frame and a 6-byte
+        // trailer that doesn't parse as a clip) get one implicit clip so
+        // callers never have to special-case them.
+        out.clips.push_back({0, out.frameCount, 10});
+    }
+
     return true;
+}
+
+const ModelVertex& Model::VertexAt(int frameIndex, int vertexIndex) const {
+    static const ModelVertex kZero{};
+    if (vertsPerFrame <= 0 || vertexIndex < 0 || vertexIndex >= vertsPerFrame) return kZero;
+    int frame = frameIndex;
+    if (frame < 0) frame = 0;
+    if (frame >= frameCount) frame = frameCount > 0 ? frameCount - 1 : 0;
+    size_t offset = static_cast<size_t>(frame) * static_cast<size_t>(vertsPerFrame) +
+                    static_cast<size_t>(vertexIndex);
+    if (offset >= vertices.size()) return kZero;
+    return vertices[offset];
 }
 
 uint16_t Model::TexelAt(int skinIndex, int x, int y) const {

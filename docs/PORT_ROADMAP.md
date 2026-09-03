@@ -2021,6 +2021,214 @@ algorithms.
       session (this agent has no way to listen) -- door/chest/lock sounds
       and each zone's ambient music should be checked live.
 
+- [x] **M28 -- full audit pass: the tile-grid renderer rebuilt against a
+      complete decompile, plus real menu-navigation and monster-AI fixes**
+      (this session). Prompted by three player-reported glitches --
+      "textures and lighting are not correct, some walls have the wrong
+      textures or they can be misaligned", "the menus don't work properly,
+      especially moving between the options and selecting them", and "the
+      enemies have gigantic aggro ranges and ignore all pathfinding and
+      collision". All three traced to real defects; most turned out to be
+      port-side mistranslations of things the decompile already had, or
+      could settle.
+    - **Textures: the real `.sur` UV pipeline, implemented.** The port had
+      been mapping a flat 0..1 UV across every quad since M6, so a single
+      128x128 texture was stretched over a whole wall face regardless of
+      its real world size. The real formula (decompiled from
+      `SurfaceFace_BuildAndProject`'s tail, with the fixed-point scale
+      pinned down by its consumer `SurfaceFace_RasterizeTextured_v3`) is a
+      function of the vertex's **world position**: `u = (worldAxis +
+      uOffset) << uShift`, `v = (vAxis + vOffset) << vShift`, negated per
+      the flip bits, with the texel fetch being `mask & (uv >> 8)` -- so
+      one texel is `2^(8-shift)` raw world units and textures genuinely
+      **tile** (a wrap, not the clamp the port used). Real `azra.sur`
+      shifts are 4-7; the dominant 6 puts 64 texels across a 256-unit
+      tile. `.sur` bytes 0-5 were parsed for the first time
+      (`SurfaceRecord`, `world/zone.h`).
+    - **Textures: a wall's material comes from the *neighbouring* tile.**
+      The single largest visual defect. `Render3DScene`'s four wall blocks
+      rebuild the type-table pointer from the neighbour cell's own
+      `zcpIndex` (`pbVar36 + 0xc` / `- 4` / row strides) -- the port read
+      the *current* tile's index. Measured across shipped data the two
+      disagree for **100%** of azra's wall boundaries, 98% of snowline's,
+      92% of ghstpass's, 12% of crypt1's. Concretely: azra's wall tiles
+      hand back a surface whose flags bit5 marks it *disabled* (the real
+      game draws nothing and shows the canyon beyond), while the port was
+      filling those faces in with whatever texture the tile underfoot
+      happened to use -- which is why the starting area rendered as
+      floor-to-ceiling grass instead of the stone-and-timber interior it
+      actually is.
+    - **Textures: the two wall bands' roles were swapped**, and the whole
+      wall-face gate was wrong. `0x16`-`0x19` (named `_lo`) is the
+      **main** band, spanning `max(currentFloor, neighbourCeiling)` to the
+      current ceiling; `0x1a`-`0x1d` (`_hi`) is the **lower floor-step**
+      band. Faces are not gated on "is the neighbour a wall" at all -- any
+      boundary can carry one, `0xff` means none, and a flat corridor
+      simply produces zero-height bands. Wall tiles are iterated too (only
+      their floor/ceiling is suppressed); the height comparisons keep that
+      from double-drawing.
+    - **The corner-index convention was reversed.** `floorHeight[4]`/
+      `ceilingHeight[4]` index 0 is `(x0,y1)`, 1 `(x1,y1)`, 2 `(x1,y0)`,
+      3 `(x0,y0)` -- read off the floor block's vertex assignments and
+      confirmed by all four wall blocks. The port assumed
+      `0=NW,1=NE,2=SE,3=SW`, the exact reverse, which mirrors every sloped
+      tile about its diagonal -- in the renderer *and* in
+      `Zone::FloorHeightAt()`, i.e. in the ground the player physically
+      stands on.
+    - **A whole `ZcpEntry` field was missing.** The floor-draw gate reads
+      `entry+2`, not the ceiling threshold at `+4` (an earlier version of
+      `ZONE_FORMAT.md` quoted it wrongly, and the port had never parsed
+      `+2` at all). Now `floorBandThreshold`; the ceiling A/B selection
+      (previously always band A) uses `+4` as documented.
+    - **`ZcpEntry+0x23`'s corner nudge, implemented.** Already documented
+      but never ported: the real engine shifts each face vertex by half a
+      tile per an 8-case code on the cell that vertex falls in, which is
+      where the game's diagonal/bevelled corners come from. ~7% of real
+      `.zcp` entries across the 21 shipped zones use it.
+    - **Lighting is now per-vertex, with the real distance fog.**
+      `vertex.light = engine+0x484 + cellLight - (viewDepth >> 1)`,
+      clamped `[0x400, 0x3f00]`, interpolated across the triangle -- the
+      port applied one flat value per face and had no distance falloff at
+      all. `engine+0x484` is referenced exactly once in the whole binary
+      (this read) and written nowhere, so the real ambient base is
+      effectively 0 -- the same "never explicitly initialised" finding
+      already recorded for the eye-height field. The distance-driven
+      texture detail mask (`0x7f`/`0x7e`/`0x7c`/`0x78` by average
+      triangle depth) is implemented too.
+    - **Real near-plane clipping**, replacing M6's whole-quad cull. A
+      polygon with any vertex behind the eye used to be dropped entirely,
+      which punched a hole in the floor and ceiling of the tile the player
+      was standing in every frame, and made entity models vanish in chunks
+      up close. Now clipped Sutherland-Hodgman against the near plane
+      (what `Poly3D_ClipAgainstPlane` does in the original), for both the
+      tile pipeline and models.
+    - **Menus: the selection index was compared against the wrong
+      counter.** `selectedItem()` is a 1-based index into *all* rows (the
+      number `AddMenuItem`/`AddStaticItem` hand back to scripts, and what
+      `SetSelectedItem` takes -- confirmed against real scripts like
+      `configkeys.s`), but `main.cpp`'s menu and popup renderers counted
+      only *selectable* rows. On any screen mixing static and selectable
+      rows the highlight landed on a different row than the one Enter would
+      activate -- and on the main menu, where Load/Delete/Multiplayer start
+      disabled, moving the selection made the highlight vanish entirely.
+    - **Menus: `SetPrevMenu` was soft-failing, stranding the player.** 15
+      real screens call it in `Init()` and **no script in the corpus ever
+      reads it back** -- there is no `GetPrevMenu` anywhere -- so it can
+      only have been consumed natively by the back key. 11 of those screens
+      (Options, ConfigKeys, Load/Save/Delete Game, ChooseCharacterMenu,
+      MultiPlayerMenu, ...) define no `OnRightSoftkey` handler at all, so
+      pressing back on them did nothing whatsoever. Now
+      `MenuExecutable::GoBack()`: the screen's own handler if it has one,
+      else its real `SetPrevMenu()` target.
+    - **Menus: held direction keys did nothing after the first press.**
+      `SetButton()` deliberately latches only the 0->1 edge, so menus were
+      tap-only. Added a menu-only auto-repeat (`TickRepeats()` /
+      `ConsumeJustPressedOrRepeat()`, ~320ms then ~120ms); gameplay actions
+      keep the exact old edge-only behaviour so holding an attack key still
+      doesn't machine-gun. Also fixed a stale-selection case
+      (`EnsureValidSelection()`): a screen whose `OnDisplay()` rebuilds its
+      rows came back with nothing highlighted and a dead confirm key.
+    - **Enemies: aggro is now sight-gated.** 222 of the corpus's 270
+      `SetChaseRadius` calls pass **18000** raw world units -- 70 tiles on
+      a 128x128 grid, over half the map. Taken as a bare radius (which is
+      what the port did) that is "the whole level notices you"; it only
+      makes sense as "anywhere I can actually see". Added
+      `Zone::HasLineOfSight()` (an Amanatides-Woo DDA over the same wall
+      flag the renderer and `Bullseye` light rays use -- the real engine
+      has exactly this facility as `TileGrid_RaycastVisibility`, though how
+      its AI consumes it was never traced, so the specific use is this
+      port's design). Aggro now also requires vertical proximity, so a
+      creature two storeys down no longer wakes up, and a chaser gives up
+      ~2s after losing sight instead of never de-aggroing.
+    - **Enemies: collision and steering.** Live monsters are solid to the
+      player (they were walked straight through). Chasers steer around
+      obstacles -- straight line first, then progressively wider turns --
+      instead of grinding into the wall between them and the player, and
+      push apart from each other so a pack doesn't collapse onto one point.
+      Still not a real pathfinder: the original's own `.pth` spawn/patrol
+      data is undecoded past its header.
+    - **Real per-instance `SetSkin`/`SetScale`**, both previously
+      soft-failed (and both visible in the user's own play-session log):
+      creatures rendered as skin 0 at 1:1 regardless of what their script
+      asked for. `SetScale` is 8.8 fixed point (256 == 1:1), consistent
+      with every real call site including `azra_rat.s`'s
+      `SetScale(Random(206,306))`.
+    - **Ranged attacks no longer shoot through walls** -- closes M20's own
+      documented gap now that a sightline test exists.
+    - Two host-side defects fixed while in here: the Win32 message loop
+      busy-spun a full CPU core between the 25Hz ticks (now waits on the
+      message queue), and `WM_SYSKEYDOWN`/`WM_SYSKEYUP` were dropped, which
+      could leave a key latched down forever if its release arrived as a
+      SYS message.
+    - New `port/src/tests/m28_surface_uv_smoke.cpp` asserts the real
+      `.sur` field values from `azra.sur` byte-for-byte, the UV scale
+      (shift 6 = 64 texels/tile, 7 = 128, 4 = 16), the wall-vs-floor V
+      axis, the flip bits, the corner-nudge half-tile, the corner-index
+      convention (via `FloorHeightAt` at each corner of a real sloped
+      tile), the two distinct threshold fields, and line-of-sight
+      behaviour. All 27 smoke tests pass, and the result was confirmed
+      live: the starting area now renders as a real stone interior with
+      timber ceiling beams, arched openings, a rug and props, in place of
+      the uniform green it showed before.
+    - **The Options screen was missing half its rows.** `AddMenuSlider`,
+      `GetLanguageStr` and `MuteOnCall` all soft-failed, so options.s's two
+      volume sliders didn't exist as rows at all and its God-Mode/language
+      branches took the wrong path. Implemented for real
+      (`simkin_bindings/slider_executable.h`, plus master SFX/music gains
+      on `audio/audio_engine.h` that the sliders actually drive). The
+      screen now shows Sound Volume / Music Volume / Select Language /
+      Customize Controls / Mute-when-in-call, and Left/Right moves a
+      slider by its real step.
+    - **`GoBack()` falls through to `SetPrevMenu` even when the screen
+      *has* a handler** -- because the handler is often dead in the real
+      game too. options.s's `OnRightSoftkey` body is a single call to
+      `OptionsMenuBack()`, and `OptionsMenuBack` is **absent from the
+      fully-enumerated real 702-entry native table**; so are `MenuBack()`
+      (called by inventory.s / questlog.s / buysell.s / actionqueue.s) and
+      `HostGameMenuBack()`. Same already-documented "registered nowhere,
+      so it misses in the real binary too" case as
+      `UpdateTextItems`/`GetLastItem`/`IsRightQueue`. Confirmed live: Esc
+      on Options now returns to the main menu.
+    - **Not attempted**: `SetAttachedWeapon` (a held-weapon model on a
+      creature), and replacing the fixed-radius tile scan with the real
+      `TileGrid_RaycastVisibility` fan.
+
+- [x] **M29 -- creature animation, and the model trailer decoded** (this
+      session, direct follow-on from M28's audit). Every monster script in
+      the corpus sets four animation numbers and the port soft-failed all
+      of them, so creatures were static resting-pose statues sliding
+      around the level -- one of the largest remaining visual gaps.
+    - **`docs/MODEL_FORMAT.md`'s open "what is the resource trailer?"
+      follow-up is resolved**: it's the **animation clip table**, one
+      6-byte `(startFrame, endFrame, rate)` record per clip. What settles
+      it is that the records **exactly partition** `[0, frameCount)` --
+      first starts at 0, each start is the previous end, last end equals
+      the header's own frame count -- for **every** animated entry in the
+      real archive (33 of 226, up to 200 frames and 11 clips), asserted by
+      the new `m29_animation_smoke` test. The clip *count* also matches
+      script usage: `arat.s` names clips 0-3 and its model carries 4; the
+      creatures naming clip 8 resolve to models carrying 9 or 11. That is
+      exactly what `SetIdleAnimation`/`SetWalkAnimation`/
+      `SetSwingAnimation`/`SetDeathAnimation`/`PlayAnimation` index.
+    - `world/model_archive.h` now keeps **all** frames (M8 kept only frame
+      0), at the real per-frame offset `(frameIndex * H5 + H0) * 2`, plus
+      the parsed clip table; `Model::VertexAt(frame, vertex)` clamps
+      out-of-range frames. `PlacedEntity::frameIndex` threads the chosen
+      frame to the rasterizer.
+    - `MonsterExecutable` stores the four real clip numbers and
+      `PlayAnimation`/`PlayAnimationOffset`'s starting pose;
+      `main.cpp`'s AI loop selects idle / walk / swing / death from the
+      creature's own state and advances playback per tick.
+    - **A dead monster no longer blinks out of existence** -- it plays its
+      real `SetDeathAnimation()` clip and holds the final pose as a body.
+      (It stops blocking movement and stops being targetable the moment it
+      dies, as before; only the visual changed.) Without this the death
+      clip every real script sets had nothing to play it.
+    - **This port's own choices, not recovered behaviour**: reading the
+      clip record's third field as frames-per-second (its units were never
+      traced to a consumer -- observed values are 1/3/5/6/10/11/15/17/29),
+      and looping every clip except death.
+
 ## Next milestones (not yet started)
 
 Roughly in priority order for reaching "actually playable," not commitments:
@@ -2064,6 +2272,13 @@ Roughly in priority order for reaching "actually playable," not commitments:
   entry and `simkin_bindings/weapon_viewmodel.h`'s class comment. This
   port currently substitutes the `UseLeftAction`/`UseRightAction` keypress
   that already drives combat resolution, undecompiled.
+- **`AnimationClip::rate`'s real units** (M29) -- frames per second is the
+  working reading and looks right in motion, but it hasn't been traced to a
+  decompiled consumer. Likewise `SetAttachedWeapon` (a second model drawn
+  in a creature's hand) is still stored-and-unused.
+- **The real `TileGrid_RaycastVisibility` fan** in place of the renderer's
+  fixed-radius tile scan (M28 rebuilt everything else about that pipeline
+  against the decompile, but the visibility set is still an approximation).
 - **Audio's remaining narrower gaps** (M27, `docs/AUDIO_FORMAT.md`
   resolved the core system) -- native-only player-action sounds (attack/
   jump/death/footsteps, never called from any script); main-menu

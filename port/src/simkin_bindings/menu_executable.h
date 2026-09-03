@@ -102,10 +102,45 @@ public:
     // M4/M5: host-driven navigation, called from the input/tick loop.
     // Moves the 1-based selection to the next/previous *selectable* row,
     // wrapping around either end.
+    //
+    // IMPORTANT (and the source of a real navigation bug fixed this
+    // session): `selectedItem()` is a **1-based index into every row**, not
+    // into just the selectable ones -- that's the convention the real
+    // scripts use, since AddMenuItem()/AddStaticItem() hand back exactly
+    // that number (see MenuItemHandle::intValue(), and AddStaticItem's own
+    // `m_Rows.size()` return) for scripts to pass straight back into
+    // SetSelectedItem(). main.cpp's renderer used to compare it against a
+    // counter that skipped non-selectable rows, so on any screen mixing
+    // static and selectable rows the highlight landed on the wrong row --
+    // use IsRowSelected() below rather than recounting.
     void MoveSelection(int delta);
+
+    // True if `rowIndex` (0-based, into rows()) is the currently selected
+    // row. The single place the 1-based/all-rows convention above is
+    // decoded, so renderers can't get it wrong again.
+    bool IsRowSelected(size_t rowIndex) const {
+        return static_cast<int>(rowIndex) + 1 == m_SelectedItem;
+    }
+
+    // Snaps the selection to the first selectable row if it currently
+    // points at nothing selectable -- i.e. after ClearMenu() (which resets
+    // it to 0) or after a script's own SetSelectedItem() named a row that
+    // is now static or gone. Without this, a screen whose OnDisplay()
+    // rebuilds its rows comes back with no selection at all: nothing is
+    // highlighted and the confirm key does nothing until the player
+    // happens to press Up or Down. Cheap and idempotent -- called once per
+    // tick from the input loop.
+    void EnsureValidSelection();
     // Cycles the currently selected row's value if it's a ComboBox (fires
-    // its SetCallback() handler on change); no-op for any other row kind.
+    // its SetCallback() handler on change) or nudges it if it's a Slider
+    // (M28, the real Options screen's two volume rows -- applies the new
+    // value to the audio engine straight away); no-op for any other row
+    // kind.
     void CycleSelectedCombo(int delta);
+    // Pushes a slider row's current value into the audio engine (see
+    // the .cpp) -- shared by the initial AddMenuSlider() and each
+    // later Left/Right adjustment.
+    void ApplySliderValue(const class SliderExecutable& slider);
     // Fires the currently selected row's script callback (MenuItem's
     // AddMenuItem callback, ComboBox's SetOnEnterCallback, or
     // FloatingSprite's own callback), if it has one -- same dispatch path
@@ -115,8 +150,17 @@ public:
     // Fires a named handler if the script defines one (e.g.
     // "OnRightSoftkey" for the back/cancel softkey); no-ops silently if
     // it doesn't, unlike method()'s normal soft-fail logging -- this is
-    // an optional hook, not an unresolved native call.
-    void TryInvoke(const std::string& handlerName);
+    // an optional hook, not an unresolved native call. Returns whether the
+    // script actually had it.
+    bool TryInvoke(const std::string& handlerName);
+
+    // The back/cancel softkey for this screen -- the screen's own handler
+    // if it defines one, else its real SetPrevMenu() target. See the .cpp
+    // for why the SetPrevMenu fallback is required rather than optional.
+    // Returns false only if the screen has neither.
+    bool GoBack();
+
+    const std::string& prevMenuPath() const { return m_PrevMenuPath; }
 
     enum class RowKind {
         MenuItem,
@@ -127,6 +171,7 @@ public:
         TextEntry,
         ItemButton,  // M10: AddItemButton()
         Table,       // M10: AddTable()
+        Slider,      // M28: AddMenuSlider() -- see slider_executable.h
     };
     struct MenuRow {
         RowKind kind;
@@ -240,6 +285,10 @@ private:
     TitleHandle m_TitleHandle{*this};
     bool m_UseHoriz = false;
     bool m_TextEntryActive = false;
+    // Real SetPrevMenu() target -- see GoBack(). Survives ClearMenu()
+    // (which every screen's OnDisplay runs), since the real call site is
+    // Init(), which runs only once per screen.
+    std::string m_PrevMenuPath;
     std::vector<MenuRow> m_Rows;
     int m_SelectedItem = 0;
     bool m_QueueHandIsRight = false;

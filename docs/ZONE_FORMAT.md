@@ -33,8 +33,45 @@ fallback). `GameEngine_InitLevel` loads them in this order:
    `bit5`=**disable this face entirely** — `BuildAndProject`'s very first
    check, no vertices built, no draw call at all when set), `[7]`=texture
    index (clamped into `[0, 0xfe]`, or `0xff` if the raw value overflows
-   that). Flip-U/flip-V and the UV-shift/offset fields are decoded but not
-   yet ported (the PC port still uses a flat 0..1 UV per quad).
+   that).
+
+   **The UV formula these drive, and its fixed-point scale — resolved**
+   (PC-port session; previously "decoded but not yet ported", with the port
+   substituting a flat 0..1 UV per quad). `BuildAndProject`'s tail computes
+   each vertex's UV straight from its **world position**:
+
+   ```c
+   switch (orientCode) {                       // param_5
+     case 0: u = (worldY + uOffset) << uShift; break;
+     case 1: u = (uOffset - worldY) << uShift; break;
+     case 2: u = (worldX + uOffset) << uShift; break;
+     case 3: u = (uOffset - worldX) << uShift; break;
+     case 4: case 5: u = (worldX + uOffset) << uShift; vAxis = worldY; break;
+   }
+   v = (vAxis + vOffset) << vShift;            // vAxis = worldZ for cases 0-3
+   if (flags & 2) u = -u;                      // flip U
+   if (flags & 1) v = -v;                      // flip V
+   ```
+
+   `Render3DScene` picks `orientCode` per direction: the `±Y` blocks pass a
+   literal `2`/`3`, floor passes `5` and ceiling `4` (the two fall through
+   to identical code), and the `±X` blocks choose between `0` and `1` using
+   the *main-band surface's own flip-U bit* (`+X`: `flipU ? 0 : 1`; `-X`:
+   `flipU ? 1 : 0`) — so for those two directions the flip bit ends up
+   changing the sign of the U *offset* rather than of the U axis.
+
+   The fixed-point scale is pinned by the consumer:
+   `SurfaceFace_RasterizeTextured_v3` (0x1005bbc8) fetches
+   `texture[(mask & (u >> 8)) + ((mask & (v >> 8)) << widthShift)]`, with
+   `SurfaceFace_ClipAndDispatch` passing `widthShift = 7` (128-wide) and
+   `mask` = `0x7f`/`0x7e`/`0x7c`/`0x78` chosen by the triangle's average
+   view depth against `0x400`/`0x800`/`0xc00` raw units — a real
+   distance-driven detail reduction, not just a wrap. So **one texel =
+   2^(8 − shift) raw world units**: the dominant real shift of 6 gives 64
+   texels per 256-unit tile (one 128×128 texture per 2×2 tiles), 7 gives one
+   texture per tile, and 4 (real mural surfaces, e.g. `azra.sur` records
+   14/15) stretches one texture across 8 tiles. Note the addressing is a
+   **wrap** (`&`), so textures genuinely tile across a face.
 3. **`<zone>.zon`** — room definitions: `u16` count → `engine+0x5460`, then
    count × 0x48-byte (72-byte) room records into `engine+0x5464`, stride
    0x84 (132 bytes) per room slot. **Record layout now fully decoded** (see
@@ -585,7 +622,25 @@ struct ZcpFile {
 };
 struct ZcpEntry {                  // 36 bytes -- now fully mapped
     int8   lightDelta;               // 0x00: signed, applied as delta*0x100
-    uint8  unknown0[3];                // 0x01..0x03, not decoded
+    uint8  unknown0;                   // 0x01, not decoded
+    int16  floorBandThreshold;           // 0x02: **identified this session** (was
+                                           // part of "unknown0[3]"). The FLOOR's own
+                                           // eye-height gate: `Render3DScene`'s
+                                           // floor-draw block is
+                                           //   (flags & 2) == 0 &&
+                                           //   (*(int16*)(entry+2) < cameraEyeHeight
+                                           //    || (flags & 4))
+                                           // -- i.e. the floor draws only when the
+                                           // camera is above this scalar, or tile
+                                           // `flags` bit2 forces it. An earlier pass
+                                           // of this doc quoted that gate as reading
+                                           // `ceilingBandThreshold`; it does not, it
+                                           // reads offset **2**, and the two are
+                                           // genuinely different values (in real
+                                           // azra data they differ for the large
+                                           // majority of tiles). Reading +4 here
+                                           // instead gates the floor on the ceiling's
+                                           // height and makes floors vanish.
     int16  ceilingBandThreshold;         // 0x04 (was "heightA"): a standalone
                                            // scalar, NOT part of either 4-corner
                                            // array below -- read only as the
@@ -634,17 +689,25 @@ struct ZcpEntry {                  // 36 bytes -- now fully mapped
                                            // floor/ceiling/wall-band traversal
                                            // blocks in full and matching every
                                            // 16-bit read against these offsets.
-    uint8  surIndexE_lo;                       // 0x16: EAST wall, lower band --
-                                                 // also the "does this tile have
-                                                 // an east wall at all" gate
-                                                 // (0xff = no face)
-    uint8  surIndexW_lo;                        // 0x17: WEST wall, lower band
-    uint8  surIndexS_lo;                        // 0x18: SOUTH wall, lower band
-    uint8  surIndexN_lo;                        // 0x19: NORTH wall, lower band
-    uint8  surIndexE_hi;                        // 0x1a: EAST wall, upper band
-    uint8  surIndexW_hi;                        // 0x1b: WEST wall, upper band
-    uint8  surIndexS_hi;                        // 0x1c: SOUTH wall, upper band
-    uint8  surIndexN_hi;                        // 0x1d: NORTH wall, upper band
+    // IMPORTANT, and easy to get backwards -- see "Which tile owns a wall
+    // face's material" below. These bytes are read from the tile on the
+    // **far side** of the boundary being drawn, and the `_lo`/`_hi` names
+    // are the opposite way round from the bands' actual vertical order:
+    // the `_lo` family (0x16-0x19) is the MAIN/upper band and the `_hi`
+    // family (0x1a-0x1d) is the LOWER floor-step band.
+    uint8  surIndexE_lo;                       // 0x16: +X boundary, MAIN band --
+                                                 // also the "is there a face on
+                                                 // this boundary at all" gate for
+                                                 // the whole direction (0xff = no
+                                                 // face, and the step band is
+                                                 // skipped with it)
+    uint8  surIndexW_lo;                        // 0x17: -X boundary, main band
+    uint8  surIndexS_lo;                        // 0x18: +Y boundary, main band
+    uint8  surIndexN_lo;                        // 0x19: -Y boundary, main band
+    uint8  surIndexE_hi;                        // 0x1a: +X boundary, floor-step band
+    uint8  surIndexW_hi;                        // 0x1b: -X boundary, floor-step band
+    uint8  surIndexS_hi;                        // 0x1c: +Y boundary, floor-step band
+    uint8  surIndexN_hi;                        // 0x1d: -Y boundary, floor-step band
     uint8  surIndexCeilingA;                    // 0x1e: ceiling, band A
     uint8  surIndexCeilingB;                    // 0x1f: ceiling, band B
     uint8  surIndexFloor;                       // 0x20: floor
@@ -721,13 +784,82 @@ bit1 (wall), bit3 (force-draw), and bit2 (used in the floor gate,
 draw gate** (line ~531-549):
 ```c
 if ((*pbVar36 & 2) == 0 &&                                    // not a wall
-    (ceilingBandThreshold < cameraEyeHeight || (*pbVar36 & 4) != 0))
+    (floorBandThreshold < cameraEyeHeight || (*pbVar36 & 4) != 0))
 ```
 bit2 unconditionally forces the OR to true, making the floor face draw
 regardless of the height comparison — mechanically identical in spirit
-to bit3's wall force-draw. This matches the existing characterization
-exactly; the *why* (which real tile situations set bit2 in shipped
-zone data) still isn't recoverable from code alone.
+to bit3's wall force-draw. The *why* (which real tile situations set bit2
+in shipped zone data) still isn't recoverable from code alone.
+
+**Correction (PC-port session):** an earlier version of this note named
+`ceilingBandThreshold` (offset `0x04`) in that gate. The real instruction
+reads `*(short *)(iVar24 + 2)` — offset **`0x02`**, the separate
+`floorBandThreshold` field now documented in the struct above. The two are
+genuinely different values in shipped data, so the mix-up isn't cosmetic:
+gating the floor on the *ceiling's* threshold makes floors disappear
+across most of a zone.
+
+### Which tile owns a wall face's material, and how the two bands work
+
+Also fully pinned down this session, by reading all four of
+`Render3DScene`'s wall blocks (and correcting a long-standing
+approximation in the PC port):
+
+- **The `.sur` index for a boundary comes from the tile on the far side of
+  it, never from the tile being iterated.** In the `+X` block the entry
+  pointer is rebuilt as `zcpBase + *(u16 *)(pbVar36 + 0xc) * 0x24` — that
+  is the *next* cell's `zcpIndex` (runtime cells are 8 bytes; `+0xc` is
+  `(cell+8)+4`) — and the `-X` block mirrors it with `pbVar36 - 4`. The
+  two `±Y` blocks do the same through row-stride cell indices.
+  Measured against shipped data, "current tile's index" and "neighbour's
+  index" disagree for **100%** of azra's wall boundaries, 98% of
+  snowline's, 92% of ghstpass's and 12% of crypt1's — so this is not a
+  subtle distinction, it decides most walls' material outright.
+- **Faces are not gated on "is the neighbour a wall".** Any boundary can
+  carry a face; `0xff` in the neighbour's main-band byte means "no face
+  here" and skips the direction entirely. What actually makes a flat
+  corridor draw nothing is that both bands come out with zero vertical
+  extent.
+- **Two bands per direction**, in this vertical order:
+  - the **floor-step** band (index from the `0x1a`-`0x1d` family), drawn
+    when `currentFloor < neighbourFloor` at either edge endpoint, spanning
+    `currentFloor → neighbourFloor`;
+  - the **main** band (index from the `0x16`-`0x19` family), spanning
+    `max(currentFloor, neighbourCeiling) → currentCeiling`, skipped only
+    when that range is empty at *both* endpoints.
+  A solid neighbour (floor raised, ceiling dropped below it) makes the two
+  together span the full opening — that is where an ordinary wall comes
+  from. Note this makes the naming in the struct above misleading: the
+  `_lo` family is the upper/main band.
+- **Wall tiles are iterated too** — only their floor/ceiling draw is
+  suppressed (`(*pbVar36 & 2) == 0`). The height comparisons keep this
+  self-consistent instead of double-drawing each boundary: on the solid
+  side of an open/solid boundary, both bands evaluate degenerate.
+- **A face draws only while the camera is still on the iterated tile's own
+  side of that boundary** (`camera.x < x1` for `+X`, `x0 < camera.x` for
+  `-X`, `camera.y < y1` for `+Y`, `y0 < camera.y` for `-Y`), unless the
+  tile's `flags` bit3 forces it.
+
+### The corner-index convention (0-3) — decoded
+
+`floorHeight[4]`/`ceilingHeight[4]`'s indices map to tile corners as:
+
+| index | corner position |
+|-------|-----------------|
+| 0     | `(x0, y1)`      |
+| 1     | `(x1, y1)`      |
+| 2     | `(x1, y0)`      |
+| 3     | `(x0, y0)`      |
+
+Read straight off the floor-draw block, which assigns vertex X from
+`x0,x1,x1,x0` and vertex Y from `y1,y1,y0,y0` alongside
+`floorHeight[0..3]`, and confirmed independently by all four wall blocks
+(e.g. `+X` pairs this tile's `floor[2]`/`floor[1]` against the
+neighbour's `floor[3]`/`floor[0]` — exactly the two points `(x1,y0)` and
+`(x1,y1)` the two tiles share). This is the **reverse** of the
+`0=NW,1=NE,2=SE,3=SW` order the PC port had assumed; the difference is
+invisible on the flat tiles that make up most of a zone but mirrors every
+sloped tile about its diagonal.
 
 **Bits 4-5 identified** (PC-port session, chasing a real-vs-port
 screenshot mismatch): the tile-grid wall/surface renderer's `.zlu`

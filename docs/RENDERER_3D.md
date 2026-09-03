@@ -468,6 +468,27 @@ Full writeup and the tile-record/type-table field layout live in
    implicit backface/already-passed cull) **or** the tile's `flags` bit3
    forces it regardless (exact intended use not confirmed — plausibly
    "always double-sided").
+3. **Three corrections to the point above**, from a full read of all four
+   wall blocks (PC-port session) — see `ZONE_FORMAT.md`'s "Which tile owns
+   a wall face's material" section for the detail and the measured impact.
+   (a) The neighbour's entry supplies the `.sur` index for **every**
+   boundary, not only ones where the neighbour happens to be a wall tile.
+   (b) The `0x16`-`0x19` family is the **main/upper** band while
+   `0x1a`-`0x1d` is the **lower floor-step** band — the opposite of what
+   the `_lo`/`_hi` naming suggests. (c) The floor's own gate reads
+   `ZcpEntry+2`, a separate threshold field, not the ceiling's at `+4`.
+4. **The per-vertex light/fog value, fully decoded**:
+   `vertex.light = engine+0x484 + cellLight - (viewDepth >> 1)`, clamped to
+   `[0x400, 0x3f00]`, where `cellLight` is read from the grid cell each
+   individual vertex falls in and `viewDepth` is that vertex's own
+   view-forward distance in raw world units. A whole-program decompiled
+   grep finds `engine+0x484` referenced exactly once — this read — and
+   written nowhere, so on EKA1's zeroed heap the ambient base is
+   effectively 0, the same "never explicitly initialised" pattern already
+   recorded for the eye-height constant. The `- depth/2` term is the
+   engine's real distance fog, and the rasterizer interpolates the value
+   across each scanline, so lighting is genuinely per-vertex rather than
+   flat per face.
 
 So the wall/surface pipeline isn't drawing every tile boundary every
 frame — it's gated by (a) a genuine visibility raycast and (b) a

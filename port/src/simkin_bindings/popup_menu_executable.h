@@ -43,7 +43,19 @@ public:
     static bool IsSelectable(const Item& item) { return !item.callback.empty() && !item.blanked; }
     const std::vector<Item>& items() const { return m_Items; }
     bool visible() const { return m_Visible; }
-    int selectedItem() const { return m_SelectedItem; }  // 1-based
+    // 1-based index into **all** items (`m_Items[selectedItem()-1]`), not
+    // into just the selectable ones -- the same convention MenuExecutable
+    // uses, and the same one real scripts rely on (buysell.s's
+    // `msgPopup.SetSelectedItem(2)` names item 2 of the popup as built).
+    // Use IsItemSelected() rather than recounting: main.cpp's popup
+    // renderer used to compare this against a selectable-only counter, so
+    // the highlight sat on the wrong row on any popup with a static
+    // message line above its buttons -- which is every confirm popup in
+    // the game.
+    int selectedItem() const { return m_SelectedItem; }
+    bool IsItemSelected(size_t itemIndex) const {
+        return static_cast<int>(itemIndex) + 1 == m_SelectedItem;
+    }
 
     // Host-driven navigation while this popup is the active modal (see
     // main.cpp) -- mirrors MenuExecutable's own MoveSelection/
