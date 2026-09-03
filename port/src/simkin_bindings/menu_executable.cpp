@@ -1,6 +1,8 @@
 #include "simkin_bindings/menu_executable.h"
 
+#include <algorithm>
 #include <cstdio>
+#include <cstdlib>
 
 #include "assets/string_table.h"
 #include "audio/audio_engine.h"
@@ -161,6 +163,105 @@ void MenuExecutable::MoveSelection(int delta) {
     int nextPos = (static_cast<int>(currentPos) + delta % count + count) % count;
     m_PrevSelectedItem = m_SelectedItem;
     m_SelectedItem = static_cast<int>(selectableIndices[static_cast<size_t>(nextPos)]) + 1;
+}
+
+bool MenuExecutable::NavigateDirectional(int dx, int dy) {
+    if (m_SelectedItem < 1 || static_cast<size_t>(m_SelectedItem) > m_Rows.size()) return false;
+    MenuRow& current = m_Rows[static_cast<size_t>(m_SelectedItem - 1)];
+
+    // Left/Right on a value widget adjusts the value; that is not a move.
+    if (dx != 0 && (current.kind == RowKind::ComboBox || current.kind == RowKind::Slider)) {
+        return false;
+    }
+
+    // A table consumes Up/Down while it still has somewhere to go. At its
+    // first/last row it declines, so focus can leave it for the band above
+    // or below -- which is what makes the inventory table escapable.
+    if (dy != 0 && current.kind == RowKind::Table) {
+        auto* table = static_cast<TableExecutable*>(current.widget.get());
+        if (table && table->rowCount() > 0) {
+            int next = table->selectedRow() + dy;
+            if (table->selectedRow() < 0 || (next >= 0 && next < table->rowCount())) {
+                table->MoveSelection(dy);
+                return true;
+            }
+        }
+    }
+
+    // Group the positioned selectable rows into horizontal bands. Rows the
+    // script never gave a position (AddMenuItem lists, the quit softkey)
+    // stay out of this entirely.
+    constexpr int kBandTolerance = 8;  // px; a hand-laid row is pixel-aligned
+    struct Positioned {
+        size_t index;
+        int x, y;
+    };
+    std::vector<Positioned> placed;
+    for (size_t i = 0; i < m_Rows.size(); ++i) {
+        if (!m_Rows[i].selectable || m_Rows[i].y < 0) continue;
+        placed.push_back({i, m_Rows[i].x, m_Rows[i].y});
+    }
+    if (placed.size() < 2) return false;
+
+    auto sameBand = [kBandTolerance](int a, int b) { return std::abs(a - b) <= kBandTolerance; };
+    int curX = current.x, curY = current.y;
+    if (curY < 0) return false;  // selection isn't part of the laid-out grid
+
+    if (dy != 0) {
+        // Nearest band strictly above/below, then the nearest row in it.
+        bool haveBand = false;
+        int bandY = 0;
+        for (const Positioned& p : placed) {
+            if (sameBand(p.y, curY)) continue;
+            if (dy > 0 ? (p.y <= curY) : (p.y >= curY)) continue;
+            if (!haveBand || (dy > 0 ? p.y < bandY : p.y > bandY)) {
+                bandY = p.y;
+                haveBand = true;
+            }
+        }
+        if (!haveBand) return false;
+        size_t best = placed.front().index;
+        int bestDx = -1;
+        for (const Positioned& p : placed) {
+            if (!sameBand(p.y, bandY)) continue;
+            int d = std::abs(p.x - curX);
+            if (bestDx < 0 || d < bestDx) {
+                bestDx = d;
+                best = p.index;
+            }
+        }
+        m_PrevSelectedItem = m_SelectedItem;
+        m_SelectedItem = static_cast<int>(best) + 1;
+        // Entering a table from above/below starts at its near edge rather
+        // than wherever it was left, so the two directions stay symmetric.
+        MenuRow& landed = m_Rows[best];
+        if (landed.kind == RowKind::Table) {
+            auto* table = static_cast<TableExecutable*>(landed.widget.get());
+            if (table && table->rowCount() > 0) {
+                table->SetSelectedRow(dy > 0 ? 0 : table->rowCount() - 1);
+            }
+        }
+        return true;
+    }
+
+    // Horizontal: move within this band, wrapping (a five-tab strip reads
+    // as a ring, and the real screens never have more than a handful).
+    std::vector<Positioned> band;
+    for (const Positioned& p : placed) {
+        if (sameBand(p.y, curY)) band.push_back(p);
+    }
+    if (band.size() < 2) return false;
+    std::sort(band.begin(), band.end(),
+              [](const Positioned& a, const Positioned& b) { return a.x < b.x; });
+    int pos = 0;
+    for (size_t i = 0; i < band.size(); ++i) {
+        if (band[i].index == static_cast<size_t>(m_SelectedItem - 1)) pos = static_cast<int>(i);
+    }
+    int count = static_cast<int>(band.size());
+    int next = ((pos + dx) % count + count) % count;
+    m_PrevSelectedItem = m_SelectedItem;
+    m_SelectedItem = static_cast<int>(band[static_cast<size_t>(next)].index) + 1;
+    return true;
 }
 
 void MenuExecutable::EnsureValidSelection() {
@@ -669,6 +770,16 @@ bool MenuExecutable::method(const skString& methodName, skRValueArray& args,
         row.widget.reset(new TableExecutable(*this, args[0].intValue(), args[1].intValue(),
                                               args[2].intValue(), args[3].intValue(),
                                               args[4].intValue()));
+        // M35: AddTable's real x/y/w/h were handed to the widget but never
+        // recorded on the row itself, so the table was the one thing on a
+        // hand-laid screen with no position. NavigateDirectional() needs it
+        // to know the table sits *below* the category buttons rather than
+        // being an unpositioned list row -- without it, Down from the tab
+        // strip had nowhere to go.
+        row.x = args[1].intValue();
+        row.y = args[2].intValue();
+        row.w = args[3].intValue();
+        row.h = args[4].intValue();
         returnValue = skRValue(static_cast<skiExecutable*>(row.widget.get()), false);
         return true;
     }

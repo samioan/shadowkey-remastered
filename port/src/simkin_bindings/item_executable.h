@@ -73,7 +73,12 @@ public:
     // skParseException/skRuntimeException) DoorExecutable/
     // MonsterExecutable's own InvokeOnUse() already establish, for a real
     // world pickup's Action::Use (main.cpp).
-    void InvokeOnUse();
+    // M35: returns whether the script actually defined an OnUse handler.
+    // Most world items do not -- every weapon (83 scripts), every armour
+    // piece (89), every shield (10), every spell scroll (7) and half the
+    // spells (14) have Init/HitTarget only -- and for those the engine
+    // runs its own native default instead (see main.cpp's Use handling).
+    bool InvokeOnUse();
 
     // M22: runs the real script's HitTarget(target) handler -- a real
     // spell's own damage/effect entry point, never called from any

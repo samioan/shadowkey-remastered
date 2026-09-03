@@ -295,3 +295,8 @@ target_link_libraries(animation_smoke PRIVATE sk_world)
 # see src/tests/m32_ai_package_smoke.cpp.
 add_executable(ai_package_smoke src/tests/m32_ai_package_smoke.cpp)
 target_link_libraries(ai_package_smoke PRIVATE sk_bindings)
+
+# .ent per-placement script path + equip-screen layout navigation +
+# weapon-swing restart guard -- see src/tests/m35_placement_menu_smoke.cpp.
+add_executable(placement_menu_smoke src/tests/m35_placement_menu_smoke.cpp)
+target_link_libraries(placement_menu_smoke PRIVATE sk_bindings sk_world)

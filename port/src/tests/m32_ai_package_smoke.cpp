@@ -139,8 +139,11 @@ int main(int argc, char** argv) {
     // --- The attack cadence (monster+0x2c4) ---
     {
         // Must NOT fire before the accumulator passes 0x100, and must fire
-        // once it does. At the port's 40-unit frame delta that's 7 ticks
-        // (6 * 40 = 240 <= 256 < 7 * 40 = 280).
+        // once it does. Bounds are derived from the two real constants
+        // rather than written out, so they stay honest if the frame delta
+        // is ever re-derived again -- M35 corrected it from 40 to 0x100/25
+        // (the engine's clock counts 1/256ths of a second), which turned
+        // one swing every ~7 ticks into one every ~26, i.e. one a second.
         int ticksToFirstSwing = 0;
         for (int i = 0; i < 200; ++i) {
             ++ticksToFirstSwing;
@@ -160,11 +163,21 @@ int main(int argc, char** argv) {
                 ++ticks;
                 if (rat->ConsumeAttackCadence(sk_bindings::kAiFrameDeltaUnits)) break;
             }
-            // 0x100 with 0..31 already banked, over a 40-unit delta.
-            if (ticks < 6 || ticks > 7) cadenceSane = false;
+            // 0x100 to cover, with 0..31 of it already banked by the reset.
+            int fastest = (sk_bindings::kAiAttackCadenceThreshold - 31) /
+                              sk_bindings::kAiFrameDeltaUnits + 1;
+            int slowest = expected;
+            if (ticks < fastest || ticks > slowest) cadenceSane = false;
         }
         Check(cadenceSane,
               "subsequent swings stay on cadence, jittered by the real `rand & 0x1f` reset");
+
+        // The whole point of the M35 correction: that cadence is about one
+        // swing per second at the real 25Hz tick, not four.
+        int ticksPerSwing = sk_bindings::kAiAttackCadenceThreshold /
+                                sk_bindings::kAiFrameDeltaUnits + 1;
+        Check(ticksPerSwing >= 24 && ticksPerSwing <= 27,
+              "...which works out to roughly one swing a second, not four");
     }
 
     // --- The real status-effect selector ---

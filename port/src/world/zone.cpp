@@ -178,18 +178,25 @@ bool Zone::Load(const std::string& scriptRoot, const std::string& zoneName) {
             playerStartZ = z;
             foundStart = true;
         } else if (typeId > 1) {
-            // M18: offset 0x20, 40 bytes, NUL-terminated (see EntPlacement::
-            // name's comment) -- most records leave this blank.
-            const char* namePtr = reinterpret_cast<const char*>(p + 0x20);
-            size_t nameLen = 0;
-            while (nameLen < 40 && namePtr[nameLen] != '\0') ++nameLen;
+            // M35: the record tail is TWO NUL-terminated strings, not one
+            // 40-byte name -- `char name[8]` at 0x20 and `char script[32]`
+            // at 0x28. See EntPlacement::scriptPath for the evidence.
+            // Reading the name as 40 bytes ran the two together for every
+            // record whose name filled its field.
+            auto readFixedString = [](const uint8_t* base, size_t cap) {
+                const char* s = reinterpret_cast<const char*>(base);
+                size_t len = 0;
+                while (len < cap && s[len] != '\0') ++len;
+                return std::string(s, len);
+            };
             EntPlacement placement;
             placement.x = x;
             placement.y = y;
             placement.z = z;
             placement.typeId = typeId;
             placement.yawRaw = ReadU16(p + 0x14);  // see EntPlacement::yawRaw
-            placement.name.assign(namePtr, nameLen);
+            placement.name = readFixedString(p + 0x20, 8);
+            placement.scriptPath = readFixedString(p + 0x28, 32);
             entities_.push_back(std::move(placement));
         }
     }

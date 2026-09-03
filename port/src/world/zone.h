@@ -170,6 +170,32 @@ public:
         // "trthgar", matching monsters/azra_rat.s's own
         // `Level.GetEntity("trthgar")` call).
         std::string name;
+        // M35: the record's **second** string, at offset 0x28.
+        //
+        // The tail of an .ent record is not one 40-byte name field, it is
+        // two NUL-terminated strings in fixed buffers: `char name[8]` at
+        // 0x20 and this one, `char script[32]`, at 0x28. Reading them as
+        // one produced names like "ContaineRaiders\RT_A.s" -- which is
+        // exactly "Containe" (a "Container" tag truncated into its 8-byte
+        // field) immediately followed by "Raiders\RT_A.s". Several records
+        // also carry stale editor bytes after their NUL (azra's Old_Trinket
+        // reads "monsters\Old_Trinket.s\0Azra.s"), which only makes sense
+        // for a string written into a reused fixed buffer.
+        //
+        // For gameplay entities this is **the real per-placement script
+        // path**, and it is authoritative over the entities.txt entry for
+        // the typeId: across all 21 shipped zones it resolves to a real
+        // .s file for 1530/1532 monster placements, 9/9 merchants, 11/11
+        // trapped objects, 393/570 containers and 442/559 doors -- and it
+        // is frequently a *different* script than the typeId's own (azra's
+        // "tanyin" placement is typeId 166, whose entities.txt script is
+        // monsters\Tanyin_Aldwyr.s, but whose placement names
+        // monsters\Tanyin_Aldwyr_Azra.s -- the zone-specific variant).
+        //
+        // For scenery it is just a label ("footlocker", "rock"), which is
+        // why callers must check the path actually resolves before using
+        // it. Empty when the record has no second string.
+        std::string scriptPath;
     };
     const std::vector<EntPlacement>& entities() const { return entities_; }
 

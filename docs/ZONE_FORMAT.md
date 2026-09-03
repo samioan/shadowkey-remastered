@@ -177,9 +177,52 @@ struct EntPlacement {      // offset  size
                                    //             u16 pair, just still packed into one
                                    //             field here instead of split)
     int32  typeId;                  // 0x1c    4   entity/object type ID
-    char   name[40];                  // 0x20   40   object/instance name
+    char   name[8];                   // 0x20    8   object/instance name
+    char   script[32];                  // 0x28   32   per-placement script path
 };                                             // total 0x48 = 72
 ```
+
+**Correction (M35): the tail is TWO strings, not one 40-byte name.** An
+earlier pass had `char name[40]` at `0x20`, which silently concatenated
+the two whenever the name filled its field. The tell is in the data: real
+container placements came back named `"ContaineRaiders\RT_A.s"`, which is
+`"Containe"` — a `"Container"` tag truncated into an 8-byte field, so no
+terminator — immediately followed by `"Raiders\RT_A.s"`. Several records
+also carry stale editor bytes *after* their terminator (azra's Old Trinket
+placement reads `"monsters\Old_Trinket.s\0Azra.s"`), which only happens
+when a shorter string is written into a reused fixed buffer. The `\xCC`
+filler padding both fields is the same uninitialised-memory marker as
+`unkB`'s constant `0xCCCC` high half.
+
+**`script[32]` is the real per-placement script path, and it overrides
+`entities.txt`.** Parsed across all 21 shipped zones and checked against
+the script tree:
+
+| category | placements with a tag | tag resolves to a real `.s` |
+|---|---|---|
+| 2 (monsters) | 1532 | **1530** |
+| 11 (doors) | 559 | 442 |
+| 8 (containers) | 570 | **393** |
+| 12 (trapped) | 11 | 11 |
+| 7 (merchants) | 9 | 9 |
+| 10 (traps) | 39 | 34 |
+| 1 (scenery) | 5506 | 9 |
+
+For scenery it is only a label (`"footlocker"`, `"rock"`), which is why a
+consumer has to check the path resolves rather than trusting it. For
+everything else it is the script to run, and it is routinely a *different*
+script than the typeId's own: azra's `"tanyin"` placement is typeId 166,
+whose `entities.txt` entry is `monsters\Tanyin_Aldwyr.s`, but which names
+`monsters\Tanyin_Aldwyr_Azra.s` — the zone-specific variant — for itself.
+
+**This is how a chest gets its contents.** Every container in the game is
+an `entities.txt` `!label` with no script (`!chest_loot`, `!footlocker`,
+`!barrel_loot`, ...); the loot script is named per placement, and is
+typically one of the randomised `RT_A.s`/`RT_B.s` chest scripts
+(`SetUsable(true)`, a `Random(1,100)` chain of
+`Level.CreateEntity(id); AddObject(Item);`, and an `OnUse` that opens the
+loot menu on itself). A port that resolves scripts only through
+`entities.txt` therefore renders every chest in the game as inert scenery.
 
 **Corrects an earlier version of this struct** (`typeId` at `0x14`, `pad[6]`
 at `0x18`, `name` at `0x1e`) — that was wrong by 8 bytes on `typeId`/`name`

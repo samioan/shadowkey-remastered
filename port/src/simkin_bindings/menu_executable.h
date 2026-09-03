@@ -115,6 +115,35 @@ public:
     // use IsRowSelected() below rather than recounting.
     void MoveSelection(int delta);
 
+    // M35: directional navigation that respects the screen's own layout.
+    //
+    // MoveSelection() treats every selectable row as one flat vertical
+    // list, which is right for the AddMenuItem screens it was written for
+    // and wrong for every screen a real script lays out by hand. The
+    // inventory/equip screen is the clear case: inventory.s's OnDisplay()
+    // puts five category buttons (weapons, armour, consumables, spells,
+    // misc) side by side on one row at y=25 via AddButton(...,x,y,...),
+    // with x stepping by 34 each time, and then the item table below them
+    // at y=60. Flattened, Up/Down walked through the five buttons *and*
+    // the table as if they were stacked, Left/Right did nothing at all
+    // (they went to CycleSelectedCombo, and there is no combo on that
+    // screen), and once the selection reached the table it could never
+    // leave -- Up/Down were being consumed by the table forever. That is
+    // both "the equip menus don't move through the selections properly"
+    // and "I can't get to the armour/consumables/spells tabs".
+    //
+    // The fix reads the layout the scripts already provide (MenuRow's real
+    // x/y, stored since M10): rows sharing a y band form a horizontal
+    // group navigated with Left/Right, and Up/Down step between bands,
+    // keeping the horizontally-nearest row. A Table row navigates
+    // internally until it reaches its own first/last row, then releases
+    // focus to the neighbouring band.
+    //
+    // Returns false when it does not apply -- an unpositioned screen (the
+    // classic centred AddMenuItem list, untouched), or a horizontal move
+    // on a ComboBox/Slider, which belongs to CycleSelectedCombo instead.
+    bool NavigateDirectional(int dx, int dy);
+
     // True if `rowIndex` (0-based, into rows()) is the currently selected
     // row. The single place the 1-based/all-rows convention above is
     // decoded, so renderers can't get it wrong again.

@@ -506,9 +506,31 @@ void RasterizeModelTriangle(Backbuffer& backbuffer, std::vector<float>& depthBuf
             if (raw444 == 0x0f0f) continue;  // chroma-key cutout
 
             depthBuffer[static_cast<size_t>(depthIndex)] = invW;
-            // M9 doesn't reach entity models -- unlit, matching M8's
-            // scope (see zone_renderer.h).
-            backbuffer.SetPixel(px, py, ExpandRGB444(raw444, 1.0f));
+            // M35: models are lit and fogged now, instead of being drawn
+            // at a flat 1.0 forever. That flat factor is why creatures,
+            // trees and props stayed fully bright at any distance while
+            // the walls around them faded -- they read as floating in
+            // front of the fog rather than being in it.
+            //
+            // The real actor pipeline does fog them, by its own route:
+            // `Poly3D_ClipAndDispatch` picks between 10 rasterizer
+            // variants, and the five "fade" ones compute a per-vertex
+            // `intensity = clamp(vertexZ * engine[+0x5c8] >> 8, 0,
+            // 0xffff)` -- depth scaled by a global factor -- interpolate
+            // it across the polygon, and OR its top nibble into the
+            // output colour word, which CompositeSceneBufferToScreen then
+            // runs through the engine+0x5c4 lookup table
+            // (docs/RENDERER_3D.md). Neither that factor nor that table
+            // was extracted, so the exact curve isn't reproducible; what
+            // is reproducible is the term the surface pipeline already
+            // uses (cell light minus half the view depth), applied here
+            // as a straight RGB scale because a model carries its own
+            // RGB444 skin rather than indexing a .zlu palette rung.
+            // Approximation in the mapping, right in the behaviour: the
+            // two pipelines now agree about distance.
+            float lightF = l0 * a.light + l1 * b.light + l2 * c.light;
+            float brightness = std::clamp(lightF / static_cast<float>(kMaxLightLevel), 0.0f, 1.0f);
+            backbuffer.SetPixel(px, py, ExpandRGB444(raw444, brightness));
         }
     }
 }
@@ -525,12 +547,16 @@ void RasterizeModelTriangle(Backbuffer& backbuffer, std::vector<float>& depthBuf
 // open. Zero for every caller before M15 (room mesh, and every entity
 // but a live door), so this is purely additive -- cosEntityYaw=1/
 // sinEntityYaw=0 reduces the new rotation to a no-op.
-void SubmitModel(Backbuffer& backbuffer, std::vector<float>& depthBuffer, const Model& model,
-                  int skinIndex, float offsetTileX, float offsetTileY, float offsetZ, float camX,
-                  float camY, float camZ, float cosYaw, float sinYaw, float cosPitch,
-                  float sinPitch, float focalX, float focalY, float entityYaw = 0.0f,
-                  float scale = 1.0f, int frameIndex = 0) {
-    float cosEntityYaw = std::cos(entityYaw), sinEntityYaw = std::sin(entityYaw);
+void SubmitModel(Backbuffer& backbuffer, std::vector<float>& depthBuffer, const Zone& zone,
+                  const Model& model, int skinIndex, float offsetTileX, float offsetTileY,
+                  float offsetZ, float camX, float camY, float camZ, float cosYaw, float sinYaw,
+                  float cosPitch, float sinPitch, float focalX, float focalY,
+                  float entityYaw = 0.0f, float scale = 1.0f, int frameIndex = 0) {
+    // M35: see kModelForwardYawOffset -- a model's forward is its local
+    // +Z, so a heading measured from world +X needs a quarter turn taken
+    // out of it before it can be used as a rotation of the local axes.
+    float modelYaw = entityYaw + kModelForwardYawOffset;
+    float cosEntityYaw = std::cos(modelYaw), sinEntityYaw = std::sin(modelYaw);
     for (const ModelFace& face : model.faces) {
         if (face.vA < 0 || face.vB < 0 || face.vC < 0 ||
             face.vC >= model.vertsPerFrame || face.vB >= model.vertsPerFrame ||
@@ -574,6 +600,20 @@ void SubmitModel(Backbuffer& backbuffer, std::vector<float>& depthBuffer, const 
             vv3[i].up = rz * cosPitch + flatForward * sinPitch;
             vv3[i].u = uv[i]->u / 256.0f;
             vv3[i].v = uv[i]->v / 256.0f;
+
+            // M35: the same per-vertex light the tile-grid pipeline uses
+            // (its own comment has the decompiled formula) -- the cell's
+            // baked light where this vertex stands, less half the view
+            // depth. See RasterizeModelTriangle for why a model applies it
+            // as an RGB scale rather than a palette rung.
+            float worldVertX = (offsetTileX + lx / kTileScale) * kTileScale;
+            float worldVertY = (offsetTileY + lz / kTileScale) * kTileScale;
+            int cellTx = static_cast<int>(std::floor(worldVertX / kTileScale));
+            int cellTy = static_cast<int>(std::floor(worldVertY / kTileScale));
+            float cellLight = static_cast<float>(zone.CellAt(cellTx, cellTy).lightLevel);
+            vv3[i].light = std::clamp(cellLight - vv3[i].forward * kTileScale * 0.5f,
+                                       static_cast<float>(kMinLightLevel),
+                                       static_cast<float>(kMaxLightLevel));
         }
 
         // Same real near-plane clip the tile-grid pipeline above uses --
@@ -592,6 +632,7 @@ void SubmitModel(Backbuffer& backbuffer, std::vector<float>& depthBuffer, const 
             pvc[i].depthWorld = clipped[i].forward * kTileScale;
             pvc[i].u = clipped[i].u * pvc[i].invW;
             pvc[i].v = clipped[i].v * pvc[i].invW;
+            pvc[i].light = clipped[i].light;  // M35
         }
         for (int i = 1; i + 1 < clippedCount; ++i) {
             RasterizeModelTriangle(backbuffer, depthBuffer, pvc[0], pvc[i], pvc[i + 1], model,
@@ -725,9 +766,9 @@ void ZoneRenderer::Render(Backbuffer& backbuffer, const Zone& zone, const Camera
             // model doesn't carry falls back to skin 0 rather than reading
             // past the pixel buffer.
             int skin = (pe.skinIndex >= 0 && pe.skinIndex < model->skinCount) ? pe.skinIndex : 0;
-            SubmitModel(backbuffer, depthBuffer, *model, skin, baseTileX, baseTileY, baseZ, camX,
-                        camY, camZ, cosYaw, sinYaw, cosPitch, sinPitch, focalX, focalY, pe.yaw,
-                        pe.scale, pe.frameIndex);
+            SubmitModel(backbuffer, depthBuffer, zone, *model, skin, baseTileX, baseTileY, baseZ,
+                        camX, camY, camZ, cosYaw, sinYaw, cosPitch, sinPitch, focalX, focalY,
+                        pe.yaw, pe.scale, pe.frameIndex);
         }
     }
 
@@ -737,10 +778,11 @@ void ZoneRenderer::Render(Backbuffer& backbuffer, const Zone& zone, const Camera
     // world/zone.h's RoomMesh() comment). No per-instance offset (unlike
     // .ent-placed entities): the mesh's own vertex coordinates already
     // sit in the zone's world-unit frame. Same simplifications as M8's
-    // entities: skin 0 only, unlit (no lighting reaches models yet).
+    // entities: skin 0 only. (M35: no longer unlit -- SubmitModel now
+    // applies the same per-vertex light/fog term the tile grid does.)
     if (const Model* room = zone.RoomMesh()) {
-        SubmitModel(backbuffer, depthBuffer, *room, 0, 0.0f, 0.0f, 0.0f, camX, camY, camZ, cosYaw,
-                    sinYaw, cosPitch, sinPitch, focalX, focalY);
+        SubmitModel(backbuffer, depthBuffer, zone, *room, 0, 0.0f, 0.0f, 0.0f, camX, camY, camZ,
+                    cosYaw, sinYaw, cosPitch, sinPitch, focalX, focalY);
     }
 }
 

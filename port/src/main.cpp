@@ -13,6 +13,7 @@
 #include <cctype>
 #include <cmath>
 #include <cstdio>
+#include <fstream>
 #include <map>
 #include <memory>
 #include <sstream>
@@ -130,7 +131,21 @@ std::string RowText(int textId, const std::string& literalText, const sk::String
 // simply add.
 float PlacementYawRadians(uint16_t yawRaw) {
     constexpr float kTwoPi = 6.28318530718f;
-    return static_cast<float>(yawRaw) / 65536.0f * kTwoPi;
+    // M35: the trailing `- kModelForwardYawOffset` holds every *placed*
+    // entity (doors, world pickups) exactly where it already rendered.
+    //
+    // The renderer now takes a quarter turn out of every heading, because
+    // a model's forward axis is its local +Z (see kModelForwardYawOffset
+    // -- decompiled from the real actor transform). Creature headings are
+    // computed here from atan2(dy, dx) and were genuinely a quarter turn
+    // wrong, which that fixes. This raw .ent angle is a different case:
+    // its own zero-reference was never derived from the binary, it was
+    // fitted by eye until doors stopped reading as permanently open. That
+    // fit silently absorbed the same quarter turn, so cancelling it here
+    // keeps the one thing that *was* verified -- how these actually look
+    // in the world -- rather than rotating it by an angle the fit already
+    // accounted for.
+    return static_cast<float>(yawRaw) / 65536.0f * kTwoPi - sk::kModelForwardYawOffset;
 }
 
 // M30: the entities.txt categories that are *item-shaped* -- a placement
@@ -1181,13 +1196,49 @@ int main(int argc, char** argv) {
                 // below, so Level.GetEntity() can never return a dangling
                 // pointer into a destroyed zone's objects.
                 stack.level().ClearEntities();
+                // M35: which script a placement actually runs.
+                //
+                // The .ent record carries its own script path (see
+                // Zone::EntPlacement::scriptPath -- the second string in
+                // the record tail, which this port used to read as part of
+                // the name), and it *overrides* the entities.txt entry for
+                // the typeId. That is how a chest gets its contents: every
+                // container in the game is an entities.txt "!label" with no
+                // script at all, and the loot script (Raiders\RT_A.s and
+                // friends -- randomised `Level.CreateEntity`/`AddObject`
+                // chains) is named per placement. It is also how a zone
+                // gets its own variant of a shared NPC: azra's "tanyin"
+                // placement is typeId 166, whose entities.txt script is
+                // monsters\Tanyin_Aldwyr.s, but which names
+                // monsters\Tanyin_Aldwyr_Azra.s for itself.
+                //
+                // Checked for existence rather than trusted, because for
+                // pure scenery the same field is only a label ("rock",
+                // "footlocker"). Falls back to the entities.txt name, i.e.
+                // exactly what every branch below used to do.
+                auto placementScript = [&](const sk::Zone::EntPlacement& e,
+                                            const sk::EntityTypeDescriptor* desc) -> std::string {
+                    auto toFullPath = [&](const std::string& rel) {
+                        std::string p = rel;
+                        std::replace(p.begin(), p.end(), '\\', '/');
+                        return std::string(scriptRoot) + "/" + p;
+                    };
+                    if (!e.scriptPath.empty()) {
+                        std::string full = toFullPath(e.scriptPath);
+                        if (!HasRealScript(full)) full += ".s";
+                        std::ifstream probe(full, std::ios::binary);
+                        if (probe.good()) return full;
+                    }
+                    if (desc && HasRealScript(desc->name)) return toFullPath(desc->name);
+                    return std::string();
+                };
+
                 for (const sk::Zone::EntPlacement& e : gameZone->entities()) {
                     const sk::EntityTypeDescriptor* desc = entityTypes.Lookup(e.typeId);
                     if (!desc) continue;
-                    if (desc->category == 11 && HasRealScript(desc->name)) {
-                        std::string relPath = desc->name;
-                        std::replace(relPath.begin(), relPath.end(), '\\', '/');
-                        std::string fullPath = std::string(scriptRoot) + "/" + relPath;
+                    const std::string placementScriptPath = placementScript(e, desc);
+                    if (desc->category == 11 && !placementScriptPath.empty()) {
+                        const std::string& fullPath = placementScriptPath;
                         skExecutableContext loadCtxt(&interpreter);
                         try {
                             auto door = std::make_unique<sk_bindings::DoorExecutable>(
@@ -1222,10 +1273,8 @@ int main(int argc, char** argv) {
                     // loop pulls a live object out for. M19 only covered
                     // category 3, leaving chests and every world-dropped
                     // weapon/potion as inert scenery with no prompt.
-                    if (IsPickupCategory(desc->category) && HasRealScript(desc->name)) {
-                        std::string relPath = desc->name;
-                        std::replace(relPath.begin(), relPath.end(), '\\', '/');
-                        std::string fullPath = std::string(scriptRoot) + "/" + relPath;
+                    if (IsPickupCategory(desc->category) && !placementScriptPath.empty()) {
+                        const std::string& fullPath = placementScriptPath;
                         skExecutableContext loadCtxt(&interpreter);
                         try {
                             auto item = std::make_unique<sk_bindings::ItemExecutable>(
@@ -1261,10 +1310,9 @@ int main(int argc, char** argv) {
                     // handled exactly like an NPC's, see monster_
                     // executable.cpp; OnUse() opens a real conversation menu
                     // the same way M16's NPC dialogue already does).
-                    if ((desc->category == 2 || desc->category == 7) && HasRealScript(desc->name)) {
-                        std::string relPath = desc->name;
-                        std::replace(relPath.begin(), relPath.end(), '\\', '/');
-                        std::string fullPath = std::string(scriptRoot) + "/" + relPath;
+                    if ((desc->category == 2 || desc->category == 7) &&
+                        !placementScriptPath.empty()) {
+                        const std::string& fullPath = placementScriptPath;
                         skExecutableContext loadCtxt(&interpreter);
                         try {
                             auto monster = std::make_unique<sk_bindings::MonsterExecutable>(
@@ -2186,8 +2234,45 @@ int main(int argc, char** argv) {
                         // (still possibly non-empty), so the 3D view pauses
                         // into the real loot-selection menu instead.
                         sk_bindings::MenuExecutable* beforeMenu = stack.currentMenu();
-                        pickup->script->InvokeOnUse();
-                        if (pickup->script->markedForRemoval()) {
+                        bool hadOnUse = pickup->script->InvokeOnUse();
+                        if (!hadOnUse) {
+                            // M35: the native default action, for the
+                            // large majority of world items whose script
+                            // defines no OnUse at all.
+                            //
+                            // Two shapes, and the corpus shows both by
+                            // pairing scripts that differ *only* in having
+                            // the handler. loot_ratseye.s is
+                            // `SetUsable(true)` + a CreateEntity/AddObject
+                            // chain + `OnUse { OpenMenu("LootMenu") }`;
+                            // raiders\RT_A.s (a real chest's own loot
+                            // script, named by its .ent placement) is the
+                            // same CreateEntity/AddObject chain with
+                            // SetUsable(true) and *no* OnUse. So a
+                            // container's default is to open the loot menu
+                            // on itself -- which is why no chest in the
+                            // game could be opened before this.
+                            //
+                            // Otherwise the item is simply taken. Its own
+                            // Init() already picked the prompt that says
+                            // so: blaze.s sets use text 404 "Learn Blaze"
+                            // when the player's class can use it and 405
+                            // "Pickup Blaze Scroll" when it cannot. That
+                            // prompt appearing with nothing behind it was
+                            // the reported "interacting does nothing".
+                            if (pickup->isContainer || !pickup->script->contents().empty()) {
+                                // Same spelling every real bag script uses
+                                // for it, so this shares MenuStack's cache
+                                // entry rather than making a second one.
+                                stack.OpenMenu("LootMenu", pickup->script.get());
+                                inGame = false;
+                                gamePausedForMenu = true;
+                            } else {
+                                stack.player().AddItem(std::move(pickup->script));
+                                gamePickups.erase(gamePickups.begin() +
+                                                   (pickup - gamePickups.data()));
+                            }
+                        } else if (pickup->script->markedForRemoval()) {
                             skiExecutable* pending = stack.player().TakePendingPickupItem();
                             if (pending == static_cast<skiExecutable*>(pickup->script.get())) {
                                 stack.player().AddItem(std::move(pickup->script));
@@ -2415,28 +2500,42 @@ int main(int argc, char** argv) {
                     // to the next outer row -- TryMoveTableSelection()
                     // only does something (and returns true) when the
                     // current selection actually is a Table.
+                    // M35: NavigateDirectional() first -- on any screen the
+                    // script laid out by hand (the inventory/equip tab
+                    // strip, charactermanager.s's 2x2 grid) it moves the
+                    // way the layout reads, and lets a table release focus
+                    // at its own first/last row instead of trapping it.
+                    // It declines on the plain centred AddMenuItem lists,
+                    // which then behave exactly as before.
                     if (input.ConsumeJustPressedOrRepeat(sk::ButtonSlot::Up)) {
-                        if (!menu->TryMoveTableSelection(-1)) menu->MoveSelection(-1);
+                        if (!menu->NavigateDirectional(0, -1)) {
+                            if (!menu->TryMoveTableSelection(-1)) menu->MoveSelection(-1);
+                        }
                     }
                     if (input.ConsumeJustPressedOrRepeat(sk::ButtonSlot::Down)) {
-                        if (!menu->TryMoveTableSelection(1)) menu->MoveSelection(1);
+                        if (!menu->NavigateDirectional(0, 1)) {
+                            if (!menu->TryMoveTableSelection(1)) menu->MoveSelection(1);
+                        }
                     }
-                    if (menu->useHoriz()) {
-                        // Portrait/name-entry-style screens: Left/Right
-                        // navigate rows instead of cycling a combo (there
-                        // isn't one on these screens anyway).
-                        if (input.ConsumeJustPressedOrRepeat(sk::ButtonSlot::Left)) {
-                            menu->MoveSelection(-1);
+                    if (input.ConsumeJustPressedOrRepeat(sk::ButtonSlot::Left)) {
+                        if (!menu->NavigateDirectional(-1, 0)) {
+                            // Portrait/name-entry screens (useHoriz) walk
+                            // rows; everything else adjusts the selected
+                            // combo/slider, if it has one.
+                            if (menu->useHoriz()) {
+                                menu->MoveSelection(-1);
+                            } else {
+                                menu->CycleSelectedCombo(-1);
+                            }
                         }
-                        if (input.ConsumeJustPressedOrRepeat(sk::ButtonSlot::Right)) {
-                            menu->MoveSelection(1);
-                        }
-                    } else {
-                        if (input.ConsumeJustPressedOrRepeat(sk::ButtonSlot::Left)) {
-                            menu->CycleSelectedCombo(-1);
-                        }
-                        if (input.ConsumeJustPressedOrRepeat(sk::ButtonSlot::Right)) {
-                            menu->CycleSelectedCombo(1);
+                    }
+                    if (input.ConsumeJustPressedOrRepeat(sk::ButtonSlot::Right)) {
+                        if (!menu->NavigateDirectional(1, 0)) {
+                            if (menu->useHoriz()) {
+                                menu->MoveSelection(1);
+                            } else {
+                                menu->CycleSelectedCombo(1);
+                            }
                         }
                     }
                     if (input.ConsumeJustPressed(sk::ButtonSlot::LeftSelectionKey)) {

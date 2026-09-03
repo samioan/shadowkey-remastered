@@ -78,6 +78,15 @@ public:
 
     int rowCount() const { return static_cast<int>(m_Rows.size()); }
     int selectedRow() const { return m_SelectedRow; }  // 0-based, -1 = none
+    // M35: used when focus enters the table from outside, so arriving from
+    // above lands on the first row and from below on the last -- see
+    // MenuExecutable::NavigateDirectional(). Clamped; a no-op on an empty
+    // table.
+    void SetSelectedRow(int row) {
+        if (m_Rows.empty()) return;
+        int count = static_cast<int>(m_Rows.size());
+        m_SelectedRow = row < 0 ? 0 : (row >= count ? count - 1 : row);
+    }
     // Rendering data for main.cpp: resolved display text for (row, col),
     // "" if out of range. Column 0 of an item row is the item's own name
     // (ItemExecutable::name()); grid-mode rows use whatever SetText() put

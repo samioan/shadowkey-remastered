@@ -62,20 +62,27 @@ ItemExecutable::StatusEffect ItemExecutable::statusEffect() const {
     return kEffectNone;
 }
 
-void ItemExecutable::InvokeOnUse() {
-    if (!m_Interpreter) return;
+bool ItemExecutable::InvokeOnUse() {
+    if (!m_Interpreter) return false;
     skRValueArray args;
     args.append(skRValue(0));  // placeholder for OnUse's "(s)" parameter, same convention every
                                 // other InvokeOnUse() in this codebase already uses.
     skRValue ret;
     skExecutableContext ctxt(m_Interpreter);
     try {
-        method(skString("OnUse"), args, ret, ctxt);
+        // M35: returns whether the script actually *defined* OnUse. Calls
+        // the base class directly, the same way MenuExecutable::TryInvoke
+        // does, so a script without the handler answers false instead of
+        // logging an unresolved-native soft-fail -- for a world item,
+        // having no OnUse is the normal case, not an error. See main.cpp's
+        // Use handling for the native default that then runs.
+        return skScriptedExecutable::method(skString("OnUse"), args, ret, ctxt);
     } catch (skParseException& e) {
         std::printf("ItemExecutable: PARSE ERROR in OnUse(): %s\n", e.toString().ptr());
     } catch (skRuntimeException& e) {
         std::printf("ItemExecutable: RUNTIME ERROR in OnUse(): %s\n", e.toString().ptr());
     }
+    return false;
 }
 
 void ItemExecutable::InvokeHitTarget(skiExecutable* target) {

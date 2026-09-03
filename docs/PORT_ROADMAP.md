@@ -2533,6 +2533,89 @@ algorithms.
       `Absorb.s`/`IgniteFoe.s`/`lakvan.s` coverage including the shared
       `+0x76` interaction -- 29/29 smoke tests pass.
 
+- [x] **M35 -- eight reported gameplay/UI bugs, and the four root causes
+  under them.** A user bug list that turned out to be four shared causes
+  plus four local ones. Every fix is against decompiled or shipped-data
+  evidence, not tuning.
+    - **The engine's time unit was wrong by 3.9x** (attack noise firing
+      continuously). `kAiFrameDeltaUnits` was 40, on the reasoning that the
+      per-frame delta was never recovered so the port's own 40ms tick would
+      do -- which conflated milliseconds with the engine's unit. The unit
+      is not a free choice: every duration is stored as `seconds * 0x100`,
+      and `FUN_1002f694` advances the clock those expiries are compared
+      against (`+0x460`, zeroed in `FUN_1002fca4`) by exactly this delta
+      each frame. So the clock counts 1/256ths of a second and the delta is
+      `0x100 * frameSeconds` = `0x100/25` = 10.24, not 40. Every AI timer
+      in the game -- attack cadence, poison ticks, fear, paralysis, burn --
+      was running nearly four times too fast. The 0x100 attack cadence is
+      now ~26 ticks, i.e. **one swing a second**, which is what that
+      constant and its `rand & 0x1f` jitter are proportioned for.
+    - **Models were drawn a quarter turn off** (creatures not facing the
+      player). A model's forward axis is its local **+Z**, decompiled from
+      `BuildRotationMatrix3x4` + the actor vertex loop and corroborated by
+      the shipped geometry (quadrupeds longest along Z, humanoids
+      *narrowest* along Z, door.s a slab whose thin axis is Z). See
+      `docs/MODEL_FORMAT.md`. The port rotated local +X to the heading, so
+      creatures tracked the player but always presented their flank.
+      Placement yaws are compensated so doors/pickups render unchanged --
+      their raw `.ent` zero-reference was fitted by eye, and that fit had
+      already absorbed the same quarter turn.
+    - **The `.ent` record tail is two strings, not one 40-byte name**
+      (couldn't loot chests). `char name[8]` at 0x20 and `char script[32]`
+      at 0x28 -- run together, container placements read as
+      `"ContaineRaiders\RT_A.s"`. That second field is the real
+      per-placement script path and overrides `entities.txt` (1530/1532
+      monster placements, 393/570 containers, 442/559 doors resolve). It is
+      how a chest gets its contents: every container in the game is an
+      `entities.txt` "!label" with no script, and the randomised loot
+      script is named per placement. Resolving it also picks up
+      zone-specific NPC variants (azra's "tanyin" runs
+      `Tanyin_Aldwyr_Azra.s`, not `Tanyin_Aldwyr.s`). Full writeup in
+      `docs/ZONE_FORMAT.md`.
+    - **Most world items define no `OnUse` at all** ("Learn Blaze" doing
+      nothing). Every weapon (83 scripts), every armour piece (89), every
+      shield (10), every scroll (7) and half the spells (14) have only
+      Init/HitTarget -- the engine's native default takes the item, and the
+      script's own Init already picks the prompt that says so (blaze.s sets
+      404 "Learn Blaze" or 405 "Pickup Blaze Scroll" depending on
+      `IsItemEnabledFor`). The port drove pickups purely off the script's
+      OnUse, so the prompt appeared with nothing behind it.
+      `InvokeOnUse()` now reports whether a handler existed and main.cpp
+      runs the native default when it did not.
+    - **Equip screen navigation** (two of the reported bugs). Selection was
+      one flat vertical list, but `inventory.s` lays five category buttons
+      side by side at y=25 and the item table at y=60. Flattened, Up/Down
+      walked buttons and table as if stacked, Left/Right went to
+      `CycleSelectedCombo` and did nothing (there is no combo on that
+      screen), and the table swallowed Up/Down forever once reached.
+      `NavigateDirectional()` now reads the layout the scripts already
+      provide -- rows in a y band navigate with Left/Right, Up/Down steps
+      between bands, and a table releases focus at its own first/last row.
+      Also fixed `AddTable` discarding its real x/y/w/h, which left the
+      table as the one unpositioned thing on a hand-laid screen.
+    - **Repeated attacks restarted the swing.** `StartWeaponSwing` reset to
+      frame 0 on every press; the real draw function's swing branch only
+      ever advances its progress accumulator. The post-swing hold stays
+      interruptible, which is what chains one swing into the next.
+    - **Models ignored fog** (visible through it). `RasterizeModelTriangle`
+      passed a hardcoded 1.0 brightness, so creatures/props/trees stayed
+      fully lit at any distance while the walls around them faded. The real
+      actor pipeline does fade them -- five of the ten
+      `Poly3D_RasterizeTextured` variants interpolate a depth-scaled
+      intensity into the output colour -- but neither its global factor nor
+      its lookup table was extracted, so models now take the same
+      `cellLight - depth/2` term the surface pipeline already uses, applied
+      as an RGB scale since a model carries its own RGB444 skin instead of
+      indexing a `.zlu` rung. Approximate in the mapping, correct in the
+      behaviour: the two pipelines agree about distance now.
+    - New `m35_placement_menu_smoke` (13 assertions against real
+      `raiders.ent`/`Raiders\RT_A.s`/`inventory.s` data) plus the corrected
+      cadence assertions in `m32_ai_package_smoke`; 30/30 smoke tests pass.
+    - **Not verified live**: synthetic input could not drive the running
+      game past character creation into a zone, so the in-world half of
+      these (facing, fog, chests, prompts) is verified by tests and offline
+      renders rather than by play.
+
 ## Next milestones (not yet started)
 
 Roughly in priority order for reaching "actually playable," not commitments:

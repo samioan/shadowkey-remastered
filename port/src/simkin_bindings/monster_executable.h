@@ -49,15 +49,32 @@ class StringTable;
 
 namespace sk_bindings {
 
-// M32: the engine's own per-frame delta (what FUN_1001afa4 returns) is the
-// unit every AI timer below counts in. Its magnitude was not recovered --
-// it is a field the engine writes each frame -- so this port uses its own
-// fixed tick period, 40ms (docs/RENDER_LOOP.md's real 25Hz CPeriodic).
-// That makes the decompiled 0x100 attack-cadence threshold work out to
-// ~6.4 ticks, i.e. roughly one attack attempt every 256ms, and the
-// `rand & 0x1f` reset a sub-frame jitter -- both of which are the
-// proportions the real constants imply.
-constexpr int kAiFrameDeltaUnits = 40;
+// M35 -- CORRECTED. This was 40, on the reasoning that the engine's
+// per-frame delta (FUN_1001afa4) was never recovered so the port might as
+// well count its own 40ms tick period. That conflated milliseconds with
+// the engine's own unit, and ran every AI timer in this file **3.9x too
+// fast** -- the visible symptom being a creature's attack noise firing
+// about four times a second, i.e. continuously.
+//
+// The unit is not a free choice: it is fixed by the durations themselves.
+// Every timed value in the engine is stored as `seconds * 0x100` --
+// FUN_1004aa28's `expiry = now + duration * 0x100`, Disease's literal
+// 0x1e (30 seconds), Paralyze's `(magnitude + 4) * 0x100`, IgniteFoe's
+// `magnitude << 9` (magnitude*2 seconds) -- and those expiries are
+// compared against a clock at `+0x460` which FUN_1002f694 advances by
+// exactly this per-frame delta each frame (`clock += FUN_1001afa4(...)`,
+// zeroed in the constructor, FUN_1002fca4). So the clock counts in
+// 1/256ths of a second, and the per-frame delta is
+//
+//     0x100 * frameSeconds  ==  256 / 25  ==  10.24
+//
+// at the real 25Hz tick (docs/RENDER_LOOP.md). Truncated to 10 below,
+// which makes a nominal second take 25.6 ticks instead of 25 -- 2.4%
+// slow, against the 290% fast it was. With this, the 0x100 attack-cadence
+// threshold is ~26 ticks, i.e. **one swing a second**, and the `rand &
+// 0x1f` reset is the small jitter that keeps a pack out of lockstep --
+// which is what those two constants are proportioned for.
+constexpr int kAiFrameDeltaUnits = 0x100 / 25;
 
 // The decompiled attack-cadence threshold (monster+0x2c4 must exceed this
 // before the creature may act).

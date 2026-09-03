@@ -193,6 +193,37 @@ struct PlacedEntity {
     int frameIndex = 0;
 };
 
+// M35: a model's own forward axis is its **local +Z**, and this is the
+// offset that reconciles that with `PlacedEntity::yaw`, which (like every
+// other heading in this port) measures from world +X.
+//
+// Decompiled, not guessed. `BuildRotationMatrix3x4` (FUN_10073a70) builds
+// the actor transform from three Euler angles; setting the other two to
+// zero and keeping only the third leaves
+//
+//     row0 = [ cos, 0, sin ]      out0 = screen right
+//     row1 = [   0, 1,   0 ]      out1 = screen up
+//     row2 = [-sin, 0, cos ]      out2 = camera depth
+//
+// and `Actor3D_TransformAndSubmitModel`'s own vertex loop (FUN_10056eb0)
+// applies those rows to the vertex's three int16s in file order. So the
+// heading angle rotates file components 1 and 3 about component 2 --
+// component 2 is up (which this port already had right), and at heading 0
+// component 3 maps straight to camera *depth*: the model faces directly
+// away from a camera looking the same way, i.e. **forward is local +Z**.
+//
+// Independently corroborated by the shipped geometry: measuring frame 0's
+// bounding box, every quadruped is longest along Z (Azra_Rat 311x422x1182,
+// Alpha_Wolf 238x481x893 -- the body runs along Z), every humanoid is
+// *narrowest* along Z (Bandit_Thug 218x668x120 -- shoulders across X,
+// depth in Z), and door.s is a slab whose thin axis is Z (519x1036x30 --
+// its normal, which is exactly a door's facing).
+//
+// This port was rotating local +X to the heading instead, so every
+// creature was drawn a quarter-turn off: they turned to track the player
+// but always presented their flank.
+constexpr float kModelForwardYawOffset = -1.57079632679f;  // -pi/2
+
 class ZoneRenderer {
 public:
     // Tile radius (in tiles) around the camera to scan for faces to

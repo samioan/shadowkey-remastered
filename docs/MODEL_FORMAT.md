@@ -233,3 +233,47 @@ argument) is now doubly confirmed by real bytes agreeing with both.
   their `+0x54` model pointer as a cache read from that array, keyed by an
   index carried on a per-entity-type descriptor (`engine+0xbe34`, a BST
   keyed by type ID).
+
+## A model's forward axis is its local +Z
+
+Decompiled in M35, and needed by anything that has to point a model in a
+direction (a creature facing the player, a door facing its wall).
+
+`BuildRotationMatrix3x4` (`FUN_10073a70`) builds the actor transform from
+three Euler angles. Zero the other two and keep only the third and it
+reduces to
+
+```
+row0 = [ cos, 0, sin ]      -> out0 = screen right
+row1 = [   0, 1,   0 ]      -> out1 = screen up
+row2 = [-sin, 0, cos ]      -> out2 = camera depth
+```
+
+and `Actor3D_TransformAndSubmitModel`'s vertex loop (`FUN_10056eb0`,
+around `0x10057400`) applies those rows to the vertex's three `int16`s in
+**file order** — `out_i = row_i . (v1, v2, v3) + t_i`. So the heading angle
+rotates file components **1 and 3** about component **2**:
+
+- component 2 is **up** (untouched by heading),
+- component 1 is the model's **right**,
+- component 3 is the model's **forward** — at heading zero it maps
+  straight to camera depth, i.e. the model faces directly away from a
+  camera looking the same way.
+
+The shipped geometry agrees independently. Measuring frame 0's bounding
+box per axis:
+
+| model | dX | dY | dZ | reading |
+|---|---|---|---|---|
+| Azra_Rat | 311 | 422 | **1182** | quadruped body runs along Z |
+| Alpha_Wolf | 238 | 481 | **893** | same |
+| Bandit_Thug | 218 | 668 | **120** | humanoid: shoulders across X, *depth* in Z |
+| Skelos_Undriel | 217 | 668 | **123** | same |
+| door.s | 519 | 1036 | **30** | a slab whose thin axis — its normal, i.e. its facing — is Z |
+
+Every case puts the facing axis on Z, and every case puts height on Y.
+
+**Porting note:** a renderer that rotates local +X to the heading instead
+draws every model a quarter turn off. Creatures still turn to track a
+target, but present their flank while doing it, which is easy to misread
+as "they don't turn at all".
