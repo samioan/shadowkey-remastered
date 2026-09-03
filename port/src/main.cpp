@@ -1535,6 +1535,28 @@ int main(int argc, char** argv) {
                     skExecutableContext callCtxt(&interpreter);
                     zoneScript->method(skString("Init"), args, ret, callCtxt);
                     gameZoneScript = std::move(zoneScript);
+                    // M39: SetZone(zoneId, totalExperience) -- the real
+                    // handler divides that total evenly across every
+                    // creature in the zone whose script called SetMob(),
+                    // overwriting each one's own SetExpWorth(). Applied
+                    // here because the creature list lives on this side.
+                    int zoneId = 0, zoneXp = 0;
+                    if (gameZoneScript->TakePendingZoneExperience(zoneId, zoneXp)) {
+                        int share = 0;
+                        size_t counted = 0;
+                        for (const MonsterInstance& m : gameMonsters) {
+                            if (m.script && m.script->countsForZoneExperience()) ++counted;
+                        }
+                        if (counted) share = zoneXp / static_cast<int>(counted);
+                        for (MonsterInstance& m : gameMonsters) {
+                            if (m.script && m.script->countsForZoneExperience()) {
+                                m.script->SetExpWorth(share);
+                            }
+                        }
+                        std::printf("shadowkey-port: SetZone(%d, %d) -> %zu creature(s) worth %d "
+                                    "each\n",
+                                    zoneId, zoneXp, counted, share);
+                    }
                     // M38: now that AddTrigger()/SetTrap()/AddEntity() have
                     // run, keep only the placements a trap trigger actually
                     // watches.
@@ -1668,6 +1690,21 @@ int main(int argc, char** argv) {
                 // an Action.
                 if (input.GetBoundButton(sk::Action::SideStepLeft)) tryMove(-rx, -ry);
                 if (input.GetBoundButton(sk::Action::SideStepRight)) tryMove(rx, ry);
+
+                // M39: scripted teleports. azra.s's `Birg.SummonMe()` and
+                // friends are ordinary script handlers whose whole body is
+                // a SetPosition (see MonsterExecutable's handler), so the
+                // move has to be mirrored onto the live instance -- drained
+                // here rather than inside the script call, same
+                // defer-to-a-safe-point convention as PickupItem().
+                for (MonsterInstance& m : gameMonsters) {
+                    float nx = 0, ny = 0, nz = 0;
+                    if (m.script && m.script->TakePendingPosition(nx, ny, nz)) {
+                        m.x = nx;
+                        m.y = ny;
+                        m.z = nz;
+                    }
+                }
 
                 // M38: the real trap proximity check, once the player's
                 // position for this tick is settled.

@@ -315,6 +315,27 @@ bool PlayerExecutable::method(const skString& methodName, skRValueArray& args,
         m_Experience += args[0].intValue();
         return true;
     }
+    if (methodName == skString("CountInventory") && args.entries() == 1) {
+        // M39: the real handler is a single call --
+        // `FUN_1006d08c(player+0x1f8, name)` -- a count of matching
+        // entries in the player's own inventory collection. Real callers
+        // gate quest progress on it: azra.s and glcrcrwl/nym_convo.s both
+        // branch on `GetPlayer().CountInventory("stooth") = 7`, i.e. seven
+        // of the item whose script called SetID("stooth"). It matches the
+        // item's *id*, not its display name, which is what makes a bare
+        // ASCII tag like "stooth" the right key.
+        const std::string wanted = ToStdString(args[0].str());
+        int count = 0;
+        for (const auto& item : m_Inventory) {
+            if (item && !item->markedForRemoval() && item->id() == wanted) {
+                // A stacked entry counts once per unit -- SetQuantity() is
+                // how loot_gold6-10.s and friends express "six of these".
+                count += (std::max)(1, item->quantity());
+            }
+        }
+        returnValue = skRValue(count);
+        return true;
+    }
     if (methodName == skString("PickupItem") && args.entries() == 1) {
         // M19: a real world pickup's OnUse() calls this as
         // "GetPlayer().PickupItem(self)" -- only records which live

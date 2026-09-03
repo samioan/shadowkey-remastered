@@ -40,6 +40,16 @@ bool LevelExecutable::method(const skString& methodName, skRValueArray& args,
         }
         return true;
     }
+    if ((methodName == skString("Log") || methodName == skString("TraceInt")) &&
+        args.entries() >= 1) {
+        // M39: `Level.Log("...")` / `Level.TraceInt(...)` -- real debug
+        // traces (~100 Log call sites across the shipped corpus). See
+        // ZoneScriptExecutable's own Log handler; a zone script reaches
+        // this one when it qualifies the call as `Level.Log(...)`, which
+        // most of them do.
+        std::printf("  [level log] %s\n", ToStdString(args[0].str()).c_str());
+        return true;
+    }
     if (methodName == skString("GetPlayer") && args.entries() == 0) {
         returnValue = skRValue(static_cast<skiExecutable*>(&m_Stack.player()), false);
         return true;

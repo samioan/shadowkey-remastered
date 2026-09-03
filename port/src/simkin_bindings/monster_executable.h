@@ -208,6 +208,27 @@ public:
 
     // Real per-instance appearance (see the SetSkin/SetScale handlers).
     int level() const { return m_Level; }
+
+    // M39: see the SetMob handler -- true once the script has called it,
+    // which is what opts this creature into the zone's SetZone() XP
+    // budget.
+    bool countsForZoneExperience() const { return m_CountsForZoneExperience; }
+    void SetExpWorth(int value) { m_ExpWorth = value; }
+    int expWorth() const { return m_ExpWorth; }
+
+    // M39: a script-driven teleport (SummonMe()'s whole implementation --
+    // see the SetPosition handler). Host-side: main.cpp drains this once
+    // per tick and moves the live MonsterInstance, the same
+    // defer-to-a-safe-point shape PickupItem()/markedForRemoval() already
+    // use. Returns false when nothing has changed.
+    bool TakePendingPosition(float& x, float& y, float& z) {
+        if (!m_PositionDirty) return false;
+        m_PositionDirty = false;
+        x = static_cast<float>(m_PositionX);
+        y = static_cast<float>(m_PositionY);
+        z = static_cast<float>(m_PositionZ);
+        return true;
+    }
     int skin() const { return m_Skin; }
     // SetScale()'s 8.8 fixed-point value as a plain multiplier (256 -> 1).
     float scale() const { return m_Scale > 0 ? static_cast<float>(m_Scale) / 256.0f : 1.0f; }
@@ -426,6 +447,10 @@ private:
     int m_MagicResistance = 0;
     int m_Will = 0;  // M37: stats+0x1a -- see spellResistance()
     int m_CreatureKind = kCreatureNormal;  // M37: monster+0x2d0
+    // M39: see countsForZoneExperience() / TakePendingPosition().
+    bool m_CountsForZoneExperience = false;
+    int m_PositionX = 0, m_PositionY = 0, m_PositionZ = 0;
+    bool m_PositionDirty = false;
     int m_DamageMin = 0;
     int m_DamageMax = 0;
     int m_ArmorValue = 0;

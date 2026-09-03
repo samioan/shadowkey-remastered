@@ -237,12 +237,38 @@ bool ZoneScriptExecutable::method(const skString& methodName, skRValueArray& arg
         return true;
     }
     if (methodName == skString("SetZone") && args.entries() == 2) {
-        // M23: azra.s's own bare `SetZone(1, 2000)` -- real corpus
-        // research (docs/SIMKIN_NATIVE_API.md) placed this on the "Zone
-        // effects" class, bare-reachable the same way GetEntity/GetPlayer
-        // are. Real meaning unconfirmed (no getter anywhere reads it
-        // back) -- stored only so the call doesn't soft-fail-log on
-        // every zone load; nothing in this port consumes the values yet.
+        // M39 -- resolved. This was stored-and-ignored ("real meaning
+        // unconfirmed, no getter anywhere reads it back"). The Zone-effects
+        // dispatcher's case 0 shows it is the zone's **experience budget**:
+        //
+        //   level->zoneId = arg0;
+        //   count = number of creatures in the zone with `+0x2ef` set;
+        //   share = count ? arg1 / count : 0;
+        //   for each of them: creatureStats->expWorth (+0x0e) = share;
+        //
+        // and `+0x2ef` is set by exactly one thing, the monster class's own
+        // SetMob() (see MonsterExecutable's handler). So a zone author
+        // writes one total -- azra.s's 2000, lothcav.s's 21500, crypt1.s's
+        // 25000 -- and the engine divides it evenly across however many
+        // creatures that zone happens to place, overwriting each script's
+        // own SetExpWorth(). Which is why the per-script values vary so
+        // little: they are placeholders the zone overwrites.
+        //
+        // Applied by the host after Init() returns, because the creature
+        // list lives in main.cpp (see pendingZoneExperience()).
+        m_ZoneId = args[0].intValue();
+        m_ZoneExperience = args[1].intValue();
+        m_ZoneExperiencePending = true;
+        return true;
+    }
+    if (methodName == skString("Log") && args.entries() >= 1) {
+        // M39: `Level.Log("...")` -- a real debug trace with ~100 call
+        // sites across the corpus ("About to run CountInventory",
+        // "Crystals are at " # num_crystals, ...). Genuinely useful now
+        // that whole zone scripts run: it is the script author's own
+        // commentary on what their logic thinks it is doing, and it lands
+        // in shadowkey_port.log next to everything else.
+        std::printf("  [zone log] %s\n", ToStdString(args[0].str()).c_str());
         return true;
     }
     if (methodName == skString("AddTrigger") && args.entries() == 1) {

@@ -306,6 +306,17 @@ public:
     // TriggerExecutable::WatchesEntity().
     bool AnyTrapWatches(int typeId, const std::string& entityName) const;
 
+    // M39: SetZone()'s real payload -- see its handler. Returns true once,
+    // right after Init(), handing back the zone's total experience budget
+    // for the host to divide across the creatures it loaded.
+    bool TakePendingZoneExperience(int& zoneId, int& totalExperience) {
+        if (!m_ZoneExperiencePending) return false;
+        m_ZoneExperiencePending = false;
+        zoneId = m_ZoneId;
+        totalExperience = m_ZoneExperience;
+        return true;
+    }
+
 private:
     // M38: object-valued script fields -- see setValue() above.
     std::map<std::string, skRValue> m_ObjectFields;
@@ -321,6 +332,10 @@ private:
     MenuStack& m_Stack;
     std::vector<std::unique_ptr<TriggerExecutable>> m_Triggers;
     std::vector<std::unique_ptr<EncounterExecutable>> m_Encounters;
+    // M39: see TakePendingZoneExperience().
+    int m_ZoneId = 0;
+    int m_ZoneExperience = 0;
+    bool m_ZoneExperiencePending = false;
 };
 
 }  // namespace sk_bindings

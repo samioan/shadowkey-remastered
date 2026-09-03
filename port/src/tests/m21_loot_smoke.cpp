@@ -89,25 +89,34 @@ int main(int argc, char** argv) {
     stack.level().SetEntityTypes(&entityTypes);
 
     // --- Part 1: real Azra_Rat.s's SetLoot() tag ---
-    skExecutableContext loadCtxt(&interpreter);
+    //
+    // M39 CORRECTION: `SetLoot(300, "Loot_ratseye", 1, 8)`'s trailing pair
+    // is a **drop chance**, decided once at Init -- the real handler rolls
+    // rand(1,8) and keeps the loot name only when the roll comes up 1. So
+    // a single rat carries the tag one time in eight, and this loads fresh
+    // rats until one does rather than asserting on the first.
+    // (m39_loose_ends_smoke asserts the distribution itself.)
     std::unique_ptr<sk_bindings::MonsterExecutable> rat;
-    try {
-        rat = std::make_unique<sk_bindings::MonsterExecutable>(
-            skString((std::string(scriptRoot) + "/monsters/Azra_Rat.s").c_str()), loadCtxt,
-            &strings, stack.player(), stack);
-        skRValueArray args;
-        args.append(skRValue(0));
-        skRValue ret;
-        skExecutableContext callCtxt(&interpreter);
-        rat->method(skString("Init"), args, ret, callCtxt);
-    } catch (skParseException& e) {
-        std::printf("m21_loot_smoke: FAILED -- PARSE ERROR: %s\n", e.toString().ptr());
-        return 1;
-    } catch (skRuntimeException& e) {
-        std::printf("m21_loot_smoke: FAILED -- RUNTIME ERROR: %s\n", e.toString().ptr());
-        return 1;
+    for (int attempt = 0; attempt < 500 && (!rat || rat->lootTag().empty()); ++attempt) {
+        skExecutableContext loadCtxt(&interpreter);
+        try {
+            rat = std::make_unique<sk_bindings::MonsterExecutable>(
+                skString((std::string(scriptRoot) + "/monsters/Azra_Rat.s").c_str()), loadCtxt,
+                &strings, stack.player(), stack);
+            skRValueArray args;
+            args.append(skRValue(0));
+            skRValue ret;
+            skExecutableContext callCtxt(&interpreter);
+            rat->method(skString("Init"), args, ret, callCtxt);
+        } catch (skParseException& e) {
+            std::printf("m21_loot_smoke: FAILED -- PARSE ERROR: %s\n", e.toString().ptr());
+            return 1;
+        } catch (skRuntimeException& e) {
+            std::printf("m21_loot_smoke: FAILED -- RUNTIME ERROR: %s\n", e.toString().ptr());
+            return 1;
+        }
     }
-    bool tagOk = rat->lootTag() == "Loot_ratseye";
+    bool tagOk = rat && rat->lootTag() == "Loot_ratseye";
     std::printf("Azra_Rat.s lootTag(): \"%s\" (expected \"Loot_ratseye\") %s\n",
                 rat->lootTag().c_str(), tagOk ? "OK" : "FAILED");
     if (!tagOk) ok = false;

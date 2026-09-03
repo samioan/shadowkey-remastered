@@ -246,6 +246,9 @@ public:
     int templateId() const { return m_TemplateId; }
     void SetTemplateId(int typeId) { m_TemplateId = typeId; }
 
+    // M39: a real script's own SetID() (e.g. "stooth") -- the key
+    // PlayerExecutable::CountInventory() matches on.
+    const std::string& id() const { return m_Id; }
     int quantity() const { return m_Quantity; }
     const std::vector<std::unique_ptr<ItemExecutable>>& contents() const { return m_Contents; }
 

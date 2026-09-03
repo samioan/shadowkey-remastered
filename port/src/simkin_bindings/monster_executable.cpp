@@ -480,8 +480,16 @@ bool MonsterExecutable::method(const skString& methodName, skRValueArray& args,
         returnValue = skRValue(m_Level);
         return true;
     }
-    if (methodName == skString("SetMob") && args.entries() == 1) {
+    if (methodName == skString("SetMob") && (args.entries() == 1 || args.entries() == 2)) {
+        // M39: the real handler's very first side effect is
+        // `monster+0x2ef = 1`, and that byte is read by exactly one other
+        // place in the binary -- SetZone's own XP distribution (see
+        // ZoneScriptExecutable::SetZone). So calling SetMob is what opts a
+        // creature into the zone's experience budget; a scripted NPC that
+        // never calls it is skipped. The optional second argument is a
+        // per-creature adjustment added to the tier value.
         m_Mob = args[0].intValue();
+        m_CountsForZoneExperience = true;
         return true;
     }
     // M28: the real animation clip numbers. Every monster script sets all
@@ -571,7 +579,46 @@ bool MonsterExecutable::method(const skString& methodName, skRValueArray& args,
     if (methodName == skString("SetLoot") && args.entries() >= 2) {
         // M21: see lootTag()'s comment -- main.cpp's death handling
         // resolves and spawns this as a real world pickup.
+        //
+        // M39: the trailing pair is a **drop chance**, not a quantity.
+        // The real handler (monster dispatcher case 0xd) rolls
+        // `rand(min, max)` and assigns the loot only when the roll comes
+        // up equal to `min`, discarding the name otherwise -- a 1-in-
+        // (max - min + 1) chance, decided once at Init, not at death. So
+        // `SetLoot(300, "Loot_ratseye", 1, 8)` is a one-in-eight rat eye
+        // and `SetLoot(300, "loot_gold25-35")` (no trailing pair) always
+        // drops. This port used to ignore the pair entirely, which made
+        // every creature in the game a guaranteed drop.
+        if (args.entries() >= 4) {
+            int lo = args[2].intValue();
+            int hi = args[3].intValue();
+            int roll = hi > lo ? lo + std::rand() % (hi - lo + 1) : lo;
+            if (roll != lo) return true;  // no loot on this instance
+        }
         m_LootTag = ToStdString(args[1].str());
+        return true;
+    }
+    // M39: `SetPosition(x, y, z)` -- not a decoration. azra.s's
+    // `Birg.SummonMe()` / `Skelos.SummonMe()` / `Vil1..4.SummonMe()` /
+    // `Heather.SummonMe()` calls are the zone's whole "the cast arrives
+    // for this scene" mechanism, and SummonMe turns out **not to be a
+    // native at all**: it is an ordinary script handler each of those
+    // NPCs' own .s files declares, whose entire body is a single
+    // SetPosition (monsters/birgiddaazra.s: `SummonMe[() {
+    // SetPosition(31083, 3483, -2816); }]`). So the only thing that was
+    // missing was the setter itself -- which soft-failed, leaving every
+    // summoned NPC standing wherever the .ent file put them.
+    //
+    // SetPositionMirror is the network-replicated twin (same
+    // DoorOpened()/DestroyObjectMirror() pattern -- no multiplayer here),
+    // and azra_rat.s's own OnKilled uses it to move Trothgar.
+    if ((methodName == skString("SetPosition") ||
+         methodName == skString("SetPositionMirror")) &&
+        args.entries() >= 3) {
+        m_PositionX = args[0].intValue();
+        m_PositionY = args[1].intValue();
+        m_PositionZ = args[2].intValue();
+        m_PositionDirty = true;
         return true;
     }
     if (methodName == skString("DestroyObjectMirror")) {

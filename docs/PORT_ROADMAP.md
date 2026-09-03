@@ -2815,6 +2815,51 @@ algorithms.
       list at `level+0x44c`, which is very likely also what `EnterZone`'s
       named triggers walk).
 
+- [x] **M39 -- the small documented loose ends.** Five open items, each
+  one call or argument, each left unguessed in its own milestone's "Not
+  attempted" note. All five resolved from the decompile and checked
+  against real shipped scripts.
+    - **`SetLoot`'s trailing pair is a drop *chance*, not a quantity.**
+      The monster dispatcher's case 0xd rolls `rand(min, max)` and keeps
+      the loot name **only when the roll comes up equal to `min`**,
+      discarding it otherwise -- a 1-in-`(max - min + 1)` chance, decided
+      once at Init rather than at death. So
+      `SetLoot(300, "Loot_ratseye", 1, 8)` is a one-in-eight rat eye and
+      `SetLoot(300, "loot_gold25-35")` (no trailing pair) always drops.
+      This port ignored the pair, which made every creature in the game a
+      guaranteed drop.
+    - **`SetZone(zoneId, total)` is the zone's experience budget.**
+      Zone-effects case 0 counts every creature in the zone with
+      `monster+0x2ef` set, divides `total` by that count, and writes the
+      share into each one's `expWorth` (`stats+0x0e`) -- overwriting
+      whatever the creature's own script set. And `+0x2ef` is written by
+      exactly one thing: the monster class's own `SetMob()`. So a zone
+      author writes one number (azra.s 2000, lothcav.s 21500, crypt1.s
+      25000) and the engine spreads it. Corroborated by the corpus:
+      `monsters/Azra_Rat.s` calls `SetMob` and counts;
+      `monsters/Tanyin_Aldwyr.s`, a scripted NPC, does not and is skipped.
+    - **`SummonMe()`/`SummonMe2()` are not natives at all.** Every target
+      of azra.s's `Birg.SummonMe()` / `Skelos.SummonMe()` /
+      `Vil1..4.SummonMe()` / `Heather.SummonMe()` declares the handler in
+      its own `.s` file, and the whole body is a single `SetPosition`
+      (`monsters/birgiddaazra.s`: `SummonMe[() { SetPosition(31083, 3483,
+      -2816); }]`). The missing piece was the setter, which soft-failed --
+      so azra's entire summoned cast stood wherever `azra.ent` put them.
+      `SetPosition`/`SetPositionMirror` are implemented and mirrored onto
+      the live instance.
+    - **`CountInventory(id)`** -- Player case 0x40, a count of matching
+      entries in the player's own inventory collection keyed on the item
+      script's `SetID()`, not its display name. Real callers gate quest
+      progress on it (azra.s and glcrcrwl/nym_convo.s both branch on
+      `CountInventory("stooth") = 7`, and `items/startooth.s` is what sets
+      that id).
+    - **`Level.Log(s)`** -- a debug trace with ~100 real call sites; it
+      now lands in `shadowkey_port.log` with everything else, which is
+      genuinely useful reading now that whole zone scripts run.
+    - New `m39_loose_ends_smoke` (12 assertions); the M21 loot assertion
+      updated for the drop chance it was silently relying on being 100%.
+      34/34 smoke tests pass.
+
 ## Next milestones (not yet started)
 
 Roughly in priority order for reaching "actually playable," not commitments:
@@ -2842,10 +2887,6 @@ Roughly in priority order for reaching "actually playable," not commitments:
   this port routes a creature's own cast through `DoAttackRoll`, and
   Absorb's heal unconditionally targets the player. Correct today only
   because nothing but the player casts here.
-- **Small documented loose ends**, one call/argument each, left open in
-  their own milestone's "Not attempted" note rather than guessed at:
-  M21's `SetLoot` trailing min/max args; M23's `SummonMe()`/`SummonMe2()`/
-  `CountInventory()`/`SetZone`'s real meaning; M24's `Level.Log(...)`.
 - **Real save file format** -- M5's save system is simulated in-memory
   only; no on-disk save format has been RE'd yet.
 - **Which scenario each of `FUN_1002c010`'s 4 gating modes means** -- the
