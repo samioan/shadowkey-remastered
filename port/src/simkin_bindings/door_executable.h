@@ -56,6 +56,17 @@ public:
     bool method(const skString& methodName, skRValueArray& args, skRValue& returnValue,
                 skExecutableContext& context) override;
 
+    // M21: guaranteed-non-blank strValue() -- see ItemExecutable::
+    // strValue()'s comment for the real bug this avoids (a found object's
+    // default-empty strValue() could otherwise compare equal to the
+    // blank `null` global via skRValue::operator=='s T_Object-vs-T_String
+    // branch). azra.s's own `M1 = Level.GetEntity("m1"); if (M1 != null)`
+    // pattern (a door/switch, category 11) is the real call shape this
+    // protects, even though that script isn't loaded/run by this port
+    // yet (docs/PORT_ROADMAP.md's M18 "Not attempted" note) -- fixed
+    // proactively rather than waiting to hit it.
+    skString strValue() const override { return skString("Door"); }
+
     // Real per-instance state, host-side accessors (same split
     // MonsterExecutable's stat accessors use) -- main.cpp's render loop
     // and interact-prompt text read these without going through the

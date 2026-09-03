@@ -565,6 +565,9 @@ int main(int argc, char** argv) {
 
     skInterpreter interpreter;
     sk_bindings::MenuStack stack(scriptRoot, interpreter, &strings);
+    // M21: Level.CreateEntity() needs entities.txt to resolve a typeId --
+    // see level_executable.h's class comment.
+    stack.level().SetEntityTypes(&entityTypes);
 
     std::string mainMenuPath = std::string(scriptRoot) + "/mainmenu.s";
     try {
@@ -779,7 +782,7 @@ int main(int argc, char** argv) {
                         skExecutableContext loadCtxt(&interpreter);
                         try {
                             auto item = std::make_unique<sk_bindings::ItemExecutable>(
-                                skString(fullPath.c_str()), loadCtxt, &strings, stack.player());
+                                skString(fullPath.c_str()), loadCtxt, stack);
                             skRValueArray args;
                             args.append(skRValue(0));  // placeholder for Init's "(s)" parameter
                             skRValue ret;
@@ -1006,6 +1009,59 @@ int main(int argc, char** argv) {
                     m.z = gameZone->FloorHeightAt(m.x, m.y);
                 }
 
+                // M21: monster-death loot-bag spawning -- see docs/
+                // PORT_ROADMAP.md's M21 entry for the full real-corpus
+                // decode. A dead monster's real SetLoot() tag string
+                // (lootTag(), MonsterExecutable) is, lowercased, a real
+                // loadable script path (this port's filesystem being
+                // case-insensitive, same convention every other path
+                // lookup in this codebase already relies on) -- resolved
+                // and loaded the same way M19's pickups are, then dropped
+                // into gamePickups at the dead monster's own position so
+                // it's immediately visible/usable, same Action::Use path
+                // pickups already go through (a loot bag's own OnUse()
+                // opens a real menu instead of directly transferring
+                // itself -- see the Action::Use handling below for how
+                // that's told apart from a direct M19-style pickup).
+                auto spawnLoot = [&](const MonsterInstance& m) {
+                    const std::string& tag = m.script->lootTag();
+                    if (tag.empty()) return;
+                    std::string relPath = tag;
+                    for (char& c : relPath) {
+                        if (c == '\\') c = '/';
+                    }
+                    std::string fullPath = std::string(scriptRoot) + "/" + relPath;
+                    skExecutableContext loadCtxt(&interpreter);
+                    try {
+                        auto bag = std::make_unique<sk_bindings::ItemExecutable>(
+                            skString(fullPath.c_str()), loadCtxt, stack);
+                        skRValueArray initArgs;
+                        initArgs.append(skRValue(0));  // placeholder for Init's "(s)" parameter
+                        skRValue initRet;
+                        skExecutableContext callCtxt(&interpreter);
+                        bag->method(skString("Init"), initArgs, initRet, callCtxt);
+                        PickupInstance inst;
+                        inst.x = m.x;
+                        inst.y = m.y;
+                        inst.z = m.z;
+                        inst.modelArchiveIndex = -1;  // no real model for a dropped loot bag found
+                                                       // yet (typeId 300's own entities.txt entry
+                                                       // is the "!bag_loot" label-only convention,
+                                                       // docs/ZONE_FORMAT.md) -- ZoneRenderer
+                                                       // already skips entities with no resolved
+                                                       // model (M8), so this just doesn't render,
+                                                       // same as any other undecoded visual.
+                        inst.script = std::move(bag);
+                        gamePickups.push_back(std::move(inst));
+                    } catch (skParseException& ex) {
+                        std::printf("shadowkey-port: PARSE ERROR loading loot bag %s: %s\n",
+                                    fullPath.c_str(), ex.toString().ptr());
+                    } catch (skRuntimeException& ex) {
+                        std::printf("shadowkey-port: RUNTIME ERROR loading loot bag %s: %s\n",
+                                    fullPath.c_str(), ex.toString().ptr());
+                    }
+                };
+
                 // Player attack -- UseLeftAction/UseRightAction (Key7/
                 // Key5, real decoded default bindings, previously unused)
                 // swing/fire whichever hand's weapon is equipped (bare-
@@ -1060,7 +1116,10 @@ int main(int argc, char** argv) {
                                                        target->script->defense(),
                                                        target->script->armorValue(), dmgMin, dmgMax);
                     target->script->ApplyDamage(dmg);
-                    if (!target->script->alive()) target->script->InvokeOnKilled();
+                    if (!target->script->alive()) {
+                        target->script->InvokeOnKilled();
+                        spawnLoot(*target);
+                    }
                 };
                 if (input.ConsumeBoundJustPressed(sk::Action::UseLeftAction)) {
                     tryAttack(stack.player().leftItem());
@@ -1154,15 +1213,23 @@ int main(int argc, char** argv) {
                     float pickupDist =
                         pickup ? distanceTo(pickup->x, pickup->y) : kInteractRange + 1.0f;
                     if (pickup && pickupDist <= doorDist && pickupDist <= npcDist) {
-                        // M19: real OnUse() (PickupItem(self) +
-                        // MirrorDestroyObject(self)) leaves the item marked
-                        // for removal from the world; if it also actually
-                        // asked to be picked up (TakePendingPickupItem()
+                        // M19/M21: two different real OnUse() shapes share
+                        // this one branch. A direct world item (snowline/
+                        // foxglove.s) calls PickupItem(self)+
+                        // MirrorDestroyObject(self) -- markedForRemoval()
+                        // goes true, and (if TakePendingPickupItem()
                         // matches this exact instance -- a script could in
                         // principle destroy itself without ever granting
-                        // the item, though no real corpus script does),
-                        // move its real ItemExecutable into the player's
-                        // inventory before erasing the world instance.
+                        // the item, though no real corpus script does) its
+                        // real ItemExecutable moves into the player's
+                        // inventory before the world instance is erased. A
+                        // loot bag (loot_ratseye.s etc., M21) instead calls
+                        // OpenMenu("LootMenu") -- detected the same
+                        // before/after currentMenu() way the NPC branch
+                        // below already does -- and stays in the world
+                        // (still possibly non-empty), so the 3D view pauses
+                        // into the real loot-selection menu instead.
+                        sk_bindings::MenuExecutable* beforeMenu = stack.currentMenu();
                         pickup->script->InvokeOnUse();
                         if (pickup->script->markedForRemoval()) {
                             skiExecutable* pending = stack.player().TakePendingPickupItem();
@@ -1171,6 +1238,9 @@ int main(int argc, char** argv) {
                             }
                             gamePickups.erase(gamePickups.begin() +
                                                (pickup - gamePickups.data()));
+                        } else if (stack.currentMenu() != beforeMenu) {
+                            inGame = false;
+                            gamePausedForMenu = true;
                         }
                     } else if (npc && npcDist <= doorDist) {
                         // A real NPC's OnUse() (e.g. tanyinconvo.s) calls

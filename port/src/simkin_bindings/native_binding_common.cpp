@@ -1,6 +1,8 @@
 #include "simkin_bindings/native_binding_common.h"
 
+#include <algorithm>
 #include <cstdio>
+#include <cstdlib>
 
 namespace sk_bindings {
 
@@ -17,6 +19,14 @@ bool SoftFailNativeCall(const char* objectDebugName, const skString& methodName,
     }
     std::printf(") -- not implemented\n");
     returnValue = skRValue(0);
+    return true;
+}
+
+bool TryHandleRandom(const skString& methodName, skRValueArray& args, skRValue& returnValue) {
+    if (methodName != skString("Random") || args.entries() != 2) return false;
+    int a = args[0].intValue(), b = args[1].intValue();
+    int lo = (std::min)(a, b), hi = (std::max)(a, b);
+    returnValue = skRValue(hi > lo ? lo + std::rand() % (hi - lo + 1) : lo);
     return true;
 }
 

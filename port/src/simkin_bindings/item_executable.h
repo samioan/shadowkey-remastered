@@ -17,7 +17,9 @@
 // category convention without needing to know a script's file path.
 // Defaults to kItemTypeMisc if none of those fire.
 
+#include <memory>
 #include <string>
+#include <vector>
 
 #include "simkin_bindings/native_stub_executable.h"
 #include "skScriptedExecutable.h"
@@ -30,25 +32,37 @@ class StringTable;
 
 namespace sk_bindings {
 
-class PlayerExecutable;
+class MenuStack;
 
 class ItemExecutable : public skScriptedExecutable {
 public:
-    // `strings` may be null (e.g. a context with no real stringtable.eng
-    // loaded, like some smoke tests) -- GetName()/GetItemDescription()
+    // M21: `stack` -- replaces M19's separate `strings`/`PlayerExecutable&`
+    // parameters (a real script now also needs `GetPlayer()` *and*
+    // `Level.CreateEntity`'s result routed through `AddObject()`, i.e. both
+    // MenuStack::player() and MenuStack::level() -- MenuStack itself
+    // already owns both plus the real stringtable/scriptRoot/interpreter,
+    // same single-reference shape MenuExecutable's own constructor already
+    // takes, so this is one reference instead of accumulating a third/
+    // fourth separate one). May reference a MenuStack constructed with a
+    // null stringtable (some smoke tests) -- GetName()/GetItemDescription()
     // fall back to a placeholder rather than crash.
-    //
-    // M19: `player` -- a real world-pickup script's OnUse() calls
-    // GetPlayer() bare (self-receiver, same convention every other
-    // binding class's own OnUse()/Init() already relies on), needed to
-    // resolve `GetPlayer().PickupItem(self)` (snowline/foxglove.s etc.).
-    // Every existing call site (PlayerExecutable::LoadStartingInventory)
-    // already has a real PlayerExecutable to pass (itself).
-    ItemExecutable(const skString& filename, skExecutableContext& ctxt,
-                    const sk::StringTable* strings, PlayerExecutable& player);
+    ItemExecutable(const skString& filename, skExecutableContext& ctxt, MenuStack& stack);
 
     bool method(const skString& methodName, skRValueArray& args, skRValue& returnValue,
                 skExecutableContext& context) override;
+
+    // M21: skTreeNodeObject::strValue() (skScriptedExecutable's own base)
+    // defaults to the TreeNode's own root data -- empty for an ordinary
+    // loaded .s script, since nothing ever assigns it one. That's a real
+    // bug source: `skRValue::operator==`'s T_Object-vs-T_String branch
+    // compares a found object's strValue() against a blank string, so a
+    // real, live ItemExecutable could accidentally compare equal to the
+    // blank `null` global (game_constants.cpp) -- caught for real by this
+    // session's own lootmenu.s test (`if (Opener.GetFirst() = null)`
+    // wrongly took its "empty bag" branch for a bag that had one real
+    // item in it). A guaranteed-non-blank override fixes it at the
+    // source, for every future comparison, not just this one call site.
+    skString strValue() const override { return skString("Item"); }
 
     // M19: runs the real script's OnUse() handler -- same host-triggered-
     // call convention (placeholder "(s)" arg, catch+log
@@ -100,9 +114,19 @@ public:
     bool markedForRemoval() const { return m_MarkedForRemoval; }
     void MarkForRemoval() { m_MarkedForRemoval = true; }
 
+    // M21: real loot-bag support (loot_ratseye.s/loot_gold6-10.s etc. --
+    // see docs/PORT_ROADMAP.md's M21 entry). A bag script's Init() calls
+    // `Item = Level.CreateEntity(typeId); Item.SetQuantity(...);
+    // AddObject(Item);` -- SetQuantity()'s real value (default 1, matching
+    // lootmenu.s's own `if (Item.GetQuantity() != 1)` branch), and
+    // AddObject()/GetFirst()/GetNext()/RemoveObject() implement the bag's
+    // own Collection of contained ItemExecutables (`m_Contents`) that
+    // lootmenu.s's real UpdateMenu()/SelectItem() walk.
+    int quantity() const { return m_Quantity; }
+    const std::vector<std::unique_ptr<ItemExecutable>>& contents() const { return m_Contents; }
+
 private:
-    const sk::StringTable* m_Strings;
-    PlayerExecutable& m_Player;
+    MenuStack& m_Stack;
     skInterpreter* m_Interpreter;
     int m_ItemType = 0;  // kItemTypeMisc until a category setter fires
     int m_NameId = -1;
@@ -127,6 +151,11 @@ private:
     bool m_Equipped = false;
     skiExecutable* m_Owner = nullptr;
     bool m_MarkedForRemoval = false;
+
+    // M21: see quantity()/contents()'s comment above.
+    int m_Quantity = 1;
+    std::vector<std::unique_ptr<ItemExecutable>> m_Contents;
+    size_t m_ContentsIter = 0;
 };
 
 }  // namespace sk_bindings

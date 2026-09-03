@@ -5,6 +5,7 @@
 
 #include "simkin_bindings/game_constants.h"
 #include "simkin_bindings/item_executable.h"
+#include "simkin_bindings/menu_stack.h"
 #include "simkin_bindings/native_binding_common.h"
 #include "skInterpreter.h"
 #include "skParseException.h"
@@ -17,8 +18,7 @@ namespace sk_bindings {
 PlayerExecutable::PlayerExecutable(const sk::StringTable* strings)
     : NativeStubExecutable("Player"), m_Strings(strings) {}
 
-void PlayerExecutable::LoadStartingInventory(const std::string& scriptRoot,
-                                              skInterpreter& interpreter) {
+void PlayerExecutable::LoadStartingInventory(MenuStack& stack) {
     // A small, curated starting kit -- one of each real category
     // (weapon/armor/consumable) this milestone's item native binding
     // covers, not an attempt at "the real game's actual starting
@@ -32,15 +32,15 @@ void PlayerExecutable::LoadStartingInventory(const std::string& scriptRoot,
         "items/bread.s",
     };
     for (const char* relPath : kStartingItems) {
-        std::string fullPath = scriptRoot + "/" + relPath;
-        skExecutableContext loadCtxt(&interpreter);
+        std::string fullPath = stack.scriptRoot() + "/" + relPath;
+        skExecutableContext loadCtxt(&stack.interpreter());
         try {
-            auto item = std::make_unique<ItemExecutable>(skString(fullPath.c_str()), loadCtxt,
-                                                           m_Strings, *this);
+            auto item =
+                std::make_unique<ItemExecutable>(skString(fullPath.c_str()), loadCtxt, stack);
             skRValueArray args;
             args.append(skRValue(0));  // placeholder for Init's "(s)" parameter
             skRValue ret;
-            skExecutableContext callCtxt(&interpreter);
+            skExecutableContext callCtxt(&stack.interpreter());
             item->method(skString("Init"), args, ret, callCtxt);
             std::printf("PlayerExecutable: starting item '%s' -> \"%s\" (type=%d)\n", relPath,
                         item->name().c_str(), item->itemType());

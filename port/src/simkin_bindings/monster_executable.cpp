@@ -171,6 +171,12 @@ bool MonsterExecutable::method(const skString& methodName, skRValueArray& args,
         returnValue = skRValue(static_cast<skiExecutable*>(&m_Player), false);
         return true;
     }
+    if (TryHandleRandom(methodName, args, returnValue)) {
+        // M21: azra_rat.s's own `SetScale(Random(206,306))` -- bare, same
+        // real gap native_binding_common.h's TryHandleRandom() comment
+        // explains (previously soft-failed to 0 on every monster).
+        return true;
+    }
     // M16: NPC-mode fields/calls -- see class comment.
     if (methodName == skString("SetUsable") && args.entries() == 1) {
         m_Usable = args[0].boolValue();
@@ -193,14 +199,19 @@ bool MonsterExecutable::method(const skString& methodName, skRValueArray& args,
         m_Stack.ReopenMenu(ToStdString(args[0].str()));
         return true;
     }
+    if (methodName == skString("SetLoot") && args.entries() >= 2) {
+        // M21: see lootTag()'s comment -- main.cpp's death handling
+        // resolves and spawns this as a real world pickup.
+        m_LootTag = ToStdString(args[1].str());
+        return true;
+    }
     // SetAttackNoise/SetDeathNoise/SetIsHitNoise/SetWalkAnimation/
     // SetSwingAnimation/SetDeathAnimation/SetIdleAnimation/
-    // PlayAnimationOffset/SetScale/AiDetect/SetLoot -- azra_rat.s calls
-    // all of these, but this port has no audio and no skeletal
-    // animation (consistent with every prior milestone) and no loot-
-    // pickup-spawning system yet, so they fall through to the soft-fail
-    // below rather than getting dedicated no-op handlers -- there's
-    // nothing meaningful to store them into yet.
+    // PlayAnimationOffset/SetScale/AiDetect -- azra_rat.s calls all of
+    // these, but this port has no audio and no skeletal animation
+    // (consistent with every prior milestone), so they fall through to
+    // the soft-fail below rather than getting dedicated no-op handlers --
+    // there's nothing meaningful to store them into yet.
     if (skScriptedExecutable::method(methodName, args, returnValue, context)) {
         return true;
     }

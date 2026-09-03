@@ -16,4 +16,10 @@ void RowOwnerRef::SetRowLiteralText(const std::string& text) {
     m_Owner.SetRowLiteralText(m_RowIndex, text);
 }
 
+skiExecutable* RowOwnerRef::RowAssociatedObject() const {
+    const auto& rows = m_Owner.rows();
+    if (m_RowIndex >= rows.size()) return nullptr;
+    return rows[m_RowIndex].associatedObject;
+}
+
 }  // namespace sk_bindings

@@ -19,6 +19,12 @@ bool MenuItemHandle::method(const skString& methodName, skRValueArray& args,
         SetRowLiteralText(ToStdString(args[0].str()));
         return true;
     }
+    if (methodName == skString("GetAssociatedObject") && args.entries() == 0) {
+        // M21: lootmenu.s's own `MenuItem.GetAssociatedObject()`.
+        skiExecutable* obj = RowAssociatedObject();
+        if (obj) returnValue = skRValue(obj, false);
+        return true;
+    }
     return SoftFailNativeCall("MenuItem", methodName, args, returnValue);
 }
 

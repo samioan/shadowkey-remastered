@@ -142,6 +142,13 @@ public:
         // the real UI would invalidate a widget handle when its menu
         // redraws.
         std::unique_ptr<NativeStubExecutable> widget;
+        // M21: AddMenuItem's real 3-arg form (text, callback,
+        // associatedObject) -- lootmenu.s's own
+        // `AddMenuItem(Item.GetName(),"SelectItem",Item)`, read back via
+        // MenuItemHandle::GetAssociatedObject(). Non-owning (the real
+        // owner is wherever the object actually lives -- an ItemExecutable
+        // bag's own m_Contents, for the loot-menu case).
+        skiExecutable* associatedObject = nullptr;
     };
     const std::vector<MenuRow>& rows() const { return m_Rows; }
     int backgroundId() const { return m_BackgroundId; }
@@ -187,10 +194,22 @@ public:
     bool queueHandIsRight() const { return m_QueueHandIsRight; }
     void SetQueueHandIsRight(bool right) { m_QueueHandIsRight = right; }
 
+    // M21: the object that opened this menu on itself (a real loot bag's
+    // `OpenMenu("LootMenu")`, ItemExecutable::method()'s OpenMenu handler)
+    // -- set by MenuStack::OpenMenu()/ReopenMenu()'s new `opener` parameter,
+    // read back via lootmenu.s's own `GetOpener()` calls
+    // (`GetOpener().GetFirst()`, `GetOpener().RemoveObject(...)`, ...).
+    // nullptr for every menu not opened this way (the overwhelming
+    // majority) -- GetOpener() soft-fails to a benign default in that case
+    // rather than crash, same as any other unset optional reference in
+    // this port.
+    void SetOpener(skiExecutable* opener) { m_Opener = opener; }
+
 private:
     MenuRow& AddRow(RowKind kind, int textId, const std::string& callback, bool selectable);
 
     MenuStack& m_Stack;
+    skiExecutable* m_Opener = nullptr;
     int m_BackgroundId = -1;
     int m_TitleTextId = -1;
     TitleHandle m_TitleHandle{*this};

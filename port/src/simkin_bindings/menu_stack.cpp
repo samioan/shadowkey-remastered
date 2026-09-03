@@ -55,7 +55,7 @@ MenuStack::MenuStack(std::string scriptRoot, skInterpreter& interpreter,
       m_Interpreter(interpreter),
       m_Strings(strings),
       m_Player(new PlayerExecutable(strings)),
-      m_Level(new LevelExecutable(*m_Player)) {
+      m_Level(new LevelExecutable(*this)) {
     RegisterGameConstants(interpreter);
     // M18: `Level` is a bare global every real script can reach (docs/
     // SIMKIN_NATIVE_API.md's Zone/Level+Zone effects), never obtained via
@@ -67,7 +67,7 @@ MenuStack::MenuStack(std::string scriptRoot, skInterpreter& interpreter,
 
 MenuStack::~MenuStack() = default;
 
-MenuExecutable* MenuStack::GetOrCreateMenu(const std::string& simkinPath) {
+MenuExecutable* MenuStack::GetOrCreateMenu(const std::string& simkinPath, skiExecutable* opener) {
     std::string key = NormalizeKey(simkinPath);
     auto it = m_Menus.find(key);
     if (it != m_Menus.end()) return it->second.get();
@@ -89,6 +89,7 @@ MenuExecutable* MenuStack::GetOrCreateMenu(const std::string& simkinPath) {
         throw;
     }
     MenuExecutable* raw = menu.get();
+    if (opener) raw->SetOpener(opener);
     m_Menus[key] = std::move(menu);
     raw->RunInit();
     return raw;
@@ -104,18 +105,22 @@ MenuExecutable* MenuStack::CreateRootMenu(const std::string& key, const std::str
     return raw;
 }
 
-void MenuStack::OpenMenu(const std::string& simkinPath) {
-    MenuExecutable* menu = GetOrCreateMenu(simkinPath);
+void MenuStack::OpenMenu(const std::string& simkinPath, skiExecutable* opener) {
+    MenuExecutable* menu = GetOrCreateMenu(simkinPath, opener);
     if (!menu) {
         std::printf("  [MenuStack] OpenMenu(\"%s\") -- could not resolve, staying on current menu\n",
                     simkinPath.c_str());
         return;
     }
+    // Covers the "already cached" case GetOrCreateMenu() can't set an
+    // opener on itself (Init() doesn't rerun there, but the caller's
+    // opener should still apply to a subsequent GetOpener() call).
+    if (opener) menu->SetOpener(opener);
     m_Current = menu;
     menu->RunOnDisplay();
 }
 
-void MenuStack::ReopenMenu(const std::string& simkinPath) {
+void MenuStack::ReopenMenu(const std::string& simkinPath, skiExecutable* opener) {
     // M17: drops the cached instance (if any) first, so GetOrCreateMenu()
     // rebuilds it from scratch and reruns its real Init() -- needed for
     // an NPC dialogue tree (monster_executable.h's OpenMenu handler)
@@ -130,7 +135,7 @@ void MenuStack::ReopenMenu(const std::string& simkinPath) {
     // this is used only for that narrower case, not a change to
     // OpenMenu()'s own general caching semantics.
     m_Menus.erase(NormalizeKey(simkinPath));
-    OpenMenu(simkinPath);
+    OpenMenu(simkinPath, opener);
 }
 
 bool MenuStack::GameAvailableForLoad(int slot) const {
@@ -173,7 +178,7 @@ std::string MenuStack::GetSavedTimeStr(int slot) const {
 
 void MenuStack::RequestGameStart(std::string zoneName) {
     if (!m_StartingInventoryLoaded) {
-        m_Player->LoadStartingInventory(m_ScriptRoot, m_Interpreter);
+        m_Player->LoadStartingInventory(*this);
         m_StartingInventoryLoaded = true;
     }
     m_GameStartRequested = true;

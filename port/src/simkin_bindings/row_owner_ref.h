@@ -10,6 +10,8 @@
 #include <cstddef>
 #include <string>
 
+class skiExecutable;
+
 namespace sk_bindings {
 
 class MenuExecutable;
@@ -27,6 +29,11 @@ protected:
     // M10: ButtonExecutable/MenuItemHandle's SetItemText(literal string)
     // -- charactermanager.s's nameButton.SetItemText(myname) etc.
     void SetRowLiteralText(const std::string& text);
+    // M21: MenuItemHandle's GetAssociatedObject() -- AddMenuItem's real
+    // 3-arg form stores this on the row (menu_executable.h's MenuRow::
+    // associatedObject comment); nullptr if the row was never given one
+    // (every non-loot-menu AddMenuItem call site).
+    skiExecutable* RowAssociatedObject() const;
 
     MenuExecutable& m_Owner;
     size_t m_RowIndex;

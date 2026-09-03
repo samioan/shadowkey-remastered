@@ -37,12 +37,28 @@ void RegisterGameConstants(skInterpreter& interpreter) {
 
     // M18: `null` isn't a language literal in this Simkin dialect (checked
     // the vendored grammar -- no such keyword), but real scripts (e.g.
-    // azra.s's `if (M1 != null)` after `M1 = Level.GetEntity("m1")`)
-    // reference it as an ordinary bare global. A blank default skRValue()
-    // is exactly what LevelExecutable::GetEntity() returns on a miss (see
-    // its class comment for why that specific default, not a dedicated
-    // sentinel, is what makes the comparison behave correctly against the
-    // vendored interpreter's real skRValue::operator== semantics).
+    // azra.s's `if (M1 != null)` after `M1 = Level.GetEntity("m1")`,
+    // lootmenu.s's `if (Opener.GetFirst() = null)`) reference it as an
+    // ordinary bare global. A blank default skRValue() (T_String) is
+    // deliberate, not just the path of least resistance: it makes real
+    // scripts' equality checks against a *found* object correctly false
+    // (skRValue::operator=='s T_Object-vs-T_String branch), while a
+    // script that mistakenly calls a *method* on a genuinely-null result
+    // still throws a real "Cannot call Method ... on a non object" error
+    // (the vendored interpreter's makeMethodCall() only proceeds for
+    // T_Object) -- exactly the "comparison is safe, calling a method on
+    // null is still an error" behavior a real null should have. M21 found
+    // (and fixed at the source, see ItemExecutable/DoorExecutable/
+    // MonsterExecutable's own strValue() overrides) a real bug in the
+    // *other* half of this: skTreeNodeObject::strValue() -- the base
+    // every skScriptedExecutable-derived class inherits -- defaults to
+    // the TreeNode's own empty root data, so a *found*, real Item/Door/
+    // Monster object could accidentally compare equal to this blank
+    // "null" too (lootmenu.s's own `if (Opener.GetFirst() = null)`
+    // caught this for real, wrongly taking its "empty bag" branch for a
+    // bag that had one real item in it) -- fixed by giving those classes
+    // a real, non-blank strValue(), not by changing what `null` itself
+    // is.
     interpreter.addGlobalVariable(skString("null"), skRValue());
 }
 

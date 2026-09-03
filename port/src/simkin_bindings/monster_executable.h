@@ -58,6 +58,15 @@ public:
     bool method(const skString& methodName, skRValueArray& args, skRValue& returnValue,
                 skExecutableContext& context) override;
 
+    // M21: guaranteed-non-blank strValue() -- see ItemExecutable::
+    // strValue()'s comment for the real bug this avoids (a found object's
+    // default-empty strValue() could otherwise compare equal to the
+    // blank `null` global via skRValue::operator=='s T_Object-vs-T_String
+    // branch) -- e.g. `Trthgar = Level.GetEntity("trthgar")` if a script
+    // ever null-checked it (azra_rat.s's own OnKilled() doesn't, but a
+    // future one might).
+    skString strValue() const override { return skString("Monster"); }
+
     std::string name() const;
 
     // Real per-instance combat stats, read directly off azra_rat.s's own
@@ -84,6 +93,18 @@ public:
     bool usable() const { return m_Usable; }
     int useTextId() const { return m_UseTextId; }
     bool invulnerable() const { return m_Invulnerable; }
+
+    // M21: azra_rat.s's own `SetLoot(300, "Loot_ratseye", 1, 8)` -- the
+    // 2nd argument (only) is real, loadable data: lowercased, it's the
+    // exact real filename of a loot-bag script (`loot_ratseye.s`, this
+    // port's filesystem being case-insensitive, same convention every
+    // other path lookup here already relies on) -- see docs/
+    // PORT_ROADMAP.md's M21 entry for the full real-corpus decode. The
+    // first argument (always literally 300, entities.txt's generic "!
+    // bag_loot" container typeId) and the trailing min/max (plausibly a
+    // drop-chance roll, not confirmed by any further evidence) aren't
+    // stored -- nothing in this port's model reads them back.
+    const std::string& lootTag() const { return m_LootTag; }
 
     // Runs the real script's OnUse() handler -- same host-triggered-call
     // pattern InvokeOnKilled() already establishes. For an NPC this is
@@ -137,6 +158,7 @@ private:
     bool m_Usable = false;
     int m_UseTextId = -1;
     bool m_Invulnerable = false;
+    std::string m_LootTag;  // M21: see lootTag()'s comment.
 };
 
 }  // namespace sk_bindings

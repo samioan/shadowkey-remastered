@@ -21,6 +21,7 @@
 #include "skExecutableContext.h"
 
 class skInterpreter;
+class skiExecutable;
 
 namespace sk {
 class StringTable;
@@ -54,18 +55,36 @@ public:
     // Loads (or returns the already-loaded) menu for `simkinPath`, running
     // its Init() the first time it's created. Returns nullptr (logged) if
     // the target .s file doesn't exist or fails to parse.
-    MenuExecutable* GetOrCreateMenu(const std::string& simkinPath);
+    //
+    // M21: `opener`, if given, is set on a newly-created menu *before*
+    // Init() runs -- lootmenu.s's own Init() calls UpdateMenu(), which
+    // immediately calls GetOpener() (real corpus data), so the opener has
+    // to already be in place by then, not set afterward the way
+    // OpenMenu()'s own two-step "create, then configure" shape would
+    // otherwise do it. Ignored on an already-cached menu (Init() doesn't
+    // rerun then anyway).
+    MenuExecutable* GetOrCreateMenu(const std::string& simkinPath, skiExecutable* opener = nullptr);
 
     // Switches the "current" menu, creating it first if necessary, and
     // runs its OnDisplay(). Logs and no-ops if that fails.
-    void OpenMenu(const std::string& simkinPath);
+    //
+    // M21: `opener` -- the object that called OpenMenu() on itself (e.g. a
+    // real loot bag's `OpenMenu("LootMenu")`), stored on the target menu so
+    // its own real GetOpener() calls resolve back to it (lootmenu.s's
+    // GetOpener().GetFirst()/RemoveObject() etc.). nullptr (the default)
+    // for every caller that isn't itself a script object -- matches every
+    // pre-M21 call site, which never had (or needed) an opener at all.
+    void OpenMenu(const std::string& simkinPath, skiExecutable* opener = nullptr);
 
     // M17: like OpenMenu(), but discards any cached instance for
     // `simkinPath` first, so it's rebuilt from scratch and its Init()
     // genuinely reruns -- see the .cpp for why this exists (NPC dialogue
     // needs its quest-state branching in Init() to re-evaluate on every
-    // conversation, not just the first).
-    void ReopenMenu(const std::string& simkinPath);
+    // conversation, not just the first; M21's loot bags need the same
+    // thing, for the same reason -- lootmenu.s's own UpdateMenu() re-walks
+    // the bag's live Collection in Init(), which must rerun as the bag's
+    // contents actually change across visits).
+    void ReopenMenu(const std::string& simkinPath, skiExecutable* opener = nullptr);
 
     // Constructs, registers under `key` (so a later OpenMenu(key) -- e.g.
     // every "back to main menu" handler's OpenMenu("MainMenu") -- reuses

@@ -1357,6 +1357,119 @@ algorithms.
     - Not independently confirmed in an actual windowed play session
       (same caveat every prior milestone's writeup already carries).
 
+- [x] **M21 -- monster-death loot-bag spawning + the loot-menu/container
+      pattern** (this session). Closes two items flagged as separate,
+      larger, not-yet-attempted work since M12/M19 -- turned out to be
+      fully real-data-decodable with zero native decompilation needed.
+    - **`SetLoot()`'s tag string is a real script path**: a real monster's
+      `SetLoot(300, "Loot_ratseye", 1, 8)` (id is always literally 300,
+      entities.txt's generic "!bag_loot" container typeId; the trailing
+      min/max, plausibly a drop-chance roll, aren't stored -- nothing
+      reads them back) -- the *tag*, lowercased, is exactly a real
+      loadable script's filename (`loot_ratseye.s`, found sitting at
+      `scriptRoot`'s top level; this port's filesystem is case-
+      insensitive, same convention every other path lookup here already
+      relies on). `MonsterExecutable` gained a real `SetLoot` handler
+      (`lootTag()`) instead of soft-failing it.
+    - **The real loot-bag script itself, fully decoded**:
+      `loot_ratseye.s`'s `Init()` is `SetName(456); SetUseText(457);
+      SetUsable(true); Item = Level.CreateEntity(704); AddObject(Item);`
+      -- `704` is exactly `items/ratseye.s`'s real entities.txt typeId.
+      `Level.CreateEntity(typeId)` (`LevelExecutable`, new handler)
+      resolves a typeId through the same `EntityTypeTable` chain placed
+      entities already use, loads a real `ItemExecutable`, runs its real
+      `Init()`, and hands it back -- only item-shaped categories (3/4/5/
+      6/9) resolve, matching every real loot-bag script's own usage.
+      `loot_gold6-10.s` (`Item = Level.CreateEntity(52); Item.SetQuantity(
+      Random(6,10)); AddObject(Item);`, typeId 52 = `gold.s`) additionally
+      confirmed a real, separate, pre-existing gap: `Random(min,max)` had
+      no handler anywhere in this port (every prior `Random(...)` call,
+      e.g. `azra_rat.s`'s own `SetScale(Random(206,306))`, silently soft-
+      failed to 0) -- new shared `TryHandleRandom()`
+      (`native_binding_common.h`/`.cpp`) fixes it for both `ItemExecutable`
+      and `MonsterExecutable`.
+    - **`ItemExecutable` gained a real Collection** (`AddObject`/
+      `GetFirst`/`GetNext`/`RemoveObject`, `m_Contents`) -- a bag's own
+      `AddObject(Item)` takes real ownership of `CreateEntity`'s result
+      out of `LevelExecutable`'s one-slot pending holder
+      (`TakePendingCreatedEntity()`, same "defer the tricky move" shape
+      `PlayerExecutable::TakePendingPickupItem()` already established,
+      M19); `RemoveObject()` (called from `lootmenu.s`'s real
+      `SelectItem()`, right after `PickupItem()`) completes the transfer
+      into the player's real inventory synchronously -- unlike M19's
+      world-pickup flow, a loot-menu selection's whole round trip happens
+      within one ordinary script-to-script call chain, so there's no
+      live-call-frame ownership problem to defer past.
+    - **The real `lootmenu.s`, fully wired**: `GetOpener()` (new
+      `MenuExecutable`/`MenuStack` concept -- `OpenMenu()`/`ReopenMenu()`
+      gained an `opener` parameter, set *before* `Init()` runs so
+      `UpdateMenu()`'s own `GetOpener().GetFirst()` call, made from
+      inside `Init()` itself, resolves correctly -- an ordering bug this
+      session's own test caught and fixed) and `AddMenuItem`'s real 3-arg
+      form (`AddMenuItem(text, callback, associatedObject)`, `MenuRow`
+      gained `associatedObject`, `MenuItemHandle::GetAssociatedObject()`
+      reads it back) are both new, real, general-purpose `MenuExecutable`
+      capabilities, not loot-bag-specific hacks.
+    - **A real, separate latent bug found and fixed**: `ItemExecutable`
+      (like `DoorExecutable`/`MonsterExecutable`) inherits
+      `skTreeNodeObject::strValue()`, which defaults to the TreeNode's own
+      *empty* root data for an ordinary loaded script -- meaning a real,
+      live object's `strValue()` was often `""`, exactly as "equal" to
+      the blank `null` global (M18) as a genuine miss, via `skRValue::
+      operator==`'s T_Object-vs-T_String cross-type branch. Caught for
+      real by this milestone's own test: `lootmenu.s`'s real `if
+      (Opener.GetFirst() = null)` wrongly took its "empty bag" branch for
+      a bag that actually held one real item. Considered (and rejected)
+      making `null` itself a real singleton object instead -- that would
+      have also made *calling a method on* a genuinely-missing result
+      silently soft-fail instead of throwing (the vendored interpreter's
+      `makeMethodCall` only proceeds for `T_Object`), which would have
+      let `azra_rat.s`'s `Trthgar.SetPositionMirror(...)` silently
+      succeed even with `"trthgar"` never registered, wrongly completing
+      that quest and regressing `quest_smoke`'s own correct assertion.
+      Fixed at the actual source instead: `ItemExecutable`/
+      `DoorExecutable`/`MonsterExecutable` all now override `strValue()`
+      to a guaranteed-non-blank constant, leaving `null`'s own blank-
+      string design (and its real "comparison-safe, method-call-still-
+      throws" property) untouched. `quest_smoke` re-verified unchanged
+      after the fix (still correctly `false`).
+    - **Verified end to end against real data, `loot_smoke`
+      (`src/tests/m21_loot_smoke.cpp`)**: real `Azra_Rat.s` lootTag,
+      real `loot_ratseye.s`/`loot_gold6-10.s` `Init()` (`Level.
+      CreateEntity`+`AddObject`+real `Random()`-driven `SetQuantity`),
+      the real `OnUse()` -> real `lootmenu.s` chain (`GetOpener`/
+      `GetFirst`/`GetNext`/`AddMenuItem`'s associated-object form all
+      exercised for real), and selecting that real row via `menu->
+      method("SetSelectedItem",...)` + `ActivateSelected()` (the same
+      dispatch `main.cpp`'s own input handling uses) genuinely landing
+      the real `ItemExecutable` in the player's inventory and emptying
+      the bag.
+    - **`main.cpp` wiring**: a monster's death now calls a new
+      `spawnLoot()` (resolves `lootTag()`, loads the bag the same way,
+      drops it into `gamePickups` at the death position -- reusing M19's
+      mechanism completely). `Action::Use`'s pickup branch now tells
+      apart two real `OnUse()` shapes sharing one list: a direct item
+      (`markedForRemoval()` true, moves into inventory, same as M19) vs.
+      a loot bag (opens a real menu instead, detected the same before/
+      after `currentMenu()` way the NPC branch already does, and stays in
+      the world). `ItemExecutable`'s constructor was refactored from
+      separate `(strings, PlayerExecutable&)` parameters to one
+      `MenuStack&` (mirroring `MonsterExecutable`'s own precedent) --
+      needed access to both `player()` and the new `level()`.
+      `PlayerExecutable::LoadStartingInventory()` and every
+      `ItemExecutable` construction site updated to match.
+    - **Not attempted**: the loot bag has no real model
+      (`entities.txt`'s typeId 300 is itself the "!bag_loot" label-only
+      convention) -- renders as nothing (`ZoneRenderer` already skips an
+      unresolved model index, M8), findable only via the real use-text
+      prompt/`Action::Use`, not a visible 3D object; the empty-bag
+      cleanup path (`QuitAndDestroyOpener()`/`QueryDestroy()`, real but
+      soft-failed) -- a fully-looted bag stays in the world rather than
+      despawning; `SetLoot`'s own trailing min/max args (plausibly a
+      drop-chance roll, no further evidence chased).
+    - Not independently confirmed in an actual windowed play session
+      (same caveat every prior milestone's writeup already carries).
+
 ## Next milestones (not yet started)
 
 Roughly in priority order for reaching "actually playable," not commitments:
@@ -1389,14 +1502,18 @@ Roughly in priority order for reaching "actually playable," not commitments:
   inventory); M20 took a seventh (ranged weapons -- a real bow/crossbow's
   own `SetRange(16384)` now genuinely reaches farther than a melee
   weapon's real `SetRange(384)`, both previously-stored-but-unused
-  values). Still open: spellcasting, monster-death loot-bag spawning, the
-  broader loot-menu/container pattern (category 8, M19's "Not attempted"
-  note), the rest of `Zone/Level` (`AddTrigger` and its own further
-  "Door/trap trigger" return-type class, `CreateEntity`/
-  `CreateEntityScript`, save/load-level state, ...) plus Zone effects
-  (`Vignette`, `SpawnWithinRadius`, `AddEncounters`, ...), and a zone-root
-  `<zone>.s` script loader (`azra.s` itself is still never run -- see
-  M18's "Not attempted" note).
+  values); M21 took an eighth (monster-death loot-bag spawning + the
+  loot-menu/container pattern -- both turned out fully real-data-
+  decodable, no native RE needed after all; also closed a real latent
+  strValue()/null-comparison bug affecting every skScriptedExecutable-
+  derived class). Still open: spellcasting, `Level`'s own trap/switch-
+  controller side (`AddTrigger` and its own further "Door/trap trigger"
+  return-type class, `CreateEntity`/`CreateEntityScript`'s
+  non-item-shaped categories, save/load-level state, ...) plus Zone
+  effects (`Vignette`, `SpawnWithinRadius`, `AddEncounters`, ...), a
+  zone-root `<zone>.s` script loader (`azra.s` itself is still never run
+  -- see M18's "Not attempted" note), and M21's own small loose ends
+  (empty-bag despawn, `SetLoot`'s trailing min/max args).
 - **Real save file format** -- M5's save system is simulated in-memory
   only; no on-disk save format has been RE'd yet.
 - **`FUN_1002c010`'s big single vitals bar** -- confirmed real (appears

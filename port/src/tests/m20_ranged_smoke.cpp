@@ -31,11 +31,10 @@ namespace {
 
 std::unique_ptr<sk_bindings::ItemExecutable> LoadAndInit(const std::string& fullPath,
                                                            skInterpreter& interpreter,
-                                                           const sk::StringTable* strings,
-                                                           sk_bindings::PlayerExecutable& player) {
+                                                           sk_bindings::MenuStack& stack) {
     skExecutableContext loadCtxt(&interpreter);
-    auto obj = std::make_unique<sk_bindings::ItemExecutable>(skString(fullPath.c_str()), loadCtxt,
-                                                               strings, player);
+    auto obj =
+        std::make_unique<sk_bindings::ItemExecutable>(skString(fullPath.c_str()), loadCtxt, stack);
     skRValueArray args;
     args.append(skRValue(0));  // placeholder for Init's "(s)" parameter
     skRValue ret;
@@ -65,10 +64,8 @@ int main(int argc, char** argv) {
     // --- Part 1: real Init() values ---
     std::unique_ptr<sk_bindings::ItemExecutable> club, bow;
     try {
-        club = LoadAndInit(std::string(scriptRoot) + "/weapons/club.s", interpreter, &strings,
-                            stack.player());
-        bow = LoadAndInit(std::string(scriptRoot) + "/weapons/bandit_longbow.s", interpreter,
-                           &strings, stack.player());
+        club = LoadAndInit(std::string(scriptRoot) + "/weapons/club.s", interpreter, stack);
+        bow = LoadAndInit(std::string(scriptRoot) + "/weapons/bandit_longbow.s", interpreter, stack);
     } catch (skParseException& e) {
         std::printf("m20_ranged_smoke: FAILED -- PARSE ERROR: %s\n", e.toString().ptr());
         return 1;

@@ -85,7 +85,7 @@ int main(int argc, char** argv) {
     std::unique_ptr<sk_bindings::ItemExecutable> item;
     try {
         item = std::make_unique<sk_bindings::ItemExecutable>(skString(fullPath.c_str()), loadCtxt,
-                                                               &strings, stack.player());
+                                                               stack);
         skRValueArray args;
         args.append(skRValue(0));  // placeholder for Init's "(s)" parameter
         skRValue ret;

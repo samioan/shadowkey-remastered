@@ -1,9 +1,12 @@
 #include "simkin_bindings/item_executable.h"
 
+#include <algorithm>
 #include <cstdio>
 
 #include "assets/string_table.h"
 #include "simkin_bindings/game_constants.h"
+#include "simkin_bindings/level_executable.h"
+#include "simkin_bindings/menu_stack.h"
 #include "simkin_bindings/native_binding_common.h"
 #include "simkin_bindings/player_executable.h"
 #include "skExecutableContext.h"
@@ -15,11 +18,8 @@
 namespace sk_bindings {
 
 ItemExecutable::ItemExecutable(const skString& filename, skExecutableContext& ctxt,
-                                const sk::StringTable* strings, PlayerExecutable& player)
-    : skScriptedExecutable(filename, ctxt),
-      m_Strings(strings),
-      m_Player(player),
-      m_Interpreter(ctxt.getInterpreter()) {}
+                                MenuStack& stack)
+    : skScriptedExecutable(filename, ctxt), m_Stack(stack), m_Interpreter(ctxt.getInterpreter()) {}
 
 void ItemExecutable::InvokeOnUse() {
     if (!m_Interpreter) return;
@@ -38,7 +38,7 @@ void ItemExecutable::InvokeOnUse() {
 }
 
 std::string ItemExecutable::name() const {
-    if (m_Strings && m_NameId >= 0) return m_Strings->Get(m_NameId);
+    if (m_Stack.strings() && m_NameId >= 0) return m_Stack.strings()->Get(m_NameId);
     return m_Id.empty() ? std::string("?") : m_Id;
 }
 
@@ -153,7 +153,9 @@ bool ItemExecutable::method(const skString& methodName, skRValueArray& args,
         return true;
     }
     if (methodName == skString("GetItemDescription") && args.entries() == 0) {
-        std::string desc = m_Strings && m_DescriptionId >= 0 ? m_Strings->Get(m_DescriptionId) : "";
+        std::string desc = m_Stack.strings() && m_DescriptionId >= 0
+                                ? m_Stack.strings()->Get(m_DescriptionId)
+                                : "";
         returnValue = skRValue(skString(desc.c_str()));
         return true;
     }
@@ -221,7 +223,105 @@ bool ItemExecutable::method(const skString& methodName, skRValueArray& args,
     if (methodName == skString("GetPlayer") && args.entries() == 0) {
         // M19: a world pickup's real OnUse() calls this bare (self-
         // receiver) -- same handler shape Door/Monster/Menu already have.
-        returnValue = skRValue(static_cast<skiExecutable*>(&m_Player), false);
+        returnValue = skRValue(static_cast<skiExecutable*>(&m_Stack.player()), false);
+        return true;
+    }
+    if (TryHandleRandom(methodName, args, returnValue)) {
+        // M21: loot_gold6-10.s's own Init() calls
+        // `Item.SetQuantity(Random(6,10))` -- bare, so resolved as a call
+        // on whichever ItemExecutable is running (native_binding_common.h's
+        // TryHandleRandom() comment has the full real-corpus justification).
+        return true;
+    }
+    if (methodName == skString("SetQuantity") && args.entries() == 1) {
+        m_Quantity = args[0].intValue();
+        return true;
+    }
+    if (methodName == skString("GetQuantity") && args.entries() == 0) {
+        returnValue = skRValue(m_Quantity);
+        return true;
+    }
+    if (methodName == skString("AddObject") && args.entries() == 1) {
+        // M21: called as "AddObject(Item)" from a real loot-bag script's
+        // own Init() (loot_ratseye.s etc.), where `Item` is exactly what
+        // `Level.CreateEntity(...)` (LevelExecutable::method()'s own
+        // handler) just returned -- takes real ownership of it out of
+        // Level's one-slot pending holder (see
+        // LevelExecutable::TakePendingCreatedEntity()'s comment) and into
+        // this bag's own Collection, only if the passed reference actually
+        // matches (defends against a script somehow passing something
+        // else, though no real corpus script does).
+        std::unique_ptr<ItemExecutable> created = m_Stack.level().TakePendingCreatedEntity();
+        if (created && static_cast<skiExecutable*>(created.get()) == args[0].obj()) {
+            m_Contents.push_back(std::move(created));
+        }
+        return true;
+    }
+    if (methodName == skString("GetFirst") && args.entries() == 0) {
+        // M21: lootmenu.s's own Collection-walk convention (GetFirst() then
+        // repeated GetNext() until null) -- see docs/SIMKIN_NATIVE_API.md's
+        // "Collection" class research.
+        m_ContentsIter = 0;
+        if (!m_Contents.empty()) {
+            returnValue = skRValue(static_cast<skiExecutable*>(m_Contents[0].get()), false);
+        }
+        // else: leave returnValue at its default blank skRValue() -- the
+        // "null" global (game_constants.cpp's own comment) -- lootmenu.s's
+        // own `if (Opener.GetFirst() = null)` compares against exactly
+        // this. Correct as long as a real found ItemExecutable's own
+        // strValue() is never blank -- see this class's strValue()
+        // override below.
+        return true;
+    }
+    if (methodName == skString("GetNext") && args.entries() == 0) {
+        ++m_ContentsIter;
+        if (m_ContentsIter < m_Contents.size()) {
+            returnValue =
+                skRValue(static_cast<skiExecutable*>(m_Contents[m_ContentsIter].get()), false);
+        }
+        return true;
+    }
+    if (methodName == skString("RemoveObject") && args.entries() == 1) {
+        // M21: lootmenu.s's SelectItem() calls
+        // "GetPlayer().PickupItem(Object); GetOpener().RemoveObject(Object);"
+        // in that order -- PickupItem() (PlayerExecutable's own handler)
+        // only records which object asked (see its comment), so this is
+        // where the real ownership transfer actually completes: unlike
+        // M19's world-pickup flow (deferred to main.cpp, because that real
+        // call site is still inside a host-triggered InvokeOnUse() frame
+        // holding the item in a different container), a loot-menu
+        // selection's whole round trip happens within one ordinary script-
+        // to-script call chain, so the transfer can finish synchronously
+        // right here, with no dangling-pointer window to defer past.
+        skiExecutable* target = args[0].obj();
+        auto it = std::find_if(m_Contents.begin(), m_Contents.end(),
+                                [&](const std::unique_ptr<ItemExecutable>& item) {
+                                    return static_cast<skiExecutable*>(item.get()) == target;
+                                });
+        if (it != m_Contents.end()) {
+            std::unique_ptr<ItemExecutable> removed = std::move(*it);
+            m_Contents.erase(it);
+            if (m_Stack.player().TakePendingPickupItem() ==
+                static_cast<skiExecutable*>(removed.get())) {
+                m_Stack.player().AddItem(std::move(removed));
+            }
+            // else: no real corpus script calls RemoveObject() without a
+            // matching PickupItem() first -- the removed item is simply
+            // dropped (freed) rather than silently kept somewhere, same
+            // "soft-fail rather than guess" spirit as everywhere else.
+        }
+        return true;
+    }
+    if (methodName == skString("OpenMenu") && args.entries() == 1) {
+        // M21: a real loot bag's OnUse() calls this bare (self-receiver,
+        // loot_ratseye.s's own `OpenMenu("LootMenu")`) -- ReopenMenu(), not
+        // OpenMenu(), for the same M17 reason NPC dialogue needs it
+        // (lootmenu.s's own UpdateMenu() re-walks this bag's live Collection
+        // in Init(), which has to rerun on every visit as the bag's
+        // contents actually change, not just the first). Passes `this` as
+        // the new menu's opener so lootmenu.s's real GetOpener() calls
+        // resolve back to this exact bag, not some other one.
+        m_Stack.ReopenMenu(ToStdString(args[0].str()), static_cast<skiExecutable*>(this));
         return true;
     }
     if (methodName == skString("MirrorDestroyObject") && args.entries() == 1) {

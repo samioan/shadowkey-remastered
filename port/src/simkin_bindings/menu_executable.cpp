@@ -229,9 +229,17 @@ bool MenuExecutable::method(const skString& methodName, skRValueArray& args,
         returnValue = skRValue(static_cast<int>(m_Rows.size()));
         return true;
     }
-    if (methodName == skString("AddMenuItem") && args.entries() == 2) {
-        MenuRow& row =
-            AddRow(RowKind::MenuItem, args[0].intValue(), ToStdString(args[1].str()), true);
+    if (methodName == skString("AddMenuItem") && (args.entries() == 2 || args.entries() == 3)) {
+        MenuRow& row = AddRow(RowKind::MenuItem, -1, ToStdString(args[1].str()), true);
+        // M21: unlike every other AddMenuItem call site (a plain textId),
+        // lootmenu.s's own `AddMenuItem(Item.GetQuantity() # " " #
+        // Item.GetName(), "SelectItem", Item)` passes an already-resolved
+        // literal string -- same dynamically-typed-first-argument shape
+        // AddButton()/AddFloatingText() already handle, reused here.
+        SetRowTextFromArg(row, args[0]);
+        // Real 3-arg form (associatedObject) carries a per-row associated
+        // object, read back via MenuItemHandle::GetAssociatedObject().
+        if (args.entries() == 3) row.associatedObject = args[2].obj();
         row.widget.reset(new MenuItemHandle(*this, m_Rows.size() - 1));
         returnValue = skRValue(static_cast<skiExecutable*>(row.widget.get()), false);
         return true;
@@ -506,6 +514,11 @@ bool MenuExecutable::method(const skString& methodName, skRValueArray& args,
         size_t maxLen = static_cast<size_t>(args[1].intValue());
         if (text.size() > maxLen) text = text.substr(0, maxLen);
         returnValue = skRValue(skString(text.c_str()));
+        return true;
+    }
+    if (methodName == skString("GetOpener") && args.entries() == 0) {
+        // M21: see this class's SetOpener()/m_Opener comment.
+        if (m_Opener) returnValue = skRValue(m_Opener, false);
         return true;
     }
     if (methodName == skString("GetSelectedItem") && args.entries() == 0) {

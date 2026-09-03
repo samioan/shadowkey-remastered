@@ -60,6 +60,20 @@ endif()
 # because M10's ItemExecutable/PlayerExecutable resolve real item/vitals
 # text through it directly (not just at render time like every other menu
 # row) -- smoke tests that link this library alone need the symbol too.
+# entities.txt loader (world/entity_types.h) -- its own tiny library, not
+# folded into sk_bindings or sk_world directly, because M21 needs it in
+# both (LevelExecutable::CreateEntity() resolves a typeId the same way
+# main.cpp's zone-load block already does) and a source file can't
+# safely be compiled into two static libraries that might both end up
+# linked into the same executable (duplicate-symbol territory) -- this
+# is the shared dependency both pull in instead. Self-contained (just
+# <fstream>), no puff/zlib dependency, so this doesn't pull sk_world's
+# own dependency chain into every sk_bindings consumer.
+add_library(sk_entity_types STATIC
+  src/world/entity_types.cpp
+)
+target_include_directories(sk_entity_types PUBLIC src)
+
 add_library(sk_bindings STATIC
   src/assets/string_table.cpp
   src/simkin_bindings/button_executable.cpp
@@ -85,7 +99,7 @@ add_library(sk_bindings STATIC
   src/simkin_bindings/text_area_executable.cpp
 )
 target_include_directories(sk_bindings PUBLIC src)
-target_link_libraries(sk_bindings PUBLIC simkin)
+target_link_libraries(sk_bindings PUBLIC simkin sk_entity_types)
 
 # --- Vendored puff (zlib's reference inflate, zlib license, see
 # third_party/puff/PROVENANCE.md) -- decompresses the zlib-wrapped
@@ -100,12 +114,11 @@ endif()
 # src/render3d/.
 add_library(sk_world STATIC
   src/assets/zone_file.cpp
-  src/world/entity_types.cpp
   src/world/model_archive.cpp
   src/world/zone.cpp
 )
 target_include_directories(sk_world PUBLIC src)
-target_link_libraries(sk_world PUBLIC puff)
+target_link_libraries(sk_world PUBLIC puff sk_entity_types)
 
 # A from-scratch (not fixed-point-exact) software renderer for the
 # tile-grid wall/floor/ceiling geometry -- see src/render3d/zone_renderer.h.
@@ -210,3 +223,8 @@ target_link_libraries(pickup_smoke PRIVATE sk_bindings sk_world)
 # Ranged weapons smoke test -- see src/tests/m20_ranged_smoke.cpp.
 add_executable(ranged_smoke src/tests/m20_ranged_smoke.cpp)
 target_link_libraries(ranged_smoke PRIVATE sk_bindings)
+
+# Monster-death loot-bag spawning smoke test -- see
+# src/tests/m21_loot_smoke.cpp.
+add_executable(loot_smoke src/tests/m21_loot_smoke.cpp)
+target_link_libraries(loot_smoke PRIVATE sk_bindings)

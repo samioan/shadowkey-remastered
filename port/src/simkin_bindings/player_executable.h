@@ -34,6 +34,7 @@ class StringTable;
 namespace sk_bindings {
 
 class ItemExecutable;
+class MenuStack;
 
 class PlayerExecutable : public NativeStubExecutable {
 public:
@@ -55,12 +56,17 @@ public:
 
     // M10: real-data verification step for this milestone, mirroring M8's
     // real .ent -> models.idx resolution -- runs a small curated set of
-    // real armor/weapon/item .s files through `interpreter`, appending
-    // each successfully-loaded one to the inventory. Logs (to stdout) and
-    // skips any that fail to parse/run rather than aborting; not fatal if
-    // the whole set is unavailable. Called once by MenuStack when a New
-    // Game starts.
-    void LoadStartingInventory(const std::string& scriptRoot, skInterpreter& interpreter);
+    // real armor/weapon/item .s files through `stack`'s interpreter,
+    // appending each successfully-loaded one to the inventory. Logs (to
+    // stdout) and skips any that fail to parse/run rather than aborting;
+    // not fatal if the whole set is unavailable. Called once by MenuStack
+    // when a New Game starts.
+    //
+    // M21: takes `MenuStack&` (was `scriptRoot`/`interpreter` separately)
+    // -- ItemExecutable's own constructor needs a MenuStack now too (see
+    // its header comment), and `stack` already has everything this method
+    // itself needs (scriptRoot(), interpreter()).
+    void LoadStartingInventory(MenuStack& stack);
 
     const std::vector<std::unique_ptr<ItemExecutable>>& inventory() const { return m_Inventory; }
     // Marks `item` for removal -- see item_executable.h's

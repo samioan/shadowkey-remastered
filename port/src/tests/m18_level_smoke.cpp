@@ -19,7 +19,7 @@
 // class needed), registers it into the Level global under its real
 // instance name, then confirms `Level.GetEntity("trthgar")` resolves to
 // that exact object -- and that an unregistered name resolves to the
-// same blank default the new `null` global constant holds, matching real
+// same blank default the `null` global constant holds, matching real
 // scripts' `if (X != null)` pattern (azra.s).
 //
 // Part 3: the actual payoff -- runs real Azra_Rat.s's OnKilled() 8 times
