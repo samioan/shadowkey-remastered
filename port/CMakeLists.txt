@@ -238,3 +238,8 @@ target_link_libraries(spell_smoke PRIVATE sk_bindings)
 # src/tests/m23_zonescript_smoke.cpp.
 add_executable(zonescript_smoke src/tests/m23_zonescript_smoke.cpp)
 target_link_libraries(zonescript_smoke PRIVATE sk_bindings sk_world)
+
+# AddTrigger kill-count callback smoke test -- see
+# src/tests/m24_trigger_smoke.cpp.
+add_executable(trigger_smoke src/tests/m24_trigger_smoke.cpp)
+target_link_libraries(trigger_smoke PRIVATE sk_bindings)

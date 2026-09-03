@@ -1650,6 +1650,79 @@ algorithms.
     - Not independently confirmed in an actual windowed play session
       (same caveat every prior milestone's writeup already carries).
 
+- [x] **M24 -- `AddTrigger` kill-count callbacks** (this session). A first,
+      narrow slice of `Level`'s "Door/trap trigger" class (0x14ccc, docs/
+      SIMKIN_NATIVE_API.md) -- the return value of `AddTrigger(name)`,
+      called from a real zone-root script (M23).
+    - **Confirmed real: two genuinely distinct usage shapes share one
+      factory.** A corpus-wide read of every real `AddTrigger` call site
+      (`broken1.s`, `crypt1.s`, `dstar_e.s`, `erthcave.s`, `ghstpass.s`,
+      `lothcav.s`) found a physical, position-based trap (`spikeTrap.
+      AddEntity(1013); spikeTrap.SetTrap(8,16,10); spikeTrap.
+      RemainActive();`) and a zone-scoped *kill-count* trigger
+      (`zombieTrigger.SetEntityID(104); zombieTrigger.SetLimit(2);
+      zombieTrigger.SetCallback("GPZombiesKilled");`, `ghstpass.s`/
+      `lothcav.s`) -- syntactically non-overlapping method sets on the
+      same returned object, easy to tell apart and implement separately.
+      Only the kill-count variant is implemented here -- the physical
+      variant needs real trigger-volume/position data this port doesn't
+      have (the same gap blocking `EnterZone`'s own trigger tags, M23's
+      "Not attempted" note) -- while the kill-count variant is purely
+      data-driven and composes directly on already-real infrastructure
+      (M12's combat loop, M17's quest state, M23's zone-root scripts).
+    - **New `sk_bindings::TriggerExecutable`** (`zone_script_executable.h`
+      /`.cpp`) -- a real, owned-by-`ZoneScriptExecutable` native handle
+      (`AddTrigger`'s real return value), answering `SetEntityID`/
+      `SetLimit`/`SetCallback` for real; `RemainActive()` is real but
+      inert (this port doesn't reproduce the fire-once-vs-stays-armed
+      distinction, only relevant to the unimplemented physical-trap
+      variant). `ZoneScriptExecutable::NotifyKilled(typeId)` -- called by
+      `main.cpp` on every real monster death (`MonsterInstance` gained
+      its own `typeId` field, the real entities.txt typeId that
+      placement resolved from) -- matches against every registered
+      trigger's real `entityId()` and, the one time a match's running
+      count first reaches its real `limit()`, invokes the real script
+      callback (same host-triggered-call convention -- placeholder
+      `(s)` arg, catch+log exceptions -- every other `Invoke*()` in this
+      codebase already establishes).
+    - **A real, separate problem found and fixed along the way**:
+      `ghstpass.s`'s own `Init()` calls `AddEncounters(...)`
+      *unconditionally* (an "Encounter spawner" class, not attempted
+      here) and immediately chains 5 real `.AddRandomSets(...)` calls on
+      the result, no `if`-guard. Soft-failing `AddEncounters` to a plain
+      int (this port's usual "not implemented" default) would have made
+      every one of those chained calls throw "Cannot call Method ... on
+      a non object" (the vendored interpreter's own `makeMethodCall()`
+      only proceeds for a real `T_Object`) -- aborting the *rest of
+      `Init()`*, not just the one unimplemented call, which would have
+      silently broken `zombieTrigger`'s own setup too if it came later in
+      script order. New `sk_bindings::InertHandleExecutable`
+      (`native_binding_common.h`, general-purpose, reusable) returns a
+      real object whose every method individually soft-fails instead,
+      letting the rest of a real script's `Init()` run to completion --
+      the general fix for "a soft-failed factory call's result gets
+      chained further," not just this one call site.
+    - **Verified end to end against real data, `trigger_smoke`
+      (`src/tests/m24_trigger_smoke.cpp`)**: confirms typeId 104's real
+      entities.txt entry, runs `ghstpass.s`'s real `Init()` (confirming
+      the `AddEncounters` fix -- all 10 real chained `AddRandomSets()`
+      calls soft-fail cleanly instead of crashing), then calls
+      `NotifyKilled(104)` twice (matching the real `SetLimit(2)`) and
+      confirms `player.questSolved(14)` flips from `false` to `true`
+      only on the second call -- the real `GPZombiesKilled()` callback
+      genuinely ran and called the real `GetPlayer().SetQuestSolved(14)`
+      -- plus a robustness check that a third/unrelated-typeId kill
+      neither double-fires nor crashes.
+    - **Not attempted**: the physical-trap variant (`AddEntity`/
+      `SetTrap`/`SetDoor`/`OpenDoor`/`ShowDamageMessage`/`IsActive`, all
+      soft-failed) -- needs real trigger-volume/position data; the
+      "Encounter spawner" class itself (`AddEncounters`/`AddRandomSets`,
+      random monster-group spawning) -- a separate, real feature, not
+      just an inert stand-in; and `Level.Log(...)` (a plain debug-log
+      call, soft-fails harmlessly, no gameplay effect either way).
+    - Not independently confirmed in an actual windowed play session
+      (same caveat every prior milestone's writeup already carries).
+
 ## Next milestones (not yet started)
 
 Roughly in priority order for reaching "actually playable," not commitments:
@@ -1675,17 +1748,25 @@ Roughly in priority order for reaching "actually playable," not commitments:
   way (M18's "Not attempted" note): zone-root `<zone>.s` script loading
   -- `azra.s`'s real `Init()` now genuinely runs at zone load, its dozens
   of real `Level.GetEntity(...)` calls resolving against real, named
-  placements. Still open: `Level`'s own trap/switch-controller side
-  (`AddTrigger` and its own further "Door/trap trigger" return-type
-  class, `CreateEntity`/`CreateEntityScript`'s non-item-shaped
-  categories, save/load-level state, ...) plus Zone effects (`Vignette`,
-  `SpawnWithinRadius`, `AddEncounters`, ...); `EnterZone(s)`'s trigger-
-  volume mechanism (M23's own "Not attempted" note -- no real trigger-
-  volume data source traced yet); the real status-effect system
-  `DoAttackRoll`'s `effectId` argument selects (M22's "Not attempted"
-  note); and two sets of small loose ends (M21's empty-bag despawn/
-  `SetLoot`'s trailing min/max args; M23's `SummonMe()`/`SummonMe2()`/
-  `CountInventory()`/`SetZone`'s real meaning).
+  placements. M24 then took a first, narrow slice of `Level`'s own trap/
+  switch-controller side: `AddTrigger`'s kill-count-callback usage
+  (`SetEntityID`/`SetLimit`/`SetCallback`) -- killing real monsters of a
+  tracked typeId now genuinely fires a real zone-root script callback.
+  Still open: `AddTrigger`'s own physical/position-based trap variant
+  (`AddEntity`/`SetTrap`/`SetDoor`/`OpenDoor`/`ShowDamageMessage` --
+  needs real trigger-volume/position data this port doesn't have);
+  `CreateEntity`/`CreateEntityScript`'s non-item-shaped categories and
+  save/load-level state; the "Encounter spawner" class (`AddEncounters`/
+  `AddRandomSets`, random monster-group spawning -- M24's own currently-
+  inert stand-in); Zone effects beyond `SetZone`
+  (`Vignette`/`SpawnWithinRadius`, ...); `EnterZone(s)`'s trigger-volume
+  mechanism (M23's own "Not attempted" note -- no real trigger-volume
+  data source traced yet, the same root gap blocking the physical-trap
+  variant above); the real status-effect system `DoAttackRoll`'s
+  `effectId` argument selects (M22's "Not attempted" note); and three
+  sets of small loose ends (M21's empty-bag despawn/`SetLoot`'s trailing
+  min/max args; M23's `SummonMe()`/`SummonMe2()`/`CountInventory()`/
+  `SetZone`'s real meaning; M24's `Level.Log(...)`).
 - **Real save file format** -- M5's save system is simulated in-memory
   only; no on-disk save format has been RE'd yet.
 - **`FUN_1002c010`'s big single vitals bar** -- confirmed real (appears

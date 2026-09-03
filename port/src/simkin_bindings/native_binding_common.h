@@ -8,6 +8,7 @@
 
 #include <string>
 
+#include "simkin_bindings/native_stub_executable.h"
 #include "skRValue.h"
 #include "skRValueArray.h"
 #include "skString.h"
@@ -35,5 +36,29 @@ bool SoftFailNativeCall(const char* objectDebugName, const skString& methodName,
 // into their own method() before falling through to SoftFailNativeCall,
 // same "try, then soft-fail" shape as every other binding class.
 bool TryHandleRandom(const skString& methodName, skRValueArray& args, skRValue& returnValue);
+
+// M24: a real object handle with no behavior of its own -- for a factory
+// call this port doesn't implement (e.g. ghstpass.s's own unconditional
+// `fight12 = AddEncounters(...); fight12.AddRandomSets(...);`, an
+// "Encounter spawner" class not attempted here) whose result still needs
+// *further* real method calls to not throw. Returning `SoftFailNativeCall`
+// -like default straight from the factory handler would make the result
+// an int (T_Int), and the vendored interpreter's own `makeMethodCall()`
+// only proceeds for `T_Object` -- so a genuinely-missing object crashes
+// the *calling script*, not just soft-fails the one call. This is a real
+// object instead; every method called on it soft-fails individually
+// (through the base `SoftFailNativeCall`, same logging), letting the rest
+// of the calling script run to completion. Not a general-purpose
+// substitute for implementing a real class -- only for a factory result
+// nothing in this port reads back.
+class InertHandleExecutable : public NativeStubExecutable {
+public:
+    explicit InertHandleExecutable(const char* debugTypeName)
+        : NativeStubExecutable(debugTypeName) {}
+    bool method(const skString& methodName, skRValueArray& args, skRValue& returnValue,
+                skExecutableContext&) override {
+        return SoftFailNativeCall(debugTypeName(), methodName, args, returnValue);
+    }
+};
 
 }  // namespace sk_bindings

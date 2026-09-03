@@ -150,6 +150,11 @@ struct MonsterInstance {
     int modelArchiveIndex = -1;
     enum class AiState { Idle, Chasing, Attacking } aiState = AiState::Idle;
     int attackCooldownTicks = 0;
+    // M24: the real entities.txt typeId this placement resolved from --
+    // ZoneScriptExecutable::NotifyKilled() (a real zone-root script's own
+    // AddTrigger()...SetEntityID(id) kill-count trigger, e.g. ghstpass.s's
+    // zombieTrigger.SetEntityID(104)) matches kills against this.
+    int typeId = -1;
 };
 
 // M15: Action::Use interact binding, first (narrow) slice -- doors only,
@@ -839,6 +844,7 @@ int main(int argc, char** argv) {
                             inst.y = static_cast<float>(e.y);
                             inst.z = static_cast<float>(e.z);
                             inst.modelArchiveIndex = desc->modelArchiveIndex;
+                            inst.typeId = e.typeId;
                             inst.script = std::move(monster);
                             stack.level().RegisterEntity(e.name, inst.script.get());
                             gameMonsters.push_back(std::move(inst));
@@ -1191,6 +1197,11 @@ int main(int argc, char** argv) {
                     if (!target->script->alive()) {
                         target->script->InvokeOnKilled();
                         spawnLoot(*target);
+                        // M24: a real zone-root script's own kill-count
+                        // trigger (ghstpass.s's zombieTrigger etc.) --
+                        // no-ops if this zone's real Init() never set one
+                        // up watching this typeId.
+                        if (gameZoneScript) gameZoneScript->NotifyKilled(target->typeId);
                     }
                 };
                 if (input.ConsumeBoundJustPressed(sk::Action::UseLeftAction)) {
