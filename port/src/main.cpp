@@ -205,7 +205,6 @@ struct MonsterInstance {
     // direction regardless of where it is walking.
     float facingYaw = 0.0f;
     enum class AiState { Idle, Chasing, Attacking } aiState = AiState::Idle;
-    int attackCooldownTicks = 0;
     // Ticks since this monster last actually had the player in sight.
     // Chasing survives brief losses of sight (the player ducking round a
     // pillar) but not indefinitely -- see the AI block in the tick loop.
@@ -1547,7 +1546,6 @@ int main(int argc, char** argv) {
                 // port-side value.
                 constexpr float kMonsterMoveSpeed = 14.0f;
                 constexpr float kMonsterRadius = 40.0f;     // world units, wall-collision only
-                constexpr int kAttackCooldownTicks = 25;    // ~1s at the fixed 40ms tick
                 // How far above/below a monster the player can be and
                 // still be considered "on the same level". Real zones
                 // stack rooms vertically at very different floor heights
@@ -1568,6 +1566,10 @@ int main(int argc, char** argv) {
                 // collapse into one shared point on top of the player.
                 constexpr float kMonsterSeparation = 70.0f;
 
+                // Straight ahead first, then progressively wider turns to
+                // either side -- shared by the chase and flee paths.
+                static const float kSteerAngles[] = {0.0f, 0.6f, -0.6f, 1.2f, -1.2f, 1.9f, -1.9f};
+
                 // M28: picks the clip a creature should be playing from
                 // its own AI state, and latches the death clip so a corpse
                 // holds its final pose instead of looping.
@@ -1579,6 +1581,11 @@ int main(int argc, char** argv) {
                 };
 
                 for (MonsterInstance& m : gameMonsters) {
+                    // M32: the real per-frame AI timers -- the flee/Fear
+                    // countdown (which restores the previous package when
+                    // it expires) and the paralysis lockout. Runs even for
+                    // the dead/destroyed so an effect can't outlive them.
+                    m.script->TickAi(sk_bindings::kAiFrameDeltaUnits);
                     // M23: destroyed() (a real zone-root script's
                     // DestroyObjectMirror()) removes an entity from play
                     // as fully as death does, everywhere alive() is
@@ -1592,8 +1599,63 @@ int main(int argc, char** argv) {
                         setAnimClip(m, m.script->idleAnimation(), false);
                         continue;
                     }
+                    // M32: the real AI package gates everything below.
+                    //
+                    // Package 6 (AiSpellAssistTarget) is faithfully inert:
+                    // nothing anywhere in the real binary reads it, so a
+                    // creature left in it matches neither branch of the
+                    // engine's own tick and simply stops acting. Package
+                    // -1 (AiSleep) is the same. Reproduced, not invented.
+                    int pkg = m.script->aiPackage();
+                    if (pkg == sk_bindings::MonsterExecutable::kAiAsleep ||
+                        pkg == sk_bindings::MonsterExecutable::kAiSpellAssist) {
+                        setAnimClip(m, m.script->idleAnimation(), false);
+                        continue;
+                    }
+
                     float mdx = gameCamera.x - m.x, mdy = gameCamera.y - m.y;
                     float dist = std::sqrt(mdx * mdx + mdy * mdy);
+
+                    // M32: package 4 -- flee. Reached in the real game only
+                    // through the Fear spell (FUN_100458e4's typeId-4020
+                    // branch calls FUN_10086b98(target, 4, magnitude*5)),
+                    // never from a creature's own morale: SetWimpy is
+                    // stored but the AI never reads it. The real helper
+                    // sets a one-shot move goal and a countdown, and the
+                    // tick restores the previous package when it expires --
+                    // there is no per-tick flee steering in the original,
+                    // so running directly away for the duration is this
+                    // port's reading of that one-shot goal.
+                    if (pkg == sk_bindings::MonsterExecutable::kAiFlee) {
+                        setAnimClip(m, m.script->walkAnimation(), false);
+                        if (dist > 1.0f && !m.script->paralyzed()) {
+                            float awayX = -mdx / dist, awayY = -mdy / dist;
+                            for (float steer : kSteerAngles) {
+                                float cs = std::cos(steer), sn = std::sin(steer);
+                                float sx = awayX * cs - awayY * sn;
+                                float sy = awayX * sn + awayY * cs;
+                                float nx = m.x + sx * kMonsterMoveSpeed;
+                                float ny = m.y + sy * kMonsterMoveSpeed;
+                                if (!gameZone->CircleHitsWall(nx, ny, kMonsterRadius)) {
+                                    m.x = nx;
+                                    m.y = ny;
+                                    m.facingYaw = std::atan2(sy, sx);
+                                    break;
+                                }
+                            }
+                        }
+                        m.z = gameZone->FloorHeightAt(m.x, m.y);
+                        continue;
+                    }
+
+                    // A paralysed creature neither swings nor turns -- the
+                    // real attack function's first test is
+                    // `monster+0x294 < 1`, and the tick only steers toward
+                    // a target while that timer is exactly 0.
+                    if (m.script->paralyzed()) {
+                        setAnimClip(m, m.script->idleAnimation(), false);
+                        continue;
+                    }
 
                     // Can this monster actually perceive the player right
                     // now? Real chase radii are enormous (see
@@ -1620,7 +1682,6 @@ int main(int argc, char** argv) {
                         // Lost it -- back to standing post rather than
                         // homing on the player forever through geometry.
                         m.aiState = MonsterInstance::AiState::Idle;
-                        m.attackCooldownTicks = 0;
                     }
                     if (m.aiState == MonsterInstance::AiState::Idle) {
                         setAnimClip(m, m.script->idleAnimation(), false);
@@ -1640,21 +1701,25 @@ int main(int argc, char** argv) {
                         m.aiState = MonsterInstance::AiState::Attacking;
                         setAnimClip(m, m.script->swingAnimation(), false);
                         if (dist > 1.0f) m.facingYaw = std::atan2(mdy, mdx);
-                        if (m.attackCooldownTicks > 0) {
-                            --m.attackCooldownTicks;
-                        } else {
+                        // M32: the real attack cadence (monster+0x2c4).
+                        // The engine accumulates the frame delta every
+                        // frame, only lets a creature act once the total
+                        // passes 0x100, then resets it to `rand & 0x1f` so
+                        // a pack doesn't swing in lockstep. That works out
+                        // to roughly one attempt every 256ms, replacing
+                        // this port's invented fixed ~1s cooldown.
+                        if (m.script->ConsumeAttackCadence(
+                                sk_bindings::kAiFrameDeltaUnits)) {
                             int dmg = sk_bindings::RollDamage(
                                 m.script->attack(), stack.player().baseDefense(),
                                 stack.player().armorRating(), m.script->damageMin(),
                                 m.script->damageMax());
                             stack.player().ApplyDamage(dmg);
                             m.script->PlayAttackNoise();
-                            m.attackCooldownTicks = kAttackCooldownTicks;
                         }
                     } else {
                         m.aiState = MonsterInstance::AiState::Chasing;
                         setAnimClip(m, m.script->walkAnimation(), false);
-                        m.attackCooldownTicks = 0;
                         // Head for the player if currently visible, else
                         // for wherever they were last seen.
                         float goalX = canSee ? gameCamera.x : m.lastSeenX;
@@ -1693,9 +1758,6 @@ int main(int argc, char** argv) {
                             // into the wall between it and the player,
                             // which is what the previous straight-line
                             // beeline did.
-                            static const float kSteerAngles[] = {0.0f,        0.6f,  -0.6f,
-                                                                  1.2f,        -1.2f, 1.9f,
-                                                                  -1.9f};
                             // Never close past bodily contact: melee range
                             // is the trigger to swing, but the creature
                             // still must not walk *into* the player. Clamp

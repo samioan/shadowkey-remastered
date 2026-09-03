@@ -1,6 +1,7 @@
 #include "simkin_bindings/item_executable.h"
 
 #include <algorithm>
+#include <cctype>
 #include <cstdio>
 
 #include "assets/string_table.h"
@@ -21,7 +22,30 @@ namespace sk_bindings {
 
 ItemExecutable::ItemExecutable(const skString& filename, skExecutableContext& ctxt,
                                 MenuStack& stack)
-    : skScriptedExecutable(filename, ctxt), m_Stack(stack), m_Interpreter(ctxt.getInterpreter()) {}
+    : skScriptedExecutable(filename, ctxt), m_Stack(stack), m_Interpreter(ctxt.getInterpreter()) {
+    m_ScriptPath = ToStdString(filename);
+    for (char& c : m_ScriptPath) {
+        if (c == '\\') c = '/';
+        c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    }
+}
+
+ItemExecutable::StatusEffect ItemExecutable::statusEffect() const {
+    // See the header: the real engine keys this off the spell entity's
+    // entities.txt typeId; this port loads spells by path, which
+    // entities.txt maps to those same typeIds.
+    auto endsWith = [&](const char* suffix) {
+        std::string s(suffix);
+        return m_ScriptPath.size() >= s.size() &&
+               m_ScriptPath.compare(m_ScriptPath.size() - s.size(), s.size(), s) == 0;
+    };
+    if (endsWith("spells/fear.s")) return kEffectFear;
+    if (endsWith("spells/paralyze.s")) return kEffectParalyze;
+    // The remaining real branches (Absorb/Blind/Drain/HarmArmor/IgniteFoe/
+    // Disease/Poison) are identified but not modelled -- this port has no
+    // stat-drain, blindness or damage-over-time systems to hang them on.
+    return kEffectNone;
+}
 
 void ItemExecutable::InvokeOnUse() {
     if (!m_Interpreter) return;
@@ -190,8 +214,28 @@ bool ItemExecutable::method(const skString& methodName, skRValueArray& args,
         // (RollSpellDamage()'s own comment) -- only damage applies.
         auto* target = static_cast<MonsterExecutable*>(args[0].obj());
         if (target && target->alive()) {
-            int dmg = RollSpellDamage(m_Rating, target->magicResistance());
-            target->ApplyDamage(dmg);
+            // M32: args[1] is the spell's *magnitude*, not an effect
+            // selector -- the effect comes from which spell this is (see
+            // statusEffect()). Real Fear.s passes 10, real blaze.s passes 1.
+            int magnitude = args.entries() >= 2 ? args[1].intValue() : 1;
+            switch (statusEffect()) {
+                case kEffectFear:
+                    // FUN_100458e4's Fear branch:
+                    // FUN_10086b98(target, 4, magnitude * 5).
+                    target->SetAiPackageTimed(MonsterExecutable::kAiFlee, magnitude * 5);
+                    break;
+                case kEffectParalyze:
+                    // The Paralyze branch arms the target's action lockout
+                    // (monster+0x294) through a vtable call; the same
+                    // magnitude-scaled duration shape is used here.
+                    target->SetParalyzed(magnitude * 5 * 256);
+                    break;
+                case kEffectNone: {
+                    int dmg = RollSpellDamage(m_Rating, target->magicResistance());
+                    target->ApplyDamage(dmg);
+                    break;
+                }
+            }
         }
         return true;
     }

@@ -2359,6 +2359,62 @@ algorithms.
       `.pth` patrol-path system, and the attack cadence timer
       (`monster+0x2c4`, accumulated per tick and reset to `rand & 0x1f`).
 
+- [x] **M32 -- the flee/spell-assist packages, the attack cadence, and the
+      status-effect system** (this session). Requested directly as a
+      follow-on to M31. Two of the three turned out to be barely
+      implemented in the original, which is itself the finding.
+    - **The attack cadence is real and is now the port's.**
+      `monster+0x2c4` accumulates the engine's per-frame delta, the whole
+      attack block is gated on `0x100 < accumulator`, and afterwards it
+      resets to `rand & 0x1f` -- a jitter so a pack doesn't swing in
+      lockstep. That works out to roughly one attempt every 256ms,
+      replacing this port's invented fixed ~1s cooldown. Nothing else
+      throttles attacking.
+    - **`monster+0x294` is a paralysis lockout, not an attack cooldown** --
+      the attack function's first test is `+0x294 < 1`, and the tick only
+      steers toward a target while it is exactly 0. Written from exactly
+      one place, the `SetParalyzed` dispatcher case. Implemented, and it
+      now blocks both swinging and turning.
+    - **Flee (package 4) is the Fear spell, not creature morale.** Its
+      whole implementation is `FUN_10086b98(actor, 4, duration)`: set the
+      package, arm a `duration << 8` countdown, drop the current target and
+      record "come back as idle". **The AI tick has no `package == 4`
+      branch at all** -- there is no per-tick flee steering in the
+      original, only that one-shot move goal. `SetWimpy` does *not* trigger
+      it (the AI never reads `monster+0x2ae`). This port runs the creature
+      directly away for the duration, which is its reading of that one-shot
+      goal -- noting the original's own goal expression,
+      `(target - self) * 0x14`, yields an absolute position that isn't
+      generally away from the threat, and may be a bug in the original.
+    - **Spell-assist (package 6) is a no-op in the shipped game.** A
+      whole-program decompiled grep for `0x2a8) == 6` returns nothing, and
+      a creature left in package 6 matches neither branch of the tick's
+      package dispatch -- it simply stops acting. Reproduced faithfully
+      rather than invented. (No script in the corpus calls it, or
+      `AiFlee`, either -- only `AiDetect` and `AiSleep`.)
+    - **The status-effect system, resolved** -- closing a long-standing
+      "Next milestones" item. `FUN_100458e4` selects the effect from the
+      **spell entity's own `entities.txt` typeId** (`actor+0xc8`), not from
+      `DoAttackRoll`'s second argument, which is a magnitude: 4020 =
+      `spells\Fear.s` -> the flee package for `magnitude * 5`, 4025 =
+      `spells\Paralyze.s` -> the action lockout, plus identified branches
+      for Absorb/Blind/Drain/HarmArmor/IgniteFoe/Disease/Poison. Real
+      `Fear.s` passes `DoAttackRoll(target, 10)`; real `blaze.s` passes 1.
+      Fear and Paralyze are implemented; the rest have no system in this
+      port to attach to yet.
+    - `AiDetect`/`AiSleep`/`AiAttack`/`AiFlee`/`AiSpellAssistTarget`/
+      `SetParalyzed` are all real handlers now (`AiDetect` alone was 35 of
+      the play-session log's soft-fails), and `AiActivate`/`AiWounded`/
+      `AiPursue` are accepted as the genuine no-ops they are in the
+      original. New `m32_ai_package_smoke` asserts all of it against real
+      `arat.s`/`Fear.s`/`blaze.s` data -- 29/29 smoke tests pass.
+    - **Frame-delta caveat**: every AI timer counts in the engine's own
+      per-frame delta, a field the engine writes each frame whose magnitude
+      was not recovered. The port uses its fixed 40ms tick, which makes the
+      decompiled `0x100` threshold land at ~256ms and the `rand & 0x1f`
+      reset a sub-frame jitter -- the proportions the real constants imply,
+      but not a measured value.
+
 ## Next milestones (not yet started)
 
 Roughly in priority order for reaching "actually playable," not commitments:
@@ -2375,10 +2431,14 @@ Roughly in priority order for reaching "actually playable," not commitments:
   (`AddEncounters`/`AddRandomSets`, random monster-group spawning --
   M24's own currently-inert stand-in); Zone effects beyond `SetZone`
   (`Vignette`/`SpawnWithinRadius`, ...).
-- **The real status-effect system** `DoAttackRoll`'s `effectId` argument
-  selects (poison/paralyze/blind/fear/drain/... -- M22's "Not attempted"
-  note) -- native, and unlike M21's loot tags, no scripted table has been
-  found anywhere to decode it from.
+- ~~**The real status-effect system** `DoAttackRoll`'s `effectId` argument
+  selects~~ -- **resolved in M32**: the effect is chosen by the *spell
+  entity's own `entities.txt` typeId* (`FUN_100458e4`), not by
+  `DoAttackRoll`'s second argument, which is a magnitude. The "scripted
+  table" that was never found is `entities.txt` itself. Fear and Paralyze
+  are implemented; Absorb/Blind/Drain/HarmArmor/IgniteFoe/Disease/Poison
+  are identified but still unmodelled -- this port has no stat-drain,
+  blindness or damage-over-time systems to hang them on.
 - **Small documented loose ends**, one call/argument each, left open in
   their own milestone's "Not attempted" note rather than guessed at:
   M21's empty-bag despawn (`QuitAndDestroyOpener`/`QueryDestroy`) and

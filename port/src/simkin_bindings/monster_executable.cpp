@@ -1,6 +1,7 @@
 #include "simkin_bindings/monster_executable.h"
 
 #include <cstdio>
+#include <cstdlib>
 
 #include "assets/sound_archive.h"
 #include "assets/string_table.h"
@@ -125,6 +126,42 @@ void MonsterExecutable::InvokeOnKilled() {
     }
 }
 
+void MonsterExecutable::SetAiPackageTimed(int package, int durationUnits) {
+    // FUN_10086b98, byte for byte in behaviour: set the package, arm the
+    // countdown as `duration << 8`, and -- only for the flee package --
+    // forget the current target and record idle as what to return to.
+    m_AiPackage = package;
+    m_AiPackageTimer = durationUnits << 8;
+    if (package != kAiFlee) return;
+    m_SavedAiPackage = kAiIdle;
+}
+
+void MonsterExecutable::TickAi(int deltaUnits) {
+    if (m_AiPackageTimer > 0) {
+        m_AiPackageTimer -= deltaUnits;
+        if (m_AiPackageTimer <= 0) {
+            m_AiPackageTimer = 0;
+            // The real tick's `if (timer expired) package = saved` --
+            // this is what ends a Fear effect.
+            m_AiPackage = m_SavedAiPackage;
+        }
+    }
+    if (m_ParalysisTimer > 0) {
+        m_ParalysisTimer -= deltaUnits;
+        if (m_ParalysisTimer < 0) m_ParalysisTimer = 0;
+    }
+}
+
+bool MonsterExecutable::ConsumeAttackCadence(int deltaUnits) {
+    m_AttackCadence += deltaUnits;
+    if (m_AttackCadence <= kAiAttackCadenceThreshold) return false;
+    // Real reset: `rand & 0x1f`. Uses the same host RNG the rest of this
+    // port's combat rolls use rather than reproducing the engine's own
+    // generator, which is not decompiled.
+    m_AttackCadence = std::rand() & 0x1f;
+    return true;
+}
+
 bool MonsterExecutable::method(const skString& methodName, skRValueArray& args,
                                 skRValue& returnValue, skExecutableContext& context) {
     if (methodName == skString("PlaySound") && args.entries() >= 1) {
@@ -189,6 +226,51 @@ bool MonsterExecutable::method(const skString& methodName, skRValueArray& args,
     }
     if (methodName == skString("SetWimpy") && args.entries() == 1) {
         m_Wimpy = args[0].intValue();
+        return true;
+    }
+    // ---- M32: the real Ai* package calls ----
+    //
+    // Only AiDetect() and AiSleep() are ever called by any script in the
+    // corpus; the rest exist for completeness and for the native paths
+    // (the Fear spell reaches AiFlee's package through
+    // SetAiPackageTimed()). Package values are the decompiled ones -- see
+    // monster_executable.h's AiPackage enum.
+    if (methodName == skString("AiDetect") && args.entries() == 0) {
+        m_AiPackage = kAiIdle;
+        return true;
+    }
+    if (methodName == skString("AiSleep") && args.entries() == 0) {
+        m_AiPackage = kAiAsleep;
+        return true;
+    }
+    if (methodName == skString("AiAttack") && args.entries() >= 1) {
+        m_AiPackage = kAiPursue;
+        return true;
+    }
+    if (methodName == skString("AiFlee") && args.entries() >= 1) {
+        // The dispatcher's own flee case sets the package with no timer --
+        // the timed form is what the Fear spell uses.
+        m_AiPackage = kAiFlee;
+        m_SavedAiPackage = kAiIdle;
+        return true;
+    }
+    if (methodName == skString("AiSpellAssistTarget") && args.entries() >= 1) {
+        // Faithfully inert: the dispatcher stores package 6 and a target,
+        // and **nothing anywhere in the binary ever reads package 6** --
+        // a creature left in it matches neither branch of the real AI tick
+        // and simply stops acting. Reproduced rather than invented.
+        m_AiPackage = kAiSpellAssist;
+        return true;
+    }
+    if ((methodName == skString("AiActivate") || methodName == skString("AiWounded") ||
+         methodName == skString("AiPursue")) &&
+        args.entries() >= 0) {
+        // Genuine no-ops: each of these dispatcher cases falls straight
+        // through to the shared `break` and stores nothing.
+        return true;
+    }
+    if (methodName == skString("SetParalyzed") && args.entries() >= 1) {
+        SetParalyzed(args[0].intValue());
         return true;
     }
     // M31: the real stand-off distance (monster+0x2dc). Same

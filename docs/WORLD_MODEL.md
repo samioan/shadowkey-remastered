@@ -338,3 +338,83 @@ from the attacker's eye toward the target with a step budget of
 `attackRange >> 8`. The generous radii above only make sense alongside
 that check — which is why a port that skips it, however it scales the
 radius, ends up with the whole level converging on the player.
+
+### The flee package, the attack cadence, and the status-effect system
+
+Second AI pass (PC-port session), covering what M31 left open.
+
+**The attack cadence (`monster+0x2c4`)** is the only thing pacing a
+creature's swings. The tick adds the engine's per-frame delta
+(`FUN_1001afa4`, a field the engine writes each frame) to it every frame,
+gates the whole attack block on `0x100 < accumulator`, and afterwards
+resets it to `rand & 0x1f` — a small random jitter so a pack doesn't swing
+in lockstep. Nothing else throttles attacking: `monster+0x294` looks like a
+cooldown but is never written by the attack, only by the dispatcher (see
+below).
+
+**`monster+0x294` is the paralysis/stun lockout**, not an attack cooldown.
+The attack function's (`FUN_100835b8`) very first test is
+`monster+0x294 < 1`, and the tick only steers toward a target while the
+value is exactly `0`; the tick counts it down by the same per-frame delta
+and, on reaching zero, releases the animation lock and returns the creature
+to its idle pose. It is written from exactly one place: the dispatcher case
+that corresponds to `SetParalyzed`.
+
+**Timed AI packages** come from `FUN_10086b98(actor, package, duration)`:
+
+```c
+actor->aiPackage   = package;          // +0x2a8
+actor->packageTimer = duration << 8;   // +0x300
+if (package == 4 && actor->target) {   // flee only
+    actor->hasMoveGoal  = 1;           // +0x1b9
+    actor->goalX = (target->x - actor->x) * 0x14;   // +0x1bc
+    actor->goalY = (target->y - actor->y) * 0x14;   // +0x1c0
+    actor->target = 0;                 // +0x20c  -- forget the target
+    actor->savedPackage = 2;           // +0x2fc  -- come back as idle
+}
+```
+
+The tick counts `+0x300` down and, when it expires, restores `+0x2fc`.
+
+**Package 4 (flee) has no per-tick behaviour** — the AI tick contains no
+`package == 4` branch at all. Its entire implementation is the one-shot
+move goal above plus the countdown. Note the goal expression
+`(target - self) * 0x14` produces an absolute world position that is not
+generally *away* from the threat; whether that is intended or an original
+bug is not determinable from the code alone.
+
+**Package 6 (spell-assist) is never read anywhere in the binary.** A
+whole-program decompiled grep for `0x2a8) == 6` returns nothing, and a
+creature left in package 6 matches neither branch of the tick's
+`if (package == 3 ...) else if (package == 2 || ...)` structure — so it
+simply stops acting. `AiSpellAssistTarget` is effectively a no-op in the
+shipped game. (No script in the corpus calls it, or `AiFlee`, either — only
+`AiDetect` and `AiSleep`.)
+
+**`SetWimpy` does not drive fleeing.** `monster+0x2ae` has a getter and a
+setter in the dispatcher and no other reference in the program; the AI
+never reads it.
+
+#### RESOLVED: the status-effect system
+
+`FUN_100458e4` is the status-effect dispatcher, and it selects the effect
+from **the spell entity's own `entities.txt` typeId** (`actor+0xc8`) — not
+from `DoAttackRoll`'s second argument, which is a *magnitude*:
+
+| typeId | script | branch |
+|--------|--------|--------|
+| 4009 | `spells\Absorb.s` | — |
+| 4010 | `spells\Blind.s` | — |
+| 4018 | `spells\Drain.s` | — |
+| **4020** | **`spells\Fear.s`** | `FUN_10086b98(target, 4, magnitude * 5)` — the flee package |
+| 4023 | `spells\HarmArmor.s` | — |
+| 4024 | `spells\IgniteFoe.s` | — |
+| **4025** | **`spells\Paralyze.s`** | arms the target's `+0x294` lockout |
+| 4033 | `spells\Disease.s` | — |
+| 4034 | `spells\Poison.s` | — |
+
+This closes what `PORT_ROADMAP.md` had recorded as "no scripted table has
+been found anywhere to decode `DoAttackRoll`'s `effectId` from": the table
+is `entities.txt`, keyed by typeId, and the argument scripts pass is the
+magnitude (real `Fear.s` passes `DoAttackRoll(target, 10)`, real `blaze.s`
+passes `1`).

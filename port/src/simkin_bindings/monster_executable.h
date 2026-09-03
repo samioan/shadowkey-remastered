@@ -47,6 +47,20 @@ class StringTable;
 
 namespace sk_bindings {
 
+// M32: the engine's own per-frame delta (what FUN_1001afa4 returns) is the
+// unit every AI timer below counts in. Its magnitude was not recovered --
+// it is a field the engine writes each frame -- so this port uses its own
+// fixed tick period, 40ms (docs/RENDER_LOOP.md's real 25Hz CPeriodic).
+// That makes the decompiled 0x100 attack-cadence threshold work out to
+// ~6.4 ticks, i.e. roughly one attack attempt every 256ms, and the
+// `rand & 0x1f` reset a sub-frame jitter -- both of which are the
+// proportions the real constants imply.
+constexpr int kAiFrameDeltaUnits = 40;
+
+// The decompiled attack-cadence threshold (monster+0x2c4 must exceed this
+// before the creature may act).
+constexpr int kAiAttackCadenceThreshold = 0x100;
+
 class MenuStack;
 class PlayerExecutable;
 
@@ -136,6 +150,49 @@ public:
         if (scaledSquared <= 0) return 0.0f;
         return 16.0f * std::sqrt(static_cast<float>(scaledSquared));
     }
+
+    // ---- M32: the real AI package state machine (monster+0x2a8) ----
+    //
+    // Decompiled from the AI tick (FUN_10082224), the dispatcher
+    // (FUN_10084924) and the timed-package helper (FUN_10086b98). See
+    // docs/WORLD_MODEL.md's "The monster AI" section.
+    enum AiPackage {
+        kAiAsleep = -1,      // the actor constructor's own initial value; AiSleep()
+        kAiIdle = 2,         // look for a target -- the post-spawn default, and AiDetect()
+        kAiPursue = 3,       // chase/attack monster+0x20c; set by the tick on acquiring a target
+        kAiFlee = 4,         // run away for a limited time -- the Fear spell, see below
+        kAiSpellAssist = 6,  // AiSpellAssistTarget(); **no reader anywhere in the binary**
+    };
+    int aiPackage() const { return m_AiPackage; }
+    void SetAiPackage(int package) { m_AiPackage = package; }
+
+    // FUN_10086b98(actor, package, duration): sets the package, arms the
+    // countdown at monster+0x300 (`duration << 8`), and -- for the flee
+    // package specifically -- drops the current target and records
+    // "return to idle" in monster+0x2fc. When the countdown expires the
+    // tick restores that saved package.
+    void SetAiPackageTimed(int package, int durationUnits);
+
+    // Real SetParalyzed (dispatcher case 0xe -> monster+0x294): a general
+    // action lockout. The attack function's very first test is
+    // `monster+0x294 < 1`, and the tick only steers toward a target while
+    // it is exactly 0, so a paralysed creature neither swings nor turns.
+    void SetParalyzed(int durationUnits) { m_ParalysisTimer = durationUnits; }
+    bool paralyzed() const { return m_ParalysisTimer > 0; }
+
+    // Per-tick countdowns for both timers above. `deltaUnits` is the
+    // engine's own per-frame delta (the value FUN_1001afa4 returns) --
+    // see kAiFrameDeltaUnits.
+    void TickAi(int deltaUnits);
+
+    // The real attack cadence (monster+0x2c4). The tick adds the frame
+    // delta every frame, only lets the creature act once the accumulator
+    // passes 0x100, and then resets it to `rand & 0x1f` -- a small random
+    // jitter so a pack doesn't swing in lockstep. Returns true on the
+    // frames the creature is allowed to attack, consuming the accumulator.
+    //
+    // This replaces the port's own invented fixed cooldown.
+    bool ConsumeAttackCadence(int deltaUnits);
 
     int currentHealth() const { return m_CurrentHealth; }
     int maxHealth() const { return m_MaxHealth; }
@@ -243,6 +300,13 @@ private:
     int m_AttackRange = 0x6a4;
     int m_Mob = 0;
     int m_Level = 0;  // M30: SetLevel/GetLevel, read by real spell damage formulas
+    // M32: see the AI package block above. Defaults match the real actor
+    // constructor (FUN_100815e0): package -1, timers clear.
+    int m_AiPackage = kAiAsleep;
+    int m_SavedAiPackage = kAiIdle;  // monster+0x2fc
+    int m_AiPackageTimer = 0;        // monster+0x300
+    int m_ParalysisTimer = 0;        // monster+0x294
+    int m_AttackCadence = 0;         // monster+0x2c4
     int m_Skin = 0;
     int m_Scale = 256;  // 8.8 fixed point, 256 == 1:1
     int m_IdleAnim = -1;

@@ -290,3 +290,8 @@ target_link_libraries(surface_uv_smoke PRIVATE sk_world)
 # src/tests/m29_animation_smoke.cpp.
 add_executable(animation_smoke src/tests/m29_animation_smoke.cpp)
 target_link_libraries(animation_smoke PRIVATE sk_world)
+
+# AI package state machine / flee / paralysis / attack cadence smoke test --
+# see src/tests/m32_ai_package_smoke.cpp.
+add_executable(ai_package_smoke src/tests/m32_ai_package_smoke.cpp)
+target_link_libraries(ai_package_smoke PRIVATE sk_bindings)

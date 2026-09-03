@@ -48,6 +48,10 @@ public:
     // fall back to a placeholder rather than crash.
     ItemExecutable(const skString& filename, skExecutableContext& ctxt, MenuStack& stack);
 
+    // The script path this item was loaded from, lowercased -- see
+    // statusEffect(). Kept because skScriptedExecutable doesn't expose it.
+    const std::string& scriptPath() const { return m_ScriptPath; }
+
     bool method(const skString& methodName, skRValueArray& args, skRValue& returnValue,
                 skExecutableContext& context) override;
 
@@ -83,6 +87,23 @@ public:
     // "no such handler" fallback -- same TryInvoke()-style tolerance
     // MenuExecutable already relies on).
     void InvokeHitTarget(skiExecutable* target);
+
+    // M32: which real status effect this item's script *is*.
+    //
+    // The real selector is decompiled: FUN_100458e4 switches on the spell
+    // entity's own entities.txt typeId -- 4020 = spells\Fear.s applies AI
+    // package 4 (flee) for `magnitude * 5`, 4025 = spells\Paralyze.s arms
+    // the target's action lockout, and there are further branches for
+    // Absorb/Blind/Drain/HarmArmor/IgniteFoe/Disease/Poison. That resolves
+    // docs/PORT_ROADMAP.md's long-standing "no scripted table has been
+    // found anywhere to decode DoAttackRoll's effect from" open item: the
+    // table is entities.txt, keyed by typeId.
+    //
+    // This port loads a spell by script *path* rather than by typeId, but
+    // that is the same relation -- entities.txt maps one to the other --
+    // so the effect is resolved from the script filename.
+    enum StatusEffect { kEffectNone, kEffectFear, kEffectParalyze };
+    StatusEffect statusEffect() const;
 
     // Host-side accessors -- used by MenuExecutable's inventory-table
     // population (DisplayWeaponsPage etc.) and PlayerExecutable's equip
@@ -159,6 +180,7 @@ public:
     int rating() const { return m_Rating; }
 
 private:
+    std::string m_ScriptPath;  // M32: see scriptPath()/statusEffect()
     MenuStack& m_Stack;
     skInterpreter* m_Interpreter;
     int m_ItemType = 0;  // kItemTypeMisc until a category setter fires
