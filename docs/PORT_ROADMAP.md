@@ -2078,3 +2078,13 @@ Every milestone gets a standalone smoke-test executable
 depending on the windowed app or (flaky) screenshot tooling, plus an
 interactive pass through the actual `shadowkey_port.exe` for anything
 that's meaningfully different in a live loop (input timing, rendering).
+
+**`shadowkey_port.exe` also writes `shadowkey_port.log`** (next to
+wherever it's launched from, user-requested) -- a real OS-level tee
+(`platform/win32/console_tee.h`, started as the very first thing in
+`main()`) duplicates everything the console window already shows (action
+traces, every `[soft-fail] ... -- not implemented` line, load errors)
+into that file too, unchanged, with zero per-call-site changes anywhere
+else in the codebase. Meant for reviewing what a real play session hit
+that isn't implemented yet without copying console text by hand --
+gitignored, overwritten fresh each run.

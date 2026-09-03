@@ -153,6 +153,7 @@ add_executable(shadowkey_port
   src/assets/sprite_archive.cpp
   src/assets/zone_display_names.cpp
   src/graphics/bitmap_font.cpp
+  src/platform/win32/console_tee.cpp
   src/platform/win32/window.cpp
 )
 

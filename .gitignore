@@ -64,3 +64,6 @@ __pycache__/
 # open-source (LGPL) and safe to redistribute in-tree. See the port
 # scaffold plan for the license/provenance rationale.
 /port/build/
+# Runtime action/soft-fail log (platform/win32/console_tee.h) -- written
+# next to wherever shadowkey_port.exe is launched from.
+shadowkey_port.log

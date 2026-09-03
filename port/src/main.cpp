@@ -29,6 +29,7 @@
 #include "engine/pc_key_map.h"
 #include "graphics/backbuffer.h"
 #include "graphics/bitmap_font.h"
+#include "platform/win32/console_tee.h"
 #include "platform/win32/window.h"
 #include "render3d/camera.h"
 #include "render3d/zone_renderer.h"
@@ -671,6 +672,17 @@ void RenderLoadingScreen(sk::Backbuffer& backbuffer, sk::SpriteArchive& sprites,
 }  // namespace
 
 int main(int argc, char** argv) {
+    // User-requested: every std::printf this whole codebase already does
+    // (action traces, SoftFailNativeCall/"not implemented" logs, load
+    // errors, ...) also lands in a plain text file, unchanged, so a play
+    // session's unimplemented-call traces can be reviewed afterward
+    // without copying them out of the console by hand. See platform/
+    // win32/console_tee.h's own comment for why this is a real OS-level
+    // tee (keeps the live console working too) rather than a plain
+    // `freopen`. As early as possible -- anything printed before this
+    // call only reaches the console, not the log.
+    sk::StartConsoleTeeLog("shadowkey_port.log");
+
     const char* scriptRoot =
         argc > 1 ? argv[1]
                   : "The-Elder-Scrolls-Travels-Shadowkey_N-Gage_EN-FR-DE-ES-IT_USA-Europe-"
