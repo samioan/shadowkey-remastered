@@ -306,3 +306,7 @@ target_link_libraries(placement_menu_smoke PRIVATE sk_bindings sk_world)
 # src/tests/m37_spellpower_smoke.cpp.
 add_executable(spellpower_smoke src/tests/m37_spellpower_smoke.cpp)
 target_link_libraries(spellpower_smoke PRIVATE sk_bindings)
+
+# Physical trap/door zone triggers -- see src/tests/m38_trap_trigger_smoke.cpp.
+add_executable(trap_trigger_smoke src/tests/m38_trap_trigger_smoke.cpp)
+target_link_libraries(trap_trigger_smoke PRIVATE sk_bindings sk_world)

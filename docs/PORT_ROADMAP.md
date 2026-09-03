@@ -2741,22 +2741,99 @@ algorithms.
       `+0xf3c == 6` -- all three read object graphs this port has no
       equivalent of. Each is a missing *bonus*, not a wrong formula.
 
+- [x] **M38 -- zone triggers: the physical trap/door half, and the
+  "trigger volume" question answered.** The blocker recorded since M23/M24
+  ("no real trigger-volume data source traced yet: is it `.ent`-based,
+  `.zcp`-cell-based, or something else entirely") turns out to have a
+  third answer: **there is no volume**.
+    - **How a trigger identifies what it guards.** `FUN_10090818` (fire)
+      and `FUN_1007307c` (the walk over the zone's trigger list at
+      `level+0x420`) show a trigger is notified about an *entity*, with a
+      mode saying what happened, and matches it either against its own
+      `AddEntity(...)` list -- which holds integer `entities.txt` typeIds
+      *or* entity names, `FUN_1009138c` comparing `entity+0xc8` for one and
+      strcmp'ing `entity+0xcb` for the other -- or against the trigger's
+      **own name**, compared to the entity's.
+    - **Corroborated twice from shipped data.** `crypt1.s` builds five
+      triggers named `door1`..`door5` with no `AddEntity` and no `SetDoor`
+      at all; `crypt1.ent` contains exactly five placements with those
+      names (all typeId 27, a door), and `crypt1.stn` independently binds
+      those same five names to a shared `resistDisarm[28]` slot. Three
+      unrelated files agreeing is what makes this a reading rather than a
+      guess. Meanwhile `lothcav.s`'s three traps match by typeId (1013,
+      1011, 1012) -- all three real category-10 (trap) entities.
+    - **The three notification modes**, from `FUN_1007307c`'s three call
+      sites: **0** entity killed (M24's kill-count variant), **1** door
+      opened (`FUN_1002e6cc`, which notifies *before* running the door's
+      own open -- which is what makes a trapped door bite as you open it),
+      **2** a trap entity's own periodic proximity check (`FUN_1008ff14`,
+      which builds a +/-0x100 box around the trap and the player's box from
+      the player's `SetRadius`/`SetRadius2` half-extents). All three are
+      wired: mode 1 on the door Use path, mode 2 as an edge-triggered
+      per-tick box test over the zone's real trap placements.
+    - **`SetTrap`/`RemainActive`/`ShowDamageMessage`/`IsActive`/`SetDoor`/
+      `OpenDoor`/`AddEntity`** implemented, with the real flag bits
+      (`trigger+0x24`, whose constructor value is the one-shot bit -- which
+      is why `RemainActive()` *clears* a bit rather than setting one).
+    - **A real vendored-Simkin incompatibility, found by this work.**
+      `skTreeNodeObject::setValue()` stores a native object assigned to a
+      *declared* field as `child->data(v.str())` -- it keeps the string and
+      drops the object. `lothcav.s` declares `fight41` and `doorTrigger` at
+      the top of its class, so `fight41.AddRandomSets(272, 1)` threw and
+      **aborted that whole zone's `Init()` before any of its three trap
+      triggers were registered**; `ghstpass.s` does the same thing without
+      declaring the fields (undeclared identifiers become stack locals,
+      which hold real objects), which is why it never showed up. Fixed with
+      an object-field side table on all four `skScriptedExecutable`
+      subclasses; plain values still take the normal TreeNode path, so
+      `saved_X` flags are untouched.
+    - **Trigger callbacks take two parameters, not one.** `crypt1.s`
+      declares `OnOpenDoor[ (trigger, who) ]` and immediately calls
+      `trigger.IsActive()` and `who.OpenDoor("Open Door")`; the real
+      argument array (built at `LAB_10090d70`) is exactly the trigger
+      object and the notifying entity. Every other host-triggered call in
+      this port passes a single placeholder, so this one needed its own
+      shape.
+    - **The Encounter spawner is a real object now** (`AddEncounters` used
+      to return an inert handle). `AddRandomSets` reads its arguments in
+      (typeId, count) **pairs** and appends the whole run as one set --
+      five calls give five alternative sets, which is what makes them
+      random; `SetLimit(index, count)` indexes the *region* list, not the
+      set list.
+    - New `m38_trap_trigger_smoke` (18 assertions against real `lothcav.s`,
+      `crypt1.s`, `ghstpass.s`, `entities.txt` and `crypt1.ent` data);
+      33/33 smoke tests pass.
+    - **Not attempted**: the pair of saving throws in front of trap damage
+      (`FUN_1003e438` reads a player stance model and an 8-slot equipped-
+      effect array this port has no equivalent of; `FUN_10044e58` is a
+      second, cheaper roll) -- so a trap here always connects, a missing
+      mitigation rather than a wrong formula. And where an *encounter
+      region* is positioned: dumping every named placement in
+      `lothcav.ent`/`ghstpass.ent` found none of `battle41`/`fight12`/
+      `fight13C`/... so regions live in a per-zone source not yet
+      identified (the real lookup goes through `FUN_100731b4` against a
+      list at `level+0x44c`, which is very likely also what `EnterZone`'s
+      named triggers walk).
+
 ## Next milestones (not yet started)
 
 Roughly in priority order for reaching "actually playable," not commitments:
 
-- **`Zone/Level` global object (beyond M18/M23/M24's slices)** --
-  `AddTrigger`'s own physical/position-based trap variant (`AddEntity`/
-  `SetTrap`/`SetDoor`/`OpenDoor`/`ShowDamageMessage` -- needs real
-  trigger-volume/position data this port doesn't have, the same root gap
-  blocking the next item); `EnterZone(s)`'s own trigger-volume mechanism
-  (M23's "Not attempted" note -- no real trigger-volume data source
-  traced yet: is it `.ent`-based, `.zcp`-cell-based, or something else
-  entirely); `CreateEntity`/`CreateEntityScript`'s non-item-shaped
-  categories and save/load-level state; the "Encounter spawner" class
-  (`AddEncounters`/`AddRandomSets`, random monster-group spawning --
-  M24's own currently-inert stand-in); Zone effects beyond `SetZone`
-  (`Vignette`/`SpawnWithinRadius`, ...).
+- **`Zone/Level` global object -- what M38 left.** The trigger half is
+  done (M38); these are the remaining pieces of the same bullet:
+    - **Where a named zone region lives.** `EnterZone(s)`'s tags
+      (`"Skelos_Dead"`, `"YouSure"`, `"ghasts"`, ...) and the Encounter
+      spawner's regions (`"battle41"`, `"fight12W"`, ...) are looked up the
+      same way -- `FUN_100731b4` against a list at `level+0x44c` -- and M38
+      ruled out the obvious source by dumping every named `.ent` placement
+      in `lothcav.ent`/`ghstpass.ent`/`crypt1.ent`: none of these names
+      appears. With that list's real source found, both `EnterZone` and
+      `SpawnEncounter` become straightforward (the spawner's own object
+      model, sets and limits included, is already implemented and tested).
+    - `CreateEntity`/`CreateEntityScript`'s non-item-shaped categories and
+      save/load-level state.
+    - Zone effects beyond `SetZone` (`Vignette`/`SpawnWithinRadius`/
+      `LightRect`/`AddInterestPoint`, dispatcher `FUN_1002f074`).
 - **Monsters as spell casters.** M37 implemented the real caster stat and
   hit gate, but always reads them off the *player*:
   `MonsterExecutable::spellToHit()` exists and is correct, and

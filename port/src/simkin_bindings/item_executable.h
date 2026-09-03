@@ -1,5 +1,8 @@
 #pragma once
 
+#include <map>
+#include <string>
+
 // M10: native binding for a real armor/weapon/item/consumable .s script
 // object -- e.g. armor/chain_coif.s, weapons/club.s, items/bread.s. Same
 // role TestArmorExecutable played for M2's throwaway round-trip proof, but
@@ -54,6 +57,16 @@ public:
 
     bool method(const skString& methodName, skRValueArray& args, skRValue& returnValue,
                 skExecutableContext& context) override;
+
+    // M38: keep an object assigned to a *pre-declared* script field --
+    // see native_binding_common.h's StoreScriptObjectField() for the
+    // vendored-Simkin behaviour this works around and the real script
+    // (lothcav.s) that exposed it.
+    bool setValue(const skString& fieldName, const skString& attribute,
+                  const skRValue& value) override;
+    bool getValue(const skString& fieldName, const skString& attribute,
+                  skRValue& value) override;
+
 
     // M21: skTreeNodeObject::strValue() (skScriptedExecutable's own base)
     // defaults to the TreeNode's own root data -- empty for an ordinary
@@ -258,6 +271,8 @@ public:
     int rating() const { return m_Rating; }
 
 private:
+    // M38: object-valued script fields -- see setValue() above.
+    std::map<std::string, skRValue> m_ObjectFields;
     std::string m_ScriptPath;  // M32: see scriptPath()/statusEffect()
     MenuStack& m_Stack;
     skInterpreter* m_Interpreter;

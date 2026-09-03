@@ -62,6 +62,18 @@ bool DoorExecutable::method(const skString& methodName, skRValueArray& args, skR
         m_RotationRaw += args[0].intValue();
         return true;
     }
+    if (methodName == skString("OpenDoor")) {
+        // M38: a trapped door's trigger callback opens the door itself --
+        // crypt1.s's `OnOpenDoor[ (trigger, who) ]` does
+        // `who.OpenDoor("Open Door")` when the trap is no longer armed.
+        // The real notification order (FUN_1002e6cc) is "tell the trigger
+        // list, then run the open", so by the time this callback lands the
+        // port has already got the open queued for this same Use -- doing
+        // it again here would swing the door twice. Accepted as a no-op so
+        // the real callback runs to completion instead of throwing
+        // "Method OpenDoor not found" and skipping everything after it.
+        return true;
+    }
     if (methodName == skString("DoorOpened")) {
         // Real signature is DoorOpened(self, isOpen, isNormal) -- network/
         // replication bookkeeping in the original (docs/PORT_ROADMAP.md:
@@ -78,6 +90,19 @@ bool DoorExecutable::method(const skString& methodName, skRValueArray& args, skR
         return true;
     }
     return SoftFailNativeCall("Door", methodName, args, returnValue);
+}
+
+
+// M38: see native_binding_common.h's StoreScriptObjectField().
+bool DoorExecutable::setValue(const skString& fieldName, const skString& attribute,
+                     const skRValue& value) {
+    if (StoreScriptObjectField(m_ObjectFields, fieldName, value)) return true;
+    return skScriptedExecutable::setValue(fieldName, attribute, value);
+}
+
+bool DoorExecutable::getValue(const skString& fieldName, const skString& attribute, skRValue& value) {
+    if (LoadScriptObjectField(m_ObjectFields, fieldName, value)) return true;
+    return skScriptedExecutable::getValue(fieldName, attribute, value);
 }
 
 }  // namespace sk_bindings

@@ -1,5 +1,8 @@
 #pragma once
 
+#include <map>
+#include <string>
+
 // Combat vertical-slice: native binding for a real monster .s script
 // object (monsters/Azra_Rat.s to start -- see docs/PORT_ROADMAP.md's
 // combat-slice entry). Same shape as ItemExecutable (a real script's
@@ -91,6 +94,16 @@ public:
 
     bool method(const skString& methodName, skRValueArray& args, skRValue& returnValue,
                 skExecutableContext& context) override;
+
+    // M38: keep an object assigned to a *pre-declared* script field --
+    // see native_binding_common.h's StoreScriptObjectField() for the
+    // vendored-Simkin behaviour this works around and the real script
+    // (lothcav.s) that exposed it.
+    bool setValue(const skString& fieldName, const skString& attribute,
+                  const skRValue& value) override;
+    bool getValue(const skString& fieldName, const skString& attribute,
+                  skRValue& value) override;
+
 
     // M21: guaranteed-non-blank strValue() -- see ItemExecutable::
     // strValue()'s comment for the real bug this avoids (a found object's
@@ -386,6 +399,8 @@ public:
     void InvokeOnKilled();
 
 private:
+    // M38: object-valued script fields -- see setValue() above.
+    std::map<std::string, skRValue> m_ObjectFields;
     // M28: shared by ApplyDamage()/PlayAttackNoise() -- same null-checked
     // sounds()/audio() lookup the PlaySound() method handler already uses
     // (monster_executable.cpp), just reusable for a host-triggered call

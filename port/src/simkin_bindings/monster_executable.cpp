@@ -609,4 +609,17 @@ bool MonsterExecutable::method(const skString& methodName, skRValueArray& args,
     return SoftFailNativeCall("Monster", methodName, args, returnValue);
 }
 
+
+// M38: see native_binding_common.h's StoreScriptObjectField().
+bool MonsterExecutable::setValue(const skString& fieldName, const skString& attribute,
+                     const skRValue& value) {
+    if (StoreScriptObjectField(m_ObjectFields, fieldName, value)) return true;
+    return skScriptedExecutable::setValue(fieldName, attribute, value);
+}
+
+bool MonsterExecutable::getValue(const skString& fieldName, const skString& attribute, skRValue& value) {
+    if (LoadScriptObjectField(m_ObjectFields, fieldName, value)) return true;
+    return skScriptedExecutable::getValue(fieldName, attribute, value);
+}
+
 }  // namespace sk_bindings

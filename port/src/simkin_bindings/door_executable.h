@@ -1,5 +1,8 @@
 #pragma once
 
+#include <map>
+#include <string>
+
 // M15: native binding for a real placed door's .s script (door.s/
 // door02.s -- see docs/PORT_ROADMAP.md's "generic Action::Use interact
 // binding" open item). Same shape as MonsterExecutable (a real script's
@@ -56,6 +59,16 @@ public:
     bool method(const skString& methodName, skRValueArray& args, skRValue& returnValue,
                 skExecutableContext& context) override;
 
+    // M38: keep an object assigned to a *pre-declared* script field --
+    // see native_binding_common.h's StoreScriptObjectField() for the
+    // vendored-Simkin behaviour this works around and the real script
+    // (lothcav.s) that exposed it.
+    bool setValue(const skString& fieldName, const skString& attribute,
+                  const skRValue& value) override;
+    bool getValue(const skString& fieldName, const skString& attribute,
+                  skRValue& value) override;
+
+
     // M21: guaranteed-non-blank strValue() -- see ItemExecutable::
     // strValue()'s comment for the real bug this avoids (a found object's
     // default-empty strValue() could otherwise compare equal to the
@@ -82,6 +95,8 @@ public:
     void InvokeOnUse();
 
 private:
+    // M38: object-valued script fields -- see setValue() above.
+    std::map<std::string, skRValue> m_ObjectFields;
     PlayerExecutable& m_Player;
     skInterpreter* m_Interpreter;
 

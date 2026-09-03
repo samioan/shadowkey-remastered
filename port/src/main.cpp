@@ -310,6 +310,31 @@ struct DoorInstance {
     // every door rendered face-on regardless of which wall it was in,
     // which is what made them all look permanently open.
     float placementYaw = 0.0f;
+    // M38: the two ways a zone trigger identifies the entity it guards --
+    // its entities.txt typeId and its .ent placement name. crypt1.s's five
+    // trapped doors are matched purely by name.
+    int typeId = -1;
+    std::string name;
+};
+
+// M38: a placed entity a zone-root script's own AddTrigger() watches as a
+// physical trap. Built once per zone, right after the zone script's Init()
+// has registered its triggers, by filtering every placement through
+// ZoneScriptExecutable::AnyTrapWatches() -- so the per-tick proximity test
+// walks a handful of real trap placements rather than every prop.
+//
+// The real engine has no such list: each trap entity ticks itself
+// (FUN_1008ff14) and asks the whole trigger list. Same outcome, one less
+// object to model.
+struct TrapInstance {
+    float x = 0, y = 0;
+    int typeId = -1;
+    std::string name;
+    // The real trap holds a "already sprung" flag (entity+0x225) and a
+    // re-arm timer (+0x228); this is the same latch, cleared when the
+    // player leaves the trap's box, so standing on a spike trap costs one
+    // hit rather than one per tick.
+    bool inside = false;
 };
 
 // M19: Action::Use interact binding's last remaining slice -- pickups.
@@ -1080,6 +1105,13 @@ int main(int argc, char** argv) {
     // M15: live doors, pulled out of gameEntities the same way gameMonsters
     // is -- see DoorInstance's comment.
     std::vector<DoorInstance> gameDoors;
+    // M38: this zone's real trap placements -- see TrapInstance's comment.
+    std::vector<TrapInstance> gameTraps;
+    // M38: every placement's (position, typeId, name), kept only long
+    // enough to build gameTraps once the zone script has registered its
+    // triggers (which happens after the placement loop, because those
+    // triggers' own Init() resolves Level.GetEntity() names).
+    std::vector<TrapInstance> gameTrapCandidates;
     // M19: live world pickups, pulled out of gameEntities the same way --
     // see PickupInstance's comment. Shrinks as items are actually picked
     // up (unlike gameDoors/gameMonsters, which stay fixed-size for a
@@ -1237,6 +1269,8 @@ int main(int argc, char** argv) {
                 gameEntities.clear();
                 gameMonsters.clear();
                 gameDoors.clear();
+                gameTraps.clear();
+                gameTrapCandidates.clear();
                 gamePickups.clear();
                 // M18: every live object this loop is about to (re)create
                 // is stale after this point -- drop any name -> object
@@ -1285,6 +1319,19 @@ int main(int argc, char** argv) {
                     const sk::EntityTypeDescriptor* desc = entityTypes.Lookup(e.typeId);
                     if (!desc) continue;
                     const std::string placementScriptPath = placementScript(e, desc);
+                    // M38: every placement is a possible trigger target --
+                    // matched by typeId (lothcav.s's `AddEntity(1013)`) or
+                    // by name (crypt1.s's `AddTrigger("door1")`). Filtered
+                    // down to the real ones below, once the zone script has
+                    // actually registered its triggers.
+                    {
+                        TrapInstance cand;
+                        cand.x = static_cast<float>(e.x);
+                        cand.y = static_cast<float>(e.y);
+                        cand.typeId = e.typeId;
+                        cand.name = e.name;
+                        gameTrapCandidates.push_back(std::move(cand));
+                    }
                     if (desc->category == 11 && !placementScriptPath.empty()) {
                         const std::string& fullPath = placementScriptPath;
                         skExecutableContext loadCtxt(&interpreter);
@@ -1302,6 +1349,8 @@ int main(int argc, char** argv) {
                             inst.y = static_cast<float>(e.y);
                             inst.z = static_cast<float>(e.z);
                             inst.modelArchiveIndex = desc->modelArchiveIndex;
+                            inst.typeId = e.typeId;   // M38: zone-trigger identity
+                            inst.name = e.name;
                             inst.script = std::move(door);
                             stack.level().RegisterEntity(e.name, inst.script.get());
                             gameDoors.push_back(std::move(inst));
@@ -1486,6 +1535,18 @@ int main(int argc, char** argv) {
                     skExecutableContext callCtxt(&interpreter);
                     zoneScript->method(skString("Init"), args, ret, callCtxt);
                     gameZoneScript = std::move(zoneScript);
+                    // M38: now that AddTrigger()/SetTrap()/AddEntity() have
+                    // run, keep only the placements a trap trigger actually
+                    // watches.
+                    for (TrapInstance& cand : gameTrapCandidates) {
+                        if (gameZoneScript->AnyTrapWatches(cand.typeId, cand.name)) {
+                            gameTraps.push_back(cand);
+                        }
+                    }
+                    if (!gameTraps.empty()) {
+                        std::printf("shadowkey-port: %zu trap placement(s) armed in '%s'\n",
+                                    gameTraps.size(), stack.requestedZone().c_str());
+                    }
                 } catch (skParseException& ex) {
                     std::printf("shadowkey-port: PARSE ERROR loading zone script %s: %s\n",
                                 zoneScriptPath.c_str(), ex.toString().ptr());
@@ -1607,6 +1668,35 @@ int main(int argc, char** argv) {
                 // an Action.
                 if (input.GetBoundButton(sk::Action::SideStepLeft)) tryMove(-rx, -ry);
                 if (input.GetBoundButton(sk::Action::SideStepRight)) tryMove(rx, ry);
+
+                // M38: the real trap proximity check, once the player's
+                // position for this tick is settled.
+                //
+                // FUN_1008ff14 (the trap entity's own tick) builds a box of
+                // +/-0x100 around the trap's own x/y and the player's box
+                // from the player's SetRadius/SetRadius2 half-extents, then
+                // notifies the zone's trigger list with mode 2. Both
+                // numbers below are those: 256 world units is exactly one
+                // tile, and kPlayerRadius is this port's own collision
+                // radius standing in for the real half-extents.
+                if (gameZoneScript && !gameTraps.empty()) {
+                    constexpr float kTrapHalfExtent = 256.0f;  // the real +/-0x100
+                    for (TrapInstance& trap : gameTraps) {
+                        const float reach = kTrapHalfExtent + kPlayerRadius;
+                        const bool overlapping = std::fabs(gameCamera.x - trap.x) <= reach &&
+                                                  std::fabs(gameCamera.y - trap.y) <= reach;
+                        // Edge-triggered: the real trap latches itself
+                        // sprung (entity+0x225) and re-arms on a timer, so
+                        // standing on a spike trap must not bill the player
+                        // once per tick.
+                        if (overlapping && !trap.inside) {
+                            gameZoneScript->Notify(
+                                sk_bindings::TriggerExecutable::kNotifyTrapProximity, trap.typeId,
+                                trap.name);
+                        }
+                        trap.inside = overlapping;
+                    }
+                }
 
                 // Post-M11: real gravity/jump/ground-and-ceiling physics,
                 // replacing the M6-M11 fixed "camera.z set once at zone
@@ -2430,6 +2520,17 @@ int main(int argc, char** argv) {
                             gamePausedForMenu = true;
                         }
                     } else if (door) {
+                        // M38: mode 1 -- the real engine notifies the
+                        // trigger list *before* running the door's own
+                        // open (FUN_1002e6cc calls FUN_1007307c(level, 1,
+                        // door) and only then the open itself), which is
+                        // what makes crypt1.s's five trapped doors bite as
+                        // you open them.
+                        if (gameZoneScript) {
+                            gameZoneScript->Notify(
+                                sk_bindings::TriggerExecutable::kNotifyDoorOpened, door->typeId,
+                                door->name, door->script.get());
+                        }
                         door->script->InvokeOnUse();
                     }
                 }

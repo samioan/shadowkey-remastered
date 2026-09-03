@@ -1,5 +1,7 @@
 #include "simkin_bindings/native_binding_common.h"
 
+#include "skTreeNodeObject.h"
+
 #include <algorithm>
 #include <cstdio>
 #include <cstdlib>
@@ -19,6 +21,32 @@ bool SoftFailNativeCall(const char* objectDebugName, const skString& methodName,
     }
     std::printf(") -- not implemented\n");
     returnValue = skRValue(0);
+    return true;
+}
+
+// M38: see native_binding_common.h for why these exist.
+bool StoreScriptObjectField(std::map<std::string, skRValue>& fields, const skString& fieldName,
+                             const skRValue& value) {
+    const std::string key = ToStdString(fieldName);
+    skiExecutable* obj = value.obj();
+    // TREENODE_TYPE objects are Simkin's own script-side structures and
+    // *are* handled correctly by the TreeNode path (it deep-copies them),
+    // so only native objects are diverted here.
+    if (value.type() == skRValue::T_Object && obj && obj->executableType() != TREENODE_TYPE) {
+        fields[key] = value;
+        return true;
+    }
+    // Reassigning a field to a plain value has to drop any object that was
+    // there, or the stale object would keep shadowing the new value.
+    fields.erase(key);
+    return false;
+}
+
+bool LoadScriptObjectField(const std::map<std::string, skRValue>& fields,
+                            const skString& fieldName, skRValue& value) {
+    auto it = fields.find(ToStdString(fieldName));
+    if (it == fields.end()) return false;
+    value = it->second;
     return true;
 }
 
