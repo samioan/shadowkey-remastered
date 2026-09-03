@@ -125,6 +125,29 @@ bool ItemExecutable::method(const skString& methodName, skRValueArray& args,
         m_ItemType = kItemTypeWeapon;
         return true;
     }
+    // M20: real ranged-weapon markers -- SetClipSize/SetFireRate/
+    // SetReloadFrames are deliberately NOT handled here (soft-fail is
+    // correct): a full corpus grep found zero real call sites for any of
+    // the three anywhere in the whole game, matching docs/
+    // INPUT_HANDLING.md's separate finding that "Shoot"/"Reload" exist as
+    // logical actions but were never wired into the real default control
+    // scheme -- ammo/rate-of-fire is dead weight in the shipped game, not
+    // a gap this port is missing.
+    if (methodName == skString("SetBow") && args.entries() == 1) {
+        m_Ranged = args[0].boolValue();
+        m_ItemType = kItemTypeWeapon;
+        return true;
+    }
+    if (methodName == skString("SetCrossbow") && args.entries() == 1) {
+        m_Ranged = args[0].boolValue();
+        m_ItemType = kItemTypeWeapon;
+        return true;
+    }
+    if (methodName == skString("SetThrowingWeapon") && args.entries() == 1) {
+        m_Ranged = args[0].boolValue();
+        m_ItemType = kItemTypeWeapon;
+        return true;
+    }
     if (methodName == skString("GetName") && args.entries() == 0) {
         returnValue = skRValue(skString(name().c_str()));
         return true;

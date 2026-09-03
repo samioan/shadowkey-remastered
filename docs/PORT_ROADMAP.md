@@ -1285,6 +1285,78 @@ algorithms.
     - Not independently confirmed in an actual windowed play session
       (same caveat every prior milestone's writeup already carries).
 
+- [x] **M20 -- ranged weapons** (this session). Next slice of "Combat
+      resolution" after M19 closed out `Action::Use` -- a real, previously-
+      stored-but-unused weapon field turned out to be exactly what this
+      needed.
+    - **`SetRange()` was already being stored, never read back**: every
+      real weapon script's `Init()` calls `SetRange(n)` (item_
+      executable.cpp has handled it since M10, just to flag
+      `kItemTypeWeapon`), but nothing in this port ever used the actual
+      *value* for anything. A corpus-wide grep this session found exactly
+      **two** distinct values across the whole real weapon corpus: **384**
+      (65 melee weapons -- `weapons/club.s` etc.) and **16384** (16 real
+      bow/crossbow/thrown weapons -- `weapons/bandit_longbow.s` etc.,
+      flagged by `SetBow`/`SetCrossbow`/`SetThrowingWeapon(true)`) -- a
+      clean, unambiguous, corpus-verified bimodal split, not a guess.
+      `ItemExecutable` gained a `range()` accessor (already-stored value)
+      and a `ranged()` accessor (new `m_Ranged` flag, informational --
+      the actual range decision uses `range()` directly, which already
+      captures the same split on its own) plus `SetBow`/`SetCrossbow`/
+      `SetThrowingWeapon` handlers.
+    - **No separate "fire" input exists to bind**: `docs/
+      INPUT_HANDLING.md` had already found 8 unbound logical actions in
+      the same resource-ID range as the real default control scheme,
+      including `0xcf7` Shoot and `0xcf9` Reload -- confirmed real but
+      genuinely never wired into Shadowkey's own default bindings.
+      Cross-checked against script data this session: `SetClipSize`/
+      `SetFireRate`/`SetReloadFrames` (ammo/rate-of-fire fields the real
+      Weapon class exposes) have **zero** real call sites anywhere in the
+      whole corpus -- confirming ammo/reload really is dead weight in the
+      shipped game, not a gap. So the evidenced design is: a bow/crossbow
+      just reuses the same `UseLeftAction`/`UseRightAction` (Key7/Key5)
+      attack keys M12 already wired up, with its own real (longer) range
+      -- not a new input action.
+    - **New `sk_bindings::InAttackRange()`** (`simkin_bindings/combat.h`/
+      `.cpp`) factors `tryAttack`'s inline nearest-in-range-and-facing-
+      cone math (same shape `findNearbyDoor`/`findNearbyUsableMonster`/
+      `findNearbyPickup` already used, M15/M16/M19) into a small, pure,
+      testable function -- same "host-side pure helper, verifiable
+      without the windowed game loop" precedent `RollDamage()` already
+      set. `main.cpp`'s `tryAttack` now computes its range from the
+      equipped hand's real `range()` (falling back to the existing
+      `kMeleeRange` constant only for bare fists, which have no real
+      script data) instead of always using the fixed melee constant --
+      the real, evidenced behavior change this milestone delivers: a
+      melee weapon's own real 384 now also governs its reach (previously
+      every weapon, melee or not, used the port's own invented
+      `kMeleeRange = 110`, which the real corpus never actually matched).
+      The `facingMonster` HUD name/HP label search (main.cpp) was updated
+      the same way, using whichever equipped hand reaches farthest, so
+      the label appears from bow range too, not just the hit itself.
+    - **Deliberately no line-of-sight/wall check** -- same "from-scratch,
+      no RE ground truth, keep it simple" footing every other combat
+      constant in this port already stands on (`combat.h`'s own class
+      comment); a ranged shot can in principle clip a thin wall corner at
+      extreme range, not attempted here.
+    - **Verified against real data, `ranged_smoke`
+      (`src/tests/m20_ranged_smoke.cpp`)**: loads real `club.s`/
+      `bandit_longbow.s`, checks their literal `range()`/`ranged()`/
+      damage values, then proves the actual payoff -- the *same* target
+      geometry (500 world units directly ahead) is out of range for
+      `club.s`'s real 384 but in range for `bandit_longbow.s`'s real
+      16384, and the facing cone still rejects a target directly behind
+      regardless of range.
+    - **Not attempted**: spellcasting (a separate native class), the
+      unused `SetClipSize`/`SetFireRate`/`SetReloadFrames` fields
+      (confirmed genuinely dead, see above -- not a gap), and any visual/
+      projectile representation of a ranged attack (this port's combat
+      was already hit-scan/instant for melee, M12; a bow attack is the
+      same instant-resolve, just with a longer real range, not a fired
+      projectile sprite).
+    - Not independently confirmed in an actual windowed play session
+      (same caveat every prior milestone's writeup already carries).
+
 ## Next milestones (not yet started)
 
 Roughly in priority order for reaching "actually playable," not commitments:
@@ -1314,14 +1386,17 @@ Roughly in priority order for reaching "actually playable," not commitments:
   `azra_rat.s`'s 8-kill quest now genuinely completes); M19 took a sixth
   (pickups, `Action::Use`'s last unbound category -- world items like
   `snowline/foxglove.s` now genuinely transfer into the player's real
-  inventory). Still open: spellcasting, ranged weapons, monster-death
-  loot-bag spawning, the broader loot-menu/container pattern (category 8,
-  M19's "Not attempted" note), the rest of `Zone/Level` (`AddTrigger` and
-  its own further "Door/trap trigger" return-type class,
-  `CreateEntity`/`CreateEntityScript`, save/load-level state, ...) plus
-  Zone effects (`Vignette`, `SpawnWithinRadius`, `AddEncounters`, ...),
-  and a zone-root `<zone>.s` script loader (`azra.s` itself is still
-  never run -- see M18's "Not attempted" note).
+  inventory); M20 took a seventh (ranged weapons -- a real bow/crossbow's
+  own `SetRange(16384)` now genuinely reaches farther than a melee
+  weapon's real `SetRange(384)`, both previously-stored-but-unused
+  values). Still open: spellcasting, monster-death loot-bag spawning, the
+  broader loot-menu/container pattern (category 8, M19's "Not attempted"
+  note), the rest of `Zone/Level` (`AddTrigger` and its own further
+  "Door/trap trigger" return-type class, `CreateEntity`/
+  `CreateEntityScript`, save/load-level state, ...) plus Zone effects
+  (`Vignette`, `SpawnWithinRadius`, `AddEncounters`, ...), and a zone-root
+  `<zone>.s` script loader (`azra.s` itself is still never run -- see
+  M18's "Not attempted" note).
 - **Real save file format** -- M5's save system is simulated in-memory
   only; no on-disk save format has been RE'd yet.
 - **`FUN_1002c010`'s big single vitals bar** -- confirmed real (appears

@@ -1,9 +1,20 @@
 #include "simkin_bindings/combat.h"
 
 #include <algorithm>
+#include <cmath>
 #include <cstdlib>
 
 namespace sk_bindings {
+
+bool InAttackRange(float attackerX, float attackerY, float attackerYaw, float targetX,
+                    float targetY, float range) {
+    float dx = targetX - attackerX, dy = targetY - attackerY;
+    float dist = std::sqrt(dx * dx + dy * dy);
+    if (dist > range || dist < 1.0f) return false;
+    float fwdX = std::cos(attackerYaw), fwdY = std::sin(attackerYaw);
+    float facing = (fwdX * dx + fwdY * dy) / dist;
+    return facing >= 0.5f;  // ~60 degree forward cone
+}
 
 int RollDamage(int attackerAttack, int defenderDefense, int defenderArmor, int dmgMin,
                 int dmgMax) {

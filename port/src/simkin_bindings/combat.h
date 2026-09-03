@@ -19,4 +19,16 @@ namespace sk_bindings {
 // right") says otherwise.
 int RollDamage(int attackerAttack, int defenderDefense, int defenderArmor, int dmgMin, int dmgMax);
 
+// M20 (ranged weapons): true if (targetX,targetY) is within `range` world
+// units of (attackerX,attackerY) and inside a 60-degree forward-facing
+// cone given the attacker's yaw (radians) -- the same nearest-in-cone
+// shape main.cpp's tryAttack/findNearby* lambdas already use inline,
+// factored out here so the real per-weapon range values
+// (ItemExecutable::range(), e.g. a real bow script's SetRange(16384))
+// are verifiable without needing the full windowed game loop. No line-
+// of-sight/wall check -- same "no RE ground truth, from-scratch and
+// deliberately simple" footing as RollDamage() above.
+bool InAttackRange(float attackerX, float attackerY, float attackerYaw, float targetX,
+                    float targetY, float range);
+
 }  // namespace sk_bindings

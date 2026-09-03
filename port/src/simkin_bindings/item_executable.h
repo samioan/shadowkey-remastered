@@ -73,6 +73,19 @@ public:
     int damageMax() const { return m_DamageMax; }
     bool equipped() const { return m_Equipped; }
     void SetEquipped(bool equipped) { m_Equipped = equipped; }
+    // M20: a real weapon script's own SetRange() -- previously stored
+    // (just to flag kItemTypeWeapon) but never read back by anything.
+    // Corpus-verified bimodal: every melee weapon uses exactly 384, every
+    // ranged one (bow/crossbow/thrown, see ranged() below) exactly 16384
+    // -- no other value appears anywhere in the whole real weapon corpus.
+    // main.cpp's tryAttack now uses this directly as the real per-weapon
+    // attack range instead of a single hardcoded melee constant.
+    int range() const { return m_Range; }
+    // M20: true if the real script called SetBow/SetCrossbow/
+    // SetThrowingWeapon(true) -- informational (main.cpp's actual attack-
+    // range decision uses range() directly, which already captures the
+    // same real melee-vs-ranged split on its own).
+    bool ranged() const { return m_Ranged; }
 
     // Deferred-removal flag: dropping/consuming an item (TableExecutable::
     // DropRow, OnUsedBy below) can happen mid-script-call, with a live
@@ -109,6 +122,7 @@ private:
     int m_WeaponSprite = -1;
     int m_AnimationFrames = 0;
     int m_Range = 0;
+    bool m_Ranged = false;  // M20: SetBow/SetCrossbow/SetThrowingWeapon(true)
     int m_WeaponType = 0;
     bool m_Equipped = false;
     skiExecutable* m_Owner = nullptr;

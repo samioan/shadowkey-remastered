@@ -1006,16 +1006,32 @@ int main(int argc, char** argv) {
                     m.z = gameZone->FloorHeightAt(m.x, m.y);
                 }
 
-                // Player melee attack -- UseLeftAction/UseRightAction
-                // (Key7/Key5, real decoded default bindings, previously
-                // unused) swing whichever hand's weapon is equipped
-                // (bare-fists 1-3 damage if empty) at the nearest alive
-                // monster within melee range and roughly in front of the
+                // Player attack -- UseLeftAction/UseRightAction (Key7/
+                // Key5, real decoded default bindings, previously unused)
+                // swing/fire whichever hand's weapon is equipped (bare-
+                // fists 1-3 damage at kMeleeRange if empty) at the nearest
+                // alive monster within range and roughly in front of the
                 // camera.
+                //
+                // M20: range is now the real equipped weapon's own
+                // SetRange() value (item_executable.h's range() comment --
+                // 384 for every real melee weapon, 16384 for every real
+                // bow/crossbow/thrown weapon, corpus-verified bimodal) --
+                // this is what actually makes a bow/crossbow attack reach
+                // farther than a sword; no separate "fire" input exists in
+                // the real default control scheme (docs/INPUT_HANDLING.md
+                // -- "Shoot"/"Reload" are real logical actions but were
+                // never bound), so reusing the same two attack keys with a
+                // longer real range is the evidenced design, not a guess.
+                // No line-of-sight/wall check (sk_bindings::InAttackRange's
+                // own comment) -- a ranged shot can theoretically clip
+                // through a thin wall corner at extreme range, a documented
+                // simplification, same footing as every other from-scratch
+                // combat constant in this port.
                 auto tryAttack = [&](sk_bindings::ItemExecutable* handItem) {
-                    float fwdX = std::cos(gameCamera.yaw), fwdY = std::sin(gameCamera.yaw);
+                    float range = handItem ? static_cast<float>(handItem->range()) : kMeleeRange;
                     MonsterInstance* target = nullptr;
-                    float bestDist = kMeleeRange + 1.0f;
+                    float bestDist = range + 1.0f;
                     for (MonsterInstance& m : gameMonsters) {
                         // M16: invulnerable() (essential quest NPCs, e.g.
                         // Tanyin Aldwyr's real SetInvulnerable(true))
@@ -1025,11 +1041,12 @@ int main(int argc, char** argv) {
                         // skipping targeting means the crosshair/prompt line
                         // never shows an NPC as attackable in the first place).
                         if (!m.script->alive() || m.script->invulnerable()) continue;
+                        if (!sk_bindings::InAttackRange(gameCamera.x, gameCamera.y, gameCamera.yaw,
+                                                         m.x, m.y, range)) {
+                            continue;
+                        }
                         float ddx = m.x - gameCamera.x, ddy = m.y - gameCamera.y;
                         float dist = std::sqrt(ddx * ddx + ddy * ddy);
-                        if (dist > kMeleeRange || dist < 1.0f) continue;
-                        float facing = (fwdX * ddx + fwdY * ddy) / dist;
-                        if (facing < 0.5f) continue;  // ~60 degree forward cone
                         if (dist < bestDist) {
                             bestDist = dist;
                             target = &m;
@@ -1209,24 +1226,39 @@ int main(int argc, char** argv) {
                 zoneRenderer.Render(backbuffer, *gameZone, gameCamera, frameEntities, &modelArchive);
                 RenderHud(backbuffer, stack.player(), spriteArchive, gameCamera.yaw);
                 // Minimal combat/interact feedback -- name + HP of
-                // whatever *aggressive* monster is currently in melee
-                // range/facing cone, else the nearer of a usable NPC's
-                // real SetUseText() prompt (M16) or a door's (M15)
-                // (combat takes priority when both are in range at once;
-                // aggressive()==false already keeps an NPC like Tanyin
-                // Aldwyr out of this first loop entirely -- see
-                // monster_executable.h's class comment). Drawn at y=34,
-                // below the real compass banner (RenderHud now occupies
-                // y=0..31 across the top).
+                // whatever *aggressive* monster is currently in the
+                // player's actual attack range/facing cone, else the
+                // nearer of a usable NPC's real SetUseText() prompt (M16)
+                // or a door's (M15) (combat takes priority when both are
+                // in range at once; aggressive()==false already keeps an
+                // NPC like Tanyin Aldwyr out of this first loop entirely --
+                // see monster_executable.h's class comment). Drawn at
+                // y=34, below the real compass banner (RenderHud now
+                // occupies y=0..31 across the top).
+                //
+                // M20: "in range" now means whichever hand's real weapon
+                // reaches farthest (kMeleeRange for bare fists) -- matches
+                // tryAttack's own per-weapon range above, so equipping a
+                // bow genuinely shows the HP label from farther away too,
+                // not just landing the hit.
+                float playerAttackRange = kMeleeRange;
+                if (stack.player().leftItem()) {
+                    playerAttackRange =
+                        (std::max)(playerAttackRange,
+                                   static_cast<float>(stack.player().leftItem()->range()));
+                }
+                if (stack.player().rightItem()) {
+                    playerAttackRange =
+                        (std::max)(playerAttackRange,
+                                   static_cast<float>(stack.player().rightItem()->range()));
+                }
                 const MonsterInstance* facingMonster = nullptr;
                 for (const MonsterInstance& m : gameMonsters) {
                     if (!m.script->alive() || !m.script->aggressive()) continue;
-                    float ddx = m.x - gameCamera.x, ddy = m.y - gameCamera.y;
-                    float dist = std::sqrt(ddx * ddx + ddy * ddy);
-                    if (dist > kMeleeRange) continue;
-                    float fwdX = std::cos(gameCamera.yaw), fwdY = std::sin(gameCamera.yaw);
-                    float facing = dist > 1.0f ? (fwdX * ddx + fwdY * ddy) / dist : 1.0f;
-                    if (facing < 0.5f) continue;
+                    if (!sk_bindings::InAttackRange(gameCamera.x, gameCamera.y, gameCamera.yaw, m.x,
+                                                     m.y, playerAttackRange)) {
+                        continue;
+                    }
                     facingMonster = &m;
                     break;
                 }

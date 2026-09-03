@@ -206,3 +206,7 @@ target_link_libraries(level_smoke PRIVATE sk_bindings sk_world)
 # src/tests/m19_pickup_smoke.cpp.
 add_executable(pickup_smoke src/tests/m19_pickup_smoke.cpp)
 target_link_libraries(pickup_smoke PRIVATE sk_bindings sk_world)
+
+# Ranged weapons smoke test -- see src/tests/m20_ranged_smoke.cpp.
+add_executable(ranged_smoke src/tests/m20_ranged_smoke.cpp)
+target_link_libraries(ranged_smoke PRIVATE sk_bindings)
