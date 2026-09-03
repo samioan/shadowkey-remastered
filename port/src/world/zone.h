@@ -13,6 +13,7 @@
 
 #include <cstdint>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "world/model_archive.h"
@@ -387,6 +388,57 @@ public:
     // is a conservative fallback, not expected to matter in practice).
     float FloorHeightAt(float worldX, float worldY) const;
     float CeilingHeightAt(float worldX, float worldY) const;
+
+    // M41: the real per-frame visible-tile set --
+    // `TileGrid_RaycastVisibility` (`FUN_1000f694`), transcribed. This
+    // replaces the renderer's fixed-radius square scan, which was M6's
+    // last surviving placeholder in that pipeline.
+    //
+    // The shape: a fan of rays from the camera, each marching a fixed
+    // one-tile step, appending every tile it crosses to a list that is
+    // de-duplicated by a per-cell frame stamp. Three details are worth
+    // stating because none of them is what a from-scratch version would
+    // have done:
+    //
+    //  * **The three tiers are a zoom setting, not a quality knob.**
+    //    `engine+0x608` picks (rays, maxSteps, angleStep) from
+    //    (150, 25, 170) / (177, 93, 96) / (178, 172, 52), and the same
+    //    field is a `0x100`-is-identity render-scale factor elsewhere.
+    //    Multiplying rays x angleStep gives the fan's total arc:
+    //    140 degrees, 93 degrees, 51 degrees -- i.e. zooming in narrows
+    //    the arc and pushes the range out, which is exactly what a
+    //    scale factor should do and not at all what a "detail level"
+    //    would. (Earlier notes read it as a 3-tier quality setting.)
+    //  * **Rays start four steps *behind* the camera** (`x = camX - 4*dx`),
+    //    which is how the tiles under and just behind the player get into
+    //    the set at all.
+    //  * **Walls only stop a ray after the fifth step**, and the stop test
+    //    is `(flags & 0b1010) == 0b0010` -- so a cell with bit3
+    //    (force-draw) set does *not* stop the ray even though it is a
+    //    wall, which is the same bit the face pipeline already honours.
+    //
+    // `zoomScale` is `engine+0x608`; pass kDefaultZoomScale for identity.
+    // Returns tile coordinates in visit order, capped the way the real
+    // function caps: it stops adding at 412 and hard-breaks at 512.
+    static constexpr int kDefaultZoomScale = 0x100;
+    std::vector<std::pair<int, int>> RaycastVisibleTiles(float cameraWorldX, float cameraWorldY,
+                                                          float cameraYawRadians,
+                                                          int zoomScale = kDefaultZoomScale) const;
+
+    // The tier `zoomScale` selects, exposed so the three sets of constants
+    // can be asserted directly rather than inferred from a tile set. The
+    // angle unit is the engine's own: 65536 to a full turn.
+    struct VisibilityTier {
+        int rayCount = 0;
+        int maxSteps = 0;
+        int angleStep = 0;
+        // rayCount * angleStep, as a fraction of a turn -- 140, 93 and 51
+        // degrees for the three tiers.
+        double arcDegrees() const {
+            return static_cast<double>(rayCount) * static_cast<double>(angleStep) * 360.0 / 65536.0;
+        }
+    };
+    static VisibilityTier TierFor(int zoomScale);
 
 private:
     int width_ = 0, height_ = 0;

@@ -319,3 +319,7 @@ target_link_libraries(loose_ends_smoke PRIVATE sk_bindings)
 # Real on-disk save container -- see src/tests/m40_save_archive_smoke.cpp.
 add_executable(save_archive_smoke src/tests/m40_save_archive_smoke.cpp src/assets/save_archive.cpp)
 target_include_directories(save_archive_smoke PRIVATE src)
+
+# Real per-frame tile visibility raycast -- see src/tests/m41_visibility_smoke.cpp.
+add_executable(visibility_smoke src/tests/m41_visibility_smoke.cpp)
+target_link_libraries(visibility_smoke PRIVATE sk_world)

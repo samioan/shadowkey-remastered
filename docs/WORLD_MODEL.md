@@ -147,18 +147,41 @@ wall/surface-face renderer's traversal. `Render3DScene` calls
 **`TileGrid_RaycastVisibility`** (renamed from `FUN_1000f694`, 0x1000f694)
 once per frame, before its face-drawing loop:
 
-- Casts a **fan of rays** outward from the player/camera position — the
-  ray count (150, 177, or 178) is picked by a 3-tier quality setting read
-  from `engine+0x608` (the same field elsewhere used as a `0x100`=identity
-  render-scale factor — so this looks like a detail/performance knob, not
-  a fixed constant), using the *same* 2048-entry sin/cos LUT shape as
+- Casts a **fan of rays** outward from the player/camera position, using
+  the *same* 2048-entry sin/cos LUT shape as
   `BuildRotationMatrix3x4`/the automap marker/`Bullseye_PropagateLight`.
-- Each ray steps tile-by-tile (a DDA-style march) up to a quality-tiered
-  max range (25, 93, or 172 tiles), stopping early if it reaches a tile
-  whose `flags` byte has **bit1 set (wall/obstruction)** — the *same* bit
-  `Bullseye_PropagateLight`'s light-bounce rays stop/reflect at, so one
-  "this tile is solid" bit governs both light propagation and rendering
-  visibility.
+  Three tiers are selected from `engine+0x608`:
+
+  | `engine+0x608` | rays | max steps | angle step | **total arc** |
+  |---|---|---|---|---|
+  | `< 0x101` | 150 | 25 | 170 | 140° |
+  | `< 0x201` | 177 | 93 | 96 | 93° |
+  | otherwise | 178 | 172 | 52 | 51° |
+
+  > **Correction.** An earlier pass read this as a 3-tier *quality*
+  > setting. It is a **zoom**: multiplying `rays × angleStep` in the
+  > engine's own 65536-per-turn angle unit gives the fan's total arc, and
+  > the three tiers narrow the arc (140° → 93° → 51°) while pushing the
+  > range out (25 → 93 → 172 steps). A detail level would not change the
+  > field of view; a zoom factor does exactly this — and `engine+0x608`
+  > is the same field used elsewhere as a `0x100`-is-identity render-scale
+  > factor. Note the boundary is `< 0x101`, so identity itself takes the
+  > *widest* tier.
+- **Every ray starts four steps behind the camera** (`x = camX - 4·dx`),
+  which is how the tile the player is standing on, and the ones just
+  behind them, get into the set at all — the fan itself never points
+  backwards.
+- Each ray then steps by a fixed one-tile increment (the LUT's amplitude
+  is `0x200` and the code takes `value >> 1`, giving exactly `0x100` per
+  step in the 8.8 world coordinates), stopping when it reaches a tile
+  whose flags satisfy **`(flags & 0b1010) == 0b0010`** — bit1 (wall) set
+  *and* bit3 (force-draw) clear, so a force-draw cell does not block even
+  though it is a wall. Bit1 is the *same* bit
+  `Bullseye_PropagateLight`'s light-bounce rays stop at, so one "this tile
+  is solid" bit governs both light propagation and rendering visibility.
+- **Walls are ignored for the first five steps** (`if (step > 4)`), which
+  is what keeps the tiles immediately around the camera in the set
+  regardless of what they are.
 - Every tile a ray passes through gets appended to a per-frame visible-
   tile list (max 512 entries), **deduplicated** via a newly-decoded tile
   record field: **byte 6**, a rotating 0–3 "last visible frame" stamp

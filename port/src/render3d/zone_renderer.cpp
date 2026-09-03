@@ -181,15 +181,22 @@ uint8_t SurIndexAt(const ZcpEntry& e, int byteOffset) {
 //    `flags` bit2 is set; the ceiling picks band A or B by the same
 //    comparison. Both were previously unconditional/always-A.
 //
-// Still a simplification: the tile scan is a fixed radius rather than the
-// real `TileGrid_RaycastVisibility` fan (docs/WORLD_MODEL.md), and an
-// out-of-bounds neighbour is skipped (the real code reads past the grid
-// there; its visibility raycast never reaches those tiles in practice).
-std::vector<Face> CollectFaces(const Zone& zone, int centerX, int centerY, int radius,
+// M41: `visibleTiles` is now the real per-frame set from
+// `TileGrid_RaycastVisibility` (Zone::RaycastVisibleTiles) rather than a
+// fixed-radius square scan -- which is both the real shape (rays stop at
+// walls, so a closed room no longer builds faces for the whole
+// neighbourhood behind it) and the real order (the original runs its
+// raycast immediately before this loop). An out-of-bounds neighbour is
+// still skipped; the real code reads past the grid there, and its own
+// raycast never reaches those tiles in practice.
+std::vector<Face> CollectFaces(const Zone& zone,
+                                const std::vector<std::pair<int, int>>& visibleTiles,
                                 float cameraWorldX, float cameraWorldY, float cameraWorldZ) {
     std::vector<Face> faces;
-    for (int ty = centerY - radius; ty <= centerY + radius; ++ty) {
-        for (int tx = centerX - radius; tx <= centerX + radius; ++tx) {
+    for (const std::pair<int, int>& tile : visibleTiles) {
+        {
+            const int tx = tile.first;
+            const int ty = tile.second;
             if (!zone.InBounds(tx, ty)) continue;
             const ZmpCell& cell = zone.CellAt(tx, ty);
             const ZcpEntry& t = zone.TypeOf(cell);
@@ -649,10 +656,14 @@ void ZoneRenderer::Render(Backbuffer& backbuffer, const Zone& zone, const Camera
     std::vector<float> depthBuffer(static_cast<size_t>(Backbuffer::kWidth) * Backbuffer::kHeight,
                                     0.0f);
 
-    int centerX = static_cast<int>(camera.x / kTileScale);
-    int centerY = static_cast<int>(camera.y / kTileScale);
-    std::vector<Face> faces =
-        CollectFaces(zone, centerX, centerY, renderRadius, camera.x, camera.y, camera.z);
+    // M41: the real visible-tile set. `TileGrid_RaycastVisibility` runs
+    // once per frame in the original, immediately before its face-drawing
+    // loop, and this pipeline is that loop -- so the two are called in the
+    // same order and for the same reason. Replaces M6's fixed-radius
+    // square scan, the last placeholder left in this pipeline.
+    std::vector<std::pair<int, int>> visibleTiles =
+        zone.RaycastVisibleTiles(camera.x, camera.y, camera.yaw);
+    std::vector<Face> faces = CollectFaces(zone, visibleTiles, camera.x, camera.y, camera.z);
 
     float camX = camera.x / kTileScale, camY = camera.y / kTileScale, camZ = camera.z / kTileScale;
     float cosYaw = std::cos(camera.yaw), sinYaw = std::sin(camera.yaw);

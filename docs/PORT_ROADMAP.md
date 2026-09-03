@@ -2903,6 +2903,38 @@ algorithms.
       larger job, and M5's in-memory slots are untouched by this
       milestone.
 
+- [x] **M41 -- the real per-frame visible-tile set.** M6's fixed-radius
+  square tile scan was the last placeholder left in the wall/surface
+  pipeline; `TileGrid_RaycastVisibility` (`FUN_1000f694`) replaces it.
+    - **A fan of rays, marching one tile per step**, from the camera, each
+      appending every tile it crosses to a set de-duplicated by a per-cell
+      frame stamp -- and stopping at walls, which is the whole point:
+      standing inside azra's own starting building the set is **62 tiles
+      instead of the old scan's 41x41 = 1681**, and none of them are on
+      the far side of a wall.
+    - **Correction: the three tiers are a zoom setting, not a quality
+      knob.** `engine+0x608` selects (150 rays, 25 steps, angle step 170) /
+      (177, 93, 96) / (178, 172, 52). Multiplying rays x angleStep in the
+      engine's own 65536-per-turn angle unit gives each fan's total arc:
+      **140 / 93 / 51 degrees**. So the tiers narrow the field of view
+      while pushing the range out -- which is what a zoom factor does and
+      not what a detail level would, and `engine+0x608` is the same field
+      used elsewhere as a `0x100`-is-identity render scale. The boundary is
+      `< 0x101`, so identity itself takes the *widest* tier.
+    - Two details a from-scratch version would not have had: **every ray
+      starts four steps behind the camera** (which is the only reason the
+      tile the player is standing on, and the ones just behind, are in the
+      set at all -- the fan never points backwards), and **walls are
+      ignored for the first five steps**, with the stop test being
+      `(flags & 0b1010) == 0b0010` -- so a cell with bit3 (force-draw) set
+      does not block even though it is a wall, the same bit the face
+      pipeline already honours.
+    - New `m41_visibility_smoke` (16 assertions against real azra data,
+      including all three tiers' constants and arcs); a rendered frame
+      checked by eye as well. 36/36 smoke tests pass.
+    - `docs/WORLD_MODEL.md`'s raycaster section updated with the tier
+      table, the zoom correction, and both details above.
+
 ## Next milestones (not yet started)
 
 Roughly in priority order for reaching "actually playable," not commitments:
@@ -2955,9 +2987,6 @@ Roughly in priority order for reaching "actually playable," not commitments:
   working reading and looks right in motion, but it hasn't been traced to a
   decompiled consumer. Likewise `SetAttachedWeapon` (a second model drawn
   in a creature's hand) is still stored-and-unused.
-- **The real `TileGrid_RaycastVisibility` fan** in place of the renderer's
-  fixed-radius tile scan (M28 rebuilt everything else about that pipeline
-  against the decompile, but the visibility set is still an approximation).
 - **Audio's remaining narrower gaps** (M27, `docs/AUDIO_FORMAT.md`
   resolved the core system) -- native-only player-action sounds (attack/
   jump/death/footsteps, never called from any script); main-menu

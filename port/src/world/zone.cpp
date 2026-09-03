@@ -532,4 +532,154 @@ float LightLevelToBrightness(uint16_t lightLevel) {
     return kAmbientFloor + (1.0f - kAmbientFloor) * t;
 }
 
+
+// M41: the tier table, in the real branch order.
+Zone::VisibilityTier Zone::TierFor(int zoomScale) {
+    VisibilityTier tier;
+    if (zoomScale < 0x201) {
+        if (zoomScale < 0x101) {
+            tier.maxSteps = 0x19;
+            tier.rayCount = 0x96;
+            tier.angleStep = 0xaa;
+        } else {
+            tier.rayCount = 0xb1;
+            tier.maxSteps = 0x5d;
+            tier.angleStep = 0x60;
+        }
+    } else {
+        tier.rayCount = 0xb2;
+        tier.maxSteps = 0xac;
+        tier.angleStep = 0x34;
+    }
+    return tier;
+}
+
+// M41: TileGrid_RaycastVisibility (FUN_1000f694), transcribed. See
+// zone.h's declaration for the three details that matter and for the
+// zoom-vs-quality correction.
+std::vector<std::pair<int, int>> Zone::RaycastVisibleTiles(float cameraWorldX, float cameraWorldY,
+                                                            float cameraYawRadians,
+                                                            int zoomScale) const {
+    std::vector<std::pair<int, int>> visible;
+    if (width_ <= 0 || height_ <= 0) return visible;
+
+    const VisibilityTier tier = TierFor(zoomScale);
+    const int rayCount = tier.rayCount;
+    const int maxSteps = tier.maxSteps;
+    const int angleStep = tier.angleStep;
+
+    // The real angle unit is 1/65536 of a turn; the sin/cos table is
+    // indexed by `(angle >> 5) & 0x7ff`, i.e. 2048 entries per turn, with
+    // an amplitude of 0x200 so that `value >> 1` is a unit step of exactly
+    // one tile (0x100) in the 8.8 world coordinates below. Reproduced in
+    // floating point here -- this port's renderer is float throughout (see
+    // zone_renderer.h) and the fixed-point table would buy nothing but a
+    // rounding difference in which tiles land on a ray's edge.
+    constexpr double kTwoPi = 6.283185307179586;
+    const double angleUnit = kTwoPi / 65536.0;
+    // `startAngle = (rayCount >> 1) * angleStep + cameraYaw`, then one
+    // `angleStep` subtracted per ray -- so the fan is centred on the
+    // camera's heading.
+    double angle = cameraYawRadians + static_cast<double>((rayCount >> 1) * angleStep) * angleUnit;
+
+    // The real code clamps the ray origin into [0x100, (grid-2)*0x100]
+    // before offsetting it, so a camera standing on the very edge of the
+    // grid still produces rays that start inside it.
+    auto clampStart = [](float v, int extent) {
+        int fixed = static_cast<int>(v);
+        int hi = (extent - 2) * 256;
+        if (fixed < 256) fixed = 256;
+        if (fixed > hi) fixed = hi;
+        return static_cast<double>(fixed);
+    };
+    const double startX = clampStart(cameraWorldX, width_);
+    const double startY = clampStart(cameraWorldY, height_);
+
+    struct Ray {
+        double x = 0, y = 0, dx = 0, dy = 0;
+        int step = 0;
+        bool done = false;
+    };
+    std::vector<Ray> rays(static_cast<size_t>(rayCount));
+    for (int i = rayCount - 1; i >= 0; --i) {
+        Ray& r = rays[static_cast<size_t>(i)];
+        // The real code takes sin at `angle` for dx and cos (the table
+        // read 0x4000 further along, i.e. a quarter turn) for dy.
+        // The port's camera basis is forward = (cos yaw, sin yaw) (see
+        // render3d/zone_renderer.cpp); the real engine's table read is
+        // sin for one axis and cos (a quarter turn along) for the other.
+        // Matched to this port's convention so the fan actually points
+        // where the camera does.
+        r.dx = std::cos(angle) * 256.0;
+        r.dy = std::sin(angle) * 256.0;
+        // Four steps *behind* the camera -- this is what puts the tiles
+        // under and just behind the player into the set.
+        r.x = startX - r.dx * 4.0;
+        r.y = startY - r.dy * 4.0;
+        angle -= static_cast<double>(angleStep) * angleUnit;
+    }
+
+    // A per-call stamp standing in for the real per-cell frame byte
+    // (tile[6] against engine+0x478) -- same job, without mutating the
+    // loaded zone.
+    std::vector<uint8_t> seen(static_cast<size_t>(width_) * static_cast<size_t>(height_), 0);
+
+    int active = rayCount;
+    // The real outer loop runs while any ray is live and fewer than 0x19c
+    // tiles have been collected; the inner append hard-breaks at 0x200.
+    while (active != 0 && visible.size() < 0x19c) {
+        for (Ray& r : rays) {
+            if (r.done) continue;
+            const int fx = static_cast<int>(r.x);
+            const int fy = static_cast<int>(r.y);
+            // The real bounds test is on the fixed-point coordinates, one
+            // tile in from each edge, and a failure means "no tile here"
+            // rather than "stop".
+            const bool inside = fx >= 0x101 && fx < (width_ - 1) * 256 && fy >= 0x101 &&
+                                 fy < (height_ - 1) * 256;
+            const int tx = fx >> 8;
+            const int ty = fy >> 8;
+            if (!inside || !InBounds(tx, ty)) {
+                // Outside the grid: keep marching for the first five
+                // steps, then give up on this ray.
+                if (r.step < 5) {
+                    r.x += r.dx;
+                    r.y += r.dy;
+                    ++r.step;
+                } else {
+                    r.done = true;
+                    --active;
+                }
+                continue;
+            }
+
+            const ZmpCell& cell = CellAt(tx, ty);
+            // `(flags & 0b1010) == 0b0010` -- a wall stops the ray, but
+            // only from the sixth step on, and only when bit3
+            // (force-draw) is clear.
+            if (r.step > 4 && (cell.flags & 0x0a) == 0x02) {
+                r.done = true;
+                --active;
+                continue;
+            }
+
+            uint8_t& stamp = seen[static_cast<size_t>(ty) * static_cast<size_t>(width_) +
+                                   static_cast<size_t>(tx)];
+            if (!stamp) {
+                stamp = 1;
+                visible.emplace_back(tx, ty);
+                if (visible.size() > 0x1ff) break;
+            }
+            r.x += r.dx;
+            r.y += r.dy;
+            ++r.step;
+            if (r.step >= maxSteps) {
+                r.done = true;
+                --active;
+            }
+        }
+    }
+    return visible;
+}
+
 }  // namespace sk
