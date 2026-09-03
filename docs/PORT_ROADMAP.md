@@ -1727,46 +1727,27 @@ algorithms.
 
 Roughly in priority order for reaching "actually playable," not commitments:
 
-- **Combat resolution (beyond the M12 slice above) -- original scoping
-  list now closed out.** M12 took the first narrow slice (one melee
-  weapon vs. one monster type, `UseLeftAction`/`UseRightAction` wired
-  up); M15 took a second (the generic `Action::Use` interact binding,
-  doors); M16 took a third (generalized monster/NPC loading past M12's
-  one hardcoded typeId, plus real NPC dialogue via `Action::Use`); M17
-  took a fourth (real quest-state tracking); M18 took a fifth (a first,
-  narrow slice of the `Zone/Level`-root global object); M19 took a sixth
-  (pickups, `Action::Use`'s last unbound category); M20 took a seventh
-  (ranged weapons, a real bow's own `SetRange(16384)` genuinely
-  outreaching a melee weapon's real `SetRange(384)`); M21 took an eighth
-  (monster-death loot-bag spawning + the loot-menu/container pattern,
-  fully real-data-decodable after all, no native RE needed); M22 took a
-  ninth and closed the list (spellcasting -- real spell scripts turned
-  out to be the same `ItemExecutable` class every weapon/armor/
-  consumable already uses, casting reuses the same attack keys ranged
-  weapons already do). Comparable in total scope to M0-M11 combined, as
-  originally sized up. M23 then closed a further item flagged along the
-  way (M18's "Not attempted" note): zone-root `<zone>.s` script loading
-  -- `azra.s`'s real `Init()` now genuinely runs at zone load, its dozens
-  of real `Level.GetEntity(...)` calls resolving against real, named
-  placements. M24 then took a first, narrow slice of `Level`'s own trap/
-  switch-controller side: `AddTrigger`'s kill-count-callback usage
-  (`SetEntityID`/`SetLimit`/`SetCallback`) -- killing real monsters of a
-  tracked typeId now genuinely fires a real zone-root script callback.
-  Still open: `AddTrigger`'s own physical/position-based trap variant
-  (`AddEntity`/`SetTrap`/`SetDoor`/`OpenDoor`/`ShowDamageMessage` --
-  needs real trigger-volume/position data this port doesn't have);
-  `CreateEntity`/`CreateEntityScript`'s non-item-shaped categories and
-  save/load-level state; the "Encounter spawner" class (`AddEncounters`/
-  `AddRandomSets`, random monster-group spawning -- M24's own currently-
-  inert stand-in); Zone effects beyond `SetZone`
-  (`Vignette`/`SpawnWithinRadius`, ...); `EnterZone(s)`'s trigger-volume
-  mechanism (M23's own "Not attempted" note -- no real trigger-volume
-  data source traced yet, the same root gap blocking the physical-trap
-  variant above); the real status-effect system `DoAttackRoll`'s
-  `effectId` argument selects (M22's "Not attempted" note); and three
-  sets of small loose ends (M21's empty-bag despawn/`SetLoot`'s trailing
-  min/max args; M23's `SummonMe()`/`SummonMe2()`/`CountInventory()`/
-  `SetZone`'s real meaning; M24's `Level.Log(...)`).
+- **`Zone/Level` global object (beyond M18/M23/M24's slices)** --
+  `AddTrigger`'s own physical/position-based trap variant (`AddEntity`/
+  `SetTrap`/`SetDoor`/`OpenDoor`/`ShowDamageMessage` -- needs real
+  trigger-volume/position data this port doesn't have, the same root gap
+  blocking the next item); `EnterZone(s)`'s own trigger-volume mechanism
+  (M23's "Not attempted" note -- no real trigger-volume data source
+  traced yet: is it `.ent`-based, `.zcp`-cell-based, or something else
+  entirely); `CreateEntity`/`CreateEntityScript`'s non-item-shaped
+  categories and save/load-level state; the "Encounter spawner" class
+  (`AddEncounters`/`AddRandomSets`, random monster-group spawning --
+  M24's own currently-inert stand-in); Zone effects beyond `SetZone`
+  (`Vignette`/`SpawnWithinRadius`, ...).
+- **The real status-effect system** `DoAttackRoll`'s `effectId` argument
+  selects (poison/paralyze/blind/fear/drain/... -- M22's "Not attempted"
+  note) -- native, and unlike M21's loot tags, no scripted table has been
+  found anywhere to decode it from.
+- **Small documented loose ends**, one call/argument each, left open in
+  their own milestone's "Not attempted" note rather than guessed at:
+  M21's empty-bag despawn (`QuitAndDestroyOpener`/`QueryDestroy`) and
+  `SetLoot`'s trailing min/max args; M23's `SummonMe()`/`SummonMe2()`/
+  `CountInventory()`/`SetZone`'s real meaning; M24's `Level.Log(...)`.
 - **Real save file format** -- M5's save system is simulated in-memory
   only; no on-disk save format has been RE'd yet.
 - **`FUN_1002c010`'s big single vitals bar** -- confirmed real (appears
