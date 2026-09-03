@@ -1,7 +1,10 @@
 #include "simkin_bindings/level_executable.h"
 
+#include <algorithm>
 #include <cstdio>
 
+#include "assets/sound_archive.h"
+#include "audio/audio_engine.h"
 #include "simkin_bindings/item_executable.h"
 #include "simkin_bindings/menu_stack.h"
 #include "simkin_bindings/native_binding_common.h"
@@ -53,12 +56,33 @@ bool LevelExecutable::method(const skString& methodName, skRValueArray& args,
         m_Stack.RequestZoneChange(ToStdString(args[0].str()));
         return true;
     }
-    if (methodName == skString("PlayAmbient")) {
-        // No audio system in this port (consistent with every prior
-        // milestone) -- real signature is PlayAmbient(soundId, volume);
-        // logged and no-op'd rather than a dedicated SoftFailNativeCall so
-        // it doesn't read as an unimplemented-and-unexpected call.
-        std::printf("Level: PlayAmbient(...) -- no audio system, ignored\n");
+    if (methodName == skString("PlayAmbient") && args.entries() >= 1) {
+        // M27: real signature PlayAmbient(soundId, volume) -- soundId is
+        // the current zone's own <zone>_sounds.txt slot index, same real
+        // convention PlayerExecutable::PlaySound() documents in full
+        // (assets/sound_archive.h's class comment); every real corpus
+        // call targets a real .ogg slot (a zone's own ambient/battle
+        // track, e.g. azra.s's `Level.PlayAmbient(73,100)` -> azra_
+        // sounds.txt's own `73 explore3.ogg`) and is meant to loop for as
+        // long as that zone is active, so this always goes through
+        // PlayMusic() (replaces whatever was playing) rather than a
+        // one-shot -- IsMusic() is just a defensive check in case a
+        // future/unseen real call ever targets a real .wav slot instead.
+        // volume (0-100 in the one real corpus value seen, 100) maps
+        // linearly to XAudio2's 0.0-1.0 gain.
+        if (m_Stack.sounds() && m_Stack.audio()) {
+            int soundId = args[0].intValue();
+            int volume = args.entries() >= 2 ? args[1].intValue() : 100;
+            float gain = (std::max)(0.0f, (std::min)(1.0f, static_cast<float>(volume) / 100.0f));
+            const sk::Sound* sound = m_Stack.sounds()->GetSound(soundId);
+            if (sound) {
+                if (m_Stack.sounds()->IsMusic(soundId)) {
+                    m_Stack.audio()->PlayMusic(*sound, gain);
+                } else {
+                    m_Stack.audio()->PlaySfx(*sound, gain);
+                }
+            }
+        }
         returnValue = skRValue(0);
         return true;
     }

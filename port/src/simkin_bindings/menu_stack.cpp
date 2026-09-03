@@ -50,11 +50,13 @@ bool FileExists(const std::string& path) {
 }  // namespace
 
 MenuStack::MenuStack(std::string scriptRoot, skInterpreter& interpreter,
-                      const sk::StringTable* strings)
+                      const sk::StringTable* strings, sk::SoundArchive* sounds, sk::AudioEngine* audio)
     : m_ScriptRoot(std::move(scriptRoot)),
       m_Interpreter(interpreter),
       m_Strings(strings),
-      m_Player(new PlayerExecutable(strings)),
+      m_Sounds(sounds),
+      m_Audio(audio),
+      m_Player(new PlayerExecutable(strings, sounds, audio)),
       m_Level(new LevelExecutable(*this)) {
     RegisterGameConstants(interpreter);
     // M18: `Level` is a bare global every real script can reach (docs/

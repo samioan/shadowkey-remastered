@@ -3,6 +3,8 @@
 #include <algorithm>
 #include <cstdio>
 
+#include "assets/sound_archive.h"
+#include "audio/audio_engine.h"
 #include "simkin_bindings/game_constants.h"
 #include "simkin_bindings/item_executable.h"
 #include "simkin_bindings/menu_stack.h"
@@ -15,8 +17,9 @@
 
 namespace sk_bindings {
 
-PlayerExecutable::PlayerExecutable(const sk::StringTable* strings)
-    : NativeStubExecutable("Player"), m_Strings(strings) {}
+PlayerExecutable::PlayerExecutable(const sk::StringTable* strings, sk::SoundArchive* sounds,
+                                    sk::AudioEngine* audio)
+    : NativeStubExecutable("Player"), m_Strings(strings), m_Sounds(sounds), m_Audio(audio) {}
 
 bool PlayerExecutable::setValue(const skString& fieldName, const skString&, const skRValue& value) {
     m_Fields[ToStdString(fieldName)] = value;
@@ -143,6 +146,25 @@ int PlayerExecutable::UpdateEquipStatus(ItemExecutable* item, bool equipping) {
 
 bool PlayerExecutable::method(const skString& methodName, skRValueArray& args,
                                skRValue& returnValue, skExecutableContext& context) {
+    if (methodName == skString("PlaySound") && args.entries() >= 1) {
+        // M27: `id` is the currently-loaded zone's own <zone>_sounds.txt
+        // slot index -- confirmed by real corpus cross-reference (e.g.
+        // door.s's real `GetPlayer().PlaySound(63)` on open / `PlaySound
+        // (62)` on close matches azra_sounds.txt's own `63 door_open.wav`
+        // / `62 door_close.wav` one-for-one; see assets/sound_archive.h's
+        // class comment for the full writeup). `GetOwner().PlaySound(id)`
+        // (a real item's real owner, ~50% of the corpus's real call sites)
+        // routes here too once an item's been picked up -- GetOwner()
+        // returns the player object directly (item_executable.cpp).
+        // Every real call in the corpus is single-argument; no per-call
+        // volume is ever passed, so a fixed full-volume one-shot is the
+        // best-evidenced default (a documented choice, not decompiled).
+        if (m_Sounds && m_Audio) {
+            const sk::Sound* sound = m_Sounds->GetSound(args[0].intValue());
+            if (sound) m_Audio->PlaySfx(*sound);
+        }
+        return true;
+    }
     if (methodName == skString("SetPlayerName") && args.entries() == 1) {
         m_Name = ToStdString(args[0].str());
         return true;

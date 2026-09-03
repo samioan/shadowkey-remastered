@@ -1952,6 +1952,75 @@ algorithms.
       the loading screen's look/timing and a real cheat-menu-triggered
       zone transition should be checked live.
 
+- [x] **M27 -- real audio** (this session). User-directed: "let's continue
+      with the audio, which hasn't been addressed or RE'd at all." Full
+      writeup: `docs/AUDIO_FORMAT.md`.
+    - **The data itself needed no RE at all** -- every real sound file
+      under `system/apps/6r51/` turned out to be a standard, off-the-shelf
+      format: 38 ordinary uncompressed-PCM `.wav` files (mono, 8000Hz,
+      16-bit) and 6 genuine Ogg Vorbis `.ogg` files (confirmed by real
+      file headers, not guessed). The real RE-worthy question -- what does
+      a script's `PlaySound(id)`/`Level.PlayAmbient(id,volume)` `id`
+      argument actually mean? -- was answered entirely by real corpus
+      cross-reference, no Ghidra needed: `id` is the currently-loaded
+      zone's own real `<zone>_sounds.txt` manifest slot index (same
+      numbered-slot-plus-`NULL.<ext>`-sentinel convention already known
+      from `<zone>_models.txt`/`<category>_sprites.txt`) -- proven by
+      matching `door.s`'s real `PlaySound(63)`/`PlaySound(62)` (open/
+      close) against `azra_sounds.txt`'s own `63 door_open.wav`/`62
+      door_close.wav`, `azra.s`'s real `PlayAmbient(73,100)` against
+      `73 explore3.ogg`, and (bonus corroboration) the already-documented
+      hidden Konami-code Easter egg's own native sound-effect call
+      (`docs/INPUT_HANDLING.md`'s `SecretSequence_OnComplete`, id `0x57`
+      = 87 = `pl_cast_powerup.wav`) using the exact same numbering.
+    - **New `port/src/audio/`**: `wav_file.h`/`.cpp` (a plain RIFF chunk
+      walker, no library needed), `vorbis_decoder.h`/`.cpp` (wraps
+      vendored `third_party/stb_vorbis`, single-file public-domain/MIT,
+      `PROVENANCE.md` -- same "vendor a real, focused implementation"
+      precedent `third_party/puff` already established), `audio_engine.h`
+      /`.cpp` (XAudio2 playback, bundled with Windows -- one transient
+      voice per one-shot SFX, auto-reaped once finished; one persistent
+      looping voice for ambient/battle music, always replacing whatever
+      was playing).
+    - **New `assets/sound_archive.h`/`.cpp`**: the real per-zone manifest,
+      reloaded on every zone change (`main.cpp`'s zone-load block,
+      alongside the existing icon-set load) -- decoded PCM cached by
+      resolved file path (not by slot, since the same slot number means a
+      different real file in different zones), so a sound shared across
+      many zones' manifests (`door_open.wav` etc.) is only ever decoded
+      once.
+    - **New real handlers**: `PlayerExecutable::PlaySound(id)` (the large
+      majority of real corpus calls, via `GetPlayer()`/`GetOwner()` -- an
+      item's real owner once picked up), `MonsterExecutable::PlaySound
+      (id)` (the real bare/self calls that aren't the player, e.g.
+      `monsters/umbra_keth.s`), `LevelExecutable::PlayAmbient(id,volume)`
+      (real looping music, `volume` linearly mapped to XAudio2 gain -- no
+      real mixing formula was RE'd, a documented simple default).
+      `PlayerExecutable`'s constructor gained optional `SoundArchive*`/
+      `AudioEngine*` params (it predates and holds no reference to the
+      `MenuStack` that owns it, unlike Door/Monster/Item/LevelExecutable,
+      which already reach both through their own `MenuStack&` via new
+      `sounds()`/`audio()` accessors there).
+    - **Verified end to end against real data, new `audio_smoke`
+      (`src/tests/m27_audio_smoke.cpp`)**: real `.wav`/`.ogg` decode
+      against real files, the real `azra_sounds.txt` manifest (including
+      its real `NULL.wav` sentinel resolving to nothing), and a real
+      `door.s`/`azra.s` script call genuinely reaching a real, live
+      `AudioEngine` (confirmed `AudioEngine::Init()` actually succeeds in
+      this environment -- a real device, not just a decode-only headless
+      check) without throwing.
+    - **Not attempted** (`docs/AUDIO_FORMAT.md`'s own section has the full
+      list): native-only player-action sounds (attack/jump/death/
+      footsteps -- real assets exist, but no script ever calls them, so
+      there's no real trigger *point* to verify against, only a trigger
+      *asset*); main-menu background music (no real script trigger
+      found for `menu_sounds.txt`'s own likely track); `crypt2/
+      controller.s`/`twilite/steamsound.s`'s own unresolved object-loading
+      mechanisms; positional/3D audio; the exact volume/pan formula.
+    - Not independently confirmed by ear in an actual windowed play
+      session (this agent has no way to listen) -- door/chest/lock sounds
+      and each zone's ambient music should be checked live.
+
 ## Next milestones (not yet started)
 
 Roughly in priority order for reaching "actually playable," not commitments:
@@ -1995,7 +2064,12 @@ Roughly in priority order for reaching "actually playable," not commitments:
   entry and `simkin_bindings/weapon_viewmodel.h`'s class comment. This
   port currently substitutes the `UseLeftAction`/`UseRightAction` keypress
   that already drives combat resolution, undecompiled.
-- Audio: entirely unaddressed so far, format not RE'd.
+- **Audio's remaining narrower gaps** (M27, `docs/AUDIO_FORMAT.md`
+  resolved the core system) -- native-only player-action sounds (attack/
+  jump/death/footsteps, never called from any script); main-menu
+  background music (no real script trigger found); `crypt2/controller.s`/
+  `twilite/steamsound.s`'s own unresolved loading mechanisms; positional/
+  3D audio; the exact volume/pan mixing formula.
 
 ## Verification approach
 

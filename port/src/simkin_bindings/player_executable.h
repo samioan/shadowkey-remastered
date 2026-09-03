@@ -30,6 +30,8 @@ class skInterpreter;
 
 namespace sk {
 class StringTable;
+class SoundArchive;
+class AudioEngine;
 }
 
 namespace sk_bindings {
@@ -39,7 +41,16 @@ class MenuStack;
 
 class PlayerExecutable : public NativeStubExecutable {
 public:
-    explicit PlayerExecutable(const sk::StringTable* strings);
+    // M27: `sounds`/`audio` may be null (every test constructs a
+    // PlayerExecutable without them, via MenuStack's own matching
+    // defaults) -- PlaySound() then silently no-ops. See method()'s
+    // PlaySound handler and MenuStack::MenuStack()'s own comment for why
+    // this is a constructor param here (not read from a MenuStack&,
+    // unlike DoorExecutable/MonsterExecutable/ItemExecutable/
+    // LevelExecutable -- PlayerExecutable predates the MenuStack that
+    // owns it and holds no reference back to it).
+    explicit PlayerExecutable(const sk::StringTable* strings, sk::SoundArchive* sounds = nullptr,
+                               sk::AudioEngine* audio = nullptr);
 
     bool method(const skString& methodName, skRValueArray& args, skRValue& returnValue,
                 skExecutableContext& context) override;
@@ -202,6 +213,8 @@ public:
 
 private:
     const sk::StringTable* m_Strings;
+    sk::SoundArchive* m_Sounds;  // M27: see the constructor's own comment
+    sk::AudioEngine* m_Audio;
     std::string m_Name;
     std::string m_CharNameBuffer;
     int m_Sex = 0;

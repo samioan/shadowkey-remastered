@@ -25,6 +25,8 @@ class skiExecutable;
 
 namespace sk {
 class StringTable;
+class SoundArchive;
+class AudioEngine;
 }
 
 namespace sk_bindings {
@@ -48,9 +50,22 @@ public:
     // then fall back to ItemExecutable's own no-stringtable placeholder
     // rather than crash. Registers the real/placeholder Simkin global
     // constants (game_constants.h) once, here.
+    //
+    // M27: `sounds`/`audio` may also be null (every existing test
+    // constructs a MenuStack without them) -- PlayerExecutable::PlaySound()
+    // and LevelExecutable::PlayAmbient() (via sounds()/audio() below) then
+    // silently no-op instead of crashing, same tolerance every other
+    // optional subsystem in this port already has. Passed straight into
+    // PlayerExecutable's own constructor (it's built here, not given a
+    // MenuStack& to pull them from later, unlike LevelExecutable/
+    // MonsterExecutable/ItemExecutable which already hold one).
     MenuStack(std::string scriptRoot, skInterpreter& interpreter,
-              const sk::StringTable* strings = nullptr);
+              const sk::StringTable* strings = nullptr, sk::SoundArchive* sounds = nullptr,
+              sk::AudioEngine* audio = nullptr);
     ~MenuStack();
+
+    sk::SoundArchive* sounds() const { return m_Sounds; }
+    sk::AudioEngine* audio() const { return m_Audio; }
 
     // Loads (or returns the already-loaded) menu for `simkinPath`, running
     // its Init() the first time it's created. Returns nullptr (logged) if
@@ -177,6 +192,8 @@ private:
     std::string m_ScriptRoot;
     skInterpreter& m_Interpreter;
     const sk::StringTable* m_Strings;
+    sk::SoundArchive* m_Sounds;  // M27: see sounds()/audio()'s own comment above
+    sk::AudioEngine* m_Audio;
     std::map<std::string, std::unique_ptr<MenuExecutable>> m_Menus;
     std::unique_ptr<PlayerExecutable> m_Player;
     std::unique_ptr<LevelExecutable> m_Level;

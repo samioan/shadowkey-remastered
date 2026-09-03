@@ -74,6 +74,23 @@ add_library(sk_entity_types STATIC
 )
 target_include_directories(sk_entity_types PUBLIC src)
 
+# M27: real audio pipeline -- real .wav sound effects (a plain RIFF/WAVE
+# PCM parser, no library needed) and real .ogg ambient/battle music
+# (vendored third_party/stb_vorbis, PROVENANCE.md) decoded to PCM, played
+# back via XAudio2 (bundled with Windows, no redistributable). See
+# src/audio/ and src/assets/sound_archive.h.
+add_library(sk_audio STATIC
+  src/assets/sound_archive.cpp
+  src/audio/audio_engine.cpp
+  src/audio/vorbis_decoder.cpp
+  src/audio/wav_file.cpp
+)
+target_include_directories(sk_audio PUBLIC src)
+target_include_directories(sk_audio PRIVATE third_party/stb_vorbis)
+if(WIN32)
+  target_link_libraries(sk_audio PUBLIC ole32 xaudio2)
+endif()
+
 add_library(sk_bindings STATIC
   src/assets/string_table.cpp
   src/simkin_bindings/button_executable.cpp
@@ -101,7 +118,7 @@ add_library(sk_bindings STATIC
   src/simkin_bindings/zone_script_executable.cpp
 )
 target_include_directories(sk_bindings PUBLIC src)
-target_link_libraries(sk_bindings PUBLIC simkin sk_entity_types)
+target_link_libraries(sk_bindings PUBLIC simkin sk_entity_types sk_audio)
 
 # --- Vendored puff (zlib's reference inflate, zlib license, see
 # third_party/puff/PROVENANCE.md) -- decompresses the zlib-wrapped
@@ -255,3 +272,7 @@ target_link_libraries(weapon_viewmodel_smoke PRIVATE sk_bindings)
 add_executable(loading_screen_smoke src/tests/m26_loading_screen_smoke.cpp
                                      src/assets/zone_display_names.cpp)
 target_link_libraries(loading_screen_smoke PRIVATE sk_bindings)
+
+# Real audio pipeline smoke test -- see src/tests/m27_audio_smoke.cpp.
+add_executable(audio_smoke src/tests/m27_audio_smoke.cpp)
+target_link_libraries(audio_smoke PRIVATE sk_bindings)

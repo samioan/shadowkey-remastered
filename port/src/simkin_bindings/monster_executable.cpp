@@ -2,7 +2,9 @@
 
 #include <cstdio>
 
+#include "assets/sound_archive.h"
 #include "assets/string_table.h"
+#include "audio/audio_engine.h"
 #include "simkin_bindings/menu_stack.h"
 #include "simkin_bindings/native_binding_common.h"
 #include "simkin_bindings/player_executable.h"
@@ -106,6 +108,17 @@ void MonsterExecutable::InvokeOnKilled() {
 
 bool MonsterExecutable::method(const skString& methodName, skRValueArray& args,
                                 skRValue& returnValue, skExecutableContext& context) {
+    if (methodName == skString("PlaySound") && args.entries() >= 1) {
+        // M27: a real monster script's own bare self-call (e.g. monsters/
+        // umbra_keth.s's `PlaySound(83)`) -- same real per-zone-manifest
+        // slot-index convention PlayerExecutable::PlaySound() documents in
+        // full (assets/sound_archive.h).
+        if (m_Stack.sounds() && m_Stack.audio()) {
+            const sk::Sound* sound = m_Stack.sounds()->GetSound(args[0].intValue());
+            if (sound) m_Stack.audio()->PlaySfx(*sound);
+        }
+        return true;
+    }
     if (methodName == skString("SetAggressive") && args.entries() == 1) {
         m_Aggressive = args[0].boolValue();
         return true;

@@ -19,9 +19,11 @@
 #include <string>
 #include <vector>
 
+#include "assets/sound_archive.h"
 #include "assets/sprite_archive.h"
 #include "assets/string_table.h"
 #include "assets/zone_display_names.h"
+#include "audio/audio_engine.h"
 #include "engine/game_clock.h"
 #include "engine/input_state.h"
 #include "engine/pc_key_map.h"
@@ -706,6 +708,17 @@ int main(int argc, char** argv) {
         spriteArchive.LoadCategory(scriptRoot, "menu");
     }
 
+    // M27: real audio -- see assets/sound_archive.h's class comment (the
+    // real per-zone <zone>_sounds.txt manifest convention, corpus-
+    // verified against real PlaySound()/PlayAmbient() call sites) and
+    // audio/audio_engine.h (XAudio2 playback). Init() failing (no audio
+    // device, XAudio2 unavailable) is non-fatal -- every PlaySound/
+    // PlayAmbient call below just silently no-ops, same "optional
+    // subsystem" tolerance as every other real asset in this port.
+    sk::SoundArchive soundArchive;
+    sk::AudioEngine audioEngine;
+    audioEngine.Init();
+
     // The real N-Gage menu/UI font (bitmap_font.h/.cpp's class
     // comments, docs/GRAPHICS_FORMAT.md). IS the device ROM's own
     // Ceurope.gdr after all -- confirmed by decompiling shadowkey's
@@ -728,7 +741,7 @@ int main(int argc, char** argv) {
     sk::BitmapFont::LoadRealFont(fontPath, "LatinBold12");
 
     skInterpreter interpreter;
-    sk_bindings::MenuStack stack(scriptRoot, interpreter, &strings);
+    sk_bindings::MenuStack stack(scriptRoot, interpreter, &strings, &soundArchive, &audioEngine);
     // M21: Level.CreateEntity() needs entities.txt to resolve a typeId --
     // see level_executable.h's class comment.
     stack.level().SetEntityTypes(&entityTypes);
@@ -878,6 +891,9 @@ int main(int argc, char** argv) {
             gameWeaponViewmodel.phase = sk_bindings::WeaponViewmodel::Phase::Idle;
         }
         stack.player().PurgeRemovedItems();
+        // M27: reaps one-shot SFX voices that finished playing -- see
+        // AudioEngine::Update()'s own comment.
+        audioEngine.Update();
 
         if (stack.quitRequested()) {
             window.Close();
@@ -922,6 +938,13 @@ int main(int argc, char** argv) {
                 // ships, since the inventory/equip screens need them
                 // available regardless of which zone the player is in.
                 spriteArchive.LoadCategory(scriptRoot, stack.requestedZone());
+                // M27: real per-zone sound manifest -- same idea as the
+                // per-zone icon set above, see assets/sound_archive.h.
+                // Loaded before the zone-root script's own Init() runs
+                // (below), which is exactly where a real script's own
+                // Level.PlayAmbient(id, volume) call (e.g. azra.s) needs
+                // it already in place.
+                soundArchive.LoadCategory(scriptRoot, stack.requestedZone());
                 gameZone = std::move(zone);
                 gameCamera.x = static_cast<float>(gameZone->playerStartX);
                 gameCamera.y = static_cast<float>(gameZone->playerStartY);
