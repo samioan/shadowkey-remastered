@@ -1580,12 +1580,31 @@ int main(int argc, char** argv) {
                     m.animHoldLastFrame = holdLastFrame;
                 };
 
-                for (MonsterInstance& m : gameMonsters) {
+                // M34: creatures that died to a damage-over-time this tick
+                // (poison, or IgniteFoe's burn) rather than to a player
+                // swing. The real burn branch calls the actor's kill vtable
+                // slot directly when its health reaches 0, so these deaths
+                // are just as real as combat ones and owe the same
+                // OnKilled()/loot/kill-trigger handling -- which they were
+                // silently not getting, because that handling lives with
+                // spawnLoot() further down this same block. Collected by
+                // index (not pointer) and drained the moment spawnLoot() is
+                // in scope, since gameMonsters can be appended to in
+                // between.
+                std::vector<size_t> gameDiedFromEffect;
+
+                for (size_t monsterIndex = 0; monsterIndex < gameMonsters.size(); ++monsterIndex) {
+                    MonsterInstance& m = gameMonsters[monsterIndex];
+                    const bool wasAliveBeforeTick = m.script->alive();
                     // M32: the real per-frame AI timers -- the flee/Fear
                     // countdown (which restores the previous package when
                     // it expires) and the paralysis lockout. Runs even for
                     // the dead/destroyed so an effect can't outlive them.
                     m.script->TickAi(sk_bindings::kAiFrameDeltaUnits);
+                    // M34: TickAi() is now a path that can actually kill.
+                    if (wasAliveBeforeTick && !m.script->alive()) {
+                        gameDiedFromEffect.push_back(monsterIndex);
+                    }
                     // M23: destroyed() (a real zone-root script's
                     // DestroyObjectMirror()) removes an entity from play
                     // as fully as death does, everywhere alive() is
@@ -1894,6 +1913,19 @@ int main(int argc, char** argv) {
                                     fullPath.c_str(), ex.toString().ptr());
                     }
                 };
+
+                // M34: the deaths the AI tick's damage-over-time channels
+                // caused above, given exactly the same treatment a killing
+                // blow gets below -- the creature's own OnKilled(), its
+                // loot bag, and the zone script's kill-count trigger.
+                for (size_t deadIndex : gameDiedFromEffect) {
+                    if (deadIndex >= gameMonsters.size()) continue;
+                    MonsterInstance& dead = gameMonsters[deadIndex];
+                    dead.script->InvokeOnKilled();
+                    spawnLoot(dead);
+                    if (gameZoneScript) gameZoneScript->NotifyKilled(dead.typeId);
+                }
+                gameDiedFromEffect.clear();
 
                 // Player attack -- UseLeftAction/UseRightAction (Key7/
                 // Key5, real decoded default bindings, previously unused)

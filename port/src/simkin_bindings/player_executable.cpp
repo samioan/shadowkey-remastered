@@ -106,6 +106,15 @@ void PlayerExecutable::ApplyDamage(int amount) {
     if (m_Health < 0) m_Health = 0;
 }
 
+void PlayerExecutable::SetHealth(int value) {
+    // FUN_1004bb88, in its own order (the real code assigns first and then
+    // clamps against the ceiling, then the floor -- reproduced literally so
+    // a negative maxHealth would behave the same, not that one can occur).
+    m_Health = value;
+    if (m_MaxHealth < value) m_Health = m_MaxHealth;
+    if (m_Health < 0) m_Health = 0;
+}
+
 int PlayerExecutable::UpdateEquipStatus(ItemExecutable* item, bool equipping) {
     if (!item) return 3;
     if (item->itemType() == kItemTypeArmor) {
@@ -247,7 +256,7 @@ bool PlayerExecutable::method(const skString& methodName, skRValueArray& args,
         return true;
     }
     if (methodName == skString("SetHealth") && args.entries() == 1) {
-        m_Health = args[0].intValue();
+        SetHealth(args[0].intValue());  // M34: real clamp, see SetHealth()
         return true;
     }
     if (methodName == skString("GetMagicka") && args.entries() == 0) {

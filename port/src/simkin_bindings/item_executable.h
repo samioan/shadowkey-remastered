@@ -111,6 +111,8 @@ public:
         kEffectDrain,      // 4018 spells\Drain.s
         kEffectBlind,      // 4010 spells\Blind.s
         kEffectHarmArmor,  // 4023 spells\HarmArmor.s
+        kEffectAbsorb,     // 4009 spells\Absorb.s      (M34)
+        kEffectIgniteFoe,  // 4024 spells\IgniteFoe.s   (M34)
     };
     StatusEffect statusEffect() const;
 

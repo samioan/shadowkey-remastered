@@ -163,6 +163,21 @@ public:
     // Clamps m_Health at 0 -- mirrors MonsterExecutable::ApplyDamage().
     void ApplyDamage(int amount);
 
+    // M34: the real stats-block SetHealth (FUN_1004bb88), which is three
+    // instructions long and does exactly one interesting thing -- it
+    // clamps into [0, maxHealth], so nothing can ever overheal:
+    //
+    //   health = value;
+    //   if (maxHealth < value) health = maxHealth;
+    //   if (health < 0)        health = 0;
+    //
+    // Needed by the Absorb spell (ItemExecutable::statusEffect()'s
+    // kEffectAbsorb), whose whole point is to *raise* the caster's health,
+    // and the script-facing SetHealth handler now routes through it too --
+    // it used to assign straight through, which let a script hand the
+    // player more health than their maximum.
+    void SetHealth(int value);
+
     // M17: real quest-state tracking, so dialogue trees like
     // snowline/tanyinconvo.s (M16) progress across repeated visits
     // instead of always soft-failing into their first-visit branch. A

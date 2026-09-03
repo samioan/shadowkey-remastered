@@ -473,14 +473,106 @@ halfword, `SetDefense` the second and `SetArmorValue` the seventh:
 | Drain | 4018 | attack −10 for `magnitude + 8`s |
 | Fear | 4020 | `FUN_10086b98(target, 4, magnitude * 5)` — the flee package |
 | HarmArmor | 4023 | armor −`magnitude` for `magnitude + 8`s |
-| IgniteFoe | 4024 | the second periodic channel: `+0x7c = 8`, `+0x78 = magnitude << 9` |
+| IgniteFoe | 4024 | `(magnitude+1)*2 .. (magnitude+1)*5` damage, then the second periodic channel: `+0x7c = 8`, `+0x78 = magnitude << 9`, `+0x76 = 1` — 1 damage a second for `magnitude * 2`s |
 | Paralyze | 4025 | arms the target's `+0x294` action lockout via `(magnitude + 4) * 0x100` |
 | Disease | 4033 | attack −2 (when `magnitude < 7`) else −3, **and** defense −3, both for a fixed 30s — the only effect whose duration ignores magnitude |
 | Poison | 4034 | effect flag 8, DoT kind 3 → 3 damage per 256 units for `magnitude`s |
-| Absorb | 4009 | a health transfer to the caster (`FUN_1004bb88`) |
+| Absorb | 4009 | a fixed `magnitude + 12` damage, then heals the caster by `damage * magnitude / 25 + 6` (`FUN_1004bb88`) |
 
 **`magnitude` is not the script's argument.** It is read from the
 *caster's* spell-power stat (`stats+0x34`, index 0x18) and clamped to 25;
 the dispatcher never looks at what `DoAttackRoll` was passed. The proof is
 in the scripts: real `Poison.s` and `Disease.s` call `DoAttackRoll(target)`
 with no second argument at all, yet both apply fully-parameterised effects.
+
+#### The two damage-carrying branches: Absorb and IgniteFoe
+
+Every other branch in the table above is pure status. The dispatcher's
+shared damage pair (`min`/`max`, local `local_250`/`iVar11`) stays at 0/0
+for them, so the `if (0 < max)` that guards the `DoDamage` call never
+fires and only the effect lands. Absorb and IgniteFoe are the two branches
+that set both — they deal damage *and* do something further with it.
+
+**The roll.** `max` is picked first and `min` second, then
+`if (min > max) max = min`, and the actual value is
+`rand(min, max)` — but **only when `min != max`**. Absorb sets them equal,
+which is what makes it the one spell in the table with no variance:
+
+| | `min` | `max` |
+|---|---|---|
+| Absorb (4009) | `magnitude + 12` | `magnitude + 12` |
+| IgniteFoe (4024) | `(magnitude + 1) * 2` | `(magnitude + 1) * 5` |
+
+**Absorb's heal.** After the damage call, the caster's stats block is
+handed to `FUN_1004bb88` — a three-instruction `SetHealth` that clamps
+into `[0, maxHealth]`, so absorbing at full health does nothing:
+
+```c
+casterHealth + ((damage * 0x100 * ((magnitude << 16) / 6400)) >> 16) + 6
+```
+
+That divisor is not written as a divisor. The binary has a 64-bit multiply
+by `DAT_10045e54` followed by `>> 0x2b`, and `DAT_10045e54` reads
+`0x51EB851F` — the standard magic constant for signed division by 25,
+whose own shift is 3, plus 8 more for the 256. So the divisor is
+`25 * 256 = 6400`, and 25 is exactly the cap applied to `magnitude` at the
+top of the function. The whole expression collapses to:
+
+> **heal = damage × magnitude / 25 + 6**
+
+i.e. absorb a share of the damage proportional to how far the caster's
+spell power has come toward its maximum, plus a flat 6. At the cap the
+caster recovers the full hit and then some.
+
+**IgniteFoe and the second periodic channel.** `FUN_10049780` runs *two*
+independent periodic channels, not one. The first (`+0x72`/`+0x74`/`+0x76`)
+is the effect-flag channel poison uses. The second
+(`+0x78`/`+0x7a`/`+0x7c`) has its own timer, its own accumulator and a
+`kind` selector, and the tick implements three kinds:
+
+| kind | per second |
+|------|-----------|
+| 6 | `+0x2c` (current magicka) += spell power |
+| 7 | current health += spell power, clamped to max and to >= 0 |
+| 8 | current health −= **`+0x76`**, and on reaching 0 calls the actor's kill vtable slot (`+0x28`) directly |
+
+IgniteFoe is the *only* site in the whole status-effect dispatcher that
+arms this channel, and it arms kind 8. Kinds 6 and 7 are regeneration and
+are set somewhere else (not yet found).
+
+Two details worth keeping:
+
+- **Kind 8 writes health directly** rather than going through `DoDamage`
+  the way poison does, so a burn is reduced by nothing — no armour, no
+  resistance. It is the flat 1/second it says it is, and it kills through
+  the kill slot rather than the damage path.
+- **`+0x76` is shared between the two channels.** Poison writes 3 there as
+  its kind-and-damage; IgniteFoe writes 1 there as its per-tick damage.
+  They are the same short. So poisoning a burning creature really does
+  make its flames tick for 3 instead of 1. Relatedly, channel 1's own
+  expiry is not a clear-to-zero — it assigns `flags = 2` and
+  **`+0x76 = 3`** — so a poison *wearing off* while a creature burns also
+  triples the burn. Both are reproduced in the port.
+
+**The flame itself.** The branch also calls
+`FUN_10067f84(target, 0x3e, 0x44, magnitude * 2)`, which allocates a
+0x170-byte emitter, copies the target's own `x`/`y`/`z` (`+0x94`/`+0x9c`/
+`+0xa4`), stores sprite range 62..68, registers it with the level, and
+gives it a lifetime of `magnitude * 2 << 8` — exactly the burn duration,
+from a completely independent write. That is the corroboration for the
+duration reading.
+
+**The resistance gate (not implemented in the port).** Worth recording
+because it sits above every branch here: the dispatcher wraps the entire
+effect — status included, not just damage — in a hit roll:
+
+```c
+chance = casterPower * 0x100 / (casterPower + targetResistance);   // 1/256ths
+if (chance == 0x100 || rand(0, 0x100) < chance) { ...apply everything... }
+```
+
+`casterPower` comes from `FUN_1004bc60` (defaulting to 100 when there is
+no caster stats block) and `targetResistance` from `FUN_1004bbd0`. The
+port keeps its own flat resistance-subtraction model instead; adopting
+this would change every existing spell's behaviour and needs the same
+caster spell-power stat the port does not have.

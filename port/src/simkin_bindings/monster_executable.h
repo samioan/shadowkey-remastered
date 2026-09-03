@@ -192,6 +192,36 @@ public:
     // no damage-over-time (blind).
     void ApplyEffectFlag(int flagBit, int dotKind, int durationSeconds);
 
+    // ---- M34: the stats block's *second* periodic channel ----
+    //
+    // FUN_10049780 runs two independent periodic channels. The first
+    // (+0x72/+0x74/+0x76) is the effect-flag channel above -- poison. The
+    // second (+0x78/+0x7a/+0x7c) is a separate timer with its own `kind`
+    // selector, and the tick implements three of them:
+    enum PeriodicKind {
+        kPeriodicNone = 0,
+        kPeriodicMagickaRegen = 6,  // +0x2c += spellPower, once per second
+        kPeriodicHealthRegen = 7,   // health += spellPower, clamped to max
+        kPeriodicBurn = 8,          // health -= (+0x76), and kills at 0
+    };
+
+    // The IgniteFoe branch of FUN_100458e4, which is the only place in the
+    // whole status-effect dispatcher that arms this channel:
+    //
+    //   target->kind        = 8;                  // +0x7c
+    //   target->burnTimer   = magnitude << 9;     // +0x78, magnitude*2 sec
+    //   target->burnAccum   = 0;                  // +0x7a
+    //   target->dotKind     = 1;                  // +0x76  <-- see below
+    //
+    // Note the last write: the burn's per-tick damage lives in +0x76, the
+    // *same field poison uses* for both its kind and its damage. The two
+    // channels genuinely share it in the real engine, so poisoning a
+    // burning creature really does make its flames tick for 3 instead of 1
+    // (and vice versa). Reproduced rather than tidied up -- see the tick.
+    void ApplyBurn(int damagePerTick, int durationSeconds);
+
+    bool burning() const { return m_BurnTimer > 0 && m_BurnKind == kPeriodicBurn; }
+
     bool blinded() const { return (m_EffectFlags & kEffectFlagBlind) != 0; }
     bool poisoned() const { return (m_EffectFlags & kEffectFlagPoison) != 0; }
 
@@ -365,8 +395,12 @@ private:
     std::vector<StatModifier> m_StatModifiers;
     int m_EffectFlags = 0;    // stats block +0x44
     int m_EffectTimer = 0;    // +0x72, `duration << 8`
-    int m_DotKind = 0;        // +0x76 -- 3 = poison
-    int m_DotAccumulator = 0; // host-side: paces poison damage, see the .cpp
+    int m_DotKind = 0;        // +0x76 -- 3 = poison, 1 = burn (shared, see ApplyBurn)
+    int m_DotAccumulator = 0; // +0x74
+    // M34: the second periodic channel -- see PeriodicKind/ApplyBurn().
+    int m_BurnTimer = 0;        // +0x78, `duration << 8`
+    int m_BurnAccumulator = 0;  // +0x7a
+    int m_BurnKind = kPeriodicNone;  // +0x7c
     int m_Skin = 0;
     int m_Scale = 256;  // 8.8 fixed point, 256 == 1:1
     int m_IdleAnim = -1;

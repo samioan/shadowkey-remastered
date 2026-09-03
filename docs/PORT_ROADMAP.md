@@ -2462,14 +2462,76 @@ algorithms.
       because the port treated every spell as a damage spell. Blind is not
       a damage spell; it now asserts no damage plus the real -10/-10
       modifiers.
-    - **Still unmodelled**: Absorb (4009, a health transfer to the caster)
-      and IgniteFoe (4024, which drives the stats block's *second* periodic
-      channel at `+0x78`/`+0x7c` rather than the `+0x72`/`+0x76` one every
-      other effect shares).
+    - ~~**Still unmodelled**: Absorb (4009) and IgniteFoe (4024)~~ --
+      **both implemented in M34, below.**
     - `m32_ai_package_smoke` grew to 24 assertions against real
       `Drain.s`/`Blind.s`/`Disease.s`/`Poison.s`/`arat.s` data -- 29/29
       smoke tests pass. Full writeup: `docs/WORLD_MODEL.md`'s "The
       status-effect primitives, decoded".
+
+- [x] **M34 -- Absorb and IgniteFoe: the last two status effects, and the
+  stats block's second periodic channel.** The two branches of
+  `FUN_100458e4` that carry their own damage rather than being pure
+  status. Full writeup: `docs/WORLD_MODEL.md`'s "The two damage-carrying
+  branches".
+    - **The damage roll.** The dispatcher picks a `min`/`max` pair and
+      rolls between them **only when they differ**. Absorb sets them equal
+      (`magnitude + 12` both), making it the one spell in the table with no
+      variance; IgniteFoe sets `(magnitude+1)*2 .. (magnitude+1)*5`.
+    - **Absorb's heal, and the magic constant.** After the damage, the
+      caster's health is set to
+      `health + ((damage * 0x100 * ((magnitude << 16) / 6400)) >> 16) + 6`.
+      The 6400 is not written as a divisor -- the binary multiplies by
+      `DAT_10045e54` and shifts right 43, and that constant reads
+      `0x51EB851F`, the standard magic for signed division by 25 (shift 3)
+      plus 8 more for the 256. Since `magnitude` is itself capped at 25 at
+      the top of the function, the whole thing collapses to
+      **`heal = damage * magnitude / 25 + 6`**. The setter is
+      `FUN_1004bb88`, a three-instruction `SetHealth` that clamps into
+      `[0, maxHealth]` -- so absorbing at full health does nothing.
+      `PlayerExecutable::SetHealth()` now implements it, and the
+      script-facing `SetHealth` handler routes through it too (it used to
+      assign straight through, letting a script exceed the maximum).
+    - **The second periodic channel.** `FUN_10049780` runs two independent
+      channels, not one. The second (`+0x78`/`+0x7a`/`+0x7c`) has its own
+      `kind`: 6 = magicka regen, 7 = health regen, 8 = burn. IgniteFoe is
+      the only site in the whole dispatcher that arms it, and it arms
+      kind 8 for `magnitude * 2` seconds at 1 damage a second. Kind 8
+      writes health *directly* instead of going through `DoDamage`, so a
+      burn is reduced by neither armour nor resistance, and it kills
+      through the actor's kill vtable slot.
+    - **`+0x76` is shared between the channels**, and this is reproduced:
+      poison writes 3 there as its kind-and-damage, IgniteFoe writes 1
+      there as its per-tick damage, so poisoning a burning creature really
+      does triple its burn. Channel 1's expiry is also not a clear-to-zero
+      -- it assigns `flags = 2` and `+0x76 = 3` -- which corrects M33's
+      implementation and, for the same reason, is now observable.
+    - **Independent confirmation of the duration**: the branch also builds
+      a particle emitter (`FUN_10067f84`) at the target's own x/y/z with
+      sprite range 62..68 and a lifetime of `magnitude * 2 << 8`, matching
+      the burn timer exactly. The visual itself has no emitter system here
+      to attach to and is not reproduced.
+    - **Two real aliases wired up**: `spells\IgniteScroll.s` and
+      `spells\U_Ignite_Foe_8_lvl8.s` are three-line scripts whose whole
+      `Init()` is `SetSpellType(4024); ... RunScript("spells\\IgniteFoe")`.
+      A corpus sweep found exactly 7 such `RunScript` spell aliases, and
+      these are the only two pointing at a modelled effect.
+    - **Fixed alongside**: a creature killed by a damage-over-time in
+      `TickAi()` never ran `OnKilled()`, dropped loot, or fired the zone
+      script's kill-count trigger -- that handling only existed on the
+      player-swing path. Latent for poison since M33; IgniteFoe, which
+      exists to kill over time, would have hit it constantly.
+      `SetMPUsable` (49 real call sites, `absorb.s` among them) is now
+      accepted as a no-op instead of logging soft-fail noise.
+    - **Not adopted, and recorded in the docs**: the dispatcher gates the
+      *entire* effect -- status included -- behind a hit roll of
+      `casterPower * 0x100 / (casterPower + resistance)` against
+      `rand(0, 0x100)`. Adopting it would change every existing spell's
+      behaviour and needs the same caster spell-power stat this port
+      doesn't have.
+    - `m32_ai_package_smoke` grew to 31 assertions, adding real
+      `Absorb.s`/`IgniteFoe.s`/`lakvan.s` coverage including the shared
+      `+0x76` interaction -- 29/29 smoke tests pass.
 
 ## Next milestones (not yet started)
 
@@ -2491,10 +2553,12 @@ Roughly in priority order for reaching "actually playable," not commitments:
   selects~~ -- **resolved in M32**: the effect is chosen by the *spell
   entity's own `entities.txt` typeId* (`FUN_100458e4`), not by
   `DoAttackRoll`'s second argument, which is a magnitude. The "scripted
-  table" that was never found is `entities.txt` itself. Fear, Paralyze,
-  Poison, Disease, Drain, Blind and HarmArmor are all implemented (M32/M33);
-  Absorb and IgniteFoe remain, both needing systems this port doesn't have
-  (a caster health transfer and the stats block's second periodic channel).
+  table" that was never found is `entities.txt` itself. **All nine
+  branches are now implemented** -- Fear and Paralyze (M32), Poison,
+  Disease, Drain, Blind and HarmArmor (M33), Absorb and IgniteFoe (M34).
+  What remains of this subsystem is the resistance *gate* (see M34) and
+  the caster spell-power stat both it and every effect's magnitude really
+  read.
 - **Small documented loose ends**, one call/argument each, left open in
   their own milestone's "Not attempted" note rather than guessed at:
   M21's empty-bag despawn (`QuitAndDestroyOpener`/`QueryDestroy`) and

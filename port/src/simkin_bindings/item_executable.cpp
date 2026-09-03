@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cctype>
 #include <cstdio>
+#include <cstdlib>
 
 #include "assets/string_table.h"
 #include "simkin_bindings/combat.h"
@@ -46,10 +47,18 @@ ItemExecutable::StatusEffect ItemExecutable::statusEffect() const {
     if (endsWith("spells/drain.s")) return kEffectDrain;
     if (endsWith("spells/blind.s")) return kEffectBlind;
     if (endsWith("spells/harmarmor.s")) return kEffectHarmArmor;
-    // Still unmodelled: Absorb (4009, a health transfer from target to
-    // caster) and IgniteFoe (4024, which drives the stats block's *second*
-    // periodic-effect channel at +0x78/+0x7c rather than the +0x72/+0x76
-    // one the others share).
+    if (endsWith("spells/absorb.s")) return kEffectAbsorb;
+    // M34: IgniteFoe has two real aliases. spells\IgniteScroll.s and
+    // spells\U_Ignite_Foe_8_lvl8.s are both three-line scripts whose whole
+    // Init() is `SetSpellType(4024); ... RunScript("spells\\IgniteFoe")` --
+    // they set a different cost/level and then *become* IgniteFoe. This
+    // port has no RunScript-style script swap, so matching the filenames
+    // here is the same relation by a shorter road, and it is what keeps a
+    // real found scroll from casting nothing at all.
+    if (endsWith("spells/ignitefoe.s") || endsWith("spells/ignitescroll.s") ||
+        endsWith("spells/u_ignite_foe_8_lvl8.s")) {
+        return kEffectIgniteFoe;
+    }
     return kEffectNone;
 }
 
@@ -203,6 +212,16 @@ bool ItemExecutable::method(const skString& methodName, skRValueArray& args,
         m_Rating = args[0].intValue();
         return true;
     }
+    if (methodName == skString("SetMPUsable") && args.entries() == 1) {
+        // M34: "usable in multiplayer", called by 49 real scripts
+        // (absorb.s among them). The real engine's own multiplayer paths
+        // are the ones guarded by the session flag this port has no
+        // equivalent of -- there is nothing here for the answer to gate,
+        // so it's accepted as a no-op rather than left logging soft-fail
+        // noise on every spell load. Same treatment RestrictUse() below
+        // already gets, for the same reason.
+        return true;
+    }
     if (methodName == skString("RestrictUse")) {
         // M22: a real class/race restriction list, never read back by any
         // script and with no restriction system in this port to apply it
@@ -291,6 +310,74 @@ bool ItemExecutable::method(const skString& methodName, skRValueArray& args,
                     // units for `magnitude` seconds.
                     target->ApplyEffectFlag(MonsterExecutable::kEffectFlagPoison, 3, magnitude);
                     break;
+                // ---- M34: the two branches that carry their own damage ----
+                //
+                // Every effect above is pure status: FUN_100458e4 leaves
+                // the shared `min`/`max` damage pair at 0/0 for them, so
+                // the `if (0 < max)` guarding the DoDamage call never
+                // fires and only the effect lands. Absorb and IgniteFoe
+                // are the two that set both -- they deal damage *and* do
+                // something else with it.
+                case kEffectAbsorb: {
+                    // The damage pair is `max = min = magnitude + 12`.
+                    // Equal bounds are load-bearing: the roll only happens
+                    // when `min != max`, so Absorb's damage is exactly
+                    // fixed, the one spell in the table with no variance.
+                    int rolled = magnitude + 12;
+                    target->ApplyDamage(SpellDamageAfterResistance(rolled,
+                                                                    target->magicResistance()));
+                    // Then the caster is healed, from the *pre-mitigation*
+                    // roll -- the real code reads the same `local_250` it
+                    // passed to DoDamage, before DoDamage's own reductions:
+                    //
+                    //   SetHealth(health
+                    //             + ((rolled * 0x100 * (magnitude<<16)/6400) >> 16)
+                    //             + 6)
+                    //
+                    // That divisor is not written as a divisor in the
+                    // binary -- it is a magic multiply, 0x51EB851F with a
+                    // 43-bit shift, which is the standard sequence for
+                    // signed division by 6400 (the /25 magic 0x51EB851F
+                    // with its shift of 3, plus 8 more for the 256). And
+                    // 6400 is 25 * 256, with 25 being exactly the cap
+                    // applied to `magnitude` at the top of the function.
+                    // So the whole expression collapses to
+                    //
+                    //   heal = damage * magnitude / 25 + 6
+                    //
+                    // i.e. absorb a share of the damage proportional to
+                    // how far the caster's spell power is toward its
+                    // maximum, plus a flat 6. Kept in the real integer
+                    // order below so the truncation matches step for step
+                    // rather than only in the algebra.
+                    int q = (magnitude << 16) / 6400;
+                    int drained = (rolled * 256 * q) >> 16;
+                    PlayerExecutable& caster = m_Stack.player();
+                    caster.SetHealth(caster.health() + drained + 6);
+                    break;
+                }
+                case kEffectIgniteFoe: {
+                    // `max = (magnitude+1)*5, min = (magnitude+1)*2` -- an
+                    // actual rolled range, unlike Absorb's.
+                    int lo = (magnitude + 1) * 2;
+                    int hi = (magnitude + 1) * 5;
+                    int rolled = lo + std::rand() % (hi - lo + 1);
+                    target->ApplyDamage(SpellDamageAfterResistance(rolled,
+                                                                    target->magicResistance()));
+                    // Then set the target on fire: 1 point per second for
+                    // `magnitude * 2` seconds, on the second periodic
+                    // channel (MonsterExecutable::ApplyBurn). The real
+                    // branch also spawns the flame itself -- FUN_10067f84
+                    // builds a particle emitter at the target's own x/y/z,
+                    // sprite range 62..68, and gives it a lifetime of
+                    // `magnitude * 2 << 8`, exactly the burn duration.
+                    // That is an independent confirmation of the duration
+                    // reading, from a completely different write; the
+                    // visual itself has no emitter system here to attach
+                    // to and is not reproduced.
+                    target->ApplyBurn(1, magnitude * 2);
+                    break;
+                }
                 case kEffectNone: {
                     int dmg = RollSpellDamage(m_Rating, target->magicResistance());
                     target->ApplyDamage(dmg);

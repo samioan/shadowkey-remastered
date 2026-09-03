@@ -12,6 +12,7 @@
 //   * FUN_100458e4's status-effect dispatch, which selects the effect from
 //     the spell entity's own entities.txt typeId (4020 = spells\Fear.s,
 //     4025 = spells\Paralyze.s)
+#include <algorithm>
 #include <cstdio>
 #include <memory>
 #include <string>
@@ -20,6 +21,7 @@
 #include "simkin_bindings/item_executable.h"
 #include "simkin_bindings/menu_stack.h"
 #include "simkin_bindings/monster_executable.h"
+#include "simkin_bindings/player_executable.h"
 #include "skExecutableContext.h"
 #include "skInterpreter.h"
 #include "skParseException.h"
@@ -281,6 +283,108 @@ int main(int argc, char** argv) {
             for (int i = 0; i < 40; ++i) v->TickAi(sk_bindings::kAiFrameDeltaUnits);
             Check(!v->poisoned() && v->currentHealth() == settled,
                   "...and expires after its duration instead of ticking forever");
+        }
+        // ---- M34: the two branches that carry their own damage ----
+        //
+        // Absorb: fixed damage of `magnitude + 12` (its min and max are
+        // equal, so the roll is skipped), then the caster is healed by
+        // `damage * magnitude / 25 + 6` -- clamped, so it cannot overheal.
+        // Real absorb.s has SetRating(1), so magnitude is 1: 13 damage,
+        // less the rat's real SetMagicResistance(3), is 10; and the
+        // proportional term truncates to 0 at that magnitude, leaving the
+        // flat +6. (A caster at the real 25-point cap would instead absorb
+        // the damage in full -- see the DoAttackRoll handler's note on why
+        // this port substitutes the spell's own rating for a caster stat.)
+        {
+            auto spell = cast("spells/Absorb.s");
+            auto v = LoadMonster(std::string(scriptRoot) + "/arat.s", interpreter, strings, stack);
+            // The heal is invisible at full health, by design -- the real
+            // SetHealth clamps to maxHealth -- so open a wound first.
+            stack.player().ApplyDamage(50);
+            int casterBefore = stack.player().health();
+            int hp0 = v->currentHealth();
+            hit(*spell, *v);
+            Check(spell->statusEffect() == Item::kEffectAbsorb &&
+                      v->currentHealth() == hp0 - 10,
+                  "Absorb deals its fixed magnitude+12 damage (13, less 3 resistance)");
+            Check(stack.player().health() == casterBefore + 6,
+                  "...and transfers it to the caster, who heals by the real flat +6");
+            int full = stack.player().maxHealth();
+            stack.player().SetHealth(full);
+            hit(*spell, *v);
+            Check(stack.player().health() == full,
+                  "...but never past maxHealth -- the real SetHealth clamps");
+        }
+        // IgniteFoe: an opening damage roll, then the stats block's
+        // *second* periodic channel -- 1 point a second for magnitude*2
+        // seconds. Cast at Lakvan (200 health) rather than the rat, whose
+        // real 12 wouldn't survive the opening hit to be burned at all.
+        {
+            auto spell = cast("spells/IgniteFoe.s");
+            auto v = LoadMonster(std::string(scriptRoot) + "/monsters/lakvan.s", interpreter,
+                                  strings, stack);
+            int hp0 = v->currentHealth();
+            hit(*spell, *v);
+            int opening = hp0 - v->currentHealth();
+            // ignitefoe.s has SetRating(19), so the real roll is
+            // (19+1)*2 .. (19+1)*5, less Lakvan's SetMagicResistance(45),
+            // floored at 1. Asserted as the range rather than a value --
+            // this is the one status branch with genuine variance.
+            int lo = (std::max)(1, (19 + 1) * 2 - v->magicResistance());
+            int hi = (std::max)(1, (19 + 1) * 5 - v->magicResistance());
+            Check(spell->statusEffect() == Item::kEffectIgniteFoe && opening >= lo &&
+                      opening <= hi && v->burning(),
+                  "IgniteFoe rolls its opening hit in the real range and sets the target alight");
+
+            int ticksPerSecond = 256 / sk_bindings::kAiFrameDeltaUnits + 1;
+            int hp1 = v->currentHealth();
+            for (int i = 0; i < ticksPerSecond; ++i) v->TickAi(sk_bindings::kAiFrameDeltaUnits);
+            Check(v->currentHealth() == hp1 - 1,
+                  "...then burns for exactly 1 a second -- the real +0x76 value it wrote");
+
+            // Duration is magnitude*2 == 38 seconds; run well past it.
+            for (int i = 0; i < 45 * ticksPerSecond; ++i) {
+                v->TickAi(sk_bindings::kAiFrameDeltaUnits);
+            }
+            int settled = v->currentHealth();
+            for (int i = 0; i < 2 * ticksPerSecond; ++i) {
+                v->TickAi(sk_bindings::kAiFrameDeltaUnits);
+            }
+            Check(!v->burning() && v->currentHealth() == settled,
+                  "...and goes out after magnitude*2 seconds instead of burning forever");
+        }
+        // The shared +0x76 field. The burn channel reads the same short
+        // poison writes, so poisoning a burning creature really does make
+        // its flames tick for 3 instead of 1. Faithful, and easy to lose.
+        {
+            auto ignite = cast("spells/IgniteFoe.s");
+            auto poison = cast("spells/Poison.s");
+            auto v = LoadMonster(std::string(scriptRoot) + "/monsters/lakvan.s", interpreter,
+                                  strings, stack);
+            hit(*ignite, *v);
+            hit(*poison, *v);
+            int ticksPerSecond = 256 / sk_bindings::kAiFrameDeltaUnits + 1;
+            int hp = v->currentHealth();
+            for (int i = 0; i < ticksPerSecond; ++i) v->TickAi(sk_bindings::kAiFrameDeltaUnits);
+            // Both channels fire on the same tick: poison's own 3 through
+            // channel 1, plus the burn re-reading that same 3 -- 6 total.
+            Check(v->burning() && v->poisoned() && v->currentHealth() == hp - 6,
+                  "poison and burn share +0x76, so a poisoned burn ticks for 3, not 1");
+        }
+        // A burn can finish a creature off on its own -- the real kind-8
+        // handler calls the actor's kill slot directly when health hits 0.
+        // main.cpp keys its OnKilled()/loot handling off exactly this
+        // transition happening inside TickAi(), so it is worth pinning.
+        {
+            auto v = LoadMonster(std::string(scriptRoot) + "/arat.s", interpreter, strings, stack);
+            v->ApplyBurn(1, 60);  // the rat's real SetMaxHealth is 12
+            bool aliveBefore = v->alive();
+            int ticksPerSecond = 256 / sk_bindings::kAiFrameDeltaUnits + 1;
+            for (int i = 0; i < 30 * ticksPerSecond; ++i) {
+                v->TickAi(sk_bindings::kAiFrameDeltaUnits);
+            }
+            Check(aliveBefore && !v->alive() && v->currentHealth() == 0,
+                  "a burn left to run kills the creature from inside the AI tick");
         }
         // FUN_1004aa28's mode-1 "strongest wins" rule.
         {

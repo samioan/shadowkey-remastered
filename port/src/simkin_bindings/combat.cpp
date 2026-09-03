@@ -16,8 +16,12 @@ bool InAttackRange(float attackerX, float attackerY, float attackerYaw, float ta
     return facing >= 0.5f;  // ~60 degree forward cone
 }
 
+int SpellDamageAfterResistance(int rawDamage, int targetMagicResistance) {
+    return (std::max)(1, rawDamage - targetMagicResistance);
+}
+
 int RollSpellDamage(int rating, int targetMagicResistance) {
-    return (std::max)(1, rating * 3 - targetMagicResistance);
+    return SpellDamageAfterResistance(rating * 3, targetMagicResistance);
 }
 
 int RollDamage(int attackerAttack, int defenderDefense, int defenderArmor, int dmgMin,

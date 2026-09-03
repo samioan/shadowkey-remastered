@@ -159,6 +159,14 @@ void MonsterExecutable::ApplyEffectFlag(int flagBit, int dotKind, int durationSe
     m_DotAccumulator = 0;
 }
 
+void MonsterExecutable::ApplyBurn(int damagePerTick, int durationSeconds) {
+    // FUN_100458e4's IgniteFoe branch, in its own write order.
+    m_BurnKind = kPeriodicBurn;
+    m_BurnTimer = durationSeconds * 256;  // the real `magnitude << 9`
+    m_BurnAccumulator = 0;
+    m_DotKind = damagePerTick;  // +0x76 -- deliberately the shared field
+}
+
 void MonsterExecutable::SetAiPackageTimed(int package, int durationUnits) {
     // FUN_10086b98, byte for byte in behaviour: set the package, arm the
     // countdown as `duration << 8`, and -- only for the flee package --
@@ -200,8 +208,23 @@ void MonsterExecutable::TickAi(int deltaUnits) {
         m_EffectTimer -= deltaUnits;
         if (m_EffectTimer <= 0) {
             m_EffectTimer = 0;
-            m_EffectFlags = 0;
-            m_DotKind = 0;
+            // M34 correction. The real expiry is not a clear-to-zero:
+            //
+            //   flags  = 2;   // an assignment, not an &=
+            //   dotKind = 3;
+            //
+            // Bit 1 is left set (its meaning is not decoded -- nothing in
+            // this port reads any bit but blind's 4 and poison's 8, for
+            // which `= 2` and `= 0` are identical), and dotKind is *reset
+            // to poison's 3* rather than cleared. That second write used to
+            // be unobservable, because channel 1 stops ticking the moment
+            // its own timer hits zero. It stops being unobservable now that
+            // the burn channel reads the same field: a poison wearing off
+            // while a creature is on fire really does triple its burn from
+            // 1/sec to 3/sec. Faithful, and the reason this is written the
+            // odd way it is.
+            m_EffectFlags = 2;
+            m_DotKind = 3;
             m_DotAccumulator = 0;
         } else if (m_DotKind > 0) {
             // The real damage-over-time tick (FUN_10049780):
@@ -221,6 +244,42 @@ void MonsterExecutable::TickAi(int deltaUnits) {
                 m_DotAccumulator = 0;
                 ApplyDamage(m_DotKind);
             }
+        }
+    }
+
+    // M34: the second periodic channel (+0x78/+0x7a/+0x7c). Same one-second
+    // accumulator shape as channel 1, but selected by its own `kind`:
+    //
+    //   kind 6: magicka += spellPower
+    //   kind 7: health  += spellPower, clamped to maxHealth and to 0
+    //   kind 8: health  -= (+0x76), and on reaching 0 calls the actor's
+    //           kill vtable slot (+0x28) directly
+    //
+    // Only kind 8 is reachable from the status-effect dispatcher -- the
+    // IgniteFoe branch is its single arming site anywhere in that function.
+    // Kinds 6 and 7 read the stats block's spell-power short (+0x34), which
+    // this port has no equivalent of and nothing decompiled so far arms, so
+    // they are documented here rather than guessed at.
+    //
+    // Note kind 8 writes health *directly* instead of going through
+    // DoDamage the way poison does, so a burn is not reduced by armour or
+    // resistance at all -- it is the flat 1/sec it says it is. The one
+    // deliberate divergence: this routes through ApplyDamage() anyway, so
+    // that a real SetInvulnerable(true) quest NPC still cannot be burned to
+    // death (that guard is a port safety property, and the alternative is
+    // an essential NPC dying to a stray fire spell and stranding a quest).
+    if (m_BurnTimer > 0) {
+        if (m_BurnKind == kPeriodicBurn) {
+            m_BurnAccumulator += deltaUnits;
+            if (m_BurnAccumulator >= 256) {
+                m_BurnAccumulator = 0;
+                ApplyDamage(m_DotKind);
+            }
+        }
+        m_BurnTimer -= deltaUnits;
+        if (m_BurnTimer <= 0) {
+            m_BurnTimer = 0;
+            m_BurnKind = kPeriodicNone;
         }
     }
 }

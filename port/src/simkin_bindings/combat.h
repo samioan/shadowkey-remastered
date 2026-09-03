@@ -49,14 +49,31 @@ bool InInteractRange(float playerX, float playerY, float playerYaw, float target
 
 // M22 (spellcasting): a spell's damage roll -- `rating` is the casting
 // item's own real SetRating() value (e.g. blaze.s's SetRating(2)),
-// `targetMagicResistance` the real monster's SetMagicResistance() (M12,
-// stored but never read back until now). Deliberately from-scratch, same
-// "no RE ground truth for the real formula" footing as RollDamage() --
-// real DoAttackRoll(target, effectId) is a native call this port doesn't
-// have decompiled, and its own effectId argument selects a real status
-// effect (poison/paralyze/blind/fear/drain/...) this port doesn't model
-// at all (a separate, much larger, mostly-native subsystem -- not
-// attempted here, only the damage half).
+// `targetMagicResistance` the real monster's SetMagicResistance() (M12).
+// Deliberately from-scratch, same "no RE ground truth for the real
+// formula" footing as RollDamage().
+//
+// M33/M34 update: the *effect* half is no longer unmodelled -- the real
+// selector (FUN_100458e4) is decompiled and nine of its branches are
+// implemented (ItemExecutable::statusEffect()), several with their exact
+// shipped constants. Two of those branches, Absorb and IgniteFoe, carry
+// their own real damage formula and so bypass this function entirely,
+// using only the resistance step below.
 int RollSpellDamage(int rating, int targetMagicResistance);
+
+// M34: the resistance step on its own, factored out of RollSpellDamage()
+// (which is now exactly `SpellDamageAfterResistance(rating * 3, ...)`, an
+// identity refactor -- its behaviour is unchanged).
+//
+// Absorb and IgniteFoe need it separately because their damage comes from
+// the real decompiled roll rather than from `rating * 3`, but still has to
+// meet the same resistance model every other spell in this port already
+// uses. The real engine instead resolves resistance as a *hit chance*
+// gate before the whole effect -- `casterPower * 256 / (casterPower +
+// resistance)` against a 0..0x100 roll, gating the status effect too, not
+// just the damage. Not adopted: it would silently change every existing
+// spell's behaviour, and the caster-power term reads the same spell-power
+// stat this port doesn't have (see ItemExecutable's magnitude comment).
+int SpellDamageAfterResistance(int rawDamage, int targetMagicResistance);
 
 }  // namespace sk_bindings
