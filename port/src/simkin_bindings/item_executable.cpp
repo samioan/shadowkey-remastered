@@ -4,9 +4,11 @@
 #include <cstdio>
 
 #include "assets/string_table.h"
+#include "simkin_bindings/combat.h"
 #include "simkin_bindings/game_constants.h"
 #include "simkin_bindings/level_executable.h"
 #include "simkin_bindings/menu_stack.h"
+#include "simkin_bindings/monster_executable.h"
 #include "simkin_bindings/native_binding_common.h"
 #include "simkin_bindings/player_executable.h"
 #include "skExecutableContext.h"
@@ -34,6 +36,21 @@ void ItemExecutable::InvokeOnUse() {
         std::printf("ItemExecutable: PARSE ERROR in OnUse(): %s\n", e.toString().ptr());
     } catch (skRuntimeException& e) {
         std::printf("ItemExecutable: RUNTIME ERROR in OnUse(): %s\n", e.toString().ptr());
+    }
+}
+
+void ItemExecutable::InvokeHitTarget(skiExecutable* target) {
+    if (!m_Interpreter) return;
+    skRValueArray args;
+    args.append(skRValue(target, false));
+    skRValue ret;
+    skExecutableContext ctxt(m_Interpreter);
+    try {
+        method(skString("HitTarget"), args, ret, ctxt);
+    } catch (skParseException& e) {
+        std::printf("ItemExecutable: PARSE ERROR in HitTarget(): %s\n", e.toString().ptr());
+    } catch (skRuntimeException& e) {
+        std::printf("ItemExecutable: RUNTIME ERROR in HitTarget(): %s\n", e.toString().ptr());
     }
 }
 
@@ -146,6 +163,36 @@ bool ItemExecutable::method(const skString& methodName, skRValueArray& args,
     if (methodName == skString("SetThrowingWeapon") && args.entries() == 1) {
         m_Ranged = args[0].boolValue();
         m_ItemType = kItemTypeWeapon;
+        return true;
+    }
+    if (methodName == skString("SetRating") && args.entries() == 1) {
+        // M22: deliberately does NOT set m_ItemType -- see rating()'s
+        // header comment for the real corpus counter-example
+        // (misc/ring_of_fangs.s) that ruled this out as a category
+        // signal.
+        m_Rating = args[0].intValue();
+        return true;
+    }
+    if (methodName == skString("RestrictUse")) {
+        // M22: a real class/race restriction list, never read back by any
+        // script and with no restriction system in this port to apply it
+        // to (PlayerExecutable::IsItemEnabledFor()'s own comment) --
+        // accepted as a no-op so its 100+ real call sites don't log soft-
+        // fail noise.
+        return true;
+    }
+    if (methodName == skString("DoAttackRoll") && args.entries() >= 1) {
+        // M22: called bare (self-receiver) from within a real spell
+        // script's own HitTarget(target) handler (InvokeHitTarget() above)
+        // -- args[0] is the target HitTarget() itself received; args[1],
+        // when present, is a real per-spell status-effect id (e.g.
+        // blaze.s's own DoAttackRoll(target,1)) this port doesn't model
+        // (RollSpellDamage()'s own comment) -- only damage applies.
+        auto* target = static_cast<MonsterExecutable*>(args[0].obj());
+        if (target && target->alive()) {
+            int dmg = RollSpellDamage(m_Rating, target->magicResistance());
+            target->ApplyDamage(dmg);
+        }
         return true;
     }
     if (methodName == skString("GetName") && args.entries() == 0) {

@@ -228,3 +228,7 @@ target_link_libraries(ranged_smoke PRIVATE sk_bindings)
 # src/tests/m21_loot_smoke.cpp.
 add_executable(loot_smoke src/tests/m21_loot_smoke.cpp)
 target_link_libraries(loot_smoke PRIVATE sk_bindings)
+
+# Spellcasting smoke test -- see src/tests/m22_spell_smoke.cpp.
+add_executable(spell_smoke src/tests/m22_spell_smoke.cpp)
+target_link_libraries(spell_smoke PRIVATE sk_bindings)

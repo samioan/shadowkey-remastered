@@ -969,6 +969,13 @@ int main(int argc, char** argv) {
                 // anyway -- this makes the intent explicit rather than
                 // relying on that coincidence).
                 constexpr float kMeleeRange = 110.0f;      // world units
+                // M22: no real spell script ever calls SetRange() (only
+                // weapon scripts do -- M20's own corpus-verified bimodal
+                // 384/16384 split), so there's no real value to read for
+                // casting range -- an invented, documented constant, same
+                // "no RE ground truth" footing as kEyeHeightOffset
+                // (render3d/camera.h) or this port's gravity constants.
+                constexpr float kSpellRange = 300.0f;      // world units
                 constexpr float kMonsterMoveSpeed = 22.0f;  // world units/tick, slower than the
                                                              // player's 40 -- a rat shouldn't
                                                              // outrun a walking player
@@ -1085,7 +1092,17 @@ int main(int argc, char** argv) {
                 // simplification, same footing as every other from-scratch
                 // combat constant in this port.
                 auto tryAttack = [&](sk_bindings::ItemExecutable* handItem) {
-                    float range = handItem ? static_cast<float>(handItem->range()) : kMeleeRange;
+                    // M22: an equipped item that isn't a real weapon
+                    // (kItemTypeWeapon) is treated as a spell cast instead
+                    // of a melee/ranged swing -- reuses these same two
+                    // attack keys, matching the real default control
+                    // scheme's own lack of a dedicated "cast" action, same
+                    // reasoning M20 already established for ranged
+                    // weapons reusing them over a "fire" key.
+                    bool isWeapon = handItem && handItem->itemType() == sk_bindings::kItemTypeWeapon;
+                    float range =
+                        handItem ? (isWeapon ? static_cast<float>(handItem->range()) : kSpellRange)
+                                 : kMeleeRange;
                     MonsterInstance* target = nullptr;
                     float bestDist = range + 1.0f;
                     for (MonsterInstance& m : gameMonsters) {
@@ -1109,13 +1126,22 @@ int main(int argc, char** argv) {
                         }
                     }
                     if (!target) return;
-                    bool isWeapon = handItem && handItem->itemType() == sk_bindings::kItemTypeWeapon;
-                    int dmgMin = isWeapon ? handItem->damageMin() : 1;
-                    int dmgMax = isWeapon ? handItem->damageMax() : 3;
-                    int dmg = sk_bindings::RollDamage(stack.player().baseAttack(),
-                                                       target->script->defense(),
-                                                       target->script->armorValue(), dmgMin, dmgMax);
-                    target->script->ApplyDamage(dmg);
+                    if (handItem && !isWeapon) {
+                        // M22: a real spell's own HitTarget()/DoAttackRoll()
+                        // (ItemExecutable) applies damage itself -- nothing
+                        // else needed here. Harmless no-op if handItem
+                        // isn't actually a spell (no real script's own
+                        // HitTarget matches, soft-fails through).
+                        handItem->InvokeHitTarget(target->script.get());
+                    } else {
+                        int dmgMin = isWeapon ? handItem->damageMin() : 1;
+                        int dmgMax = isWeapon ? handItem->damageMax() : 3;
+                        int dmg = sk_bindings::RollDamage(stack.player().baseAttack(),
+                                                           target->script->defense(),
+                                                           target->script->armorValue(), dmgMin,
+                                                           dmgMax);
+                        target->script->ApplyDamage(dmg);
+                    }
                     if (!target->script->alive()) {
                         target->script->InvokeOnKilled();
                         spawnLoot(*target);
@@ -1306,22 +1332,22 @@ int main(int argc, char** argv) {
                 // y=34, below the real compass banner (RenderHud now
                 // occupies y=0..31 across the top).
                 //
-                // M20: "in range" now means whichever hand's real weapon
-                // reaches farthest (kMeleeRange for bare fists) -- matches
-                // tryAttack's own per-weapon range above, so equipping a
-                // bow genuinely shows the HP label from farther away too,
-                // not just landing the hit.
-                float playerAttackRange = kMeleeRange;
-                if (stack.player().leftItem()) {
-                    playerAttackRange =
-                        (std::max)(playerAttackRange,
-                                   static_cast<float>(stack.player().leftItem()->range()));
-                }
-                if (stack.player().rightItem()) {
-                    playerAttackRange =
-                        (std::max)(playerAttackRange,
-                                   static_cast<float>(stack.player().rightItem()->range()));
-                }
+                // M20/M22: "in range" now means whichever hand's real
+                // weapon reaches farthest (kMeleeRange for bare fists,
+                // kSpellRange for a non-weapon item -- a spell) -- matches
+                // tryAttack's own per-item range above, so equipping a bow
+                // or a spell genuinely shows the HP label from farther
+                // away too, not just landing the hit.
+                auto handRange = [&](sk_bindings::ItemExecutable* item) -> float {
+                    if (!item) return 0.0f;
+                    return item->itemType() == sk_bindings::kItemTypeWeapon
+                               ? static_cast<float>(item->range())
+                               : kSpellRange;
+                };
+                float playerAttackRange = (std::max)(
+                    kMeleeRange,
+                    (std::max)(handRange(stack.player().leftItem()),
+                               handRange(stack.player().rightItem())));
                 const MonsterInstance* facingMonster = nullptr;
                 for (const MonsterInstance& m : gameMonsters) {
                     if (!m.script->alive() || !m.script->aggressive()) continue;

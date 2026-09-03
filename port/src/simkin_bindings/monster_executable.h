@@ -80,6 +80,10 @@ public:
     int armorValue() const { return m_ArmorValue; }
     float chaseRadius() const { return static_cast<float>(m_ChaseRadius); }
     bool aggressive() const { return m_Aggressive; }
+    // M22: real SetMagicResistance() -- stored since M12, never read back
+    // until now (spellcasting's own damage formula, ItemExecutable::
+    // DoAttackRoll()).
+    int magicResistance() const { return m_MagicResistance; }
 
     int currentHealth() const { return m_CurrentHealth; }
     int maxHealth() const { return m_MaxHealth; }

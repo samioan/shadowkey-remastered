@@ -71,6 +71,19 @@ public:
     // world pickup's Action::Use (main.cpp).
     void InvokeOnUse();
 
+    // M22: runs the real script's HitTarget(target) handler -- a real
+    // spell's own damage/effect entry point, never called from any
+    // script (native-triggered only, same "opaque native combat"
+    // footing M12 already established for melee) -- main.cpp's tryAttack
+    // calls this for whichever equipped item *isn't* a real weapon
+    // (kItemTypeWeapon), so casting reuses the same UseLeftAction/
+    // UseRightAction keys ranged weapons do (M20) rather than a new
+    // input action. Harmless no-op for a non-spell item (nothing defines
+    // HitTarget, soft-fails through skScriptedExecutable::method()'s own
+    // "no such handler" fallback -- same TryInvoke()-style tolerance
+    // MenuExecutable already relies on).
+    void InvokeHitTarget(skiExecutable* target);
+
     // Host-side accessors -- used by MenuExecutable's inventory-table
     // population (DisplayWeaponsPage etc.) and PlayerExecutable's equip
     // logic, which need real values without going through a script call.
@@ -125,6 +138,17 @@ public:
     int quantity() const { return m_Quantity; }
     const std::vector<std::unique_ptr<ItemExecutable>>& contents() const { return m_Contents; }
 
+    // M22: a real spell script's own SetRating() (e.g. blaze.s's
+    // SetRating(2)) -- confirmed NOT an exclusive spell-category signal
+    // (misc/ring_of_fangs.s, a real armor-category ring, also calls it,
+    // *after* its own SetArmorValue/SetArmorType -- deliberately not used
+    // to infer itemType() the way SetDamageMin/SetArmorValue/SetUsable
+    // already do, unlike every other category setter in this class).
+    // Never read back by any real script either (no GetRating() call
+    // anywhere in the corpus) -- host-side only, DoAttackRoll()'s own
+    // damage formula.
+    int rating() const { return m_Rating; }
+
 private:
     MenuStack& m_Stack;
     skInterpreter* m_Interpreter;
@@ -156,6 +180,9 @@ private:
     int m_Quantity = 1;
     std::vector<std::unique_ptr<ItemExecutable>> m_Contents;
     size_t m_ContentsIter = 0;
+
+    // M22: see rating()'s comment above.
+    int m_Rating = 0;
 };
 
 }  // namespace sk_bindings

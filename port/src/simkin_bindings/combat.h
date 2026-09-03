@@ -31,4 +31,16 @@ int RollDamage(int attackerAttack, int defenderDefense, int defenderArmor, int d
 bool InAttackRange(float attackerX, float attackerY, float attackerYaw, float targetX,
                     float targetY, float range);
 
+// M22 (spellcasting): a spell's damage roll -- `rating` is the casting
+// item's own real SetRating() value (e.g. blaze.s's SetRating(2)),
+// `targetMagicResistance` the real monster's SetMagicResistance() (M12,
+// stored but never read back until now). Deliberately from-scratch, same
+// "no RE ground truth for the real formula" footing as RollDamage() --
+// real DoAttackRoll(target, effectId) is a native call this port doesn't
+// have decompiled, and its own effectId argument selects a real status
+// effect (poison/paralyze/blind/fear/drain/...) this port doesn't model
+// at all (a separate, much larger, mostly-native subsystem -- not
+// attempted here, only the damage half).
+int RollSpellDamage(int rating, int targetMagicResistance);
+
 }  // namespace sk_bindings

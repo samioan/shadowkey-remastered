@@ -427,6 +427,40 @@ bool PlayerExecutable::method(const skString& methodName, skRValueArray& args,
         if (m_RightItem) returnValue = skRValue(static_cast<skiExecutable*>(m_RightItem), false);
         return true;
     }
+    if (methodName == skString("EquipItem") && args.entries() == 2) {
+        // M22: a direct hand assignment -- distinct from UpdateEquipStatus
+        // ()'s empty-hand-first auto-fill/toggle (inventory.s's own equip
+        // flow); this is what real spell scripts' OnUse() (`GetPlayer().
+        // EquipItem(0, self)`, every one of them, always hand 0) and a
+        // handful of key-item scripts call directly. Hand 0 -> left, else
+        // -> right -- unconfirmed which physical hand 0 really is (no
+        // script ever reads it back to check), same "arbitrary but
+        // internally consistent" footing as game_constants.h's AR_*/WR_*
+        // placeholders; picked so casting a spell (always hand 0) maps to
+        // UseLeftAction, matching the real default control scheme's own
+        // Key7/Key5 left/right split main.cpp's combat loop already uses.
+        ItemExecutable* item = static_cast<ItemExecutable*>(args[1].obj());
+        if (item) {
+            if (args[0].intValue() == 0) {
+                m_LeftItem = item;
+            } else {
+                m_RightItem = item;
+            }
+            item->SetEquipped(true);
+        }
+        return true;
+    }
+    if (methodName == skString("IsItemEnabledFor") && args.entries() == 1) {
+        // M22: real signature is IsItemEnabledFor(item) -- gates a class/
+        // race restriction (RestrictUse()'s own argument list) this port
+        // never modeled (M5's character creation only covers race/
+        // portrait/name, no class system at all) -- always true, the more
+        // permissive default when no real restriction system exists, same
+        // spirit as CanDrop()'s own "every real, owned item can be
+        // dropped" simplification (ItemExecutable).
+        returnValue = skRValue(true);
+        return true;
+    }
     if (methodName == skString("ResetQueue") && args.entries() == 1) {
         // Dead in the real shipped game -- charactermanager.s's only call
         // site (its ResetQueue() handler) is on a popup item

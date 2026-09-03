@@ -1470,49 +1470,138 @@ algorithms.
     - Not independently confirmed in an actual windowed play session
       (same caveat every prior milestone's writeup already carries).
 
+- [x] **M22 -- spellcasting** (this session). The last item in "Combat
+      resolution"'s original scoping list.
+    - **Real spell scripts are Item-shaped**, same `ItemExecutable`
+      class every weapon/armor/consumable already uses -- `spells/
+      blind.s`'s `Init()` is `SetUseText(2401); SetName(2401);
+      SetRating(3); SetItemDescription(2402); RestrictUse(2,4,6,7);
+      SetIcon(209); SetCost(1600); SetMarketValue(560); if (GetPlayer().
+      IsItemEnabledFor(self)=true) SetUseText(2403); else SetUseText(
+      2404);`, `OnUse(s) { GetPlayer().EquipItem(0,self); }`, `HitTarget(
+      target) { DoAttackRoll(target,3); }` -- no new native class needed,
+      just new handlers on the existing one.
+    - **`SetRating()` looked like an obvious spell-category signal but
+      isn't one**: a corpus check found `misc/ring_of_fangs.s` (a real
+      *armor*-category ring) also calls it, *after* its own
+      `SetArmorValue`/`SetArmorType` -- would have silently
+      misclassified it back to "spell" if `SetRating` set `itemType()`
+      the way every other category setter does. Left `itemType()`
+      alone; `rating()` is a plain host-side-only accessor instead
+      (confirmed never read back by any real script either -- no
+      `GetRating()` call anywhere in the corpus).
+    - **So "is this a spell" isn't classified at load time at all** --
+      `main.cpp`'s `tryAttack` just treats *any* equipped item that
+      isn't `kItemTypeWeapon` as a cast attempt (`ItemExecutable::
+      InvokeHitTarget()`, mirroring `InvokeOnUse()`/`InvokeOnKilled()`'s
+      existing host-triggered-call shape). A real spell's own
+      `HitTarget` handler fires for real; anything else (a misc item, or
+      nothing equipped in the traditional sense) has no `HitTarget`
+      defined, so it harmlessly no-ops through `skScriptedExecutable::
+      method()`'s own "no such handler" fallback -- same tolerance
+      `MenuExecutable::TryInvoke()` already relies on. Verified directly
+      (`spell_smoke`'s Part 5): calling `InvokeHitTarget()` on real
+      `weapons/club.s` does nothing.
+    - **`PlayerExecutable::EquipItem(hand, item)`** -- a real, direct
+      hand assignment distinct from `UpdateEquipStatus()`'s empty-hand-
+      first auto-fill (`inventory.s`'s own equip-toggle flow); every
+      real spell's `OnUse()` calls it with hand `0`. Hand 0 -> left hand,
+      else -> right -- which physical hand `0` really is isn't confirmed
+      by any script reading it back, so this is a documented, arbitrary-
+      but-consistent choice (same footing as `game_constants.h`'s AR_*/
+      WR_* placeholders), picked so casting maps to `UseLeftAction`.
+      Also closes a separate real gap: 35 corpus call sites (quest key
+      items, `dhstartupmenu.s`'s debug menu, ...) call `EquipItem`, not
+      just spells -- all previously soft-failed.
+    - **`PlayerExecutable::IsItemEnabledFor(item)`** -- gates a class/
+      race restriction (`RestrictUse()`'s own argument list) this port
+      never modeled (M5's character creation only covers race/portrait/
+      name, no class system at all) -- always returns `true`, the more
+      permissive default, same spirit as `CanDrop()`'s own "every real
+      item can be dropped" simplification. `RestrictUse()` itself is
+      accepted as a no-op (100+ real call sites, never read back by any
+      script) rather than soft-fail-logged.
+    - **`ItemExecutable::DoAttackRoll(target, effectId)`** -- called bare
+      from within a real spell's own `HitTarget()` (self-receiver, same
+      convention every other native call in this codebase already
+      follows). Only applies damage, via new `sk_bindings::
+      RollSpellDamage(rating, targetMagicResistance)` (`combat.h`/`.cpp`,
+      `max(1, rating*3 - magicResistance)`) -- deliberately from-scratch,
+      same "no RE ground truth for the real formula" footing as
+      `RollDamage()`. The real `effectId` argument (`blind.s`'s own `3`,
+      distinct per spell across the corpus -- poison/paralyze/blind/
+      fear/drain/...) selects a real status-effect system this port
+      doesn't model at all -- a separate, much larger, mostly-native
+      subsystem, explicitly not attempted. Closes another real "stored,
+      never read back" gap along the way: `MonsterExecutable::
+      SetMagicResistance()` (stored since M12) finally has a real
+      accessor and consumer.
+    - **No dedicated "cast" input** -- casting reuses `UseLeftAction`/
+      `UseRightAction` (Key7/Key5), same reasoning M20 already
+      established for ranged weapons: the real default control scheme
+      has no separate cast/fire action either. `kSpellRange` (300 world
+      units) is an invented, documented constant -- no real spell script
+      ever calls `SetRange()` (only weapon scripts do, M20's own
+      corpus-verified 384/16384 split), so there's no real value to
+      read; same footing as `render3d/camera.h`'s `kEyeHeightOffset`.
+      The `facingMonster` HUD name/HP label search was updated the same
+      way (a factored-out `handRange()` lambda) so a cast-ready target
+      shows its label from spell range too, not just the hit itself.
+    - **Verified end to end against real data, `spell_smoke`
+      (`src/tests/m22_spell_smoke.cpp`)**: real `spells/blind.s`'s
+      literal `rating()`; its real `OnUse()` genuinely equipping into
+      `player.leftItem()`; real `Azra_Rat.s`'s `magicResistance()`; the
+      real payoff -- `HitTarget()` -> `DoAttackRoll()` applying exactly
+      `RollSpellDamage(3,3)` damage to a real monster; and the
+      robustness check above. (`blaze.s`, a sibling spell with real
+      `Init()`/`HitTarget()` but genuinely no `OnUse()` at all -- it's
+      equipped directly by a debug menu script instead -- was found and
+      ruled out for this test along the way, not a bug.)
+    - **Not attempted**: the real status-effect system (`DoAttackRoll`'s
+      `effectId` argument, poison/paralyze/blind/fear/drain/... --
+      native, no scripted table found anywhere to decode it from,
+      unlike M21's loot tags); spell-specific UI (a spell "quick-cast"
+      list, `actionqueue.s`'s own already-confirmed-non-functional
+      screen); `PlayerExecutable`'s `spellToHit()`/`spellResistance()`
+      stats (M10, still unread by anything, including this milestone's
+      own `RollSpellDamage()` -- deliberately kept simple, same "no RE
+      ground truth" reasoning as `RollDamage()`'s own hit-chance-only
+      use of `attack`/`defense`); and casting at a target beyond melee
+      range through a wall (no line-of-sight check, same `InAttackRange()`
+      simplification M20 already documented).
+    - Not independently confirmed in an actual windowed play session
+      (same caveat every prior milestone's writeup already carries).
+
 ## Next milestones (not yet started)
 
 Roughly in priority order for reaching "actually playable," not commitments:
 
-- **Combat resolution (beyond the M12 slice above)** -- the rest of the
-  Monster/Actor/Spell native classes are still untouched. Sized up last
-  session (`shadowkey/simkin_native_bindings.json`): a Monster/AI
-  class (~55 methods -- `AiAttack`/`AiFlee`/`AiPursue`/`AiSleep`,
-  pathfinding, aggro), a separate Actor-movement class (~44 methods --
-  `SetTarget`, `FollowPath`, `SetDead`), a shared combatant-stats class
-  (~85 methods -- damage, spell resistance, status effects), a Weapon
-  class (~24 methods) plus a weapon-damage class (~6), a Spell/Scroll
-  class (~9) plus a magic-damage class (~4), and a generic game-object
-  base class (~57 methods -- position, sound, physics-adjacent). Comparable
-  in scope to M0-M11 combined, not a bounded decompile-and-patch pass.
-  M12 above took the first narrow slice (one melee weapon vs. one
-  monster type, `UseLeftAction`/`UseRightAction` wired up); M15 took a
-  second (the generic `Action::Use` interact binding, doors); M16 took a
-  third (generalized monster/NPC loading past M12's one hardcoded
-  typeId, plus real NPC dialogue via `Action::Use` -- a real finding
-  this pass showed NPC talk and "other monster types" were the same gap
-  all along, both fixed by the same loader generalization); M17 took a
-  fourth (real quest-state tracking, so M16's dialogue trees actually
-  progress across repeated visits); M18 took a fifth (a first, narrow
-  slice of the `Zone/Level`-root global object -- `GetEntity`/`GetPlayer`/
-  `PlayAmbient` only -- which closed M17's own documented gap:
-  `azra_rat.s`'s 8-kill quest now genuinely completes); M19 took a sixth
-  (pickups, `Action::Use`'s last unbound category -- world items like
-  `snowline/foxglove.s` now genuinely transfer into the player's real
-  inventory); M20 took a seventh (ranged weapons -- a real bow/crossbow's
-  own `SetRange(16384)` now genuinely reaches farther than a melee
-  weapon's real `SetRange(384)`, both previously-stored-but-unused
-  values); M21 took an eighth (monster-death loot-bag spawning + the
-  loot-menu/container pattern -- both turned out fully real-data-
-  decodable, no native RE needed after all; also closed a real latent
-  strValue()/null-comparison bug affecting every skScriptedExecutable-
-  derived class). Still open: spellcasting, `Level`'s own trap/switch-
-  controller side (`AddTrigger` and its own further "Door/trap trigger"
-  return-type class, `CreateEntity`/`CreateEntityScript`'s
-  non-item-shaped categories, save/load-level state, ...) plus Zone
-  effects (`Vignette`, `SpawnWithinRadius`, `AddEncounters`, ...), a
-  zone-root `<zone>.s` script loader (`azra.s` itself is still never run
-  -- see M18's "Not attempted" note), and M21's own small loose ends
+- **Combat resolution (beyond the M12 slice above) -- original scoping
+  list now closed out.** M12 took the first narrow slice (one melee
+  weapon vs. one monster type, `UseLeftAction`/`UseRightAction` wired
+  up); M15 took a second (the generic `Action::Use` interact binding,
+  doors); M16 took a third (generalized monster/NPC loading past M12's
+  one hardcoded typeId, plus real NPC dialogue via `Action::Use`); M17
+  took a fourth (real quest-state tracking); M18 took a fifth (a first,
+  narrow slice of the `Zone/Level`-root global object); M19 took a sixth
+  (pickups, `Action::Use`'s last unbound category); M20 took a seventh
+  (ranged weapons, a real bow's own `SetRange(16384)` genuinely
+  outreaching a melee weapon's real `SetRange(384)`); M21 took an eighth
+  (monster-death loot-bag spawning + the loot-menu/container pattern,
+  fully real-data-decodable after all, no native RE needed); M22 took a
+  ninth and closed the list (spellcasting -- real spell scripts turned
+  out to be the same `ItemExecutable` class every weapon/armor/
+  consumable already uses, casting reuses the same attack keys ranged
+  weapons already do). Comparable in total scope to M0-M11 combined, as
+  originally sized up. Still open, not part of the original scoping
+  list: `Level`'s own trap/switch-controller side (`AddTrigger` and its
+  own further "Door/trap trigger" return-type class, `CreateEntity`/
+  `CreateEntityScript`'s non-item-shaped categories, save/load-level
+  state, ...) plus Zone effects (`Vignette`, `SpawnWithinRadius`,
+  `AddEncounters`, ...), a zone-root `<zone>.s` script loader (`azra.s`
+  itself is still never run -- see M18's "Not attempted" note), the real
+  status-effect system `DoAttackRoll`'s `effectId` argument selects
+  (M22's "Not attempted" note), and M21's own small loose ends
   (empty-bag despawn, `SetLoot`'s trailing min/max args).
 - **Real save file format** -- M5's save system is simulated in-memory
   only; no on-disk save format has been RE'd yet.
