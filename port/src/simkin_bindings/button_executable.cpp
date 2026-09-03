@@ -29,15 +29,22 @@ bool ButtonExecutable::method(const skString& methodName, skRValueArray& args,
         return true;
     }
     if (methodName == skString("SetWidth") && args.entries() == 1) {
-        m_Width = args[0].intValue();
+        SetRowWidth(args[0].intValue());
         return true;
     }
     if (methodName == skString("SetHeight") && args.entries() == 1) {
-        m_Height = args[0].intValue();
+        SetRowHeight(args[0].intValue());
         return true;
     }
-    if (methodName == skString("ShowBorder") || methodName == skString("SetHAdjust") ||
-        methodName == skString("SetInvokeMethodOnFocus")) {
+    if (methodName == skString("ShowBorder") && args.entries() == 1) {
+        // M25: real (charactermanager.s's Stats/Equip/Quest buttons all
+        // call ShowBorder(true)) -- drawn as a real outline rectangle
+        // using the row's own real w/h, matching the real screenshot's
+        // boxed 2x2 grid.
+        SetRowShowBorder(args[0].boolValue());
+        return true;
+    }
+    if (methodName == skString("SetHAdjust") || methodName == skString("SetInvokeMethodOnFocus")) {
         return true;  // cosmetic, see button_executable.h
     }
     return SoftFailNativeCall("Button", methodName, args, returnValue);

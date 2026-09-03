@@ -22,4 +22,12 @@ skiExecutable* RowOwnerRef::RowAssociatedObject() const {
     return rows[m_RowIndex].associatedObject;
 }
 
+void RowOwnerRef::SetRowWidth(int w) { m_Owner.SetRowWidth(m_RowIndex, w); }
+
+void RowOwnerRef::SetRowHeight(int h) { m_Owner.SetRowHeight(m_RowIndex, h); }
+
+void RowOwnerRef::SetRowShowBorder(bool showBorder) {
+    m_Owner.SetRowShowBorder(m_RowIndex, showBorder);
+}
+
 }  // namespace sk_bindings

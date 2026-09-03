@@ -149,6 +149,26 @@ public:
         // owner is wherever the object actually lives -- an ItemExecutable
         // bag's own m_Contents, for the loot-menu case).
         skiExecutable* associatedObject = nullptr;
+        // Absolute screen position/size a real script provided directly
+        // (AddButton/AddFloatingText/AddItemButton/AddFloatingSprite's own
+        // real x,y[,w,h] arguments -- charactermanager.s's whole real 2x2
+        // grid + portrait + stat-text layout is built entirely from these,
+        // previously read and discarded). x/y default to -1 ("no real
+        // position given" -- AddMenuItem/AddStaticItem/AddTable/etc. never
+        // provide one) -- main.cpp's RenderMenu() only switches a row to
+        // absolute placement when x>=0, so every screen that only ever
+        // used the vertical centered-list convention (mainmenu.s and
+        // everything built on AddMenuItem) renders exactly as before.
+        // w/h default to 0 (real scripts vary in whether they ever call
+        // SetWidth()/SetHeight() at all -- ButtonExecutable's own
+        // real-corpus callers always do, ItemButtonExecutable's own w/h
+        // come from AddItemButton's args directly).
+        int x = -1, y = -1, w = 0, h = 0;
+        // AddButton's real ShowBorder(true) call (charactermanager.s's
+        // Stats/Equip/Quest buttons) -- drawn as an actual outline
+        // rectangle using w/h above, matching the real screenshot's boxed
+        // 2x2 grid.
+        bool showBorder = false;
     };
     const std::vector<MenuRow>& rows() const { return m_Rows; }
     int backgroundId() const { return m_BackgroundId; }
@@ -171,6 +191,11 @@ public:
     void SetRowTextId(size_t rowIndex, int textId);
     // M10: ButtonExecutable/MenuItemHandle's .SetItemText(literalString).
     void SetRowLiteralText(size_t rowIndex, const std::string& text);
+    // ButtonExecutable's real .SetWidth(w)/.SetHeight(h)/.ShowBorder(true)
+    // -- see MenuRow's own x/y/w/h/showBorder comment.
+    void SetRowWidth(size_t rowIndex, int w);
+    void SetRowHeight(size_t rowIndex, int h);
+    void SetRowShowBorder(size_t rowIndex, bool showBorder);
     // M10: TitleHandle's .SetLocalizedText(id) -- AddTitle()'s return
     // value, see inventory.s's WeaponsMenu()/ArmorMenu()/etc.
     void SetTitleTextId(int textId) { m_TitleTextId = textId; }

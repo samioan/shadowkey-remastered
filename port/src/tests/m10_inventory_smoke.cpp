@@ -76,6 +76,59 @@ int main(int argc, char** argv) {
         }
         std::printf("\ncharactermanager.s: %zu row(s) after OnDisplay()\n", charMgr->rows().size());
 
+        // --- M25: real absolute layout -- charactermanager.s's own real
+        // AddFloatingSprite/AddButton/AddItemButton x/y/w/h/ShowBorder
+        // arguments (read directly off the install image), previously
+        // discarded entirely by RenderMenu()'s plain vertical-list
+        // rendering. Confirms the real 2x2 grid + portrait layout data is
+        // actually captured now, not just "doesn't crash". ---
+        {
+            using RowKind = sk_bindings::MenuExecutable::RowKind;
+            auto findRowAt = [&](RowKind kind, int x, int y) -> const sk_bindings::MenuExecutable::MenuRow* {
+                for (const auto& row : charMgr->rows()) {
+                    if (row.kind == kind && row.x == x && row.y == y) return &row;
+                }
+                return nullptr;
+            };
+            bool layoutOk = true;
+            auto check = [&](const char* label, const sk_bindings::MenuExecutable::MenuRow* row) {
+                std::printf("  %s: %s\n", label, row ? "found at real position OK" : "FAILED, not found");
+                if (!row) layoutOk = false;
+                return row;
+            };
+            // portrait=AddFloatingSprite(0, "", 109, 0, false);
+            check("portrait (109,0)", findRowAt(RowKind::FloatingSprite, 109, 0));
+            // healthItem = AddFloatingText(healthText, "", 8, 10, false);
+            check("health text (8,10)", findRowAt(RowKind::StaticItem, 8, 10));
+            // statsButton = AddButton(3043,"CMStatsScreen",10,100); w=80 h=23 ShowBorder(true)
+            const auto* statsRow = check("Stats button (10,100)", findRowAt(RowKind::MenuItem, 10, 100));
+            if (statsRow && (statsRow->w != 80 || statsRow->h != 23 || !statsRow->showBorder)) {
+                std::printf("  FAILED Stats button real w/h/showBorder mismatch (w=%d h=%d "
+                            "showBorder=%s)\n",
+                            statsRow->w, statsRow->h, statsRow->showBorder ? "true" : "false");
+                layoutOk = false;
+            }
+            // equipButton = AddButton(3774,"CMEquipScreen",90,100); w=80 h=23 ShowBorder(true)
+            check("Equip button (90,100)", findRowAt(RowKind::MenuItem, 90, 100));
+            // leftActionItem=AddItemButton(0,"LeftQueueSelected",10,123,80,60);
+            const auto* leftHand =
+                check("left-hand ItemButton (10,123)", findRowAt(RowKind::ItemButton, 10, 123));
+            if (leftHand && (leftHand->w != 80 || leftHand->h != 60)) {
+                std::printf("  FAILED left-hand ItemButton real w/h mismatch (w=%d h=%d)\n",
+                            leftHand->w, leftHand->h);
+                layoutOk = false;
+            }
+            // rightActionItem=AddItemButton(0,"RightQueueSelected",90,123,80,60);
+            check("right-hand ItemButton (90,123)", findRowAt(RowKind::ItemButton, 90, 123));
+            // questButton = AddButton(3773,"CMQuestLog",68,178); w=54 h=13 ShowBorder(true)
+            check("Quest button (68,178)", findRowAt(RowKind::MenuItem, 68, 178));
+            if (!layoutOk) {
+                std::printf(
+                    "m10_inventory_smoke: FAILED charactermanager.s's real layout data missing\n");
+                return 1;
+            }
+        }
+
         stack.OpenMenu("inventory");
         sk_bindings::MenuExecutable* inventoryMenu = stack.currentMenu();
         if (!inventoryMenu) {
@@ -138,6 +191,62 @@ int main(int argc, char** argv) {
                 std::printf("m10_inventory_smoke: FAILED equip didn't change armor rating\n");
                 return 1;
             }
+        }
+
+        // --- Real equip: the starting weapon (weapons/club.s), through
+        // the same UpdateEquipStatus() entry point -- unlike armor
+        // (armorRating() only), a weapon equip should be independently
+        // observable two ways: it lands in leftItem()/rightItem() (the
+        // real empty-hand-first auto-fill UpdateEquipStatus()'s own
+        // comment documents, decompiled from FUN_10033660 case 1), and
+        // GetAttack() picks up its real damage. Never exercised before --
+        // only armor was, even though this exact code path is what
+        // main.cpp's live melee combat (tryAttack) depends on every tick. ---
+        sk_bindings::ItemExecutable* weapon = nullptr;
+        for (const auto& item : stack.player().inventory()) {
+            if (item->itemType() == sk_bindings::kItemTypeWeapon) weapon = item.get();
+        }
+        if (!weapon) {
+            std::printf("m10_inventory_smoke: FAILED no weapon item in inventory\n");
+            return 1;
+        }
+        bool handEmptyBefore = stack.player().leftItem() != weapon && stack.player().rightItem() != weapon;
+        int attackBefore = stack.player().baseAttack();
+        {
+            skRValueArray args;
+            skRValue ret;
+            skExecutableContext ctxt(&interpreter);
+            stack.player().method(skString("GetAttack"), args, ret, ctxt);
+            attackBefore = ret.intValue();
+        }
+        int ret3 = stack.player().UpdateEquipStatus(weapon, true);
+        bool handFilledAfter =
+            stack.player().leftItem() == weapon || stack.player().rightItem() == weapon;
+        int attackAfter = 0;
+        {
+            skRValueArray args;
+            skRValue ret;
+            skExecutableContext ctxt(&interpreter);
+            stack.player().method(skString("GetAttack"), args, ret, ctxt);
+            attackAfter = ret.intValue();
+        }
+        std::printf(
+            "\nweapon equip: UpdateEquipStatus()=%d, hand empty before=%s, hand filled after=%s, "
+            "GetAttack() %d -> %d\n",
+            ret3, handEmptyBefore ? "true" : "false", handFilledAfter ? "true" : "false",
+            attackBefore, attackAfter);
+        if (ret3 != 0 || !handEmptyBefore || !handFilledAfter || attackAfter <= attackBefore) {
+            std::printf(
+                "m10_inventory_smoke: FAILED weapon equip didn't fill a hand or change GetAttack()"
+                "\n");
+            return 1;
+        }
+        bool equippedFlagOk = weapon->equipped();
+        std::printf("weapon.equipped() after UpdateEquipStatus(): %s %s\n",
+                    equippedFlagOk ? "true" : "false", equippedFlagOk ? "OK" : "FAILED");
+        if (!equippedFlagOk) {
+            std::printf("m10_inventory_smoke: FAILED weapon.equipped() still false\n");
+            return 1;
         }
 
         // --- Real hand-selection flow (charactermanager.s ->

@@ -97,6 +97,7 @@ add_library(sk_bindings STATIC
   src/simkin_bindings/table_executable.cpp
   src/simkin_bindings/test_armor_executable.cpp
   src/simkin_bindings/text_area_executable.cpp
+  src/simkin_bindings/weapon_viewmodel.cpp
   src/simkin_bindings/zone_script_executable.cpp
 )
 target_include_directories(sk_bindings PUBLIC src)
@@ -243,3 +244,7 @@ target_link_libraries(zonescript_smoke PRIVATE sk_bindings sk_world)
 # src/tests/m24_trigger_smoke.cpp.
 add_executable(trigger_smoke src/tests/m24_trigger_smoke.cpp)
 target_link_libraries(trigger_smoke PRIVATE sk_bindings)
+
+# Weapon viewmodel smoke test -- see src/tests/m25_weapon_viewmodel_smoke.cpp.
+add_executable(weapon_viewmodel_smoke src/tests/m25_weapon_viewmodel_smoke.cpp)
+target_link_libraries(weapon_viewmodel_smoke PRIVATE sk_bindings)

@@ -1,12 +1,13 @@
 #pragma once
 
 // Native binding for objects returned by AddFloatingSprite() -- used by
-// ChoosePortraitMenu.s for its male/female portrait picker. Real sprite
-// rendering is out of scope (the game's portrait image format wasn't
-// RE'd here either -- see GRAPHICS_FORMAT.md's open items), so this
-// renders as a selectable placeholder label rather than an actual
-// portrait image; its callback (fired on selection) is what actually
-// matters for navigation to work.
+// ChoosePortraitMenu.s for its male/female portrait picker (a selectable
+// placeholder label there -- SpriteLabel(callback), since that picker's
+// two rows are actually chosen by their callback, not their sprite id)
+// and by charactermanager.s's real player portrait (`portrait.SetSprite(
+// GetPlayer().GetPortraitID())`, M25 -- global.spr's own portrait slot,
+// GRAPHICS_FORMAT.md's real portrait-sprite finding, drawn for real by
+// main.cpp's RenderMenu() using spriteId()/x()/y() below).
 
 #include <string>
 
@@ -26,6 +27,12 @@ public:
                 skExecutableContext& context) override;
 
     const std::string& callback() const { return m_Callback; }
+    int x() const { return m_X; }
+    int y() const { return m_Y; }
+    // M25: real SetSprite(id) -- -1 (the default) means never set, e.g.
+    // ChoosePortraitMenu.s's rows, which are real but sprite-less
+    // (SpriteLabel(callback()) is the only real content there).
+    int spriteId() const { return m_SpriteId; }
 
 private:
     std::string m_Callback;

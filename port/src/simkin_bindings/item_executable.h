@@ -100,6 +100,15 @@ public:
     int damageMax() const { return m_DamageMax; }
     bool equipped() const { return m_Equipped; }
     void SetEquipped(bool equipped) { m_Equipped = equipped; }
+    // M25: a real weapon script's own SetWeaponSprite()/SetAnimationFrames()
+    // -- stored since M10, never read back until now (main.cpp's real
+    // first-person weapon-viewmodel rendering, see its own comment for the
+    // real decompiled draw/animation state machine this drives, docs/
+    // PORT_ROADMAP.md's M25 entry). -1/0 (never set -- every real spell
+    // script, none of which call SetWeaponSprite) means "no viewmodel to
+    // draw for this item."
+    int weaponSprite() const { return m_WeaponSprite; }
+    int animationFrames() const { return m_AnimationFrames; }
     // M20: a real weapon script's own SetRange() -- previously stored
     // (just to flag kItemTypeWeapon) but never read back by anything.
     // Corpus-verified bimodal: every melee weapon uses exactly 384, every

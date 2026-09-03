@@ -42,6 +42,7 @@
 #include "simkin_bindings/popup_menu_executable.h"
 #include "simkin_bindings/table_executable.h"
 #include "simkin_bindings/text_area_executable.h"
+#include "simkin_bindings/weapon_viewmodel.h"
 #include "simkin_bindings/zone_script_executable.h"
 #include "skExecutableContext.h"
 #include "skInterpreter.h"
@@ -189,6 +190,55 @@ struct PickupInstance {
     int modelArchiveIndex = -1;
 };
 
+// M25: first-person weapon viewmodel -- state machine (WeaponViewmodel/
+// StartWeaponSwing/TickWeaponViewmodel) lives in simkin_bindings/
+// weapon_viewmodel.h so it's unit-testable without the windowed game loop
+// (see that header's comment for the real RE ground truth it recreates
+// and its one unresolved gap). Only the actual draw call is here, since it
+// needs main.cpp's own sk::Backbuffer/sk::SpriteArchive render-layer types.
+//
+// Draws the equipped item's own real global.spr sprite -- weaponSprite()
+// as a base slot, offset by the current swing frame (SetAnimationFrames()'s
+// real meaning, confirmed via the Weapon class dispatcher's SetWeaponSprite/
+// SetAnimationFrames handlers) -- bottom-right of the 3D view, matching a
+// first-person viewmodel's conventional screen position (not decompiled,
+// see weapon_viewmodel.h's comment). Falls back to the base (unoffset) slot
+// if a specific animation frame's slot doesn't decode, and is a silent
+// no-op if the base slot itself doesn't (missing/incomplete global.spr,
+// same tolerance every other optional sprite draw in this port already has).
+void RenderWeaponViewmodel(sk::Backbuffer& backbuffer, const sk_bindings::WeaponViewmodel& vm,
+                            sk::SpriteArchive& sprites) {
+    if (!vm.item || vm.item->weaponSprite() < 0) return;
+    int slot = vm.item->weaponSprite();
+    if (vm.phase == sk_bindings::WeaponViewmodel::Phase::Swinging) {
+        slot += (std::min)(vm.frame, (std::max)(0, vm.item->animationFrames() - 1));
+    }
+    const sk::Sprite* sprite = sprites.GetSprite(slot);
+    if (!sprite) sprite = sprites.GetSprite(vm.item->weaponSprite());
+    if (!sprite) return;
+    int x = sk::Backbuffer::kWidth - sprite->width - 4;
+    int y = sk::Backbuffer::kHeight - sprite->height - 4;
+    if (vm.phase == sk_bindings::WeaponViewmodel::Phase::Idle) {
+        y += static_cast<int>(std::sin(vm.idleSwayTick * 0.05f) * 2.0f);
+    }
+    backbuffer.Blit(x, y, *sprite);
+}
+
+// M25: a plain outline rectangle -- ButtonExecutable's real ShowBorder
+// (true) (charactermanager.s's Stats/Equip/Quest buttons, docs/
+// PORT_ROADMAP.md's M25 entry) drawn using the row's own real w/h.
+void DrawRectOutline(sk::Backbuffer& backbuffer, int x0, int y0, int w, int h, uint16_t color) {
+    int x1 = x0 + w, y1 = y0 + h;
+    for (int x = x0; x < x1; ++x) {
+        backbuffer.SetPixel(x, y0, color);
+        backbuffer.SetPixel(x, y1 - 1, color);
+    }
+    for (int y = y0; y < y1; ++y) {
+        backbuffer.SetPixel(x0, y, color);
+        backbuffer.SetPixel(x1 - 1, y, color);
+    }
+}
+
 void RenderPopup(sk::Backbuffer& backbuffer, sk_bindings::PopupMenuExecutable& popup,
                   const sk::StringTable& strings) {
     int x0 = 10, y0 = 60, x1 = sk::Backbuffer::kWidth - 10, y1 = 150;
@@ -255,20 +305,45 @@ void RenderMenu(sk::Backbuffer& backbuffer, sk_bindings::MenuExecutable& menu,
         switch (row.kind) {
             case RowKind::MenuItem:
             case RowKind::StaticItem: {
-                // Real menu item rows (mainmenu.s etc.) are centered on
-                // screen -- confirmed against a real screenshot, which
-                // also shows no left-margin arrow glyph on the selected
-                // row (selection is color-only, kSelectedTextColor).
                 std::string label = RowText(row.textId, row.literalText, strings);
                 int textW = sk::BitmapFont::TextWidth(label);
-                int textX = (sk::Backbuffer::kWidth - textW) / 2;
-                sk::BitmapFont::DrawString(backbuffer, textX, y, label, color);
-                y += lineHeight;
+                if (row.x >= 0) {
+                    // M25: a real AddButton()/AddFloatingText() position
+                    // (charactermanager.s's whole real layout) -- centered
+                    // within the row's own real width when it has one
+                    // (a button box, e.g. Stats/Equip/Quest), else drawn
+                    // left-anchored at its own real x (a plain stat-text
+                    // line, e.g. health/gold, which never sets a width).
+                    int textX = row.w > 0 ? row.x + (row.w - textW) / 2 : row.x;
+                    sk::BitmapFont::DrawString(backbuffer, textX, row.y, label, color);
+                    if (row.showBorder && row.w > 0 && row.h > 0) {
+                        DrawRectOutline(backbuffer, row.x, row.y, row.w, row.h, kPopupBorderColor);
+                    }
+                } else {
+                    // Real menu item rows (mainmenu.s etc., no real x/y of
+                    // their own -- AddMenuItem never takes one) are
+                    // centered on screen -- confirmed against a real
+                    // screenshot, which also shows no left-margin arrow
+                    // glyph on the selected row (selection is color-only,
+                    // kSelectedTextColor).
+                    int textX = (sk::Backbuffer::kWidth - textW) / 2;
+                    sk::BitmapFont::DrawString(backbuffer, textX, y, label, color);
+                    y += lineHeight;
+                }
                 break;
             }
             case RowKind::ItemButton: {
                 auto* item = static_cast<sk_bindings::ItemButtonExecutable*>(row.widget.get());
                 if (item->visible()) {
+                    // M25: real AddItemButton(x,y,w,h) position
+                    // (charactermanager.s's left/right-hand equip-slot
+                    // boxes) when given one; the icon is drawn at the
+                    // box's own top-left, falling back to the old
+                    // vertical-list placement (icon+label on one running-
+                    // cursor line) for any other real AddItemButton()
+                    // call site this port doesn't otherwise position.
+                    int boxX = row.x >= 0 ? row.x : 12;
+                    int boxY = row.x >= 0 ? row.y : y;
                     // Real icon (docs/GRAPHICS_FORMAT.md) when the
                     // real ItemExecutable::SetIcon() id resolved to a
                     // decoded, row-sized slot -- global.spr's icon ids
@@ -279,15 +354,18 @@ void RenderMenu(sk::Backbuffer& backbuffer, sk_bindings::MenuExecutable& menu,
                     // actually fit a list row; anything bigger falls
                     // back to the label-only rendering below, same as
                     // a missing/undecoded slot.
-                    int textX = 12;
+                    int textX = boxX;
+                    int textY = boxY;
                     const sk::Sprite* icon = sprites.GetSprite(item->icon());
                     if (icon && icon->width <= 40 && icon->height <= 40) {
-                        backbuffer.Blit(textX, y, *icon);
-                        textX += icon->width + 3;
+                        backbuffer.Blit(textX, textY, *icon);
+                        textY += icon->height + 2;
                     }
                     std::string label = RowText(item->textId(), item->itemText(), strings);
-                    sk::BitmapFont::DrawString(backbuffer, textX, y, label, color);
-                    y += lineHeight;
+                    sk::BitmapFont::DrawString(backbuffer, textX, textY, label, color);
+                    if (row.x < 0) {
+                        y += lineHeight;
+                    }
                 }
                 break;
             }
@@ -340,10 +418,28 @@ void RenderMenu(sk::Backbuffer& backbuffer, sk_bindings::MenuExecutable& menu,
                 break;
             }
             case RowKind::FloatingSprite: {
-                auto* sprite = static_cast<sk_bindings::FloatingSpriteExecutable*>(row.widget.get());
-                std::string label = "[ " + SpriteLabel(sprite->callback()) + " ]";
-                sk::BitmapFont::DrawString(backbuffer, 12, y, label, color);
-                y += lineHeight;
+                auto* fsprite = static_cast<sk_bindings::FloatingSpriteExecutable*>(row.widget.get());
+                // M25: charactermanager.s's own real player portrait
+                // (`portrait.SetSprite(GetPlayer().GetPortraitID())`) --
+                // a real global.spr slot, drawn for real at its own real
+                // position instead of a bracketed text label. Falls back
+                // to the old placeholder label for a FloatingSprite that
+                // never got a real sprite id (ChoosePortraitMenu.s's own
+                // rows, which are chosen by callback, not by rendering a
+                // sprite) or whose id doesn't decode.
+                const sk::Sprite* portrait =
+                    fsprite->spriteId() >= 0 ? sprites.GetSprite(fsprite->spriteId()) : nullptr;
+                if (portrait && row.x >= 0) {
+                    backbuffer.Blit(row.x, row.y, *portrait);
+                } else {
+                    std::string label = "[ " + SpriteLabel(fsprite->callback()) + " ]";
+                    if (row.x >= 0) {
+                        sk::BitmapFont::DrawString(backbuffer, row.x, row.y, label, color);
+                    } else {
+                        sk::BitmapFont::DrawString(backbuffer, 12, y, label, color);
+                        y += lineHeight;
+                    }
+                }
                 break;
             }
             case RowKind::TextEntry: {
@@ -664,6 +760,10 @@ int main(int argc, char** argv) {
     // zone's whole lifetime).
     std::vector<PickupInstance> gamePickups;
     sk::Camera gameCamera;
+    // M25: first-person weapon viewmodel -- see simkin_bindings/
+    // weapon_viewmodel.h's comment for the real RE ground truth this
+    // recreates.
+    sk_bindings::WeaponViewmodel gameWeaponViewmodel;
     sk::ZoneRenderer zoneRenderer;
     bool inGame = false;
     // Post-M11: real per-tick vertical physics (gravity/jump/ground-
@@ -693,6 +793,17 @@ int main(int argc, char** argv) {
         // M10: erase any inventory items marked for removal last tick
         // (UseItem/DropItem) -- safe here since any script call chain
         // that marked them has long since returned. See item_executable.h.
+        //
+        // M25: gameWeaponViewmodel.item is a raw, non-owning pointer into
+        // the same inventory (whichever item last swung) -- drop/consume
+        // the currently-mid-swing weapon and PurgeRemovedItems() below
+        // would otherwise free it out from under that pointer, same
+        // use-after-free shape PlayerExecutable::PurgeRemovedItems()
+        // itself already guards for m_LeftItem/m_RightItem.
+        if (gameWeaponViewmodel.item && gameWeaponViewmodel.item->markedForRemoval()) {
+            gameWeaponViewmodel.item = nullptr;
+            gameWeaponViewmodel.phase = sk_bindings::WeaponViewmodel::Phase::Idle;
+        }
         stack.player().PurgeRemovedItems();
 
         if (stack.quitRequested()) {
@@ -1205,11 +1316,20 @@ int main(int argc, char** argv) {
                     }
                 };
                 if (input.ConsumeBoundJustPressed(sk::Action::UseLeftAction)) {
+                    // M25: the swing pose plays on the keypress itself, not
+                    // only when tryAttack actually finds a target in range --
+                    // matches a real weapon swing happening whether or not it
+                    // connects (see WeaponViewmodel's comment; a no-op for a
+                    // non-weapon/no weaponSprite() item, e.g. bare fists or a
+                    // spell).
+                    sk_bindings::StartWeaponSwing(gameWeaponViewmodel, stack.player().leftItem());
                     tryAttack(stack.player().leftItem());
                 }
                 if (input.ConsumeBoundJustPressed(sk::Action::UseRightAction)) {
+                    sk_bindings::StartWeaponSwing(gameWeaponViewmodel, stack.player().rightItem());
                     tryAttack(stack.player().rightItem());
                 }
+                sk_bindings::TickWeaponViewmodel(gameWeaponViewmodel);
 
                 // M15/M16/M19: Action::Use (Key3, docs/INPUT_HANDLING.md's
                 // default scheme) interact binding -- doors (M15), usable
@@ -1383,6 +1503,7 @@ int main(int argc, char** argv) {
                 }
                 zoneRenderer.Render(backbuffer, *gameZone, gameCamera, frameEntities, &modelArchive);
                 RenderHud(backbuffer, stack.player(), spriteArchive, gameCamera.yaw);
+                RenderWeaponViewmodel(backbuffer, gameWeaponViewmodel, spriteArchive);
                 // Minimal combat/interact feedback -- name + HP of
                 // whatever *aggressive* monster is currently in the
                 // player's actual attack range/facing cone, else the
@@ -1462,6 +1583,7 @@ int main(int argc, char** argv) {
             inGame = true;
             zoneRenderer.Render(backbuffer, *gameZone, gameCamera, gameEntities, &modelArchive);
             RenderHud(backbuffer, stack.player(), spriteArchive, gameCamera.yaw);
+            RenderWeaponViewmodel(backbuffer, gameWeaponViewmodel, spriteArchive);
             window.Present(backbuffer);
             return;
         }

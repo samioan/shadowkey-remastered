@@ -1723,6 +1723,105 @@ algorithms.
     - Not independently confirmed in an actual windowed play session
       (same caveat every prior milestone's writeup already carries).
 
+- [x] **M25 -- menu equip flow, real `charactermanager.s` layout, and the
+      first-person weapon viewmodel** (this session). User-directed: "the
+      menu equipping flow complete... show the actual sprite complete with
+      all its animations," plus a reference screenshot for the in-game
+      character-manager screen's look.
+    - **Equip flow: already correct, just untested.** Added weapon-equip
+      coverage to `inventory_smoke` (`weapons/club.s`, mirroring the
+      existing armor-equip check) -- confirms `UpdateEquipStatus()` fills
+      an empty hand, `GetAttack()` picks up the real weapon's damage
+      (10 -> 13), and `equipped()` flips true. No code bug found; this
+      exact path is what `main.cpp`'s live melee combat already depends on
+      every tick, just never independently exercised before.
+    - **Real `charactermanager.s` absolute layout.** Read the real script
+      in full and extracted its exact coordinates (portrait at (109,0);
+      health/magicka/fatigue/class/level/gold text at x=8, y=10..70;
+      name button (10,70..); Stats/Equip buttons at (10,100)/(90,100),
+      80x23, real `ShowBorder(true)`; left/right hand `AddItemButton`s at
+      (10,123)/(90,123), 80x60; Quest button at (68,178), 54x13,
+      `ShowBorder(true)`). `MenuRow` (`menu_executable.h`) gained real
+      `x/y/w/h/showBorder` fields, populated by `AddFloatingSprite`/
+      `AddButton`/`AddFloatingText`/`AddItemButton`'s real position/size
+      arguments (previously stored nowhere or hardcoded). `x < 0` means
+      "no real position was ever given" -- every `AddMenuItem`-based
+      screen (mainmenu.s etc.) never sets it, so `main.cpp`'s `RenderMenu`
+      falls back to its old centered-vertical-list rendering completely
+      unchanged for those; a screen that *does* set real coordinates
+      (charactermanager.s) now draws every row at its own real absolute
+      position instead, with `DrawRectOutline` for a real `ShowBorder(true)`
+      button. Verified structurally against every one of the coordinates
+      above via a new `inventory_smoke` block that opens `charactermanager`
+      and asserts each row landed at its real position -- confirmed by a
+      real build+run, not just compiled.
+    - **Portrait: a reference screenshot's art was ruled inauthentic, by
+      measurement, not by eye.** The user's own reference screenshot's
+      portrait was downscaled to the real N-Gage's exact 176x208 resolution
+      (`ffmpeg`, nearest-neighbor for viewing) and still reads as smooth-
+      shaded/photographic even at native resolution -- not 2004 N-Gage
+      pixel art, unlike every other confirmed real asset in this port. User
+      decision: keep the screenshot's real *layout*, but render this port's
+      own already-RE'd real portrait sprite (`global.spr` slot 45, 64x64,
+      a real elf face) instead of the screenshot's own image.
+      `chooseportraitmenu.s`'s real `GetMalePortrait(race)`/
+      `GetFemalePortrait(race)` (previously unimplemented natives) both
+      return slot 45 for now -- real per-race/sex art almost certainly
+      exists in `global.spr`'s unidentified range, but only this one slot
+      is actually pinned down, a documented simplification rather than an
+      invented mapping. `charactermanager.s`'s own `portrait.SetSprite(
+      GetPlayer().GetPortraitID())` now draws for real via
+      `FloatingSpriteExecutable::spriteId()`.
+    - **First-person weapon viewmodel: fresh RE work, per explicit user
+      choice, done first.** Decompiled the real per-tick draw function
+      (`FUN_1002b1b0`, full decompile) -- sole callee of `FUN_10029cb0`
+      (the same `ScreenModeController` tick hook `RenderHud`'s own comment
+      already documents), gated on a real "active weapon" `Item*` at
+      `engine+0x618+0x204`. Recovered the real `WeaponViewState` struct
+      shape at that offset (`+0x230` alternate/"swing" sprite slot,
+      `+0x234` interpolation accumulator, `+0x238` post-swing hold
+      countdown, `+0x244`/`+0x248` idle-sway phase+gate) and all three real
+      branches (idle sway via a fixed-point trig table, post-swing hold,
+      active swing interpolating the equipped `Item`'s own `+0x180` frame
+      count / `+0x184` 8.8-fixed scale) -- all converge on the same
+      `Blit_RLESprite` primitive the compass/vitals HUD already use.
+      **One real gap, left honestly unresolved**: the exact native call
+      that *starts* a swing (writes `+0x230`/`+0x234`/`+0x238`) wasn't
+      found despite tracing every write site reachable from the Weapon
+      class dispatcher -- same footing as `RenderHud`'s own still-open
+      `FUN_1002c010` mystery. Implemented as a port-only recreation of the
+      real state machine's *shape* (`sk_bindings::WeaponViewmodel`,
+      `simkin_bindings/weapon_viewmodel.h`/`.cpp`, factored out of
+      `main.cpp` the same way `combat.h` was, so it's unit-testable without
+      the windowed loop): `StartWeaponSwing()` triggers on the same
+      `UseLeftAction`/`UseRightAction` keypress that already drives
+      melee/ranged/spell resolution (the best-evidenced substitute for the
+      real trigger, not a decompiled fact) and is a no-op for an item with
+      no real `weaponSprite()` (bare fists, a spell -- `SetWeaponSprite` is
+      only ever called by a real weapon script). `ItemExecutable` gained
+      `weaponSprite()`/`animationFrames()` accessors reading back a real
+      weapon script's own `SetWeaponSprite()`/`SetAnimationFrames()`
+      (stored since M10, never read back until now). `main.cpp`'s
+      `RenderWeaponViewmodel` draws the resulting sprite/frame bottom-right
+      of the 3D view (a documented, non-decompiled screen position); frame/
+      hold tick counts and the idle-sway curve are likewise this port's own
+      choices, not recovered constants. A dropped/consumed weapon mid-swing
+      is guarded the same way `PlayerExecutable::PurgeRemovedItems()`
+      already guards `m_LeftItem`/`m_RightItem` against the same
+      use-after-free shape.
+    - **Verified end to end against real data, new `weapon_viewmodel_smoke`
+      (`src/tests/m25_weapon_viewmodel_smoke.cpp`)**: confirms `club.s`'s
+      real `weaponSprite()`/`animationFrames()` (88/5) and
+      `bandit_longbow.s`'s (175/4), confirms a real spell
+      (`spells/blind.s`) never sets a `weaponSprite()` and that
+      `StartWeaponSwing()` correctly no-ops for it, then runs a real
+      `club.s` swing through every phase of the state machine (Swinging ->
+      Hold -> Idle) and checks it lands back exactly where expected.
+    - **Not independently confirmed in an actual windowed play session**
+      (same caveat every prior milestone's writeup already carries) -- the
+      character-manager layout and weapon viewmodel should be visually
+      checked by running `shadowkey_port.exe`.
+
 ## Next milestones (not yet started)
 
 Roughly in priority order for reaching "actually playable," not commitments:
@@ -1755,6 +1854,15 @@ Roughly in priority order for reaching "actually playable," not commitments:
   still unresolved after an exhaustive whole-memory reference scan; see
   the Post-M14 fix entry above and `docs/GRAPHICS_FORMAT.md`. Leading
   guess: an enemy lock-on/target health bar, unconfirmed.
+- **The real weapon-swing trigger** -- M25's RE pass fully decompiled the
+  first-person viewmodel's draw function and struct shape but couldn't
+  find the native call site that actually starts a swing (writes
+  `WeaponViewState`'s `+0x230`/`+0x234`/`+0x238`), despite tracing every
+  write site reachable from the Weapon class dispatcher. Same "exhaustive
+  search, still open" footing as `FUN_1002c010` above -- see M25's own
+  entry and `simkin_bindings/weapon_viewmodel.h`'s class comment. This
+  port currently substitutes the `UseLeftAction`/`UseRightAction` keypress
+  that already drives combat resolution, undecompiled.
 - Audio: entirely unaddressed so far, format not RE'd.
 
 ## Verification approach

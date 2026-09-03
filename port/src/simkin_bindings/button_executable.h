@@ -3,13 +3,15 @@
 // M10: native binding for objects returned by AddButton()/AddQuitButton()
 // -- charactermanager.s/inventory.s/statsscreen.s's category buttons and
 // "back"/quit corner buttons. Functionally the same selectable-row-with-
-// callback as AddMenuItem's MenuItemHandle; this adds the cosmetic
-// layout/appearance setters those screens chain onto the returned object
-// (SetWidth/SetHeight/ShowBorder/SetHAdjust/SetInvokeMethodOnFocus) --
-// stored but not rendered (the stand-in bitmap font/flat-background
-// renderer doesn't have a notion of button borders or precise pixel
-// layout, same simplification as every other cosmetic-only setter in this
-// binding layer).
+// callback as AddMenuItem's MenuItemHandle; this adds the layout/
+// appearance setters those screens chain onto the returned object.
+// M25: SetWidth/SetHeight/ShowBorder now write back onto the owning
+// MenuRow (RowOwnerRef, same mechanism SetSelectable/SetItemText already
+// use) and are actually rendered -- main.cpp's RenderMenu() draws a real
+// outline rectangle for a ShowBorder(true) row using its real w/h.
+// SetHAdjust/SetInvokeMethodOnFocus stay cosmetic-only (no rendering
+// concept of horizontal text adjustment or focus-invoke timing in this
+// port).
 
 #include <string>
 
@@ -32,7 +34,6 @@ public:
 private:
     bool m_Active = false;
     bool m_Enabled = true;
-    int m_Width = 0, m_Height = 0;
 };
 
 }  // namespace sk_bindings

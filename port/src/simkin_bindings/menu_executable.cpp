@@ -114,6 +114,18 @@ void MenuExecutable::SetRowLiteralText(size_t rowIndex, const std::string& text)
     if (rowIndex < m_Rows.size()) m_Rows[rowIndex].literalText = text;
 }
 
+void MenuExecutable::SetRowWidth(size_t rowIndex, int w) {
+    if (rowIndex < m_Rows.size()) m_Rows[rowIndex].w = w;
+}
+
+void MenuExecutable::SetRowHeight(size_t rowIndex, int h) {
+    if (rowIndex < m_Rows.size()) m_Rows[rowIndex].h = h;
+}
+
+void MenuExecutable::SetRowShowBorder(size_t rowIndex, bool showBorder) {
+    if (rowIndex < m_Rows.size()) m_Rows[rowIndex].showBorder = showBorder;
+}
+
 void MenuExecutable::MoveSelection(int delta) {
     std::vector<size_t> selectableIndices;
     for (size_t i = 0; i < m_Rows.size(); ++i) {
@@ -258,8 +270,16 @@ bool MenuExecutable::method(const skString& methodName, skRValueArray& args,
         return true;
     }
     if (methodName == skString("AddFloatingSprite") && args.entries() == 5) {
-        MenuRow& row =
-            AddRow(RowKind::FloatingSprite, 0, ToStdString(args[1].str()), true);
+        // M25: real signature is AddFloatingSprite(textId, callback, x, y,
+        // selectable) -- charactermanager.s's own portrait row
+        // (`AddFloatingSprite(0,"",109,0,false)`) is the real motivating
+        // case: x/y now stored for real (main.cpp's RenderMenu() draws
+        // the real portrait sprite there instead of a bracketed text
+        // label), and selectable is honored instead of hardcoded true.
+        MenuRow& row = AddRow(RowKind::FloatingSprite, 0, ToStdString(args[1].str()),
+                               args[4].boolValue());
+        row.x = args[2].intValue();
+        row.y = args[3].intValue();
         row.widget.reset(
             new FloatingSpriteExecutable(ToStdString(args[1].str()), args[2].intValue(),
                                           args[3].intValue()));
@@ -335,6 +355,20 @@ bool MenuExecutable::method(const skString& methodName, skRValueArray& args,
         returnValue = skRValue(static_cast<skiExecutable*>(&m_Stack.player()), false);
         return true;
     }
+    if ((methodName == skString("GetMalePortrait") || methodName == skString("GetFemalePortrait")) &&
+        args.entries() == 1) {
+        // M25: menus/chooseportraitmenu.s's own real
+        // `maleId = GetMalePortrait(race); femaleId = GetFemalePortrait(
+        // race);` -- real per-race/sex portrait art almost certainly
+        // exists (`global.spr`'s menu-icon range, docs/GRAPHICS_FORMAT.md,
+        // has room for more than the one slot identified so far), but
+        // only slot 45 (64x64, a real elf face, visually confirmed) is
+        // actually pinned to "portrait" -- returned for every race/sex
+        // until more variants are identified, a documented simplification
+        // rather than an invented mapping.
+        returnValue = skRValue(45);
+        return true;
+    }
     if (methodName == skString("GameAvailableForLoad")) {
         int slot = args.entries() >= 1 ? args[0].intValue() : -1;
         returnValue = skRValue(m_Stack.GameAvailableForLoad(slot));
@@ -405,6 +439,13 @@ bool MenuExecutable::method(const skString& methodName, skRValueArray& args,
         std::string callback = args.entries() >= 2 ? ToStdString(args[1].str()) : "";
         MenuRow& row = AddRow(RowKind::MenuItem, -1, callback, true);
         SetRowTextFromArg(row, args[0]);
+        // M25: real AddButton(text, callback, x, y) -- x/y stored for real
+        // (main.cpp's RenderMenu() places this row at its own real screen
+        // position instead of the shared vertical-list cursor); w/h come
+        // later via SetWidth()/SetHeight() (ButtonExecutable's own
+        // RowOwnerRef writeback).
+        row.x = args[2].intValue();
+        row.y = args[3].intValue();
         row.widget.reset(new ButtonExecutable(*this, m_Rows.size() - 1));
         returnValue = skRValue(static_cast<skiExecutable*>(row.widget.get()), false);
         return true;
@@ -422,12 +463,23 @@ bool MenuExecutable::method(const skString& methodName, skRValueArray& args,
         MenuRow& row =
             AddRow(selectable ? RowKind::MenuItem : RowKind::StaticItem, -1, callback, selectable);
         SetRowTextFromArg(row, args[0]);
+        // M25: real AddFloatingText(text, callback, x, y, selectable) --
+        // charactermanager.s's whole real stat-text column
+        // (health/magicka/fatigue/class/level/gold) is built from this.
+        row.x = args[2].intValue();
+        row.y = args[3].intValue();
         row.widget.reset(new MenuItemHandle(*this, m_Rows.size() - 1));
         returnValue = skRValue(static_cast<skiExecutable*>(row.widget.get()), false);
         return true;
     }
     if (methodName == skString("AddItemButton") && args.entries() == 6) {
         MenuRow& row = AddRow(RowKind::ItemButton, -1, "", true);
+        // M25: real AddItemButton(iconId, callback, x, y, w, h) --
+        // charactermanager.s's real left/right-hand equip-slot boxes.
+        row.x = args[2].intValue();
+        row.y = args[3].intValue();
+        row.w = args[4].intValue();
+        row.h = args[5].intValue();
         row.widget.reset(new ItemButtonExecutable(*this, m_Rows.size() - 1, args[0].intValue(),
                                                     ToStdString(args[1].str()), args[2].intValue(),
                                                     args[3].intValue(), args[4].intValue(),

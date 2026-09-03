@@ -34,6 +34,11 @@ protected:
     // associatedObject comment); nullptr if the row was never given one
     // (every non-loot-menu AddMenuItem call site).
     skiExecutable* RowAssociatedObject() const;
+    // ButtonExecutable's real .SetWidth(w)/.SetHeight(h)/.ShowBorder(true)
+    // -- see MenuRow's own x/y/w/h/showBorder comment.
+    void SetRowWidth(int w);
+    void SetRowHeight(int h);
+    void SetRowShowBorder(bool showBorder);
 
     MenuExecutable& m_Owner;
     size_t m_RowIndex;
