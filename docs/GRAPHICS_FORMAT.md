@@ -164,11 +164,20 @@ string-format arguments to real, readable strings in the binary:
   match.
 - **Visually confirmed** by rendering real slots to images: slot 20
   (176×208, i.e. exactly full-screen) is a parchment-and-vine-border
-  menu background; slot 30 (32×32) is a dagger icon; slot 45 (64×64)
-  is a character portrait (an elf face — the exact asset M5's
-  character-creation portrait picker needs, see
-  `FloatingSpriteExecutable`'s header comment); slot 160 (39×5) is a
+  menu background; slot 30 (32×32) is a dagger icon; slot 160 (39×5) is a
   blue-to-white gradient strip (a UI highlight/progress-bar piece).
+- **The character-portrait table** (64×64 each): slots 31-46, one
+  contiguous run of 16, are the real per-race/sex character-creation
+  portraits `menus/chooseportraitmenu.s`'s `GetMalePortrait(race)`/
+  `GetFemalePortrait(race)` need (`docs/PORT_ROADMAP.md`'s "Post-M25 fix"
+  entry has the full writeup) -- `31+race*2` male, `32+race*2` female, in
+  `menus/chooseracemenu.s`'s own real race-index order (0=Argonian ...
+  7=Wood Elf). Rendered and visually matched one-for-one against UESP's
+  own race gallery (en.uesp.net/wiki/Shadowkey:Races). A 17th 64×64 slot,
+  28, exists just outside this run (also a face, reptilian) but doesn't
+  fit the table's alternating-pairs shape or count -- unidentified,
+  unused. (An earlier pass here had wrongly assumed slot 45 alone was
+  "the" portrait -- it's actually just this table's Wood Elf Male entry.)
 
 **`<category>_sprites.txt`** (one per zone, e.g. `azra_sprites.txt`,
 plus a non-zone `menu_sprites.txt`) is a **plain-text, newline-

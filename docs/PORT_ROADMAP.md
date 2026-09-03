@@ -1769,7 +1769,9 @@ algorithms.
       return slot 45 for now -- real per-race/sex art almost certainly
       exists in `global.spr`'s unidentified range, but only this one slot
       is actually pinned down, a documented simplification rather than an
-      invented mapping. `charactermanager.s`'s own `portrait.SetSprite(
+      invented mapping. **Corrected below, see "Post-M25 fix" -- this
+      single-shared-slot design turned out to be wrong.**
+      `charactermanager.s`'s own `portrait.SetSprite(
       GetPlayer().GetPortraitID())` now draws for real via
       `FloatingSpriteExecutable::spriteId()`.
     - **First-person weapon viewmodel: fresh RE work, per explicit user
@@ -1821,6 +1823,47 @@ algorithms.
       (same caveat every prior milestone's writeup already carries) -- the
       character-manager layout and weapon viewmodel should be visually
       checked by running `shadowkey_port.exe`.
+
+- [x] **Post-M25 fix -- one shared portrait slot was wrong; the game has
+      a real, distinct 64x64 portrait per race and sex** (this session).
+      User correction, with a real reference (en.uesp.net/wiki/
+      Shadowkey:Races, listing all 8 playable races/both sexes): M25's
+      `GetMalePortrait`/`GetFemalePortrait` stand-in returning `global.spr`
+      slot 45 for every race/sex was flatly wrong -- the real game has a
+      distinct face per combination, not one shared one.
+    - **Real race indices, confirmed from script data**:
+      `menus/chooseracemenu.s`'s combo box (`AddOption`) fixes the order
+      `GetPlayer().ChooseRace(raceId)` stores and `GetRace()` returns:
+      0=Argonian, 1=Breton, 2=Dark Elf, 3=High Elf, 4=Khajiit, 5=Nord,
+      6=Redguard, 7=Wood Elf -- exactly UESP's own 8-race list.
+    - **Found the real portrait table by rescanning the whole 384-slot
+      `global.spr`, not guessing.** Every 64x64 slot (the size slot 45 was
+      already confirmed at) across the full archive: exactly 16 in one
+      contiguous run, 31-46, plus one outlier (28, also 64x64 but visually
+      a stray reptilian face that doesn't fit the pattern below --
+      unidentified, unused). Rendered all 17 to real images and visually
+      matched every one of the 16 against UESP's own race gallery, in
+      exact `chooseracemenu.s` race order, alternating male then female:
+      `31/32`=Argonian M/F, `33/34`=Breton M/F, `35/36`=Dark Elf M/F,
+      `37/38`=High Elf M/F, `39/40`=Khajiit M/F, `41/42`=Nord M/F,
+      `43/44`=Redguard M/F, `45/46`=Wood Elf M/F -- a clean, unambiguous
+      one-for-one visual match on every race's real distinguishing
+      features (Dark Elf's grey skin/red eyes/fangs, Khajiit's feline
+      face, Redguard's dark skin, Nord's pale/blonde look, etc.). Slot 45
+      (M25's original hardcoded guess) turns out to be *specifically*
+      Wood Elf Male, not a generic elf.
+    - **Fix**: `MenuExecutable::method()`'s `GetMalePortrait(race)`/
+      `GetFemalePortrait(race)` handler now computes
+      `31 + race*2 + (female ? 1 : 0)` instead of returning a constant
+      (`menu_executable.cpp`), clamping an out-of-table `race` to 0
+      (`GetRace()`'s own real default). No other code needed to change --
+      `chooseportraitmenu.s`'s real `male.SetSprite(maleId)`/
+      `female.SetSprite(femaleId)` and `charactermanager.s`'s real
+      `portrait.SetSprite(GetPlayer().GetPortraitID())` already read
+      whatever id these two natives return.
+    - Not independently confirmed in an actual windowed play session --
+      the portrait picker and in-game character manager should be checked
+      for all 8 races/both sexes.
 
 ## Next milestones (not yet started)
 

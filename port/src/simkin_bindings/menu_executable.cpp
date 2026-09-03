@@ -357,16 +357,36 @@ bool MenuExecutable::method(const skString& methodName, skRValueArray& args,
     }
     if ((methodName == skString("GetMalePortrait") || methodName == skString("GetFemalePortrait")) &&
         args.entries() == 1) {
-        // M25: menus/chooseportraitmenu.s's own real
+        // M25 (corrected): menus/chooseportraitmenu.s's own real
         // `maleId = GetMalePortrait(race); femaleId = GetFemalePortrait(
-        // race);` -- real per-race/sex portrait art almost certainly
-        // exists (`global.spr`'s menu-icon range, docs/GRAPHICS_FORMAT.md,
-        // has room for more than the one slot identified so far), but
-        // only slot 45 (64x64, a real elf face, visually confirmed) is
-        // actually pinned to "portrait" -- returned for every race/sex
-        // until more variants are identified, a documented simplification
-        // rather than an invented mapping.
-        returnValue = skRValue(45);
+        // race);` -- `race` is menus/chooseracemenu.s's real combo-box
+        // index (0=Argonian, 1=Breton, 2=Dark Elf, 3=High Elf, 4=Khajiit,
+        // 5=Nord, 6=Redguard, 7=Wood Elf, matching both its own
+        // `AddOption()` order and `PlayerExecutable::ChooseRace()`'s
+        // stored value). A user-provided real screenshot showed this
+        // port's earlier single-hardcoded-slot-45 stand-in was wrong (the
+        // game genuinely has a distinct portrait per race/sex, not one
+        // shared face) -- rescanned the whole 384-slot `global.spr` for
+        // every 64x64 (the confirmed portrait size) slot and found
+        // exactly 16 in one contiguous run, 31-46, rendered and visually
+        // matched one-for-one against every real UESP race/sex gallery
+        // image (en.uesp.net/wiki/Shadowkey:Races) in `chooseracemenu`'s
+        // exact race order, alternating male/female: 31/32=Argonian
+        // M/F (reptilian), 33/34=Breton M/F (human), 35/36=Dark Elf M/F
+        // (grey skin, red eyes, fangs), 37/38=High Elf M/F (golden
+        // skin, blonde), 39/40=Khajiit M/F (feline), 41/42=Nord M/F
+        // (pale, blonde/white hair), 43/44=Redguard M/F (dark skin,
+        // 44 with real face markings), 45/46=Wood Elf M/F (tan skin,
+        // pointy ears -- slot 45 is *specifically* Wood Elf Male, not a
+        // generic elf as first assumed). A 17th nearby 64x64 slot (28,
+        // outside the 31-46 run) visually looks like another reptilian
+        // face but doesn't fit this table's alternating-pairs shape or
+        // count -- left unidentified, not used here.
+        int race = args[0].intValue();
+        if (race < 0 || race > 7) race = 0;  // GetRace()'s own default (m_Race == 0, Argonian)
+        int base = 31 + race * 2;
+        bool female = methodName == skString("GetFemalePortrait");
+        returnValue = skRValue(base + (female ? 1 : 0));
         return true;
     }
     if (methodName == skString("GameAvailableForLoad")) {

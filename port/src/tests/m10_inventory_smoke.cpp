@@ -129,6 +129,40 @@ int main(int argc, char** argv) {
             }
         }
 
+        // --- Post-M25 fix: GetMalePortrait(race)/GetFemalePortrait(race)
+        // (any real menu script's real natives, per menus/
+        // chooseportraitmenu.s -- exercised here through charMgr since the
+        // handler lives on MenuExecutable::method() generically) must
+        // return the real per-race/sex slot from the 16-slot global.spr
+        // table (31-46, docs/GRAPHICS_FORMAT.md), not one shared slot.
+        // race=0 is Argonian (chooseracemenu.s's own combo-box order,
+        // also GetRace()'s real default), race=7 is Wood Elf. ---
+        {
+            auto getPortrait = [&](const char* method, int race) -> int {
+                skRValueArray args;
+                args.append(skRValue(race));
+                skRValue ret;
+                skExecutableContext ctxt(&interpreter);
+                charMgr->method(skString(method), args, ret, ctxt);
+                return ret.intValue();
+            };
+            bool portraitOk = true;
+            auto checkSlot = [&](const char* label, int actual, int expected) {
+                std::printf("  %s: %d (expected %d) %s\n", label, actual, expected,
+                            actual == expected ? "OK" : "FAILED");
+                if (actual != expected) portraitOk = false;
+            };
+            checkSlot("GetMalePortrait(0) Argonian", getPortrait("GetMalePortrait", 0), 31);
+            checkSlot("GetFemalePortrait(0) Argonian", getPortrait("GetFemalePortrait", 0), 32);
+            checkSlot("GetMalePortrait(7) Wood Elf", getPortrait("GetMalePortrait", 7), 45);
+            checkSlot("GetFemalePortrait(7) Wood Elf", getPortrait("GetFemalePortrait", 7), 46);
+            if (!portraitOk) {
+                std::printf(
+                    "m10_inventory_smoke: FAILED real per-race/sex portrait table mismatch\n");
+                return 1;
+            }
+        }
+
         stack.OpenMenu("inventory");
         sk_bindings::MenuExecutable* inventoryMenu = stack.currentMenu();
         if (!inventoryMenu) {
