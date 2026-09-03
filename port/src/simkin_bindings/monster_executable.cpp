@@ -72,19 +72,22 @@ void MonsterExecutable::InvokeOnKilled() {
     // ... SetQuestSolved(0,true); } }`. M17: QuestSolved/
     // AddMonsterKilled/MonstersKilled are now real state on
     // PlayerExecutable (see its class comment) -- the kill counter
-    // genuinely reaches 8 real rat kills. But `SetQuestSolved(0,true)`
-    // itself is still never reached (confirmed empirically, `quest_smoke`
-    // test): `Level.GetEntity("trthgar")` throws first -- no `Level`/
-    // `GameEngine`-root global object exists in this port at all yet (a
-    // separate, much larger, pre-existing gap -- `docs/
-    // SIMKIN_NATIVE_API.md`'s "Zone/Level" class, ~567 real scripts
-    // reference it) -- and that exception aborts the rest of the
-    // method's real script execution, including the `SetQuestSolved`
-    // line 3 statements later. So quest id 0 stays unsolved even after 8
-    // kills until `Level`/`GetEntity` exists; `InvokeOnKilled()`'s
-    // existing try/catch already logs and swallows the exception cleanly
-    // rather than crashing, same as any other script error this
-    // host-triggered call might hit.
+    // genuinely reaches 8 real rat kills. M18 (simkin_bindings/
+    // level_executable.h) closed the remaining gap: a real `Level` global
+    // now exists, and `GetEntity("trthgar")` resolves to a real live
+    // `Gravel_Trothgar.s`-backed object whenever the host has registered
+    // it (main.cpp's zone-load block does, for any zone with that real
+    // placement) -- so `SetQuestSolved(0,true)` genuinely runs and quest
+    // id 0 flips solved (verified end to end, `m18_level_smoke.cpp`). A
+    // host that never registers "trthgar" (`quest_smoke`'s own isolated
+    // setup, which doesn't load a full zone) still sees `GetEntity`
+    // resolve gracefully to "not found," so
+    // `Trthgar.SetPositionMirror(...)` throws its own clean "Cannot call
+    // Method ... on a non object" instead -- same net effect (quest stays
+    // unsolved there), just no longer because `Level` itself is missing.
+    // `InvokeOnKilled()`'s existing try/catch already logs and swallows
+    // either exception cleanly rather than crashing, same as any other
+    // script error this host-triggered call might hit.
     if (!m_Interpreter) return;
     skRValueArray args;
     args.append(skRValue(0));  // placeholder for OnKilled's "(s)" parameter, see InvokeOnUse()'s

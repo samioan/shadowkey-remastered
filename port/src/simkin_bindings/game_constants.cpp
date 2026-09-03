@@ -34,6 +34,16 @@ void RegisterGameConstants(skInterpreter& interpreter) {
     add("WR_LightBow", 6);
     add("WR_MediumBow", 7);
     add("WR_EnchantedBlade", 8);
+
+    // M18: `null` isn't a language literal in this Simkin dialect (checked
+    // the vendored grammar -- no such keyword), but real scripts (e.g.
+    // azra.s's `if (M1 != null)` after `M1 = Level.GetEntity("m1")`)
+    // reference it as an ordinary bare global. A blank default skRValue()
+    // is exactly what LevelExecutable::GetEntity() returns on a miss (see
+    // its class comment for why that specific default, not a dedicated
+    // sentinel, is what makes the comparison behave correctly against the
+    // vendored interpreter's real skRValue::operator== semantics).
+    interpreter.addGlobalVariable(skString("null"), skRValue());
 }
 
 }  // namespace sk_bindings

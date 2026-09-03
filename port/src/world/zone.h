@@ -84,6 +84,17 @@ public:
     struct EntPlacement {
         int32_t x = 0, y = 0, z = 0;
         int32_t typeId = 0;
+        // M18: the record's own 40-byte instance name (offset 0x20) --
+        // distinct from entities.txt's per-typeId descriptor name (a
+        // script path). Empty for the overwhelming majority of placements
+        // (only a handful of real, individually-referenced instances like
+        // "m1".."m7"/"trthgar" in azra ever set this); real scripts look
+        // these up via the bare global `Level.GetEntity(name)`
+        // (simkin_bindings/level_executable.h) -- confirmed against real
+        // azra.ent data (record 20, typeId 141/Gravel_Trothgar, name
+        // "trthgar", matching monsters/azra_rat.s's own
+        // `Level.GetEntity("trthgar")` call).
+        std::string name;
     };
     const std::vector<EntPlacement>& entities() const { return entities_; }
 

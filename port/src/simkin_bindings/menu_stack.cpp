@@ -8,9 +8,12 @@
 #include <sstream>
 
 #include "simkin_bindings/game_constants.h"
+#include "simkin_bindings/level_executable.h"
 #include "simkin_bindings/menu_executable.h"
 #include "simkin_bindings/player_executable.h"
 #include "skInterpreter.h"
+#include "skRValue.h"
+#include "skString.h"
 
 namespace sk_bindings {
 
@@ -51,8 +54,15 @@ MenuStack::MenuStack(std::string scriptRoot, skInterpreter& interpreter,
     : m_ScriptRoot(std::move(scriptRoot)),
       m_Interpreter(interpreter),
       m_Strings(strings),
-      m_Player(new PlayerExecutable(strings)) {
+      m_Player(new PlayerExecutable(strings)),
+      m_Level(new LevelExecutable(*m_Player)) {
     RegisterGameConstants(interpreter);
+    // M18: `Level` is a bare global every real script can reach (docs/
+    // SIMKIN_NATIVE_API.md's Zone/Level+Zone effects), never obtained via
+    // a factory call -- registered the same way RegisterGameConstants()
+    // registers scalar constants, just with an object reference instead.
+    interpreter.addGlobalVariable(skString("Level"),
+                                   skRValue(static_cast<skiExecutable*>(m_Level.get()), false));
 }
 
 MenuStack::~MenuStack() = default;

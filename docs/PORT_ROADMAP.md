@@ -1113,6 +1113,96 @@ algorithms.
       `GetExpToNextLevel()` to level up yet) are all separate, smaller
       loose ends.
 
+- [x] **M18 -- the `Level`/`Zone` global object: real `GetEntity()` resolution,
+      closing M17's own documented gap** (this session). Direct follow-up to
+      M17's "Not attempted" note -- the `Level`/`GameEngine`-root global it
+      flagged as missing turned out to be narrowly closeable, not the
+      whole ~49-method surface at once.
+    - **Real per-instance name field, never parsed before**: `docs/
+      ZONE_FORMAT.md`'s `EntPlacement::name` (offset 0x20, 40 bytes) is the
+      `.ent` record's own instance name -- distinct from entities.txt's
+      per-typeId descriptor name (a script path). Confirmed against real
+      `azra.ent` data: record 20 (typeId 141) decodes to name `"trthgar"`,
+      exactly the identifier `monsters/azra_rat.s`'s `OnKilled()` looks up
+      via `Level.GetEntity("trthgar")` on its 8th-kill branch. `Zone::
+      EntPlacement` (`world/zone.h`/`.cpp`) now parses and stores it
+      (empty for the overwhelming majority of placements that never set
+      one).
+    - **`Level` is a bare global, not a factory-returned object**:
+      confirmed by `docs/SIMKIN_NATIVE_API.md`'s corpus research (Zone/
+      Level `0x14d38` + Zone effects `0x14df8`, two chained facets of one
+      object spliced into every script's default reachable set). New
+      `sk_bindings::LevelExecutable` (`simkin_bindings/
+      level_executable.h/.cpp`, `NativeStubExecutable`-derived, same
+      native-only shape `PlayerExecutable` already established) is owned
+      by `MenuStack` (same "shared global state" bucket as its `Player`)
+      and registered as the literal global `Level` in the constructor.
+    - **Deliberately narrow real-method slice** (18/41 of Zone/Level's own
+      names are attested anywhere in the corpus; a full pass is
+      comparable in scope to a whole further M15/M16-sized milestone, not
+      attempted here): only `GetEntity(name)`, `GetPlayer()`, and
+      `PlayAmbient(id,volume)` (no-op, no audio system, same precedent as
+      every prior milestone) get real handlers -- picked because they're
+      what this port's own already-loaded real scripts (`azra_rat.s`,
+      `azra.s`) actually call. Everything else (`AddTrigger`,
+      `CreateEntity`, `LoadLevel`, ...) still soft-fails.
+      `RegisterEntity()`/`ClearEntities()` let the host populate/reset
+      `GetEntity`'s registry -- `main.cpp`'s zone-load block registers
+      every live door/monster with a non-empty real `.ent` name, and
+      clears the registry before each zone (re)load so a stale pointer
+      into a destroyed zone's objects can never leak out.
+    - **A real, necessary companion fix**: SimKin's grammar has no `null`
+      literal (checked the vendored parser directly) -- real scripts
+      (`azra.s`'s `if (M1 != null)` after `M1 = Level.GetEntity("m1")`)
+      reference it as an ordinary bare global that has to already exist.
+      `game_constants.cpp` now registers `null` as a blank default
+      `skRValue()` -- exactly what `GetEntity()` returns on a miss, so the
+      comparison behaves correctly against the vendored interpreter's real
+      `skRValue::operator==` (a T_Object receiver's cross-type branch
+      against a T_String never matches; a T_String "not found" result
+      against a T_String "null" does) -- read directly off
+      `third_party/simkin/src/skRValue.cpp`, not guessed.
+    - **A real generalization this unblocked**: `monsters/
+      Gravel_Trothgar.s` (the entity "trthgar" actually resolves to, a
+      blacksmith NPC/merchant -- `SetInvulnerable(true)`,
+      `SetAggressive(false)`, `ClearProducts()`/`AddProduct(...)`,
+      `OnUse()` opens `trothgarconvo`) is `entities.txt` category **7**
+      (merchant), not category 2 -- so it was never loaded as a live
+      object at all before this pass. `main.cpp`'s zone-load loop's
+      category filter is now `category == 2 || category == 7`; the same
+      `MonsterExecutable`/`HasRealScript()` machinery M16 already built
+      covers it with zero new code (every one of Gravel_Trothgar.s's Init/
+      OnUse calls either already has a real handler or safely soft-fails).
+    - **Verified end to end against real data, `level_smoke`
+      (`src/tests/m18_level_smoke.cpp`)**: confirms the real `.ent` name
+      field decodes to `"trthgar"` at azra's one real typeId-141 placement
+      and that its entities.txt category is genuinely 7 (structural,
+      explains why the category-7 generalization was needed at all); runs
+      `Gravel_Trothgar.s`'s real `Init()`, registers it, and confirms
+      `Level.GetEntity("trthgar")` resolves to that exact object while
+      `Level.GetEntity("m1")` (never registered) resolves to the same
+      blank default as `null`; then re-runs M17's real 8-rat-kill sequence
+      and confirms `SetQuestSolved(0,true)` now genuinely executes --
+      `player.questSolved(0)` flips to **true** for the first time (M17's
+      own `quest_smoke` test, deliberately left unmodified, still and
+      correctly asserts `false` for its own isolated setup that never
+      registers `"trthgar"` -- its header comment now explains why the
+      *reason* changed even though the *result* didn't).
+    - **Not attempted**: the rest of Zone/Level's 41 members (`AddTrigger`
+      and its own further "Door/trap trigger" return-type class,
+      `CreateEntity`/`CreateEntityScript`, save/load-level state, the
+      `SetVis_*` visibility-raycast tuning knobs, ...) and Zone effects'
+      8 members (`Vignette`, `SpawnWithinRadius`, `AddEncounters`, ...) --
+      a substantial further milestone on its own, comparable in shape to
+      M15/M16's "Object/Entity (world base)" work. `azra.s` itself (the
+      zone-root script, as opposed to per-entity scripts) is still never
+      loaded/run by this port at all -- a separate, larger gap noticed
+      along the way, not attempted (its own `Init()` is where most of the
+      `Level.GetEntity("m1".."m7")`/`PlayAmbient`/`SetZone` calls actually
+      live).
+    - Not independently confirmed in an actual windowed play session
+      (same caveat every prior milestone's writeup already carries).
+
 ## Next milestones (not yet started)
 
 Roughly in priority order for reaching "actually playable," not commitments:
@@ -1136,12 +1226,17 @@ Roughly in priority order for reaching "actually playable," not commitments:
   this pass showed NPC talk and "other monster types" were the same gap
   all along, both fixed by the same loader generalization); M17 took a
   fourth (real quest-state tracking, so M16's dialogue trees actually
-  progress across repeated visits). Still open: spellcasting, ranged
-  weapons, loot spawning, a `Zone/Level`-root global object (`AddTrigger`/
-  `GetEntity`/... -- M17 found this is why `azra_rat.s`'s 8-kill quest
-  still can't complete, see its "Not attempted" note above), and
-  `Action::Use`'s one remaining unbound category, pickups (world-to-
-  inventory transfer).
+  progress across repeated visits); M18 took a fifth (a first, narrow
+  slice of the `Zone/Level`-root global object -- `GetEntity`/`GetPlayer`/
+  `PlayAmbient` only -- which closed M17's own documented gap:
+  `azra_rat.s`'s 8-kill quest now genuinely completes). Still open:
+  spellcasting, ranged weapons, loot spawning, the rest of `Zone/Level`
+  (`AddTrigger` and its own further "Door/trap trigger" return-type
+  class, `CreateEntity`/`CreateEntityScript`, save/load-level state, ...)
+  plus Zone effects (`Vignette`, `SpawnWithinRadius`, `AddEncounters`,
+  ...), a zone-root `<zone>.s` script loader (`azra.s` itself is still
+  never run -- see M18's "Not attempted" note), and `Action::Use`'s one
+  remaining unbound category, pickups (world-to-inventory transfer).
 - **Real save file format** -- M5's save system is simulated in-memory
   only; no on-disk save format has been RE'd yet.
 - **`FUN_1002c010`'s big single vitals bar** -- confirmed real (appears

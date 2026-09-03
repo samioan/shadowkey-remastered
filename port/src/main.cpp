@@ -34,6 +34,7 @@
 #include "simkin_bindings/game_constants.h"
 #include "simkin_bindings/item_button_executable.h"
 #include "simkin_bindings/item_executable.h"
+#include "simkin_bindings/level_executable.h"
 #include "simkin_bindings/menu_executable.h"
 #include "simkin_bindings/menu_stack.h"
 #include "simkin_bindings/monster_executable.h"
@@ -687,8 +688,9 @@ int main(int argc, char** argv) {
                 // cache.
                 //
                 // Combat vertical-slice (M12) + interact binding (M15/
-                // M16): category 2 (monster, including named NPCs -- see
-                // monster_executable.h's class comment) and category 11
+                // M16/M18): category 2 (monster, including named NPCs --
+                // see monster_executable.h's class comment), category 7
+                // (merchant, e.g. Gravel_Trothgar -- M18), and category 11
                 // (door) placements whose entities.txt `name` is a real
                 // loadable script (HasRealScript() above) are pulled out
                 // into gameMonsters/gameDoors instead -- a live
@@ -702,6 +704,12 @@ int main(int argc, char** argv) {
                 gameEntities.clear();
                 gameMonsters.clear();
                 gameDoors.clear();
+                // M18: every live object this loop is about to (re)create
+                // is stale after this point -- drop any name -> object
+                // registrations from the previous zone before repopulating
+                // below, so Level.GetEntity() can never return a dangling
+                // pointer into a destroyed zone's objects.
+                stack.level().ClearEntities();
                 for (const sk::Zone::EntPlacement& e : gameZone->entities()) {
                     const sk::EntityTypeDescriptor* desc = entityTypes.Lookup(e.typeId);
                     if (!desc) continue;
@@ -724,6 +732,7 @@ int main(int argc, char** argv) {
                             inst.z = static_cast<float>(e.z);
                             inst.modelArchiveIndex = desc->modelArchiveIndex;
                             inst.script = std::move(door);
+                            stack.level().RegisterEntity(e.name, inst.script.get());
                             gameDoors.push_back(std::move(inst));
                         } catch (skParseException& ex) {
                             std::printf("shadowkey-port: PARSE ERROR loading door %s: %s\n",
@@ -734,7 +743,15 @@ int main(int argc, char** argv) {
                         }
                         continue;
                     }
-                    if (desc->category == 2 && HasRealScript(desc->name)) {
+                    // M18: category 7 (merchant, e.g. monsters/
+                    // Gravel_Trothgar.s) generalized in alongside category
+                    // 2 -- same MonsterExecutable shape already covers it
+                    // fully (Init()'s SetInvulnerable/SetAggressive(false)/
+                    // AddProduct(...) calls all soft-fail or are already
+                    // handled exactly like an NPC's, see monster_
+                    // executable.cpp; OnUse() opens a real conversation menu
+                    // the same way M16's NPC dialogue already does).
+                    if ((desc->category == 2 || desc->category == 7) && HasRealScript(desc->name)) {
                         std::string relPath = desc->name;
                         std::replace(relPath.begin(), relPath.end(), '\\', '/');
                         std::string fullPath = std::string(scriptRoot) + "/" + relPath;
@@ -753,6 +770,7 @@ int main(int argc, char** argv) {
                             inst.z = static_cast<float>(e.z);
                             inst.modelArchiveIndex = desc->modelArchiveIndex;
                             inst.script = std::move(monster);
+                            stack.level().RegisterEntity(e.name, inst.script.get());
                             gameMonsters.push_back(std::move(inst));
                         } catch (skParseException& ex) {
                             std::printf("shadowkey-port: PARSE ERROR loading monster %s: %s\n",

@@ -16,12 +16,19 @@
 // instances sharing one PlayerExecutable, matching the real
 // AddMonsterKilled(203)/MonstersKilled(203)>=8 kill-count gate) and
 // checks the counter reaches 8 -- but does NOT expect quest id 0 to end
-// up solved, because the real script's own execution order calls
-// Level.GetEntity("trthgar") (a still-unimplemented global, see
-// monster_executable.cpp's OnKilled comment) BEFORE SetQuestSolved(0,
-// true), so the real caught exception aborts the branch before that
-// line runs. Asserting this explicitly, rather than silently assuming
-// it works, matches this project's "verify against real data" standard.
+// up solved here, because this test's own MenuStack never registers
+// "trthgar" into the Level global (M18, simkin_bindings/
+// level_executable.h) the way a real zone load would -- Level.GetEntity
+// ("trthgar") genuinely resolves now (M18 closed that gap), but resolves
+// to the same blank "not found" default no name was ever registered for,
+// so the very next line (Trthgar.SetPositionMirror(...)) throws "Cannot
+// call Method ... on a non object" and the real caught exception still
+// aborts the branch before SetQuestSolved(0,true) runs. See
+// m18_level_smoke.cpp for the real end-to-end proof this quest does
+// complete once Level's registry is actually populated the way main.cpp's
+// zone-load block populates it. Asserting the (still-false) result
+// explicitly here, rather than silently assuming it works, matches this
+// project's "verify against real data" standard.
 #include <memory>
 #include <string>
 #include <vector>
@@ -162,14 +169,15 @@ int main(int argc, char** argv) {
     std::printf("player.monstersKilled(203) after 8 kills: %d (expected 8) %s\n",
                 stack.player().monstersKilled(203), killCountOk ? "OK" : "FAILED");
     if (!killCountOk) ok = false;
-    // Documented, expected gap (not a bug) -- see this file's header
-    // comment and monster_executable.cpp's OnKilled comment: the real
-    // script's own SetQuestSolved(0,true) sits after an unreachable
-    // Level.GetEntity(...) call, so it never actually runs yet.
+    // Expected here (not a bug) -- see this file's header comment: this
+    // test's Level never has "trthgar" registered, so GetEntity() resolves
+    // to "not found" and the very next real line throws. m18_level_smoke.cpp
+    // registers it for real and confirms the same script genuinely reaches
+    // SetQuestSolved(0,true) once Level's registry is actually populated.
     bool questZeroStillOpen = !stack.player().questSolved(0);
     std::printf(
-        "player.questSolved(0) after 8th kill: %s (expected false -- Level global gap, see "
-        "comment) %s\n",
+        "player.questSolved(0) after 8th kill: %s (expected false here -- \"trthgar\" isn't "
+        "registered in this test's Level, see comment) %s\n",
         stack.player().questSolved(0) ? "true" : "false", questZeroStillOpen ? "OK" : "FAILED");
     if (!questZeroStillOpen) ok = false;
 

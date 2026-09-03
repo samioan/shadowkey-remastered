@@ -28,6 +28,7 @@ class StringTable;
 
 namespace sk_bindings {
 
+class LevelExecutable;
 class MenuExecutable;
 class PlayerExecutable;
 
@@ -75,6 +76,10 @@ public:
 
     MenuExecutable* currentMenu() const { return m_Current; }
     PlayerExecutable& player() const { return *m_Player; }
+    // M18: the bare global `Level` object -- see level_executable.h. The
+    // zone-load block (main.cpp) registers each live named door/monster
+    // into it via RegisterEntity()/ClearEntities().
+    LevelExecutable& level() const { return *m_Level; }
     const std::string& scriptRoot() const { return m_ScriptRoot; }
     skInterpreter& interpreter() const { return m_Interpreter; }
     // M10: real screens call the global GetLocalizedString(id) directly
@@ -139,6 +144,7 @@ private:
     const sk::StringTable* m_Strings;
     std::map<std::string, std::unique_ptr<MenuExecutable>> m_Menus;
     std::unique_ptr<PlayerExecutable> m_Player;
+    std::unique_ptr<LevelExecutable> m_Level;
     MenuExecutable* m_Current = nullptr;
     std::array<SaveSlot, kSaveSlotCount> m_SaveSlots;
     bool m_QuitRequested = false;

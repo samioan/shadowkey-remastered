@@ -173,7 +173,12 @@ bool Zone::Load(const std::string& scriptRoot, const std::string& zoneName) {
             playerStartZ = z;
             foundStart = true;
         } else if (typeId > 1) {
-            entities_.push_back({x, y, z, typeId});
+            // M18: offset 0x20, 40 bytes, NUL-terminated (see EntPlacement::
+            // name's comment) -- most records leave this blank.
+            const char* namePtr = reinterpret_cast<const char*>(p + 0x20);
+            size_t nameLen = 0;
+            while (nameLen < 40 && namePtr[nameLen] != '\0') ++nameLen;
+            entities_.push_back({x, y, z, typeId, std::string(namePtr, nameLen)});
         }
     }
     if (!foundStart) {

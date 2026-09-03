@@ -71,6 +71,7 @@ add_library(sk_bindings STATIC
   src/simkin_bindings/game_constants.cpp
   src/simkin_bindings/item_button_executable.cpp
   src/simkin_bindings/item_executable.cpp
+  src/simkin_bindings/level_executable.cpp
   src/simkin_bindings/menu_executable.cpp
   src/simkin_bindings/menu_item_handle.cpp
   src/simkin_bindings/menu_stack.cpp
@@ -196,3 +197,7 @@ target_link_libraries(npc_smoke PRIVATE sk_bindings sk_world)
 # Quest-state tracking smoke test -- see src/tests/m17_quest_smoke.cpp.
 add_executable(quest_smoke src/tests/m17_quest_smoke.cpp)
 target_link_libraries(quest_smoke PRIVATE sk_bindings)
+
+# Level/Zone global object smoke test -- see src/tests/m18_level_smoke.cpp.
+add_executable(level_smoke src/tests/m18_level_smoke.cpp)
+target_link_libraries(level_smoke PRIVATE sk_bindings sk_world)
