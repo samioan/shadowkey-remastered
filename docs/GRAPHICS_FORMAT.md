@@ -185,8 +185,13 @@ separated list of decimal slot indices** — which of `global.spr`'s 384
 slots that context should have loaded and ready. `menu_sprites.txt`
 (60 entries: 20-61 contiguous, then a scattered set — 69, 160-162, 174,
 205-208, 213-217, 245-247) is the menu/HUD icon set, including
-multiple full-screen (176×208) background variants (20, 69, 174,
-245-247 — likely one per distinct menu backdrop) and several small
+multiple full-screen (176×208) background variants -- 20 (blank
+parchment), 69 (parchment with the Shadowkey title, the main-menu
+background), 174 (the glowing-key logo splash, M26: the real zone-
+transition loading screen's background, not a menu backdrop), and
+245-247 (rendered and identified, M26: the publisher boot splashes --
+Bethesda Softworks/Vir2L Studios/TKO Software, not menu backdrops
+either) -- and several small
 border/strip pieces (160 etc.) consistent with the "ornate gold
 dragon-head/wing border" HUD art `PORT_ROADMAP.md` describes as still
 missing. This resolves `PORT_ROADMAP.md`'s "Real menu background
@@ -572,22 +577,31 @@ real gameplay shows exactly this 3-bar cluster (red/pale-blue/green
 stacked in one small dragon-head frame, bottom-left), matching this
 decode pixel-for-pixel once scaled.
 
-**Open item -- `FUN_1002c010`'s single big bar is real too, just not
-explained yet.** A second user-provided real-gameplay screenshot shows
-a *different*, larger single-bar widget: slot 205 (79×9 red gradient)
-at `(44,182)` plus slot 206 (94×42 dragon-wing frame) at `(40,166)` --
-exactly what the original (wrong) pass had implemented. This function
-is real and does get used in actual play, evidently under some other
-game state. Exhaustively re-searched this pass (whole-memory raw scans,
-not just literal-pool scans, for both the function's own address and
-its vtable's base address as 4-byte words): `FUN_1002c010`'s address
-appears **exactly once** anywhere in the program -- its one static slot
-at `ScreenModeController`+0x44. There is no second static reference to
-chase; the real trigger is a fully dynamic/computed dispatch this pass
-couldn't resolve. Left unimplemented in the port rather than guessing a
-trigger condition. Leading (unconfirmed) guess if this is revisited: an
-enemy lock-on/target health bar, given it's health-only with no
-magicka/fatigue counterpart.
+**Resolved (M26, `docs/PORT_ROADMAP.md`'s own writeup has the full
+details) -- `FUN_1002c010`'s single big bar is the real zone-transition
+loading screen's progress bar, not a combat widget.** A second user-
+provided real-gameplay screenshot originally showed this as an
+unexplained widget: slot 205 (79×9 red gradient) at `(44,182)` plus slot
+206 (94×42 dragon-wing frame) at `(40,166)`. The earlier whole-memory
+scan here correctly found `FUN_1002c010`'s address appears **exactly
+once** statically (`ScreenModeController`+0x44) with no second caller to
+chase -- that's because the real call site is a *self*-vtable dispatch
+from inside `FUN_10029cb0` (the same per-tick dispatcher this doc's HUD
+section already covers), gated on `ScreenModeController`'s own mode
+field (`this+0x78`) equal to 3, 4, 10, or 0x1f, not a separate function a
+literal-address search could ever find. The bar's fill is confirmed to
+be a real, live percentage read from `GameEngine_InitLevel`'s own
+loading-progress counter (0, 3, 5, ..., 100, written as real load stages
+complete on a background thread) -- not decorative. The full-screen
+splash behind it is `global.spr` slot 174 (visually confirmed against a
+third user screenshot: the glowing key / "The Elder Scrolls Travels
+SHADOWKEY" logo art -- found by rendering every other full-screen
+`menu_sprites.txt` candidate; slots 245-247 turned out to be the
+publisher boot splashes, Bethesda Softworks/Vir2L Studios/TKO Software,
+not this screen). The earlier "enemy lock-on/target health bar" guess
+was wrong. One narrower gap remains open: which of the 4 real mode
+values maps to which real scenario (zone travel vs. save-load vs.
+initial boot splash) wasn't determined.
 
 **Equipped-item icons** (`FUN_1002bb54`, decompiled in full): draws
 the left/right hand's currently-equipped item icon (via `player+0x3ac
@@ -607,7 +621,8 @@ unverified-direction best effort from `Camera::yaw` (a float radian),
 not a decompiled formula — flagged in the port code itself. Equipped-
 item icons use the existing per-zone icon-loading path this session's
 earlier sprite work (see above) already established. `FUN_1002c010`'s
-big single bar (see open item above) is not implemented.
+big single bar is now implemented too, M26 (`docs/PORT_ROADMAP.md`), as
+the real zone-transition loading screen -- see the resolved item above.
 
 ## Open follow-ups
 

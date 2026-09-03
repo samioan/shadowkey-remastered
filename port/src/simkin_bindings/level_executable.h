@@ -12,15 +12,23 @@
 // 18/41 attested in the corpus for Zone/Level alone -- comparable in
 // spirit to M15/M16's "one real category, not the whole native surface"
 // scoping): only `GetEntity`/`GetPlayer`/`PlayAmbient`/`CreateEntity`
-// (M21) get real handlers, picked because they're what this port's own
-// already-loaded real scripts actually call (monsters/azra_rat.s's
-// `Level.GetEntity("trthgar")`, azra.s's `Level.GetEntity("m1".."m7")`
-// and `Level.PlayAmbient(73,100)`, real loot-bag scripts' `Level.
-// CreateEntity(typeId)` -- see M21's writeup below). Everything else
-// (AddTrigger, LoadLevel, ...) soft-fails, same convention as every other
-// binding class -- a full Zone/Level pass (AddTrigger's own "Door/trap
-// trigger" return-type class alone is a further ~10-method surface) is
-// future work, not this milestone.
+// (M21)/`LoadLevel` (M26) get real handlers, picked because they're what
+// this port's own already-loaded real scripts actually call (monsters/
+// azra_rat.s's `Level.GetEntity("trthgar")`, azra.s's `Level.
+// GetEntity("m1".."m7")` and `Level.PlayAmbient(73,100)`, real loot-bag
+// scripts' `Level.CreateEntity(typeId)` -- see M21's writeup below;
+// cheatmenu.s's real `Level.LoadLevel("azra")` -- see M26's writeup).
+// Everything else (AddTrigger, ...) soft-fails, same convention as every
+// other binding class -- a full Zone/Level pass (AddTrigger's own
+// "Door/trap trigger" return-type class alone is a further ~10-method
+// surface) is future work, not this milestone.
+//
+// M26: `LoadLevel(name)` -- MenuStack::RequestZoneChange() (own comment
+// has the full writeup), consumed by main.cpp's real loading-screen +
+// zone-load block. Fires and returns immediately; the actual zone swap
+// happens on a later tick once the loading screen's fixed run of frames
+// finishes, same "the host polls a request flag" shape RequestGameStart()
+// already established for the very first zone.
 //
 // M21: `CreateEntity(typeId)` -- confirmed real by decoding real loot-bag
 // scripts (docs/PORT_ROADMAP.md's M21 entry has the full writeup):

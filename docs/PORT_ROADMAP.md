@@ -1865,6 +1865,93 @@ algorithms.
       the portrait picker and in-game character manager should be checked
       for all 8 races/both sexes.
 
+- [x] **M26 -- the real zone-transition loading screen, and `Level.
+      LoadLevel(...)`** (this session). User correction, with a real
+      screenshot ("Travel to: Azra's Crossing" on the Shadowkey key-logo
+      splash): the open "`FUN_1002c010`'s big single vitals bar" mystery
+      (docs/PORT_ROADMAP.md's "Next milestones", previously guessed as an
+      enemy lock-on/target health bar) is actually a real loading-progress
+      bar shown during zone/level travel, not a combat HUD element.
+    - **Fresh RE, dispatched to a research fork**: `FUN_1002c010`
+      (`ScreenModeController`'s own secondary-vtable slot `+0x44`) is
+      called from *inside* `FUN_10029cb0` itself (the same per-tick
+      dispatcher `RenderHud`'s own comment already documents) via a
+      self-vtable dispatch -- not a separate function, which is why the
+      exhaustive literal-address caller search that found only the static
+      vtable-table reference (Post-M14 fix entry above) never found a
+      caller. Gated on `ScreenModeController`'s own mode field
+      (`this+0x78`) equal to 3, 4, 10, or 0x1f (31); states 3 and 10
+      additionally draw the "Travel to: `<zone>`" banner. **The bar's fill
+      is a real, live progress readout, not decorative**: traced to
+      `GameEngine_InitLevel`'s own progress counter, reset to 0 right as
+      it spawns the real zone load on a background `RThread` and written
+      through a real percentage sequence (0, 3, 5, 10, 12, 14, 22, 30, 40,
+      45, 50, 55, 58, 60, 65, 70, 75, 85, 87, 90, 95, 98, 100) as loading
+      genuinely proceeds through the real documented stages (docs/
+      ZONE_FORMAT.md's debug-marker names). The "Travel to: `<zone>`" text
+      itself: a real localized prefix string concatenated with a
+      per-zone display name from a formatting function not fully traced.
+    - **Found the splash art and the exact banner text myself, closing the
+      fork's two open gaps**: rescanned every full-screen (176x208)
+      `global.spr` slot in `menu_sprites.txt` and rendered the candidates
+      -- slot 174 is visually an exact match for the user's screenshot
+      (the glowing key / "The Elder Scrolls Travels SHADOWKEY" logo art;
+      slots 245-247 turned out to be the publisher boot splashes --
+      Bethesda Softworks/Vir2L Studios/TKO Software -- not this screen).
+      Grepped `stringtable.eng` for the real `"Travel to: "` prefix
+      (id 3950, confirmed verbatim) and found it sits right before a real
+      contiguous run at 3821-3840: exactly one display name per real zone
+      (`azra.zmp` etc., 21 real zones total), in a fixed order (id 3820
+      itself is `"Loading..."`, used here for the very first zone entered
+      a session before any previous zone exists to "travel from").
+      `ffarena` is the one real zone with no entry in this run -- left
+      unmapped, falls back to its own raw internal name rather than a
+      guessed slot.
+    - **New `assets/zone_display_names.h`/`.cpp`**: the real 20-zone
+      lookup table above, factored out of `main.cpp` (which turns an id
+      into real text via `sk::StringTable::Get()`) so the table itself is
+      unit-testable without the windowed game loop -- same precedent
+      `simkin_bindings/combat.h`/`weapon_viewmodel.h` already established.
+    - **New real `Level.LoadLevel(name)` handler** (`level_executable.cpp`,
+      previously soft-failed) -- a real script's own mid-game zone-
+      transition request (e.g. `cheatmenu.s`'s real
+      `Level.LoadLevel("azra")`). Routes to new `MenuStack::
+      RequestZoneChange(name)`, which sets the exact same two fields
+      `RequestGameStart()` already uses for the very first zone (so
+      `main.cpp`'s existing zone-load block needs no duplicate logic) but
+      deliberately skips `RequestGameStart()`'s one-time starting-
+      inventory grant -- a mid-game transition must not touch the
+      player's already-in-progress inventory.
+    - **`main.cpp`'s new loading-screen state machine**: latches the
+      instant `stack.gameStartRequested()` fires (initial start or a real
+      `LoadLevel`), then renders a fixed run of frames -- the real key-
+      logo splash (slot 174), the real dragon-wing bar frame (slot 206,
+      94x42, at (40,166)) and red-gradient fill (slot 205, 79x9, at
+      (44,182), width-clipped through the real percentage sequence
+      above), and the real banner text (`"Loading..."` for the very first
+      zone this session, `"Travel to: <zone>"` via `ZoneDisplayName()`
+      for every later transition) -- before the actual (synchronous,
+      already-existing) zone-load work runs. **Port-only, not decompiled**:
+      since this port's zone loading is synchronous (no real background
+      thread), there's no live progress to sample -- the percentage steps
+      through the real stage list on a fixed per-tick schedule purely for
+      visual continuity with the real screen, not a measurement of actual
+      work done; which of the 4 real trigger states maps to which
+      scenario, and the exact "Travel to" text's screen position, weren't
+      determined -- see "Next milestones" below.
+    - **Verified end to end against real data, new `loading_screen_smoke`
+      (`src/tests/m26_loading_screen_smoke.cpp`)**: confirms the real
+      zone-name table (including two mixed-case real internal names,
+      `cheatmenu.s`'s own `"GhstPass"`/`"LothCav"`) against the real
+      localized text, confirms `ffarena` correctly falls outside the real
+      table, confirms the real `"Travel to: "` prefix string, and confirms
+      a real `Level.LoadLevel(...)` call genuinely sets
+      `gameStartRequested()`/`requestedZone()` without re-granting
+      starting inventory.
+    - Not independently confirmed in an actual windowed play session --
+      the loading screen's look/timing and a real cheat-menu-triggered
+      zone transition should be checked live.
+
 ## Next milestones (not yet started)
 
 Roughly in priority order for reaching "actually playable," not commitments:
@@ -1892,11 +1979,13 @@ Roughly in priority order for reaching "actually playable," not commitments:
   `CountInventory()`/`SetZone`'s real meaning; M24's `Level.Log(...)`.
 - **Real save file format** -- M5's save system is simulated in-memory
   only; no on-disk save format has been RE'd yet.
-- **`FUN_1002c010`'s big single vitals bar** -- confirmed real (appears
-  in actual gameplay per a user screenshot) but its trigger condition is
-  still unresolved after an exhaustive whole-memory reference scan; see
-  the Post-M14 fix entry above and `docs/GRAPHICS_FORMAT.md`. Leading
-  guess: an enemy lock-on/target health bar, unconfirmed.
+- **`FUN_1002c010`'s exact real trigger state(s)** -- resolved as a
+  zone-transition loading-progress bar, M26 below (not the earlier "enemy
+  lock-on/target health bar" guess, corrected by the user with a real
+  reference). One narrower gap remains: which of the 4 real
+  `ScreenModeController` mode values that gate it (3, 4, 10, 0x1f) maps to
+  which real scenario (zone travel vs. save-load vs. initial boot splash,
+  etc.) -- M26's own entry has the details.
 - **The real weapon-swing trigger** -- M25's RE pass fully decompiled the
   first-person viewmodel's draw function and struct shape but couldn't
   find the native call site that actually starts a swing (writes

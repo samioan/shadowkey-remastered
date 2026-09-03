@@ -10,8 +10,10 @@
 // direction the user chose. M6 added the 3D zone renderer, M7 tile-grid
 // collision, M8 placed-entity rendering -- see docs/PORT_ROADMAP.md.
 #include <algorithm>
+#include <cctype>
 #include <cmath>
 #include <cstdio>
+#include <map>
 #include <memory>
 #include <sstream>
 #include <string>
@@ -19,6 +21,7 @@
 
 #include "assets/sprite_archive.h"
 #include "assets/string_table.h"
+#include "assets/zone_display_names.h"
 #include "engine/game_clock.h"
 #include "engine/input_state.h"
 #include "engine/pc_key_map.h"
@@ -604,6 +607,65 @@ void RenderCredits(sk::Backbuffer& backbuffer, const std::vector<std::string>& l
     }
 }
 
+// M26: turns a real zone name into real display text -- the actual
+// lookup table lives in assets/zone_display_names.h (testable without the
+// windowed game loop, its own comment has the full writeup); ffarena, or
+// anything else not in that real table, falls back to its own raw
+// internal name (a documented gap, not a guess at a slot number that
+// isn't actually there).
+std::string ZoneDisplayName(const sk::StringTable& strings, const std::string& zoneName) {
+    int id = sk::ZoneDisplayNameStringId(zoneName);
+    return id >= 0 ? strings.Get(id) : zoneName;
+}
+
+// M26: the real zone-transition loading screen (`FUN_1002c010`,
+// ScreenModeController's own secondary-vtable slot +0x44) -- per the
+// user's real-gameplay correction, this is NOT a combat health bar (the
+// prior "enemy lock-on" guess in docs/PORT_ROADMAP.md's "Next
+// milestones"), it's a loading-progress bar shown during zone/level
+// travel. Fresh RE this session confirmed: the bar's fill genuinely
+// tracks `GameEngine_InitLevel`'s own real progress counter (a live
+// percentage sequence -- 0,3,5,...,100 -- written as real loading stages
+// complete on a real background thread), not a decorative animation; the
+// full-screen splash behind it is `global.spr` slot 174 (visually
+// confirmed against the user's own reference screenshot -- the glowing
+// key / "The Elder Scrolls Travels SHADOWKEY" logo art); the bar itself
+// is slot 205 (79x9 red gradient, drawn at (44,182), width-clipped to
+// the real percentage) inside slot 206's frame (94x42 dragon-wing motif,
+// at (40,166)); the "Travel to: <zone>" banner text is real too (string
+// 3950 "Travel to: " concatenated with a real per-zone display name,
+// ZoneDisplayName() above).
+//
+// **Not decompiled, this port's own choice**: this port's zone loading is
+// synchronous (main.cpp's zone-load block runs to completion in a single
+// tick, not on a real background thread), so there's no live progress to
+// sample -- `percent` here steps through the real documented stage list
+// on a fixed per-tick schedule purely for visual continuity with the real
+// screen, not a measurement of actual work done. Exact screen position of
+// the "Travel to" text, and which of the real engine's 4 observed trigger
+// states (3/4/10/0x1f) maps to which real scenario, are likewise
+// undetermined -- this port shows the banner for every zone change after
+// the first (the first uses "Loading..." instead, string 3820) as the
+// best-evidenced substitute.
+void RenderLoadingScreen(sk::Backbuffer& backbuffer, sk::SpriteArchive& sprites,
+                          const std::string& text, int percent) {
+    const sk::Sprite* splash = sprites.GetSprite(174);
+    if (splash) {
+        backbuffer.Blit(0, 0, *splash);
+    } else {
+        backbuffer.Fill(kBackgroundColor);
+    }
+    int textX = (sk::Backbuffer::kWidth - sk::BitmapFont::TextWidth(text)) / 2;
+    sk::BitmapFont::DrawString(backbuffer, (std::max)(0, textX), 4, text, kTitleColor);
+    const sk::Sprite* frame = sprites.GetSprite(206);
+    const sk::Sprite* fill = sprites.GetSprite(205);
+    if (fill) {
+        int fillWidth = fill->width * (std::max)(0, (std::min)(100, percent)) / 100;
+        backbuffer.BlitRegion(44, 182, *fill, 0, fillWidth);
+    }
+    if (frame) backbuffer.Blit(40, 166, *frame);
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -764,6 +826,17 @@ int main(int argc, char** argv) {
     // weapon_viewmodel.h's comment for the real RE ground truth this
     // recreates.
     sk_bindings::WeaponViewmodel gameWeaponViewmodel;
+    // M26: real loading-screen state -- see RenderLoadingScreen()'s own
+    // comment. Active for a fixed run of ticks after stack.
+    // gameStartRequested() fires (both the very first zone entered and
+    // every later Level.LoadLevel() transition, MenuStack::
+    // RequestZoneChange()'s own comment), covering both the initial
+    // "Loading..." case (loadingScreenIsFirstZone, gameZone still null
+    // when the request came in) and every later "Travel to: <zone>" one.
+    bool loadingScreenActive = false;
+    int loadingScreenTick = 0;
+    bool loadingScreenIsFirstZone = false;
+    std::string loadingScreenZoneName;
     sk::ZoneRenderer zoneRenderer;
     bool inGame = false;
     // Post-M11: real per-tick vertical physics (gravity/jump/ground-
@@ -811,7 +884,35 @@ int main(int argc, char** argv) {
             return;
         }
 
-        if (stack.gameStartRequested()) {
+        // M26: real loading screen -- see RenderLoadingScreen()'s comment.
+        // Latches loadingScreenActive the instant a request comes in
+        // (initial game start or a real Level.LoadLevel() transition,
+        // MenuStack::RequestZoneChange()) and renders a fixed run of
+        // staged frames before the actual (synchronous, effectively
+        // instant) zone-load work below ever runs.
+        if (stack.gameStartRequested() && !loadingScreenActive) {
+            loadingScreenActive = true;
+            loadingScreenTick = 0;
+            loadingScreenIsFirstZone = (gameZone == nullptr);
+            loadingScreenZoneName = stack.requestedZone();
+        }
+        if (loadingScreenActive) {
+            static constexpr int kLoadingStages[] = {0,  3,  5,  10, 12, 14, 22, 30, 40, 45, 50,
+                                                       55, 58, 60, 65, 70, 75, 85, 87, 90, 95, 98, 100};
+            constexpr int kNumStages =
+                static_cast<int>(sizeof(kLoadingStages) / sizeof(kLoadingStages[0]));
+            int percent = kLoadingStages[(std::min)(loadingScreenTick, kNumStages - 1)];
+            std::string bannerText =
+                loadingScreenIsFirstZone
+                    ? strings.Get(3820)  // "Loading..."
+                    : strings.Get(3950) + ZoneDisplayName(strings, loadingScreenZoneName);  // "Travel to: <zone>"
+            RenderLoadingScreen(backbuffer, spriteArchive, bannerText, percent);
+            window.Present(backbuffer);
+            ++loadingScreenTick;
+            if (loadingScreenTick <= kNumStages) {
+                return;
+            }
+            loadingScreenActive = false;
             stack.ClearGameStartRequest();
             auto zone = std::make_unique<sk::Zone>();
             if (zone->Load(scriptRoot, stack.requestedZone())) {

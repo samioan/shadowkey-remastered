@@ -143,6 +143,22 @@ public:
     const std::string& requestedZone() const { return m_RequestedZone; }
     void ClearGameStartRequest() { m_GameStartRequested = false; }
 
+    // M26: mid-game zone transition -- a real script's own LoadLevel(name)
+    // (LevelExecutable::method(), e.g. cheatmenu.s's real `Level.
+    // LoadLevel("azra")`). Sets the exact same two fields RequestGameStart()
+    // does (main.cpp's zone-load block doesn't care which caller set
+    // them, and a real per-zone player-start position already makes
+    // "arrive at the destination zone's entry point" the correct
+    // behavior for this case too) but skips RequestGameStart()'s own
+    // one-time starting-inventory grant -- a mid-game transition must not
+    // touch the player's already-in-progress inventory. A dedicated name
+    // keeps LoadLevel's call site honest about intent rather than reading
+    // like a fresh game start.
+    void RequestZoneChange(std::string zoneName) {
+        m_GameStartRequested = true;
+        m_RequestedZone = std::move(zoneName);
+    }
+
     // Native-only "screen" (ShowCredits() has no script-side handler
     // anywhere in the corpus -- see credits.txt right next to the .s
     // files) -- main.cpp checks creditsActive() before rendering the

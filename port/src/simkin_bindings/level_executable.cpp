@@ -41,6 +41,18 @@ bool LevelExecutable::method(const skString& methodName, skRValueArray& args,
         returnValue = skRValue(static_cast<skiExecutable*>(&m_Stack.player()), false);
         return true;
     }
+    if (methodName == skString("LoadLevel") && args.entries() == 1) {
+        // M26: a real script's own zone-transition request (e.g.
+        // cheatmenu.s's `Level.LoadLevel("azra")`) -- see MenuStack::
+        // RequestZoneChange()'s own comment for why this reuses
+        // RequestGameStart()'s same two fields instead of a parallel
+        // mechanism, and main.cpp's M26 loading-screen block for what
+        // actually consumes them (a real per-zone display-name banner +
+        // the real loading-progress bar, docs/PORT_ROADMAP.md's M26
+        // entry).
+        m_Stack.RequestZoneChange(ToStdString(args[0].str()));
+        return true;
+    }
     if (methodName == skString("PlayAmbient")) {
         // No audio system in this port (consistent with every prior
         // milestone) -- real signature is PlayAmbient(soundId, volume);

@@ -134,6 +134,7 @@ add_executable(shadowkey_port
   src/main.cpp
   src/assets/gdr_font.cpp
   src/assets/sprite_archive.cpp
+  src/assets/zone_display_names.cpp
   src/graphics/bitmap_font.cpp
   src/platform/win32/window.cpp
 )
@@ -248,3 +249,9 @@ target_link_libraries(trigger_smoke PRIVATE sk_bindings)
 # Weapon viewmodel smoke test -- see src/tests/m25_weapon_viewmodel_smoke.cpp.
 add_executable(weapon_viewmodel_smoke src/tests/m25_weapon_viewmodel_smoke.cpp)
 target_link_libraries(weapon_viewmodel_smoke PRIVATE sk_bindings)
+
+# Real zone-transition loading screen smoke test -- see
+# src/tests/m26_loading_screen_smoke.cpp.
+add_executable(loading_screen_smoke src/tests/m26_loading_screen_smoke.cpp
+                                     src/assets/zone_display_names.cpp)
+target_link_libraries(loading_screen_smoke PRIVATE sk_bindings)
