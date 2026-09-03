@@ -30,6 +30,7 @@
 #include "graphics/backbuffer.h"
 #include "graphics/bitmap_font.h"
 #include "platform/win32/console_tee.h"
+#include "platform/win32/exe_dir.h"
 #include "platform/win32/window.h"
 #include "render3d/camera.h"
 #include "render3d/zone_renderer.h"
@@ -683,10 +684,21 @@ int main(int argc, char** argv) {
     // call only reaches the console, not the log.
     sk::StartConsoleTeeLog("shadowkey_port.log");
 
-    const char* scriptRoot =
-        argc > 1 ? argv[1]
-                  : "The-Elder-Scrolls-Travels-Shadowkey_N-Gage_EN-FR-DE-ES-IT_USA-Europe-"
-                    "EnFrDeEsIt-26102004/system/apps/6r51";
+    // Both this and fontPath's default below are resolved relative to the
+    // executable's own location (exe_dir.h), not the process's current
+    // working directory -- that varies by launch method (double-click in
+    // Explorer, running from port/build/, running from the repo root)
+    // and previously left the .gdr font unfindable whenever CWD wasn't
+    // the repo root, even though the file was sitting right where
+    // .gitignore says it should be (port/assets/fonts/). The build always
+    // places this exe at <repo>/port/build/, so the repo root is two
+    // directories up.
+    const std::string repoRoot = sk::ExecutableDirectory() + "/../..";
+    const std::string defaultScriptRoot =
+        repoRoot +
+        "/The-Elder-Scrolls-Travels-Shadowkey_N-Gage_EN-FR-DE-ES-IT_USA-Europe-"
+        "EnFrDeEsIt-26102004/system/apps/6r51";
+    const char* scriptRoot = argc > 1 ? argv[1] : defaultScriptRoot.c_str();
 
     sk::StringTable strings;
     if (!strings.Load(std::string(scriptRoot) + "/stringtable.eng")) {
@@ -749,7 +761,8 @@ int main(int argc, char** argv) {
     // point argv[2] at wherever it's been extracted to locally.
     // Missing/bad file is non-fatal -- DrawString keeps using the
     // placeholder glyphs, same as every other optional real asset here.
-    const char* fontPath = argc > 2 ? argv[2] : "port/assets/fonts/Ceurope.gdr";
+    const std::string defaultFontPath = repoRoot + "/port/assets/fonts/Ceurope.gdr";
+    const char* fontPath = argc > 2 ? argv[2] : defaultFontPath.c_str();
     sk::BitmapFont::LoadRealFont(fontPath, "LatinBold12");
 
     skInterpreter interpreter;
