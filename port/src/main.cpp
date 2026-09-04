@@ -265,6 +265,13 @@ struct MonsterInstance {
     // AddTrigger()...SetEntityID(id) kill-count trigger, e.g. ghstpass.s's
     // zombieTrigger.SetEntityID(104)) matches kills against this.
     int typeId = -1;
+    // M45: the real `actor+0x2e4` backlink -- which encounter region
+    // spawned this creature, so its death can decrement that region's
+    // live count (`FUN_10083c04` calls `FUN_1008b118(actor->region)`).
+    // That count is what lets a cleared region spawn again. Null for
+    // everything placed by the zone's own `.ent`.
+    sk_bindings::EncounterExecutable* encounter = nullptr;
+    size_t encounterRegion = 0;
 };
 
 // M28: advances one live creature's vertex animation by a tick and
@@ -1878,6 +1885,100 @@ int main(int argc, char** argv) {
                     }
                 }
 
+                // M45: `FUN_1008a76c` -- the encounter spawner. Placed
+                // here so it can use the same freshly-settled positions
+                // the region check below does, and so a spawn requested by
+                // a script (`Level.fight41.SpawnEncounter("battle41")`)
+                // and one triggered by walking into a region both go
+                // through one code path.
+                auto spawnEncounter = [&](sk_bindings::EncounterExecutable& encounter,
+                                          size_t regionIndex) {
+                    if (!gameZone) return;
+                    if (regionIndex >= encounter.regionCount()) return;
+                    if (!encounter.CanSpawnInRegion(regionIndex)) return;
+                    // The region's rectangle comes from `.zon` (M44); the
+                    // encounter only knows its name.
+                    std::vector<const sk::Zone::Region*> rects =
+                        gameZone->RegionsNamed(encounter.regionName(regionIndex));
+                    if (rects.empty()) return;
+                    const sk::Zone::Region& rect = *rects.front();
+                    int setIndex = encounter.PickSetIndex();
+                    if (setIndex < 0) return;
+                    const std::vector<sk_bindings::EncounterExecutable::SpawnEntry>& set =
+                        encounter.sets()[static_cast<size_t>(setIndex)];
+
+                    // `FUN_1008ae94` -- the placement search, in
+                    // Zone::FindFreeTileInRegion(). The occupancy
+                    // predicate stands in for the real per-tile entity
+                    // grid this port has no equivalent of.
+                    auto tileOccupied = [&](int tx, int ty) {
+                        for (const MonsterInstance& other : gameMonsters) {
+                            if (!other.script || !other.script->alive()) continue;
+                            if (static_cast<int>(std::floor(other.x / sk::kTileScale)) == tx &&
+                                static_cast<int>(std::floor(other.y / sk::kTileScale)) == ty) {
+                                return true;
+                            }
+                        }
+                        return false;
+                    };
+                    auto findSpawnTile = [&](int& outTx, int& outTy) {
+                        return gameZone->FindFreeTileInRegion(rect, tileOccupied, outTx, outTy);
+                    };
+
+                    for (const sk_bindings::EncounterExecutable::SpawnEntry& entry : set) {
+                        for (int n = 0; n < entry.count; ++n) {
+                            std::unique_ptr<sk_bindings::MonsterExecutable> script =
+                                stack.level().CreateCreature(entry.typeId);
+                            if (!script) continue;
+                            // The real order: the creature is created and
+                            // counted first, and only then does it look
+                            // for somewhere to put it -- so a failed
+                            // placement still consumes a slot. Reproduced.
+                            encounter.NoteSpawned(regionIndex);
+                            int tx = 0, ty = 0;
+                            if (findSpawnTile(tx, ty)) {
+                                MonsterInstance inst;
+                                inst.x = (static_cast<float>(tx) + 0.5f) * sk::kTileScale;
+                                inst.y = (static_cast<float>(ty) + 0.5f) * sk::kTileScale;
+                                // `FUN_100686e0` snaps the new actor to the
+                                // floor of the tile it landed on.
+                                inst.z = static_cast<float>(
+                                    gameZone->FloorHeightAt(inst.x, inst.y));
+                                const sk::EntityTypeDescriptor* desc =
+                                    entityTypes.Lookup(entry.typeId);
+                                inst.modelArchiveIndex = desc ? desc->modelArchiveIndex : -1;
+                                inst.typeId = entry.typeId;
+                                inst.encounter = &encounter;
+                                inst.encounterRegion = regionIndex;
+                                inst.script = std::move(script);
+                                std::printf("shadowkey-port: encounter spawned typeId %d \"%s\" in "
+                                            "region \"%s\" at tile (%d, %d)\n",
+                                            entry.typeId, inst.script->name().c_str(),
+                                            encounter.regionName(regionIndex).c_str(), tx, ty);
+                                gameMonsters.push_back(std::move(inst));
+                            } else {
+                                std::printf("shadowkey-port: encounter found no free tile in "
+                                            "region \"%s\" for typeId %d\n",
+                                            encounter.regionName(regionIndex).c_str(),
+                                            entry.typeId);
+                            }
+                            if (encounter.RegionAtLimit(regionIndex)) return;
+                        }
+                    }
+                };
+
+                // A script's own `SpawnEncounter(region)`. The real handler
+                // spawns inline; this port defers to here for the same
+                // reason CreateEntity does.
+                if (gameZoneScript) {
+                    for (const auto& encounter : gameZoneScript->encounters()) {
+                        int pending = encounter->TakePendingSpawnRegion();
+                        if (pending >= 0) {
+                            spawnEncounter(*encounter, static_cast<size_t>(pending));
+                        }
+                    }
+                }
+
                 // M44: named-region entry -- the `.zon` room list, decoded
                 // this milestone (world/zone.h's Region). Same "once the
                 // player's position for this tick is settled" placement as
@@ -1905,18 +2006,15 @@ int main(int argc, char** argv) {
                         sk_bindings::EncounterExecutable* encounter =
                             gameZoneScript->EnterRegion(regions[i].name);
                         if (encounter) {
-                            // The real FUN_1002ef44 spawns the encounter
-                            // here and returns without calling EnterZone.
-                            // This port has the encounter's whole object
-                            // model (sets, limits, respawn -- M38) but no
-                            // spawner: placing creatures needs a free tile
-                            // inside the region and a live MonsterInstance,
-                            // which is the same work CreateEntity's
-                            // creature form does below. Logged rather than
-                            // silently dropped, so the gap is visible.
-                            std::printf("shadowkey-port: region \"%s\" belongs to an encounter "
-                                        "(%zu set(s)) -- spawning not implemented\n",
-                                        regions[i].name.c_str(), encounter->sets().size());
+                            // M45: the real FUN_1002ef44 spawns the
+                            // encounter here and returns without calling
+                            // EnterZone -- which EnterRegion() reproduces
+                            // by returning the encounter instead of
+                            // running the script handler.
+                            int regionIndex = encounter->RegionIndexOf(regions[i].name);
+                            if (regionIndex >= 0) {
+                                spawnEncounter(*encounter, static_cast<size_t>(regionIndex));
+                            }
                         }
                     }
                     gameRegionsOccupied.swap(nowOccupied);
@@ -2436,6 +2534,10 @@ int main(int argc, char** argv) {
                     dead.script->InvokeOnKilled();
                     spawnLoot(dead);
                     if (gameZoneScript) gameZoneScript->NotifyKilled(dead.typeId);
+                    // M45: the `actor+0x2e4` backlink -- see
+                    // MonsterInstance::encounter.
+                    if (dead.encounter) dead.encounter->NoteDied(dead.encounterRegion);
+                    dead.encounter = nullptr;
                 }
                 gameDiedFromEffect.clear();
 
@@ -2533,6 +2635,11 @@ int main(int argc, char** argv) {
                         // no-ops if this zone's real Init() never set one
                         // up watching this typeId.
                         if (gameZoneScript) gameZoneScript->NotifyKilled(target->typeId);
+                        // M45: see MonsterInstance::encounter.
+                        if (target->encounter) {
+                            target->encounter->NoteDied(target->encounterRegion);
+                            target->encounter = nullptr;
+                        }
                     }
                 };
                 // Whichever hand actually holds a weapon provides the

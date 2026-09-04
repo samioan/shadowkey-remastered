@@ -183,7 +183,9 @@ bool EncounterExecutable::method(const skString& methodName, skRValueArray& args
     if (methodName == skString("SetLimit") && args.entries() == 2) {
         // Indexes the *region* list. The real handler logs an error and
         // does nothing when the index is out of range, which is exactly
-        // what happens here.
+        // what happens here. lothcav.s's `fight41.SetLimit(0,1)` is the
+        // only call site in the corpus; everything else runs on the region
+        // constructor's own default of 99.
         size_t index = static_cast<size_t>(args[0].intValue());
         if (index < m_RegionLimits.size()) m_RegionLimits[index] = args[1].intValue();
         return true;
@@ -195,7 +197,7 @@ bool EncounterExecutable::method(const skString& methodName, skRValueArray& args
     if (methodName == skString("SpawnEncounter") && args.entries() == 1) {
         // `if (!active) return` is the real handler's first line.
         if (!m_Active) return true;
-        m_PendingSpawn = ToStdString(args[0].str());
+        m_PendingSpawnRegion = RegionIndexOf(ToStdString(args[0].str()));
         return true;
     }
     return SoftFailNativeCall("Encounter", methodName, args, returnValue);
@@ -204,8 +206,45 @@ bool EncounterExecutable::method(const skString& methodName, skRValueArray& args
 void EncounterExecutable::AddRegions(skRValueArray& args) {
     for (unsigned i = 0; i < args.entries(); ++i) {
         m_Regions.push_back(ToStdString(args[i].str()));
-        m_RegionLimits.push_back(0);
+        // The real region constructor's own defaults: live 0, limit 99.
+        m_RegionLimits.push_back(kDefaultRegionLimit);
+        m_RegionLive.push_back(0);
     }
+}
+
+// ---- M45: the spawn bookkeeping. See the header. ----
+
+int EncounterExecutable::RegionIndexOf(const std::string& name) const {
+    for (size_t i = 0; i < m_Regions.size(); ++i) {
+        if (m_Regions[i] == name) return static_cast<int>(i);
+    }
+    return -1;
+}
+
+bool EncounterExecutable::CanSpawnInRegion(size_t index) const {
+    if (index >= m_Regions.size()) return false;
+    const int live = regionLive(index);
+    if (!(live < 1 || m_RespawnSeconds != 0)) return false;
+    if (!m_Active) return false;
+    return live <= regionLimit(index) - 1;
+}
+
+bool EncounterExecutable::RegionAtLimit(size_t index) const {
+    return index < m_Regions.size() && regionLive(index) == regionLimit(index);
+}
+
+int EncounterExecutable::PickSetIndex() const {
+    if (m_Sets.empty()) return -1;
+    if (m_Sets.size() == 1) return 0;
+    return std::rand() % static_cast<int>(m_Sets.size());
+}
+
+void EncounterExecutable::NoteSpawned(size_t index) {
+    if (index < m_RegionLive.size()) ++m_RegionLive[index];
+}
+
+void EncounterExecutable::NoteDied(size_t index) {
+    if (index < m_RegionLive.size() && m_RegionLive[index] > 0) --m_RegionLive[index];
 }
 
 ZoneScriptExecutable::ZoneScriptExecutable(const skString& filename, skExecutableContext& ctxt,

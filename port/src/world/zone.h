@@ -12,6 +12,7 @@
 // per-cell bake in the real engine, not reproduced here).
 
 #include <cstdint>
+#include <cstdlib>
 #include <string>
 #include <utility>
 #include <vector>
@@ -267,6 +268,49 @@ public:
         }
     };
     const std::vector<Region>& regions() const { return regions_; }
+
+    // M45: `FUN_1008ae94` -- where an encounter puts a creature it just
+    // created.
+    //
+    //   attempts = x1 - x0;                    // the region's *width*
+    //   for (i = 0; i < attempts; ++i) {
+    //       tx = rand(x0, x1);  ty = rand(y0, y1);   // inclusive
+    //       if (occupancyGrid[ty][tx] == 0) return tileAt(tx, ty);
+    //   }
+    //   return 0;
+    //
+    // Two details worth keeping. The retry budget is the rectangle's width
+    // and nothing to do with its area, so a long thin region gets very few
+    // tries. And the draw is inclusive at both ends -- `FUN_100730c8` is
+    // `lo + rand % (hi - lo + 1)` -- which lines up with the inclusive
+    // containment Region::Contains documents.
+    //
+    // `occupied(tx, ty)` stands in for the real per-tile entity grid at
+    // `engine+0x6904`, which this port has no equivalent of; the caller
+    // scans its live creatures instead. Wall and locked tiles are rejected
+    // here on top of that: the real grid holds no entity on a wall tile,
+    // so the engine would happily spawn inside one, and refusing is a port
+    // safety property rather than a recovered rule.
+    template <class IsOccupied>
+    bool FindFreeTileInRegion(const Region& region, IsOccupied&& occupied, int& outTileX,
+                               int& outTileY) const {
+        const int spanX = region.x1 - region.x0 + 1;
+        const int spanY = region.y1 - region.y0 + 1;
+        if (spanX <= 0 || spanY <= 0) return false;
+        const int attempts = region.x1 - region.x0;
+        for (int i = 0; i < attempts; ++i) {
+            int tx = region.x0 + std::rand() % spanX;
+            int ty = region.y0 + std::rand() % spanY;
+            if (!InBounds(tx, ty)) continue;
+            const ZmpCell& cell = CellAt(tx, ty);
+            if (cell.IsWall() || cell.IsLocked()) continue;
+            if (occupied(tx, ty)) continue;
+            outTileX = tx;
+            outTileY = ty;
+            return true;
+        }
+        return false;
+    }
 
     // Names are not unique: azra has four separate rectangles all called
     // "YouSure" and three called "queue", so a name identifies a *set* of

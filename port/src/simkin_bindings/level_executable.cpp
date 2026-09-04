@@ -44,6 +44,41 @@ bool LevelExecutable::VignetteById(int id, VignetteDefinition& out) {
     return false;
 }
 
+// M45: see the header. Factored out of the four-argument CreateEntity so
+// the encounter spawner builds its creatures through the same path.
+std::unique_ptr<MonsterExecutable> LevelExecutable::CreateCreature(int typeId) {
+    const sk::EntityTypeDescriptor* desc = m_EntityTypes ? m_EntityTypes->Lookup(typeId) : nullptr;
+    bool isRealScript = desc && desc->name.size() > 2 &&
+                         desc->name.compare(desc->name.size() - 2, 2, ".s") == 0;
+    // Category 2 is entities.txt's creature/NPC category -- the same one
+    // main.cpp's zone-load block resolves for placed monsters.
+    if (!isRealScript || desc->category != 2) return nullptr;
+    std::string relPath = desc->name;
+    for (char& c : relPath) {
+        if (c == '\\') c = '/';
+    }
+    std::string fullPath = m_Stack.scriptRoot() + "/" + relPath;
+    skExecutableContext loadCtxt(&m_Stack.interpreter());
+    try {
+        auto monster = std::make_unique<MonsterExecutable>(skString(fullPath.c_str()), loadCtxt,
+                                                            m_Stack.strings(), m_Stack.player(),
+                                                            m_Stack);
+        skRValueArray initArgs;
+        initArgs.append(skRValue(0));  // Init's "(s)" placeholder
+        skRValue initRet;
+        skExecutableContext callCtxt(&m_Stack.interpreter());
+        monster->method(skString("Init"), initArgs, initRet, callCtxt);
+        return monster;
+    } catch (skParseException& e) {
+        std::printf("Level: CreateCreature(%d) -- PARSE ERROR loading %s: %s\n", typeId,
+                    fullPath.c_str(), e.toString().ptr());
+    } catch (skRuntimeException& e) {
+        std::printf("Level: CreateCreature(%d) -- RUNTIME ERROR loading %s: %s\n", typeId,
+                    fullPath.c_str(), e.toString().ptr());
+    }
+    return nullptr;
+}
+
 bool LevelExecutable::TakePendingCreature(PendingCreature& out,
                                            std::unique_ptr<MonsterExecutable>& script) {
     if (!m_PendingCreaturePending) return false;
@@ -183,42 +218,14 @@ bool LevelExecutable::method(const skString& methodName, skRValueArray& args,
         // the result and immediately calls `SetCanTeleport(true)` on it.
         // Only the world instance is deferred.
         int typeId = args[0].intValue();
-        const sk::EntityTypeDescriptor* desc =
-            m_EntityTypes ? m_EntityTypes->Lookup(typeId) : nullptr;
-        bool isRealScript = desc && desc->name.size() > 2 &&
-                             desc->name.compare(desc->name.size() - 2, 2, ".s") == 0;
-        // Category 2 is entities.txt's creature/NPC category (the same one
-        // main.cpp's zone-load block resolves for placed monsters).
-        if (isRealScript && desc->category == 2) {
-            std::string relPath = desc->name;
-            for (char& c : relPath) {
-                if (c == '\\') c = '/';
-            }
-            std::string fullPath = m_Stack.scriptRoot() + "/" + relPath;
-            skExecutableContext loadCtxt(&m_Stack.interpreter());
-            try {
-                auto monster = std::make_unique<MonsterExecutable>(
-                    skString(fullPath.c_str()), loadCtxt, m_Stack.strings(), m_Stack.player(),
-                    m_Stack);
-                skRValueArray initArgs;
-                initArgs.append(skRValue(0));  // Init's "(s)" placeholder
-                skRValue initRet;
-                skExecutableContext callCtxt(&m_Stack.interpreter());
-                monster->method(skString("Init"), initArgs, initRet, callCtxt);
-                returnValue = skRValue(static_cast<skiExecutable*>(monster.get()), false);
-                m_PendingCreature = PendingCreature{typeId, args[1].intValue(),
-                                                     args[2].intValue(), args[3].intValue(),
-                                                     monster.get()};
-                m_PendingCreatureScript = std::move(monster);
-                m_PendingCreaturePending = true;
-                return true;
-            } catch (skParseException& e) {
-                std::printf("Level: CreateEntity(%d,x,y,z) -- PARSE ERROR loading %s: %s\n", typeId,
-                            fullPath.c_str(), e.toString().ptr());
-            } catch (skRuntimeException& e) {
-                std::printf("Level: CreateEntity(%d,x,y,z) -- RUNTIME ERROR loading %s: %s\n",
-                            typeId, fullPath.c_str(), e.toString().ptr());
-            }
+        std::unique_ptr<MonsterExecutable> monster = CreateCreature(typeId);
+        if (monster) {
+            returnValue = skRValue(static_cast<skiExecutable*>(monster.get()), false);
+            m_PendingCreature = PendingCreature{typeId, args[1].intValue(), args[2].intValue(),
+                                                 args[3].intValue(), monster.get()};
+            m_PendingCreatureScript = std::move(monster);
+            m_PendingCreaturePending = true;
+            return true;
         }
         returnValue = skRValue();  // "not found" -- see GetEntity()'s miss case
         return true;

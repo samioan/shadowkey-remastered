@@ -3251,20 +3251,77 @@ algorithms.
       logs it rather than silently dropping it, so the gap is visible in
       the log. See "Next milestones".
 
+- **M45 -- encounter spawning.** The last piece of M38's `Zone/Level`
+  bullet. RE writeup in `docs/WORLD_MODEL.md` ("The encounter spawner");
+  smoke test `src/tests/m45_encounter_spawn_smoke.cpp` (32 checks).
+
+    - **`FUN_1008a76c`, transcribed.** The gate
+      (`(live < 1 || respawnSeconds != 0) && active && live < limit`), the
+      set draw (`setCount == 1 ? 0 : rand() % setCount` -- the real code
+      skips the RNG entirely for one set), the per-entry `count` loop, and
+      the early-out when a region reaches its limit. Two details preserved
+      because they are load-bearing rather than tidy: the live count is
+      incremented **before** the placement search, so a creature that
+      cannot be placed still consumes a slot; and with `respawnSeconds` at
+      its default 0 -- every encounter in the game -- a region will not top
+      itself up while anything it spawned is alive.
+
+    - **`FUN_1008ae94`, the placement search**, now
+      `Zone::FindFreeTileInRegion()`. Draws a random tile from the
+      region's rectangle, inclusive at both ends, and retries at most
+      `x1 - x0` times -- the region's *width*, which has nothing to do with
+      its area, so a long thin region gets very few tries. The inclusive
+      draw is independent corroboration of M44's inclusive containment,
+      arrived at from a different function.
+
+      The occupancy test reads `engine+0x6904`, a **per-tile array of
+      4-byte entity pointers** distinct from the 8-byte cell array at
+      `+0x6908` -- the first use found for that array. This port has no
+      equivalent and scans its live creatures instead; wall and locked
+      tiles are additionally rejected, which is a port safety property and
+      is marked as one (the real grid holds no entity on a wall tile, so
+      the engine would happily spawn inside one).
+
+    - **The live-count backlink.** A spawned creature carries its region
+      at `actor+0x2e4`, and the death routine (`FUN_10083c04`) calls
+      `FUN_1008b118(actor->region)`, a one-line `live--`. That is what
+      lets a cleared region spawn again, and it is wired through
+      `MonsterInstance::encounter` on both of main.cpp's death paths.
+
+    - **Defaults recovered from the constructors.** An encounter is
+      **active** by default (`FUN_1008b074`) and a region starts live 0,
+      limit **99** (`FUN_1008b000`).
+
+    - **What the shipped game does with all of it is almost nothing**, and
+      establishing that was most of the value. Three `AddEncounters` call
+      sites exist. **Both of ghstpass's name six regions that do not exist
+      in `ghstpass.zon`** -- so those two encounters and the ten
+      `AddRandomSets` calls behind them are dead. The third, lothcav's, is
+      a quest reward rather than an ambush: built dormant
+      (`SetActive(false)`), capped at one creature (`SetLimit(0,1)` -- the
+      corpus's only call), and switched on only by the pilgrim's-remains
+      menu, behind a `saved_madewight` flag. **One Tunnel Wight, one time,
+      in the whole game.** Asserted directly, since getting it wrong would
+      mean inventing behaviour for six regions that cannot fire.
+
+    - **Faithfully not implemented: the respawn tick.** `FUN_1008ae00`
+      exists and is decompiled, but the level tick only calls it when
+      `level+0x459` is set, and that flag is written by exactly one thing
+      -- the `TickZones(bool)` binding, which no shipped script calls.
+      Recorded rather than reproduced, along with a units mismatch nobody
+      can observe: the timer accumulates the engine's per-frame delta (256
+      units to the second) and is compared against `SetRespawnSeconds`'s
+      argument **raw**, so `SetRespawnSeconds(60)` would fire after 60/256
+      of a second.
+
+    - **Correction to M44's own entry**: it said `SetLimit` is never
+      called. `lothcav.s` calls it once. `SetRespawnSeconds` and
+      `TickZones` really do have zero call sites.
+
 ## Next milestones (not yet started)
 
 Roughly in priority order for reaching "actually playable," not commitments:
 
-- **Encounter spawning.** The last piece of M38's bullet that M44 did not
-  finish. The Encounter object model (sets, per-region limits, respawn
-  seconds) has been implemented and tested since M38, and M44 gave the
-  regions real rectangles -- so `EnterRegion()` correctly identifies which
-  encounter claims a region and main.cpp logs it. What is missing is the
-  placement itself: `FUN_1008a76c(encounter, room, index)` picks positions
-  inside the room's rectangle for each creature in the chosen set, and
-  neither that function nor a free-tile search has been done here. Roughly
-  the same work `CreateEntity`'s creature form (M44) already does once per
-  call, times a set.
 - **What `SetAttachedWeapon` actually writes.** Re-opened by M43: M39 had
   it as `monster+0x304` with no consumer, but that offset is
   `SetMeleeRoll`'s and has a very real consumer (see M43's correction).

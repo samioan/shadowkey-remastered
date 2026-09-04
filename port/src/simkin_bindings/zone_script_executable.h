@@ -213,17 +213,43 @@ private:
 //                               looks the named region up in the level's
 //                               own named-object registry and spawns.
 //
-// **Not attempted**: where a region's position comes from. The one real
-// caller (`lothna/pilgrim_remains.s`'s `Level.fight41.SpawnEncounter(
-// "battle41")`) names a region that is *not* an `.ent` placement -- this
-// session dumped every named placement in lothcav.ent/ghstpass.ent and
-// none of "battle41"/"fight12"/"fight12W"/"fight13C"/... appears, so
-// encounter regions live in a per-zone data source this port has not
-// identified yet (the real code looks them up through FUN_100731b4
-// against a list at `level+0x44c`, which is also what
-// `EnterZone`'s own named triggers walk). Everything above the spawn
-// *position* is real and stored; a spawn request is recorded and can be
-// read back, but nothing places creatures in the world from it yet.
+// M44 found where the regions live -- `<zone>.zon` (world/zone.h's
+// Region) -- and M45 implemented the spawn itself, from `FUN_1008a76c`.
+//
+// **What the shipped game actually does with all this is very little**,
+// and that is worth knowing before reading the machinery below. There are
+// exactly three `AddEncounters` call sites in the whole corpus:
+// ghstpass.s builds two (`fight12` over "fight12"/"fight12W"/"fight12S",
+// `fight13` over "fight13"/"fight13C"/"fight13W") and lothcav.s builds one
+// (`fight41` over "battle41"). **None of ghstpass's six region names
+// exists in `ghstpass.zon`** -- its regions are witchtree, wolves,
+// snowline, Twilight, BrokenWing, Azra, tosnowline, Stouts, vig,
+// startOutTwilite, start -- so both of its encounters can never resolve a
+// region and are dead. `battle41` *is* in `lothcav.zon`.
+//
+// So the game's one live encounter is lothcav's -- and it turns out to be
+// a **quest reward rather than an ambush**. lothcav.s builds it, gives it
+// one set (typeId 272, `monsters\Tunnel_Wight.s`, x1) and then
+// immediately switches it off:
+//
+//     fight41 = AddEncounters("battle41");
+//     fight41.AddRandomSets(272, 1);
+//     fight41.SetActive(false);
+//     fight41.SetLimit(0,1);
+//
+// It stays dormant -- walking into `battle41` does reach it, and the gate
+// refuses -- until the player uses the pilgrim's remains and picks the
+// "CreateWight" option, at which point `lothna/pilgrim_remains.s` does
+// `Level.fight41.SetActive(true)` then `SpawnEncounter("battle41")`,
+// once, behind its own `saved_madewight` flag. One Tunnel Wight, one
+// time, in the whole game.
+//
+// Never called anywhere in the corpus: `SetRespawnSeconds`, and
+// `TickZones` -- the flag that enables the respawn tick at all. With
+// `TickZones` never set, `FUN_1008ae00`'s periodic top-up never runs, and
+// since `respawnSeconds` stays 0 an encounter only ever spawns again once
+// its region is completely empty. The tick is not reproduced for exactly
+// that reason; see respawnSeconds().
 class EncounterExecutable : public NativeStubExecutable {
 public:
     struct SpawnEntry {
@@ -239,29 +265,93 @@ public:
     const std::vector<std::string>& regions() const { return m_Regions; }
     const std::vector<std::vector<SpawnEntry>>& sets() const { return m_Sets; }
     bool active() const { return m_Active; }
+    // `encounter+0x2c`, stored raw by SetRespawnSeconds. Never called by
+    // any shipped script, and the tick that would consume it
+    // (`FUN_1008ae00`) is gated on a `TickZones` flag no script sets
+    // either -- so this is 0 everywhere and no respawn timer is
+    // reproduced. It still matters: the spawn gate reads it, and 0 is what
+    // makes an encounter refuse to top a region up while anything it
+    // spawned is still alive.
+    //
+    // (Recorded for whoever implements the tick: `+0x30` accumulates the
+    // engine's per-frame delta, 256 units to the second, and is compared
+    // against this field *raw*. So `SetRespawnSeconds(60)` would fire
+    // after 60/256 of a second, not 60 seconds. Since nothing calls
+    // either binding the mismatch is unobservable in the shipped game.)
     int respawnSeconds() const { return m_RespawnSeconds; }
+
+    // ---- M45: the real per-region spawn bookkeeping ----
+    //
+    // Each region record is a 0x18-byte struct with its name at `+0x08`, a
+    // **live count** at `+0x14` and a **limit** at `+0x16`. The
+    // constructor (`FUN_1008b000`) sets live 0 and limit **99**, which is
+    // what ghstpass's four regions run with; lothcav.s is the corpus's one
+    // `SetLimit` call site and narrows its region to 1.
+    static constexpr int kDefaultRegionLimit = 99;
+
+    size_t regionCount() const { return m_Regions.size(); }
+    const std::string& regionName(size_t index) const { return m_Regions[index]; }
     int regionLimit(size_t index) const {
         return index < m_RegionLimits.size() ? m_RegionLimits[index] : 0;
     }
+    int regionLive(size_t index) const {
+        return index < m_RegionLive.size() ? m_RegionLive[index] : 0;
+    }
+    // Index of a region by name, or -1. The real SpawnEncounter handler
+    // walks its own region list with wcscmp for exactly this.
+    int RegionIndexOf(const std::string& name) const;
+
+    // `FUN_1008a76c`'s entry gate, transcribed:
+    //
+    //   ((region->live < 1 || encounter->respawnSeconds != 0)
+    //    && encounter->active
+    //    && region->live <= region->limit - 1)
+    //
+    // The first clause is the interesting one: with respawnSeconds at its
+    // default 0 -- which is every encounter in the game -- a region only
+    // spawns while it holds nothing alive.
+    bool CanSpawnInRegion(size_t index) const;
+
+    // `region->live == region->limit`, the loop's own early-out.
+    bool RegionAtLimit(size_t index) const;
+
+    // `setIndex = (setCount == 1) ? 0 : rand() % setCount` -- the real
+    // code skips the RNG entirely for a single set, which is why
+    // lothcav's one-set encounter is deterministic.
+    int PickSetIndex() const;
+
+    void NoteSpawned(size_t index);
+    // The creature's own `+0x2e4` backlink, decremented from the death
+    // routine (`FUN_10083c04` calls `FUN_1008b118(region)`), which is what
+    // lets a cleared region eventually spawn again.
+    void NoteDied(size_t index);
+
     // Called by the factory handler with AddEncounters()'s own arguments.
     void AddRegions(skRValueArray& args);
 
-    // The last region SpawnEncounter() was asked for, empty if none --
-    // the record a host would drain once encounter-region positions are
-    // known. Cleared on read.
-    std::string TakePendingSpawn() {
-        std::string s;
-        s.swap(m_PendingSpawn);
-        return s;
+    // The region index SpawnEncounter() was last asked for, or -1.
+    // Cleared on read. The real handler spawns inline; this port defers to
+    // the host, which owns the world -- same shape as
+    // LevelExecutable::TakePendingCreature().
+    //
+    // Note the real handler passes the index straight through even when
+    // the name matched nothing (-1), and the spawner's own bounds check
+    // then treats -1 as region 0. Reproduced, because
+    // `pilgrim_remains.s` is the only caller and it does match.
+    int TakePendingSpawnRegion() {
+        int index = m_PendingSpawnRegion;
+        m_PendingSpawnRegion = -1;
+        return index;
     }
 
 private:
     std::vector<std::string> m_Regions;
     std::vector<int> m_RegionLimits;
+    std::vector<int> m_RegionLive;
     std::vector<std::vector<SpawnEntry>> m_Sets;
     bool m_Active = true;
     int m_RespawnSeconds = 0;
-    std::string m_PendingSpawn;
+    int m_PendingSpawnRegion = -1;
 };
 
 class ZoneScriptExecutable : public skScriptedExecutable {

@@ -1045,3 +1045,153 @@ running from `0x20` to `0x20 + slides - 1` and then falling to `5`.
 stays unidentified — but the search space is now closed on this side: it
 is not any fade target. Worth noting that the vignette run starts at
 `0x20`, one above it.
+
+---
+
+## The encounter spawner (M45)
+
+The last piece of the Zone/Level bullet. M38 recovered the Encounter
+object model, M44 gave its regions real rectangles; this is what happens
+between "the player entered a region an encounter claims" and "a creature
+is standing there".
+
+### The object layout
+
+`AddEncounters` allocates a 0x58-byte encounter (`FUN_1008b074`) and
+appends it to `level+0x44c`; each argument becomes a 0x18-byte region
+record (`FUN_1008b000`) on the encounter's own list at `+0x0c`.
+
+```c
+struct Encounter {              // 0x58 bytes
+    /* 0x0c */ List<Region> regions;      // one per AddEncounters argument
+    /* 0x14 */ int   regionCount;
+    /* 0x18 */ List<Set> sets;            // one per AddRandomSets call
+    /* 0x20 */ int   setCount;
+    /* 0x24 */ Level* level;
+    /* 0x28 */ bool  active;              // SetActive, defaults to 1
+    /* 0x2c */ int   respawnSeconds;      // SetRespawnSeconds, defaults to 0
+    /* 0x30 */ int   respawnTimer;
+};
+
+struct Region {                 // 0x18 bytes
+    /* 0x08 */ wchar name[];              // matched against a .zon room name
+    /* 0x14 */ int16 live;                // creatures alive from this region
+    /* 0x16 */ int16 limit;               // SetLimit, defaults to 99
+};
+
+struct Set    { /* 0x08 */ List<Entry> entries; /* 0x10 */ int entryCount; };
+struct Entry  { /* 0x08 */ int16 typeId;        /* 0x0a */ int16 count; };
+```
+
+### `FUN_1008a76c(encounter, room, regionIndex)` — the spawn
+
+```c
+region = encounter->regions[regionIndex];           // bounds-checked; -1 -> region 0
+
+if (!((region->live < 1 || encounter->respawnSeconds != 0)
+      && encounter->active
+      && region->live <= region->limit - 1)) return;
+
+setIndex = (encounter->setCount == 1) ? 0 : rand() % encounter->setCount;
+for (entry : encounter->sets[setIndex]) {
+    for (n = 0; n < entry->count; ++n) {
+        actor = CreateEntityByTypeId(level, entry->typeId);   // FUN_100715a8
+        if (!actor) continue;
+        actor->encounterRegion /* +0x2e4 */ = region;
+        region->live++;
+        cell = FindSpawnPosition(encounter, room, actor, &x, &y);   // FUN_1008ae94
+        if (cell) { actor->SetPosition(x, y, z); SnapToFloor(actor, cell); }
+        if (region->live == region->limit) return;
+    }
+}
+```
+
+Two things worth keeping. The live count is incremented **before** the
+placement search, so a creature that cannot be placed still consumes a
+slot. And the first clause of the gate means that with `respawnSeconds` at
+its default 0 — which is every encounter in the game — a region will not
+top itself up while anything it spawned is still alive.
+
+`actor+0x2e4` is the backlink that makes that work: the death routine
+(`FUN_10083c04`) calls `FUN_1008b118(actor->encounterRegion)`, which is a
+one-line `region->live--`.
+
+### `FUN_1008ae94` — the placement search
+
+```c
+attempts = x1 - x0;                        // the region's *width*
+for (i = 0; i < attempts; ++i) {
+    tx = rand(x0, x1);  ty = rand(y0, y1); // inclusive, FUN_100730c8
+    if (occupancyGrid[ty * width + tx] == 0) return tileAt(tx, ty);
+}
+return 0;
+```
+
+The retry budget is the rectangle's width and has nothing to do with its
+area, so a long thin region gets very few tries. The draw is inclusive at
+both ends, which lines up with the inclusive containment M44 established
+from a completely different direction.
+
+`engine+0x6904` is a **per-tile array of 4-byte entity pointers**,
+separate from the 8-byte cell array at `engine+0x6908`; a tile is free
+when its pointer is null. This is the first use found for that array.
+
+### `FUN_1008ae00` — the respawn tick, which never runs
+
+```c
+if (encounter->active && (encounter->respawnTimer += delta) > encounter->respawnSeconds) {
+    encounter->respawnTimer = 0;
+    for (index = 0, region : encounter->regions) {
+        room = LookupRoomByName(level, region->name);
+        if (room) SpawnEncounter(encounter, room, index);
+    }
+}
+```
+
+Called from the level tick, but only when `level+0x459` is set — and that
+flag is written by exactly one thing, the `TickZones(bool)` binding, which
+**no shipped script calls**. So the periodic top-up is dead in the shipped
+game.
+
+Recorded for whoever wires it up: `delta` is the engine's per-frame delta,
+256 units to the second, while `SetRespawnSeconds(n)` stores `n` **raw**.
+So `SetRespawnSeconds(60)` would fire after 60/256 of a second rather than
+60 seconds. Since neither binding is ever called the mismatch is
+unobservable, and it is not clear which side is the bug.
+
+### What the shipped game actually does with any of this
+
+Three `AddEncounters` call sites exist in the entire corpus.
+
+| script | encounter | regions | in the zone's `.zon`? |
+|---|---|---|---|
+| `ghstpass.s` | `fight12` | `fight12`, `fight12W`, `fight12S` | **none of them** |
+| `ghstpass.s` | `fight13` | `fight13`, `fight13C`, `fight13W` | **none of them** |
+| `lothcav.s` | `fight41` | `battle41` | yes |
+
+`ghstpass.zon`'s regions are `witchtree`, `wolves`, `snowline`,
+`Twilight`, `BrokenWing`, `Azra`, `tosnowline`, `Stouts`, `vig`,
+`startOutTwilite`, `start` — so both of ghstpass's encounters, and the ten
+`AddRandomSets` calls behind them, can never resolve a region and are
+dead.
+
+That leaves one, and it is a **quest reward rather than an ambush**:
+
+```
+lothcav.s:
+    fight41 = AddEncounters("battle41");
+    fight41.AddRandomSets(272, 1);        // monsters\Tunnel_Wight.s x1
+    fight41.SetActive(false);
+    fight41.SetLimit(0,1);
+
+lothna/pilgrim_remains.s, the "CreateWight" menu option:
+    Level.fight41.SetActive(true);
+    Level.fight41.SpawnEncounter("battle41");
+```
+
+Built dormant, capped at one creature, and switched on only when the
+player uses the pilgrim's remains — once, behind a `saved_madewight`
+flag. One Tunnel Wight, one time, in the whole game. Until then, walking
+into `battle41` *does* reach the encounter (the region walk matches by
+name, not by state) and the gate refuses — which also means `EnterZone`
+never fires for that region, since the encounter claimed it.

@@ -221,6 +221,14 @@ public:
     // is complete.
     bool TakePendingCreature(PendingCreature& out, std::unique_ptr<MonsterExecutable>& script);
 
+    // M45: resolve a typeId to a creature script and run its Init(), the
+    // shared half of `FUN_100715a8` -- used by the four-argument
+    // CreateEntity above and by the encounter spawner, which creates its
+    // creatures the same way. Returns null for a typeId that is not a
+    // real category-2 script. Does **not** place anything in the world;
+    // that is the host's job either way.
+    std::unique_ptr<MonsterExecutable> CreateCreature(int typeId);
+
 private:
     MenuStack& m_Stack;
     std::map<std::string, skiExecutable*> m_Entities;

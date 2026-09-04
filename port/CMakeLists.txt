@@ -335,3 +335,8 @@ target_link_libraries(monster_caster_smoke PRIVATE sk_bindings)
 # Vignette table -- see src/tests/m44_zone_region_smoke.cpp.
 add_executable(zone_region_smoke src/tests/m44_zone_region_smoke.cpp)
 target_link_libraries(zone_region_smoke PRIVATE sk_bindings sk_world)
+
+# The encounter spawner -- gate, set draw, placement search and live-count
+# bookkeeping. See src/tests/m45_encounter_spawn_smoke.cpp.
+add_executable(encounter_spawn_smoke src/tests/m45_encounter_spawn_smoke.cpp)
+target_link_libraries(encounter_spawn_smoke PRIVATE sk_bindings sk_world)
