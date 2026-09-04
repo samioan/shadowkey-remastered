@@ -51,6 +51,7 @@
 #include "simkin_bindings/player_executable.h"
 #include "simkin_bindings/popup_menu_executable.h"
 #include "simkin_bindings/slider_executable.h"
+#include "simkin_bindings/arrow_projectile.h"
 #include "simkin_bindings/spell_cast.h"
 #include "simkin_bindings/spell_projectile.h"
 #include "simkin_bindings/table_executable.h"
@@ -1203,6 +1204,11 @@ int main(int argc, char** argv) {
     // Every offensive spell, the player's and a creature's alike, now goes
     // through one of these instead of touching its target directly.
     std::vector<sk_bindings::SpellProjectile> gameProjectiles;
+    // M49: live arrows -- a *different* class from the spell projectile
+    // above (0x16c bytes, FUN_10007da4, against 0x198 and FUN_1005f0b4).
+    // Every bow, crossbow and thrown weapon on either side goes through one
+    // of these; see simkin_bindings/arrow_projectile.h.
+    std::vector<sk_bindings::ArrowProjectile> gameArrows;
     // M48: the player's own cast cooldown (FUN_10046680), which is the only
     // side of the cast the gate applies to.
     sk_bindings::SpellCastCooldown gameCastCooldown;
@@ -1430,6 +1436,9 @@ int main(int argc, char** argv) {
                 // the spell script that owns its HitTarget handler, both of
                 // which die with the zone.
                 gameProjectiles.clear();
+                // M49: same reason -- an arrow holds a raw pointer to its
+                // shooter.
+                gameArrows.clear();
                 // M18: every live object this loop is about to (re)create
                 // is stale after this point -- drop any name -> object
                 // registrations from the previous zone before repopulating
@@ -2497,6 +2506,30 @@ int main(int argc, char** argv) {
                                     applyCastResult(attempt.spell, m.script.get(), attempt.result,
                                                      m.x, m.y, m.z, m.facingYaw, 0.0f);
                                 }
+                            } else if (m.script->shootsProjectile()) {
+                                // M49: an archer. FUN_100835b8 puts its
+                                // whole melee resolution inside `if
+                                // (+0x2d8 == -1)`, so a creature that calls
+                                // SetProjectile shoots *instead of*
+                                // swinging -- it never lands a melee blow
+                                // at all. The type is hardcoded 599 on this
+                                // side (the script's own SetProjectile
+                                // value goes to a draw parameter, not the
+                                // art), the damage is `rand % damageMax`
+                                // exactly as on the player's side, and the
+                                // sound is the creature's own
+                                // SetAttackNoise -- which every one of the
+                                // twelve shipped archers sets to slot 1,
+                                // the same bow-fire sample the player uses.
+                                const int dmgMax = (std::max)(1, m.script->damageMax());
+                                gameArrows.push_back(sk_bindings::SpawnArrowProjectile(
+                                    m.script.get(), /*ownerIsPlayer=*/false,
+                                    static_cast<int>(m.x), static_cast<int>(m.y),
+                                    static_cast<int>(m.z), 0,
+                                    sk_bindings::EngineYawFromPortYaw(m.facingYaw),
+                                    /*pitch=*/0, sk_bindings::kBowProjectileTypeId,
+                                    std::rand() % dmgMax, m.script->attack()));
+                                m.script->PlayAttackNoise();
                             } else {
                                 int dmg = sk_bindings::RollDamage(
                                     m.script->attack(), stack.player().defense(),
@@ -2766,6 +2799,54 @@ int main(int argc, char** argv) {
                         gameProjectiles.end());
                 }
 
+                // M49: the same tick for arrows. Separate list, separate
+                // class, and a genuinely different flight model -- an arrow
+                // has no lifetime, travels 1.25 tiles a tick, and is stopped
+                // by floor height rather than by any wall flag.
+                if (!gameArrows.empty() && gameZone) {
+                    std::vector<sk_bindings::ArrowTarget> arrowTargets;
+                    arrowTargets.reserve(gameMonsters.size() + 1);
+                    for (MonsterInstance& victim : gameMonsters) {
+                        if (!victim.script->alive() || victim.script->destroyed()) continue;
+                        arrowTargets.push_back({victim.script.get(), static_cast<int>(victim.x),
+                                                 static_cast<int>(victim.y)});
+                    }
+                    arrowTargets.push_back({&stack.player(), static_cast<int>(gameCamera.x),
+                                             static_cast<int>(gameCamera.y)});
+                    auto arrowCellAt = [&](int worldX, int worldY, int worldZ) {
+                        sk_bindings::ArrowCell cell;
+                        const int tileX = worldX >> 8, tileY = worldY >> 8;
+                        if (!gameZone->InBounds(tileX, tileY)) return cell;
+                        cell.onMap = true;
+                        cell.floorHeight = static_cast<int>(gameZone->CollisionFloorHeightAt(
+                            static_cast<float>(worldX), static_cast<float>(worldY),
+                            static_cast<float>(worldZ)));
+                        return cell;
+                    };
+                    for (sk_bindings::ArrowProjectile& shot : gameArrows) {
+                        sk_bindings::ArrowImpact impact =
+                            sk_bindings::TickArrowProjectile(shot, arrowCellAt, arrowTargets);
+                        if (!impact.hit || !impact.target) continue;
+                        for (MonsterInstance& victim : gameMonsters) {
+                            if (victim.script.get() != impact.target) continue;
+                            if (victim.script->alive()) break;
+                            victim.script->InvokeOnKilled();
+                            spawnLoot(victim);
+                            if (gameZoneScript) gameZoneScript->NotifyKilled(victim.typeId);
+                            if (victim.encounter) {
+                                victim.encounter->NoteDied(victim.encounterRegion);
+                                victim.encounter = nullptr;
+                            }
+                            break;
+                        }
+                    }
+                    gameArrows.erase(std::remove_if(gameArrows.begin(), gameArrows.end(),
+                                                     [](const sk_bindings::ArrowProjectile& shot) {
+                                                         return !shot.alive;
+                                                     }),
+                                      gameArrows.end());
+                }
+
                 // Player attack -- UseLeftAction/UseRightAction (Key7/
                 // Key5, real decoded default bindings, previously unused)
                 // swing/fire whichever hand's weapon is equipped (bare-
@@ -2811,6 +2892,37 @@ int main(int argc, char** argv) {
                     if (handItem && !isWeapon && handItem->spellTypeId() != 0) {
                         runSpellCast(handItem, &stack.player(), gameCamera.x, gameCamera.y,
                                       gameCamera.z, gameCamera.yaw, gameCamera.pitch);
+                        return;
+                    }
+                    // M49: a ranged weapon leaves here too, for the same
+                    // reason a spell does -- `FUN_100425bc`'s ranged branch
+                    // never aims at anything. It plays the bow sound, rolls
+                    // damage, and launches an arrow down the player's own
+                    // facing; the five-pass target search a few lines above
+                    // it in the real function feeds a bookkeeping call, not
+                    // the shot. So a bow can now miss, and the invented
+                    // 64-tile targeting cone this used to fire through
+                    // (which was also how a shot reached through a wall
+                    // corner) is gone with it.
+                    if (isWeapon && handItem->usesRangedPath()) {
+                        // Slot 1 -- barch_firebow.wav in 21 of the 22
+                        // shipped sound tables, and the same slot every
+                        // archer script's SetAttackNoise(1) names.
+                        const sk::Sound* bow =
+                            soundArchive.GetSound(sk_bindings::kBowFireSound);
+                        if (bow) audioEngine.PlaySfx(*bow);
+                        // `rand() % weapon->damageMax` -- the minimum is
+                        // simply not consulted on the ranged path, unlike
+                        // the melee RandomRange(min, max) below.
+                        const int dmgMax = (std::max)(1, handItem->damageMax());
+                        gameArrows.push_back(sk_bindings::SpawnArrowProjectile(
+                            &stack.player(), /*ownerIsPlayer=*/true,
+                            static_cast<int>(gameCamera.x), static_cast<int>(gameCamera.y),
+                            static_cast<int>(gameCamera.z), static_cast<int>(gameCamera.z),
+                            sk_bindings::EngineYawFromPortYaw(gameCamera.yaw),
+                            sk_bindings::EngineAngleFromRadians(gameCamera.pitch),
+                            handItem->projectileTypeId(), std::rand() % dmgMax,
+                            stack.player().attack()));
                         return;
                     }
                     float range =
@@ -3215,6 +3327,20 @@ int main(int argc, char** argv) {
                 for (const PickupInstance& p : gamePickups) {
                     frameEntities.push_back(
                         {p.x, p.y, p.z, p.modelArchiveIndex, p.placementYaw});
+                }
+                // M49: arrows in flight. Unlike the spell projectile --
+                // whose `+0x134` art selector is still unidentified, so it
+                // is simulated invisibly -- an arrow's model is completely
+                // pinned down: entities.txt maps its typeId 599/598 to
+                // models.idx 175/176, which models.txt names arrow.bin and
+                // throw_dagger.bin. The heading is converted back from the
+                // engine's own convention (zero along +y) to this port's.
+                for (const sk_bindings::ArrowProjectile& shot : gameArrows) {
+                    if (shot.modelIndex < 0) continue;
+                    frameEntities.push_back(
+                        {static_cast<float>(shot.x), static_cast<float>(shot.y),
+                          static_cast<float>(shot.z), shot.modelIndex,
+                          sk_bindings::PortYawFromEngineYaw(shot.yaw)});
                 }
                 zoneRenderer.Render(backbuffer, *gameZone, gameCamera, frameEntities, &modelArchive);
                 RenderHud(backbuffer, stack.player(), spriteArchive, gameCamera.yaw);

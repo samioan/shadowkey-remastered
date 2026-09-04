@@ -306,18 +306,19 @@ bool ItemExecutable::method(const skString& methodName, skRValueArray& args,
     // logical actions but were never wired into the real default control
     // scheme -- ammo/rate-of-fire is dead weight in the shipped game, not
     // a gap this port is missing.
-    if (methodName == skString("SetBow") && args.entries() == 1) {
-        m_Ranged = args[0].boolValue();
+    // M49: three names, two real bytes. SetBow, SetCrossbow and SetIsLaunched
+    // all write `+0x17a`; SetThrowingWeapon and SetIsThrown write `+0x179`.
+    // The ranged attack reads only `+0x17a`, to pick 599 over 598.
+    if ((methodName == skString("SetBow") || methodName == skString("SetCrossbow") ||
+         methodName == skString("SetIsLaunched")) &&
+        args.entries() == 1) {
+        m_Launched = args[0].boolValue();
         m_ItemType = kItemTypeWeapon;
         return true;
     }
-    if (methodName == skString("SetCrossbow") && args.entries() == 1) {
-        m_Ranged = args[0].boolValue();
-        m_ItemType = kItemTypeWeapon;
-        return true;
-    }
-    if (methodName == skString("SetThrowingWeapon") && args.entries() == 1) {
-        m_Ranged = args[0].boolValue();
+    if ((methodName == skString("SetThrowingWeapon") || methodName == skString("SetIsThrown")) &&
+        args.entries() == 1) {
+        m_Thrown = args[0].boolValue();
         m_ItemType = kItemTypeWeapon;
         return true;
     }

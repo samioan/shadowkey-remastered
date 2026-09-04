@@ -548,6 +548,26 @@ public:
     float FloorHeightAt(float worldX, float worldY) const;
     float CeilingHeightAt(float worldX, float worldY) const;
 
+    // M49: the height an *entity* collides against at (worldX, worldY) when
+    // it is at `worldZ` -- `FUN_1001beac`, which is what the arrow's four
+    // wall probes actually test (`blocked == z < this`). Three real
+    // differences from FloorHeightAt above, all of them decompiled:
+    //
+    //   * The corner arrays are conditional. `FUN_1001bd50` interpolates the
+    //     four floorHeight corners only when the ZmpCell's flags bit 2 is
+    //     set, and otherwise returns the flat `floorBandThreshold` at
+    //     ZcpEntry+2; `FUN_1001bcac` does the same for the ceiling against
+    //     bit 6 and `ceilingBandThreshold`. The renderer here already reads
+    //     both bits that way, so this is the same rule, now applied to
+    //     collision too.
+    //   * A two-storey tile -- ZmpCell's *second* byte, bit 1 -- whose
+    //     ceiling surface exists and is not disabled reports its **ceiling**
+    //     as the collision height for anything already above it. That is the
+    //     floor of the upper storey.
+    //   * There is no wall flag in this at all. What stops an arrow is
+    //     geometry taller than the arrow.
+    float CollisionFloorHeightAt(float worldX, float worldY, float worldZ) const;
+
     // M41: the real per-frame visible-tile set --
     // `TileGrid_RaycastVisibility` (`FUN_1000f694`), transcribed. This
     // replaces the renderer's fixed-radius square scan, which was M6's

@@ -253,6 +253,10 @@ public:
     int defense() const {
         return (std::max)(0, m_BaseDefense + m_Stats.statModifier(ActorStats::kStatDefense));
     }
+    // M49: SpellActor's ranged-combat ratings, which an arrow's impact
+    // resolves through -- the same two numbers melee already uses.
+    int actorAttackRating() const override { return attack(); }
+    int actorDefenseRating() const override { return defense(); }
 
     // The stats block's own per-frame tick -- the poison/burn damage
     // channels and every timed expiry. main.cpp calls this once per game

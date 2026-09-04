@@ -577,6 +577,29 @@ float Zone::CeilingHeightAt(float worldX, float worldY) const {
     return BilinearCorner(t.ceilingHeight, tx - itx, ty - ity);
 }
 
+float Zone::CollisionFloorHeightAt(float worldX, float worldY, float worldZ) const {
+    float tx = worldX / kTileScale, ty = worldY / kTileScale;
+    int itx = static_cast<int>(std::floor(tx)), ity = static_cast<int>(std::floor(ty));
+    if (!InBounds(itx, ity)) return 0.0f;
+    const ZmpCell& cell = CellAt(itx, ity);
+    const ZcpEntry& t = TypeOf(cell);
+    const float u = tx - itx, v = ty - ity;
+    // FUN_1001bd50 / FUN_1001bcac: the corner arrays only when the cell says
+    // so, otherwise the flat authored band value.
+    const float floorHeight = (cell.flags & 0x04) ? BilinearCorner(t.floorHeight, u, v)
+                                                  : static_cast<float>(t.floorBandThreshold);
+    const float ceilingHeight = (cell.flags & 0x40)
+                                    ? BilinearCorner(t.ceilingHeight, u, v)
+                                    : static_cast<float>(t.ceilingBandThreshold);
+    // FUN_1001beac's upper-storey branch. `bVar1` in the decompile is "this
+    // tile's ceiling surface exists and is not disabled", i.e. there is
+    // something solid to stand on up there.
+    const bool solidCeiling =
+        t.surIndexCeilingA != 0xff && !surface(t.surIndexCeilingA).disabled();
+    if ((cell.blockFlags & 0x02) && solidCeiling && worldZ >= ceilingHeight) return ceilingHeight;
+    return floorHeight;
+}
+
 namespace {
 
 constexpr int kLightAddPerCell = 0x40;  // Bullseye_PropagateLight's flat add per crossed cell

@@ -1547,12 +1547,12 @@ the 124 px drop during a swap.
 ```c
 if (weapon->usesRangedPath /* +0x1a7 */) {
     PlaySound(engine, 1, player->x, player->y, 100, ...);
-    spread = rand() % weapon->+0x1ce;                  // i16, a per-weapon spread
+    damage = rand() % weapon->+0x1ce;                  // i16 -- SetDamageMax
     ... target picked by five FUN_1001afb0 passes at 0x68/0x7c/0x90/0xa4/0xb8,
         rejected if the yaw difference exceeds 0x180 ...
     skill = FUN_10047f64(player->stats);
-    id    = weapon->bow ? 599 : 598;
-    FUN_10005730(player, id, id, spread, skill);
+    id    = weapon->+0x17a ? 599 : 598;
+    FUN_10005730(player, id, id, damage, skill);
     return;
 }
 ```
@@ -1563,6 +1563,15 @@ the spell side, found this is a **different class**: the arrow is 0x16c
 bytes built by `FUN_10007da4`, the spell projectile 0x198 bytes built by
 `FUN_1005f0b4`. They share the actor base's position/velocity layout and
 nothing above it.
+
+> **Two corrections, from M49, which implemented this.** The `rand() %
+> weapon->+0x1ce` term was written here as "a per-weapon spread"; it is the
+> arrow's **damage** — `+0x1ce` is `SetDamageMax`, `+0x1cc` is
+> `SetDamageMin`, and the melee branch a few lines below rolls
+> `RandomRange(+0x1cc, +0x1ce)` from the same pair. So a ranged attack
+> ignores the weapon's minimum entirely. And `+0x1a7` is not set by
+> `SetBow`: `SetRange` sets it, whenever the value exceeds `0x400`. See
+> "The arrow" below.
 
 ---
 
@@ -1799,3 +1808,301 @@ Also not reproduced: the blaze impact effect above (this port has no
 HealWound's extra term for a player whose class (`player+0xf3c`) is 7 (read
 through an undecompiled stats-block vtable slot), and the monster-only
 predicate at target vtable `+0x170` that the impact sweep rejects on.
+
+---
+
+## The arrow (M49)
+
+M47 recorded the ranged branch as a pointer and M48 established that the
+thing it spawns is a *different class* from the spell projectile it had
+just implemented. This is that class: **0x16c bytes, constructed by
+`FUN_10007da4`, spawned by `FUN_10005730`, flown by `FUN_10007214`**,
+against the spell projectile's 0x198 / `FUN_1005f0b4` / `FUN_1005f928`.
+The two share the actor base's position and velocity fields and nothing
+above them, and — as it turns out — not even the same flight model.
+
+### Which weapons take the ranged path, and it is not `SetBow`
+
+The player's attack routine branches on `weapon+0x1a7`. The Weapon class's
+dispatcher (`FUN_1006ca90`, trie `0x14d44`) writes that field in exactly
+one place, and it is `SetRange`:
+
+```c
+case 2:                                   // SetRange
+    weapon->+0x1a0 = value;
+    if (value < 0x401) return 1;
+    weapon->+0x1a7 = 1;
+    return 1;
+```
+
+So "is this a ranged weapon" is a **range threshold**, not a flag. None of
+`SetBow`, `SetCrossbow` or `SetThrowingWeapon` touches `+0x1a7` at all.
+
+That is only safe because the shipped corpus is bimodal, which this port
+already knew from the other direction (M20: "every melee weapon uses
+exactly 384, every ranged one exactly 16384, no other value appears
+anywhere"). Re-checked against the threshold: **all 16 weapons with
+`SetRange(16384)` are precisely the 16 that call one of the three markers,
+and all 65 with `SetRange(384)` call none of them.** M20's convenience
+proxy turns out to be literally how the engine decides.
+
+The three markers do matter, for a different question. Mapping the whole
+dispatcher's 24 cases onto the trie's registered names gives:
+
+| binding | field | binding | field |
+|---|---|---|---|
+| `MakeInfinitePickup` | `+0x1a5 = 1` | `SetWeaponDamage` | `+0x18a` (i16) |
+| `SetPickupable` | `+0x1a4` | `SetShootSound` | `+0x188` (i16) |
+| `SetRange` | `+0x1a0`, and `+0x1a7` | `SetNumClips` | `+0x190` (i16) |
+| `SetWeaponSprite` | `+0x19c` | `SetClipSize` | `+0x18c`, `+0x18e` |
+| `SetAnimationFrames` | `+0x180` | `SetIsThrown` | `+0x179` |
+| `SetThrowingWeapon` | `+0x179` | `SetIsLaunched` | `+0x17a` |
+| `SetBow` | `+0x17a` | `SetIsAutomatic` | `+0x17b` |
+| `SetCrossbow` | `+0x17a` | `SetAllowReload` | `+0x17c` |
+| `SetWeaponClass` | `+0x1a6` | `SetCanBash` | `+0x17d` |
+| `SetReloadFrames` | `+0x180` | `SetHasZoom` | `+0x178` |
+| `SetReloadSpeed` | `+0x184` | `SetScoped` | `+0x17e` |
+| `SetFireRate` | `+0x194` | `SetWielderMovement` | `+0x198` |
+
+Three names, two bytes: `SetBow`/`SetCrossbow`/`SetIsLaunched` all write
+`+0x17a`, and `SetThrowingWeapon`/`SetIsThrown` write `+0x179`. (The
+right-hand column is mostly M47's "leftover FPS weapon class" — and note
+`SetAnimationFrames` and `SetReloadFrames` really do share `+0x180`.)
+
+The ranged branch reads only `+0x17a`, to choose between two consecutive
+entity type ids — and the shipped data names both of them:
+
+```
+598 176 1 !throwing        models.txt 176 = throw_dagger.bin
+599 175 1 !arrow           models.txt 175 = arrow.bin
+```
+
+The 7 bows and crossbows land on 599 and the 9 darts and throwing knives
+on 598, which is what the two model names say they should.
+
+### A creature shoots when `SetProjectile` was called, and the value is dead
+
+`FUN_100835b8`'s ranged branch:
+
+```c
+if (monster->+0x2d8 != -1) {                       // SetProjectile
+    damage = (rand() % stats->+0xa) - stats->+0x8 + stats->+0x8;   // == rand % damageMax
+    skill  = FUN_10047f64(monster->stats);
+    FUN_10005730(monster, monster->+0x2d8, 599, damage, skill);
+}
+... swing animation, attack sound ...
+if (monster->+0x2d8 == -1) { <the entire melee resolution> }
+```
+
+Two things. **An archer never melees** — the whole melee tail sits inside
+the `== -1` branch. And the entity type is **hardcoded 599** here; the
+script's own `SetProjectile` value goes into the spawn's *other* argument.
+
+That argument is `+0xc6`, a per-entity draw parameter the entity's render
+override (`FUN_10064ffc`) forwards into the rasterizer dispatch. The model
+does not come from it: `FUN_10089820`, which runs during the spawn, looks
+the entity up by `+0xc8` — the typeId — through `entities.txt` and stores
+the resolved model in `+0x54`, which is what
+`Actor3D_TransformAndSubmitModel` draws. So all twelve shipped archers
+passing `SetProjectile(175)` — 175 being `models.txt`'s own index for
+`arrow.bin` — is the script author writing a model index into a slot that
+is not one, and it changes nothing: the arrow draws `arrow.bin` because
+the hardcoded 599 says so. **`SetProjectile` is load-bearing only as a
+flag.**
+
+The twelve agree on more than that: every one also sets
+`SetAttackRange(12000)` (except `lakvan/deadeye.s`, at 50000),
+`SetAttachedWeapon(225)` — `models.txt` 225 is `bow.bin`, the visible bow
+M46's field draws — and `SetAttackNoise(1)`. Slot 1 is
+`barch_firebow.wav` in 21 of the 22 shipped `*_sounds.txt`, and it is the
+same slot the *player's* ranged branch plays as a bare literal
+(`FUN_1001b198(engine, 1, ...)`). None of the twelve calls `GiveWeapon`,
+which is why the branch's `weapon == 0 || ...` gate passes for them.
+
+### The spawn
+
+```c
+Arrow* Spawn(Actor* shooter, int art, int typeId, int damage, i16 skill) {   // FUN_10005730
+    a = new(0x16c); FUN_10007da4(a, art, typeId);      // +0xc6 = art, +0xc8 = typeId
+    a->vtable[0x10](a, shooter->engine);               // resolve the model from typeId
+    a->owner = shooter;                                // +0x160
+    a->damage = damage;                                // +0x164
+    a->skill  = (i16)skill;                            // +0x168
+    a->x = shooter->x;  a->y = shooter->y;             // verbatim -- no muzzle offset
+    a->z = (shooter == engine->player) ? shooter->+0x224          // the eye-height field
+                                      : shooter->z + 0x100;      // a whole tile up
+    a->yaw = shooter->yaw; a->roll = shooter->+0xb2; a->pitch = shooter->pitch;
+    a->vx = (sine[ yaw        >> 5] * 0xa00) >> 8;  a->vx >>= 3;
+    a->vy = (sine[(yaw+0x4000)>> 5] * 0xa00) >> 8;  a->vy >>= 3;
+    a->vz = (i16)((sine[(-pitch) >> 6] * 0xa00) >> 8);
+    a->pitchRate >>= 3;                                // a no-op: it is zero
+    a->vz >>= 3;
+    AddToLevel(shooter->engine, a);
+}
+```
+
+Three things worth keeping.
+
+**Speed.** `sine * 0xa00 >> 11` against the table's 8.8 scale is
+`256 * 1.25 = 320` raw units a tick — **1.25 tiles**, a quarter faster
+than a fireball's flat one. And unlike the fireball, an arrow has **no
+lifetime at all**: there is no age counter anywhere in the class. It flies
+until geometry or a body stops it. The weapon's own `SetRange(16384)` is
+consumed entirely by the `> 0x400` test; it is never a distance.
+
+**Pitch is read at half scale.** The vertical term indexes the sine table
+at `>> 6` where every other consumer in the engine — including the spell
+projectile's structurally identical pitch term, which M48 read as `>> 5`
+from the same shaped code — uses `>> 5`. Verified in the disassembly on
+both sides (`and lr,lr,r3,asr #0x6` here against `and r12,r12,r3,asr #0x5`
+at `0x1005f25c`). Left as found: it halves an arrow's elevation rather
+than breaking it.
+
+**The `pitchRate >>= 3`** reads and rewrites `+0xaa`, which the base
+constructor (`FUN_10060d54`) zeroed and nothing since has written — so it
+is a no-op, and looks like a copy-paste of the `vz >>= 3` beneath it. With
+all three angular rates left at zero, an arrow flies dead straight.
+
+### The flight, and what actually stops it
+
+`FUN_10007214`, in order:
+
+1. Integrate position and all three angles.
+2. `Map_GetTileAt(engine, x, y)`; **if there is no tile, return** — off the
+   map an arrow is neither tested nor despawned, it simply keeps going.
+3. **The player's shot only**: walk the entity list of the arrow's own
+   tile, take the first creature that is not the owner, roll to hit, apply
+   damage — and despawn *whether or not the roll landed*, since the
+   despawn sits outside the hit branch.
+4. Four wall probes, at ±0x20 on each axis.
+5. A general entity sweep over three columns.
+
+The probes are the interesting part, because what they test is not a wall
+flag:
+
+```c
+bool Blocked(Arrow* a, Sector* s, Tile* t) {          // FUN_1008977c, vtable +0x168
+    FUN_1001bdf4(s, t, a->x, a->y, a->engine, a->z);
+    return a->z < FUN_1001beac(s, t, a->x, a->y, a->engine, a->z);
+}
+```
+
+`FUN_1001beac` is the **collision height** at a position:
+
+```c
+int CollisionHeight(Sector* s, Tile* t, int x, int y, Engine* e, int z) {
+    solidCeiling = s->surIndexCeilingA != 0xff
+                   && !(e->surfaces && (e->surfaces[s->surIndexCeilingA].flags & 0x20));
+    if (!(t->byte1 & 2) || !solidCeiling || z < Ceiling(s, t, x, y))
+        return Floor(s, t, x, y);                    // FUN_1001bd50
+    return Ceiling(s, t, x, y);                      // FUN_1001bcac
+}
+```
+
+and the two height lookups are conditionally interpolated:
+
+```c
+Floor(s, t, x, y)   = (t->byte0 & 0x04) ? bilinear(s->floorHeight[4],  x&0xff, y&0xff)
+                                        : s->+0x02;   // the flat authored band value
+Ceiling(s, t, x, y) = (t->byte0 & 0x40) ? bilinear(s->ceilingHeight[4], x&0xff, y&0xff)
+                                        : s->+0x04;
+```
+
+Those two bits are the same ones the renderer already reads for exactly
+this purpose (`RENDERER_3D.md`'s floor and ceiling band gates) — so **the
+`.zmp` cell's flags bit 2 and bit 6 mean "this tile has per-corner
+floor / ceiling heights"**, in collision as in drawing. The second cell
+byte's bit 1 is new here: it marks a two-storey tile, whose ceiling
+becomes the collision floor for anything already above it.
+
+The consequence is worth stating plainly. **An arrow is stopped by
+geometry taller than the arrow, not by anything flagged as a wall.**
+Checked against real azra data: all **725** of the zone's wall-flagged
+tiles do stop a shot fired from the player's own eye height — and so do a
+further **1858 tiles that are not flagged as walls at all**. A wall-flag
+test, which is what the spell projectile uses, would fire an arrow through
+every one of those. What is left is a single connected space 13695 tiles
+across, which is the level.
+
+A blocked probe does three things at once: pushes the arrow back out of
+the cell (`x = (x + 0x100) - ((x - 0x20) & 0xff)` and its three
+variants), **reflects that axis' velocity**, and despawns the arrow — and
+then carries straight on into the next probe with the mutated position, so
+a shot can be marked dead and still hit something in the same tick's
+sweep.
+
+One probe is transposed. The `-y` probe's "one frame back" lookup is
+
+```c
+Map_GetTileAt(engine, (y - vy) - 0x20, x - vx);   // the y expression in the x slot
+```
+
+against the correct order in the other three. Verified in the
+disassembly, not a decompiler artifact. It only decides whether the probe
+is vetoed for being off the map — `FUN_1008977c` reads only the *ahead*
+pair, and the four "back" lookups exist purely so their being null can
+cancel the probe — so its effect is that an arrow near the grid's edge
+occasionally gets one probe waived on the wrong axis.
+
+### The impact
+
+Both paths roll through the same gate the melee code already uses,
+`FUN_1004b620` — `attack * 256 / (attack + defense)` against
+`rand % 0x100`. Two details of the calls:
+
+* The caller computes the target's defense with `FUN_1004801c` and passes
+  it in, and **`FUN_1004b620` ignores that argument** and recomputes it
+  from the target's stats itself.
+* The two paths disagree about the attacker's rating. The player's
+  first-look pass uses the value stamped into the arrow at spawn time
+  (`+0x168`); the general sweep re-reads the owner's live rating with
+  `FUN_10047f64`. They differ only if the shooter's stats changed
+  mid-flight.
+
+And the damage:
+
+```c
+targetStats->vtable[0x10](targetStats, arrow->damage, attackerStats, 0, 1);
+```
+
+Note what is **not** there. The melee path fetches the target's armour
+rating (`stats->vtable[0x3c]`) and subtracts it before this call; the
+arrow's two impact paths pass the rolled damage straight through. **A
+ranged hit ignores armour entirely.** Combined with `rand % damageMax`
+ignoring the weapon's minimum, a bow's damage profile is genuinely
+different from a sword's rather than a reskin of it.
+
+The general sweep takes the entity list of the first of three columns that
+has *any* entity in it — `(x, y)`, then `(x + 0x80, y)`, then
+`(x - 0x80, y)` — and walks only that one. A miss despawns the arrow and
+then **continues to the next entity in the same list**, rolling again.
+
+### Also found
+
+* The player's ranged branch sets its own refire cooldown to
+  `attackSpeed * 6` (`player+0xf48`), against the melee path's bare
+  `attackSpeed` — a bow is six times slower to ready than a sword. This
+  port has no player attack-speed timer at all (one swing per keypress),
+  so there is nothing to apply it to; recorded.
+* `FUN_1003c45c` is the **multiplayer mirror**: it replays a remote
+  player's shot as `FUN_10005730(remote, 599 or 598, same, 0, 0)` — zero
+  damage, zero skill, purely visible art. Not implemented, same as M48's
+  spell mirror.
+
+### What this port does
+
+`simkin_bindings/arrow_projectile.h` / `.cpp`, plus
+`Zone::CollisionFloorHeightAt()` for the probe. Both sides shoot: the
+player's ranged weapon and every archer creature. A bow can now miss by
+the target stepping aside, an arrow can be stopped by a pillar, and — for
+the first time in this port — a projectile is actually **visible**, since
+unlike the spell projectile's unidentified `+0x134` art selector, an
+arrow's model is completely pinned down (`599 -> 175 -> arrow.bin`,
+`598 -> 176 -> throw_dagger.bin`).
+
+Simplifications, all recorded at the code: the port's candidate list for
+both sweeps is actors only, so an ordinary world object cannot shadow a
+creature in the column sweep the way it can in the real engine; and the
+monster-side predicate at target vtable `+0x170` that the first-look pass
+rejects on is still unidentified, so "still alive" stands in for it, as it
+does everywhere else here.

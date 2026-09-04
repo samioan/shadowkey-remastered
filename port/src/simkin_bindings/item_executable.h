@@ -249,7 +249,29 @@ public:
     // SetThrowingWeapon(true) -- informational (main.cpp's actual attack-
     // range decision uses range() directly, which already captures the
     // same real melee-vs-ranged split on its own).
-    bool ranged() const { return m_Ranged; }
+    bool ranged() const { return m_Launched || m_Thrown; }
+
+    // M49: the real gate the player's attack routine branches on is
+    // `weapon+0x1a7`, and the Weapon dispatcher (FUN_1006ca90 case 2) sets
+    // that from **SetRange alone** -- `+0x1a0 = value; if (value > 0x400)
+    // +0x1a7 = 1;`. None of SetBow/SetCrossbow/SetThrowingWeapon touches it.
+    // So M20's "range() already captures the split on its own" turns out to
+    // be literally how the engine decides, not just a convenient proxy; the
+    // corpus agrees exactly (16 weapons at 16384, 65 at 384, and the 16 are
+    // precisely the ones flagged bow/crossbow/thrown).
+    bool usesRangedPath() const { return m_Range >= 0x401; }
+
+    // M49: `+0x17a` (SetBow / SetCrossbow / SetIsLaunched) versus `+0x179`
+    // (SetThrowingWeapon / SetIsThrown) -- two distinct bytes in the real
+    // object, which this port used to collapse into one flag. The ranged
+    // branch reads only the first, to choose the projectile's entities.txt
+    // type: 599 (`!arrow`, models.txt 175 arrow.bin) when it is set, 598
+    // (`!throwing`, models.txt 176 throw_dagger.bin) when it is not. The 7
+    // shipped bows and crossbows and the 9 darts and throwing knives land on
+    // either side of exactly that line.
+    bool launched() const { return m_Launched; }
+    bool thrown() const { return m_Thrown; }
+    int projectileTypeId() const { return m_Launched ? 599 : 598; }
 
     // Deferred-removal flag: dropping/consuming an item (TableExecutable::
     // DropRow, OnUsedBy below) can happen mid-script-call, with a live
@@ -340,7 +362,9 @@ private:
     int m_WeaponSprite = -1;
     int m_AnimationFrames = 0;
     int m_Range = 0;
-    bool m_Ranged = false;  // M20: SetBow/SetCrossbow/SetThrowingWeapon(true)
+    // M49: split out of M20's single m_Ranged -- see launched()/thrown().
+    bool m_Launched = false;  // +0x17a: SetBow / SetCrossbow / SetIsLaunched
+    bool m_Thrown = false;    // +0x179: SetThrowingWeapon / SetIsThrown
     int m_WeaponType = 0;
     bool m_Equipped = false;
     skiExecutable* m_Owner = nullptr;

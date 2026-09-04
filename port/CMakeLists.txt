@@ -112,6 +112,7 @@ add_library(sk_bindings STATIC
   src/simkin_bindings/popup_menu_executable.cpp
   src/simkin_bindings/slider_executable.cpp
   src/simkin_bindings/spell_actor.cpp
+  src/simkin_bindings/arrow_projectile.cpp
   src/simkin_bindings/spell_cast.cpp
   src/simkin_bindings/spell_projectile.cpp
   src/simkin_bindings/row_owner_ref.cpp
@@ -364,3 +365,10 @@ target_link_libraries(weapon_swing_smoke PRIVATE sk_bindings)
 # src/tests/m48_spell_projectile_smoke.cpp.
 add_executable(spell_projectile_smoke src/tests/m48_spell_projectile_smoke.cpp)
 target_link_libraries(spell_projectile_smoke PRIVATE sk_bindings sk_world)
+
+# The arrow -- a different projectile class from the spell's, the SetRange
+# threshold that decides which weapons take the ranged path at all, and the
+# floor-height wall test an arrow is actually stopped by. See
+# src/tests/m49_arrow_projectile_smoke.cpp.
+add_executable(arrow_projectile_smoke src/tests/m49_arrow_projectile_smoke.cpp)
+target_link_libraries(arrow_projectile_smoke PRIVATE sk_bindings sk_world)

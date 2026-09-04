@@ -89,6 +89,14 @@ public:
     // because the branch is, not because it fires.
     virtual bool actorHasSpellCostDiscount() const { return false; }
 
+    // M49: the two ranged-combat ratings a projectile impact resolves with
+    // -- FUN_10047f64 (attack) and FUN_1004801c (defense), the same pair the
+    // melee path already goes through. An arrow needs both from either side,
+    // since a creature's shot is resolved by exactly the same code as the
+    // player's; the concrete classes already compute them for melee.
+    virtual int actorAttackRating() const { return 0; }
+    virtual int actorDefenseRating() const { return 0; }
+
     // FUN_1004bb88 (clamped into [0, max]) and the DoDamage vtable slot.
     virtual int actorHealth() const = 0;
     virtual void SetActorHealth(int value) = 0;

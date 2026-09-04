@@ -95,6 +95,12 @@ int EngineAngleFromRadians(float radians);
 // heading; EngineAngleFromRadians is the raw unit conversion.
 int EngineYawFromPortYaw(float radians);
 
+// The way back, for anything that has to *draw* a projectile: the same
+// `a = pi/2 - yaw` reflection is its own inverse, so this is
+// EngineYawFromPortYaw run backwards through the unit conversion. Added by
+// M49, whose arrow is the first projectile with a model to point.
+float PortYawFromEngineYaw(int engineAngle);
+
 struct SpellProjectile {
     ItemExecutable* spell = nullptr;  // +0x17c -- whose HitTarget() the impact runs
     SpellActor* owner = nullptr;      // +0x178 -- the caster, never a valid target

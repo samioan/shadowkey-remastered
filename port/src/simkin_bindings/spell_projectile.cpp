@@ -55,6 +55,12 @@ int EngineYawFromPortYaw(float radians) {
     return EngineAngleFromRadians(static_cast<float>(kPi * 0.5) - radians);
 }
 
+float PortYawFromEngineYaw(int engineAngle) {
+    const double radians =
+        (static_cast<double>(engineAngle) / static_cast<double>(kEngineTurn)) * 2.0 * kPi;
+    return static_cast<float>(kPi * 0.5 - radians);
+}
+
 SpellProjectile SpawnSpellProjectile(ItemExecutable* spell, SpellActor* owner, int casterX,
                                      int casterY, int casterZ, int yaw, int pitch, int sprite,
                                      int impactDamage) {

@@ -600,6 +600,16 @@ bool MonsterExecutable::method(const skString& methodName, skRValueArray& args,
         m_AttackRange = args[0].intValue();
         return true;
     }
+    // M49: `monster+0x2d8`. FUN_100835b8 gates its whole ranged branch on
+    // this not being -1, and its *value* never reaches the art -- the spawn
+    // hardcodes entities.txt typeId 599 and resolves the model from that.
+    // All twelve shipped callers pass 175, which is models.txt's own index
+    // for arrow.bin, so the number is the author writing a model index into
+    // a slot the engine treats as a draw parameter. Stored as written.
+    if (methodName == skString("SetProjectile") && args.entries() == 1) {
+        m_ProjectileArt = args[0].intValue();
+        return true;
+    }
     if (methodName == skString("SetMeleeAttackRange") && args.entries() == 1) {
         // Accepted and deliberately ignored: the real dispatcher's case for
         // this name falls straight through to its shared `break` and stores

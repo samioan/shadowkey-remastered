@@ -136,6 +136,10 @@ public:
     // this port's damage roll.
     int attack() const { return (std::max)(0, m_Attack + statModifier(kStatAttack)); }
     int defense() const { return (std::max)(0, m_Defense + statModifier(kStatDefense)); }
+    // M49: SpellActor's ranged-combat ratings -- see spell_actor.h. A
+    // creature's arrow and the player's are resolved by the same code.
+    int actorAttackRating() const override { return attack(); }
+    int actorDefenseRating() const override { return defense(); }
     // The unmodified script values, for tests and UI that want the base.
     int baseAttack() const { return m_Attack; }
     int baseDefense() const { return m_Defense; }
@@ -171,6 +175,15 @@ public:
     // arm's length -- most monster scripts, arat.s included, never set it
     // and use exactly this).
     float attackRange() const { return ScaledSquaredToUnits(m_AttackRange); }
+
+    // M49 (`monster+0x2d8`, SetProjectile): does this creature shoot? The
+    // real attack routine spawns an arrow when this is set and **skips its
+    // melee resolution entirely** -- the whole melee tail sits inside
+    // `if (+0x2d8 == -1)` -- so an archer never also punches. Twelve shipped
+    // scripts are archers; see arrow_projectile.h for why the value itself
+    // is dead and only its presence matters.
+    bool shootsProjectile() const { return m_ProjectileArt != -1; }
+    int projectileArt() const { return m_ProjectileArt; }
     bool aggressive() const { return m_Aggressive; }
     // M22: real SetMagicResistance() -- stored since M12, never read back
     // until now (spellcasting's own damage formula, ItemExecutable::
@@ -639,6 +652,7 @@ private:
     // +0x2dc = 0x6a4. Both in the scaled-squared form -- see chaseRadius().
     int m_ChaseRadius = 0x7fff;
     int m_AttackRange = 0x6a4;
+    int m_ProjectileArt = -1;  // M49, monster+0x2d8 -- see shootsProjectile()
     int m_Mob = 0;
     int m_Level = 0;  // M30: SetLevel/GetLevel, read by real spell damage formulas
     // M48: the stats block's +0x2e / +0x2c. No shipped creature script sets
