@@ -330,3 +330,8 @@ target_link_libraries(visibility_smoke PRIVATE sk_world)
 # src/tests/m43_monster_caster_smoke.cpp.
 add_executable(monster_caster_smoke src/tests/m43_monster_caster_smoke.cpp)
 target_link_libraries(monster_caster_smoke PRIVATE sk_bindings)
+
+# Named zone regions (<zone>.zon), Lock/UnlockZone, LightRect and the
+# Vignette table -- see src/tests/m44_zone_region_smoke.cpp.
+add_executable(zone_region_smoke src/tests/m44_zone_region_smoke.cpp)
+target_link_libraries(zone_region_smoke PRIVATE sk_bindings sk_world)

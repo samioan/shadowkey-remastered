@@ -1,6 +1,7 @@
 #include "world/zone.h"
 
 #include <algorithm>
+#include <cctype>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
@@ -16,6 +17,26 @@ constexpr int kZtxSlotSize = 0x4000;   // 128*128, 8bpp
 constexpr size_t kZcpEntrySize = 36;
 constexpr size_t kZmpCellSize = 6;
 constexpr size_t kEntRecordSize = 0x48;
+// M44: `.zon`'s room record -- four u16 then a 64-byte name.
+// GameEngine_InitLevel reads it as `FUN_1009ec80(&rec, 0x48, 1, handle)`.
+constexpr size_t kZonRecordSize = 0x48;
+
+// The engine's own room-name comparisons are a mix of `strcmp` (the
+// UnlockZone scan) and `strcasecmp` (a leftover in the EnterZone path),
+// and the shipped names are inconsistently cased even within one zone
+// (`azra.zon` has both "YouSure" and "start"). Matching case-insensitively
+// is the tolerant reading, and matches how every other name lookup in this
+// port already behaves.
+bool EqualsIgnoreCase(const std::string& a, const std::string& b) {
+    if (a.size() != b.size()) return false;
+    for (size_t i = 0; i < a.size(); ++i) {
+        if (std::tolower(static_cast<unsigned char>(a[i])) !=
+            std::tolower(static_cast<unsigned char>(b[i]))) {
+            return false;
+        }
+    }
+    return true;
+}
 
 bool ReadWholeFile(const std::string& path, std::vector<uint8_t>& out) {
     std::ifstream f(path, std::ios::binary);
@@ -58,6 +79,9 @@ bool Zone::Load(const std::string& scriptRoot, const std::string& zoneName) {
     for (size_t i = 0; i < cellCount; ++i) {
         const uint8_t* p = &zmp[0x84 + i * kZmpCellSize];
         cells_[i].flags = p[0];
+        // M44: the second byte, which Lock/UnlockZone toggle -- see
+        // ZmpCell::blockFlags.
+        cells_[i].blockFlags = p[1];
         cells_[i].lightLevel = ReadU16(p + 2);
         cells_[i].zcpIndex = ReadU16(p + 4);
     }
@@ -205,12 +229,140 @@ bool Zone::Load(const std::string& scriptRoot, const std::string& zoneName) {
         return false;
     }
 
+    // --- M44: .zon, the named-region list. See zone.h's Region. ---
+    //
+    // Uncompressed (the same WholeFile_Load path as .sur/.pth/.ent), and
+    // the loop below is GameEngine_InitLevel's own, including the Y flip:
+    // fields b and d are stored as `gridHeight - y` and converted back
+    // with the grid height that came out of the .zmp header a few dozen
+    // lines above. The engine has room for 40 regions and reads exactly
+    // `count` of them, so a zone with more would silently overrun; every
+    // shipped zone is well under (crypt1's 31 is the largest).
+    {
+        std::vector<uint8_t> zon;
+        if (ReadWholeFile(base + ".zon", zon) && zon.size() >= 2) {
+            uint32_t regionCount = ReadU16(&zon[0]);
+            if (zon.size() < 2 + static_cast<size_t>(regionCount) * kZonRecordSize) {
+                std::printf("Zone: %s.zon too short for %u regions\n", zoneName.c_str(),
+                            regionCount);
+            } else {
+                regions_.reserve(regionCount);
+                for (uint32_t i = 0; i < regionCount; ++i) {
+                    const uint8_t* p = &zon[2 + static_cast<size_t>(i) * kZonRecordSize];
+                    const char* s = reinterpret_cast<const char*>(p + 8);
+                    size_t len = 0;
+                    while (len < 64 && s[len] != '\0') ++len;
+                    Region r;
+                    r.x0 = ReadU16(p + 0);
+                    r.y1 = height_ - static_cast<int>(ReadU16(p + 2));  // b -> bottom edge
+                    r.x1 = ReadU16(p + 4);
+                    r.y0 = height_ - static_cast<int>(ReadU16(p + 6));  // d -> top edge
+                    r.name.assign(s, len);
+                    regions_.push_back(std::move(r));
+                }
+            }
+        }
+    }
+
     std::printf(
         "Zone: loaded %s -- %dx%d tiles, %u zcp entries, %u surfaces, player start (%d,%d), "
-        "%zu placed entities\n",
+        "%zu placed entities, %zu named regions\n",
         zoneName.c_str(), width_, height_, zcpCount, surCount, playerStartX >> 8, playerStartY >> 8,
-        entities_.size());
+        entities_.size(), regions_.size());
     return true;
+}
+
+// ---- M44: the named-region API. See zone.h. ----
+
+std::vector<const Zone::Region*> Zone::RegionsNamed(const std::string& name) const {
+    std::vector<const Region*> out;
+    for (const Region& r : regions_) {
+        if (EqualsIgnoreCase(r.name, name)) out.push_back(&r);
+    }
+    return out;
+}
+
+std::vector<const Zone::Region*> Zone::RegionsAt(int tileX, int tileY) const {
+    std::vector<const Region*> out;
+    for (const Region& r : regions_) {
+        if (r.Contains(tileX, tileY)) out.push_back(&r);
+    }
+    return out;
+}
+
+void Zone::SetBlockFlags(int tileX, int tileY, uint8_t value) {
+    if (!InBounds(tileX, tileY)) return;
+    size_t index = static_cast<size_t>(tileY) * static_cast<size_t>(width_) +
+                    static_cast<size_t>(tileX);
+    cells_[index].blockFlags = value;
+    // FUN_1006d7bc: find an existing journal entry for this tile and
+    // overwrite its saved value, else append -- capped at 100, past which
+    // the real function silently drops the change.
+    for (TileChange& c : tileChanges_) {
+        if (c.x == static_cast<int16_t>(tileX) && c.y == static_cast<int16_t>(tileY)) {
+            c.blockFlags = value;
+            return;
+        }
+    }
+    if (tileChanges_.size() >= kMaxTileChanges) return;
+    tileChanges_.push_back({static_cast<int16_t>(tileX), static_cast<int16_t>(tileY), value});
+}
+
+void Zone::LightRect(int x0, int y0, int x1, int y1, int level) {
+    // The real loop, in its own order: `for (y = y0; y < y1; ++y) for
+    // (x = x0; x < x1; ++x) Map_GetTileAt(map, x << 8, y << 8)->light =
+    // level << 8`. Half-open in both axes and **not** Y-flipped -- unlike
+    // `.zon`'s stored rectangles, the script hands these in directly.
+    for (int y = y0; y < y1; ++y) {
+        for (int x = x0; x < x1; ++x) {
+            if (!InBounds(x, y)) continue;
+            size_t index = static_cast<size_t>(y) * static_cast<size_t>(width_) +
+                            static_cast<size_t>(x);
+            cells_[index].lightLevel = static_cast<uint16_t>(level << 8);
+        }
+    }
+}
+
+int Zone::LockRegion(const std::string& name) {
+    // FUN_10073470. The name-to-room map holds one room per name, so this
+    // affects a single rectangle even when several share the name -- the
+    // asymmetry with UnlockRegion below is the real engine's, not a
+    // simplification. Taking the first match reproduces "whichever one the
+    // map holds" as closely as an ordered list can.
+    int changed = 0;
+    for (const Region& r : regions_) {
+        if (!EqualsIgnoreCase(r.name, name)) continue;
+        for (int x = r.x0; x < r.x1; ++x) {
+            for (int y = r.y0; y < r.y1; ++y) {
+                // An assignment, not an OR: locking wipes whatever else
+                // the byte held. Transcribed as written.
+                SetBlockFlags(x, y, ZmpCell::kBlockLocked);
+                ++changed;
+            }
+        }
+        break;
+    }
+    return changed;
+}
+
+int Zone::UnlockRegion(const std::string& name) {
+    // FUN_10073380: a linear walk of every room slot, so all regions
+    // sharing the name unlock together.
+    int changed = 0;
+    for (const Region& r : regions_) {
+        if (!EqualsIgnoreCase(r.name, name)) continue;
+        for (int x = r.x0; x < r.x1; ++x) {
+            for (int y = r.y0; y < r.y1; ++y) {
+                if (!InBounds(x, y)) continue;
+                size_t index = static_cast<size_t>(y) * static_cast<size_t>(width_) +
+                                static_cast<size_t>(x);
+                SetBlockFlags(x, y, static_cast<uint8_t>(cells_[index].blockFlags &
+                                                           ~ZmpCell::kBlockLocked));
+                ++changed;
+            }
+        }
+    }
+    return changed;
 }
 
 const ZmpCell& Zone::CellAt(int tileX, int tileY) const {
@@ -321,7 +473,16 @@ bool Zone::CircleHitsWall(float worldX, float worldY, float radius) const {
             // Out-of-bounds tiles block movement too, matching the
             // renderer's neighborBlocks() treatment of the grid edge
             // (render3d/zone_renderer.cpp).
-            if (!InBounds(tx, ty) || CellAt(tx, ty).IsWall()) {
+            //
+            // M44: a *locked* tile blocks as well. That is the whole point
+            // of `LockZone`/`UnlockZone` -- 30-odd real call sites of the
+            // shape `UnlockZone("swdoor")` after a key is used or a lever
+            // pulled, on regions that are barriers until then. Locking is
+            // kept out of the *sightline* test below deliberately: the
+            // engine's blocking test is a separate virtual from the one the
+            // renderer and the visibility raycast use, and nothing about
+            // this byte says it stops light or line of sight.
+            if (!InBounds(tx, ty) || CellAt(tx, ty).IsWall() || CellAt(tx, ty).IsLocked()) {
                 float closestX = std::clamp(worldX, tx * kTileScale, (tx + 1) * kTileScale);
                 float closestY = std::clamp(worldY, ty * kTileScale, (ty + 1) * kTileScale);
                 float dx = worldX - closestX, dy = worldY - closestY;

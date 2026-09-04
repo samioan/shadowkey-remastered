@@ -106,6 +106,15 @@ struct ZmpCell {
     uint8_t flags = 0;  // bit0 light source, bit1 wall, bit3 force-draw, bit6 ceiling-band-select,
                          // bits4-5 .zlu hue-family selector for faces this cell blocks/owns (this
                          // session, decompiled -- see Zone::PaletteColor()'s comment)
+    // M44: the cell record's **second** byte, which this port skipped
+    // entirely until now. `LockZone`/`UnlockZone` are the two functions
+    // that make it matter: locking a named region assigns `4` to this byte
+    // across every tile in the region's rectangle (an assignment, not an
+    // OR -- see Zone::LockRegion) and unlocking clears bit 2 (`&= 0xfb`).
+    // The rest of the byte is not decoded; the port only reads bit 2.
+    uint8_t blockFlags = 0;
+    static constexpr uint8_t kBlockLocked = 0x04;
+    bool IsLocked() const { return (blockFlags & kBlockLocked) != 0; }
     // `lightLevel`'s on-disk value is only a leftover editor baseline --
     // the real engine zeroes it at the start of Bullseye_BakeLighting and
     // rebuilds it from scratch (propagation + .zcp's lightDelta). Zone::
@@ -199,6 +208,112 @@ public:
         std::string scriptPath;
     };
     const std::vector<EntPlacement>& entities() const { return entities_; }
+
+    // ---- M44: `<zone>.zon`, the named-region list ----
+    //
+    // This is the answer to the roadmap's longest-standing "where does a
+    // named zone region live?" -- the one M38 left open after ruling out
+    // `.ent` placements. It is `.zon`, whose room records ZONE_FORMAT.md
+    // already decoded byte-for-byte without recognising what they were
+    // for: `u16 count` then 72-byte `{u16 a, b, c, d; char name[64]}`
+    // records. The four numbers are an **axis-aligned tile rectangle**,
+    // and the name is what `EnterZone(s)` receives and what the Encounter
+    // spawner's region strings match.
+    //
+    // Three independent confirmations, since this had been guessed at
+    // before:
+    //   * azra's region named "start" is (118..121, 42..46) once the Y
+    //     flip below is applied, and azra's own player start tile is
+    //     (118, 46) -- inside it.
+    //   * every shipped record has a < c, in all 21 zones.
+    //   * `LockZone`/`UnlockZone` (FUN_10073470 / FUN_10073380) iterate
+    //     `for (x = a; x < c; ++x) for (y = d'; y < b'; ++y)` straight
+    //     over the cell grid, which only type-checks as a rectangle.
+    //
+    // **The Y flip.** Fields b and d are stored as `gridHeight - y`, and
+    // GameEngine_InitLevel converts them back with the grid height it read
+    // out of the *already-loaded* `.zmp` header (offset 0x82). So d is the
+    // top edge and b the bottom one, and they swap places on conversion.
+    // ZONE_FORMAT.md had noticed the `zmpTotal - field` conversion and
+    // guessed the fields were indices into "some zone-wide array sized by
+    // zmpTotal"; they are coordinates in a flipped axis.
+    struct Region {
+        std::string name;
+        // Tile-space, and **inclusive at both ends**.
+        //
+        // That is not what LockRegion/UnlockRegion do, and the discrepancy
+        // is the engine's, not a choice here: their loops are literally
+        // `for (x = x0; x < x1; ++x)`, so locking a region misses its last
+        // row and column.
+        //
+        // Containment is inclusive, and the shipped data is what says so.
+        // Checking all 21 zones' `.ent` player-start tiles against their
+        // own `.zon` rectangles, 12 spawn inside a region -- and every one
+        // of those regions is named like an arrival point: `start`,
+        // `entry`, `Entrance`, `Enter`, `Exit`, `Zvoldoor`, `vig`. Four of
+        // the twelve survive only under inclusive bounds, because the
+        // spawn sits exactly on the far edge: azra's `start` (spawn
+        // (118,46), region y42..46), broken1's `Exit`, crypt3's
+        // `Entrance` and fearfrst's `Exit`.
+        //
+        // What those regions *do* is the corroboration. crypt1.s,
+        // delfhide.s, ghstpass.s and glaciercrawl.s each contain
+        // `if (zone = "vig") Level.Vignette(n)` -- an arrival cutscene,
+        // which only makes sense if standing at the spawn point counts as
+        // being in the region.
+        int x0 = 0, y0 = 0, x1 = 0, y1 = 0;
+        bool Contains(int tileX, int tileY) const {
+            return tileX >= x0 && tileX <= x1 && tileY >= y0 && tileY <= y1;
+        }
+    };
+    const std::vector<Region>& regions() const { return regions_; }
+
+    // Names are not unique: azra has four separate rectangles all called
+    // "YouSure" and three called "queue", so a name identifies a *set* of
+    // rooms. The engine's own two consumers differ on this, and the
+    // difference is reproduced -- see LockRegion/UnlockRegion below.
+    std::vector<const Region*> RegionsNamed(const std::string& name) const;
+
+    // Every region containing this tile, innermost first is *not*
+    // guaranteed -- they come back in file order, which is what the
+    // engine's own 40-slot linear walk gives.
+    std::vector<const Region*> RegionsAt(int tileX, int tileY) const;
+
+    // `LockZone(name)` -- FUN_10073470. Looks the name up in the level's
+    // name-to-room *map* (so one room, the one the map holds for that
+    // name) and **assigns** `4` to every covered cell's second byte.
+    // Returns the number of tiles changed.
+    int LockRegion(const std::string& name);
+
+    // `UnlockZone(name)` -- FUN_10073380. Deliberately different: it walks
+    // all 40 room slots with `strcmp` and clears bit 2, so it unlocks
+    // *every* region sharing the name, not just one. Reproduced rather
+    // than made symmetric.
+    int UnlockRegion(const std::string& name);
+
+    // M44: the per-level tile-change journal (`level+0xfc` / `+0x100`, a
+    // fixed 100-entry array of `{i16 x, i16 y, u16 savedByte}`). Every
+    // Lock/Unlock records the tile's resulting second byte here, replacing
+    // an existing entry for the same tile rather than appending -- which
+    // makes it exactly "the set of cells this level has diverged from its
+    // .zmp in", i.e. the level-state half of a save file. Capped at 100 in
+    // the real engine, and the cap is reproduced.
+    struct TileChange {
+        int16_t x = 0, y = 0;
+        uint16_t blockFlags = 0;
+    };
+    static constexpr size_t kMaxTileChanges = 100;
+    const std::vector<TileChange>& tileChanges() const { return tileChanges_; }
+
+    // M44: `Level.LightRect(x0, y0, x1, y1, level)` -- the zone-effects
+    // dispatcher's case 1. Overwrites the *baked* light level of every
+    // cell in a half-open tile rectangle with `level << 8`, the same 8.8
+    // scale PaletteColor()'s `lightLevel >> 8` rung lookup reads. Every
+    // one of the 8 shipped call sites passes 64, which the rung clamp
+    // saturates to the brightest rung -- crypt2/controller.s uses it to
+    // light one alcove per puzzle step, and monsters/umbra_keth.s lights
+    // the arena it appears in.
+    void LightRect(int x0, int y0, int x1, int y1, int level);
 
     // M11: the room's own static mesh baked into <zone>.zsk -- a real,
     // separate render step in the original engine
@@ -448,8 +563,14 @@ private:
     std::vector<uint8_t> ztxData_;          // 1 header byte + N*0x4000 texture slots
     std::vector<uint8_t> zluData_;          // N*2048-byte palette sets
     std::vector<EntPlacement> entities_;
+    std::vector<Region> regions_;        // M44: parsed <zone>.zon, see regions()
+    std::vector<TileChange> tileChanges_;  // M44: see tileChanges()
     Model roomMesh_;         // M11: parsed <zone>.zsk, see RoomMesh() above
     bool roomMeshValid_ = false;
+
+    // M44: the shared tail of LockRegion/UnlockRegion -- write the cell's
+    // second byte and record the change in the journal.
+    void SetBlockFlags(int tileX, int tileY, uint8_t value);
 
     // M9: reproduces Bullseye_BakeLighting/Bullseye_PropagateLight
     // (docs/ZONE_FORMAT.md) -- called once from Load(), after cells_ and

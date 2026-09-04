@@ -83,6 +83,7 @@ namespace sk_bindings {
 
 class ItemExecutable;
 class MenuStack;
+class MonsterExecutable;  // M44: CreateEntity's creature form
 
 class LevelExecutable : public NativeStubExecutable {
 public:
@@ -134,11 +135,103 @@ public:
     // in the real corpus) returns nullptr rather than a stale object.
     std::unique_ptr<ItemExecutable> TakePendingCreatedEntity();
 
+    // ---- M44: the named-region natives ----
+    //
+    // `LockZone(name)`/`UnlockZone(name)` (dispatcher 0x1006dbec cases
+    // 0x29/0x28) make a named `.zon` region impassable or passable by
+    // writing the second byte of every cell it covers -- see
+    // world/zone.h's Region and ZmpCell::blockFlags. 30-odd real call
+    // sites across the corpus, all of the shape `UnlockZone("swdoor")`
+    // after a key is used or a lever pulled.
+    //
+    // Reached through this interface rather than through `sk::Zone`
+    // directly, because `sk_bindings` deliberately does not link
+    // `sk_world` -- the same layering that made `sk_entity_types` its own
+    // library (see CMakeLists.txt). main.cpp implements it over the live
+    // zone; a test can implement it over anything.
+    //
+    // Set by main.cpp's zone-load block; before it is set, all three
+    // natives accept the call and do nothing, the same
+    // late-bound-dependency convention SetEntityTypes() uses.
+    class ZoneRegions {
+    public:
+        virtual ~ZoneRegions() = default;
+        virtual bool HasRegion(const std::string& name) const = 0;
+        // Both return the number of tiles changed.
+        virtual int LockRegion(const std::string& name) = 0;
+        virtual int UnlockRegion(const std::string& name) = 0;
+        // M44: `LightRect(x0, y0, x1, y1, level)` -- zone-effects
+        // dispatcher (FUN_1002f074) case 1. Writes the *baked* light level
+        // of every cell in a half-open tile rectangle, as `level << 8`
+        // (the same 8.8 scale Zone::PaletteColor's `lightLevel >> 8` rung
+        // lookup already reads). All 8 real call sites pass 64, which the
+        // rung clamp turns into "fully lit".
+        virtual void LightRect(int x0, int y0, int x1, int y1, int level) = 0;
+    };
+    void SetZoneRegions(ZoneRegions* regions) { m_ZoneRegions = regions; }
+
+    // ---- M44: `Vignette(n)` ----
+    //
+    // Zone-effects dispatcher case 2, whose whole implementation
+    // (FUN_1002bc6c + its per-frame tick FUN_1002bdf4) is a **full-screen
+    // slideshow**: it stops the player dead, preloads a contiguous run of
+    // sprite slots, arms a fade to screen mode 0x20, and then advances one
+    // mode per 0x700 time units, drawing sprite `first + (mode - 0x20)`
+    // with caption string `text + (mode - 0x20)` under it. Any key skips
+    // to the end. Six of them ship, one per zone that calls it, and each
+    // is a story beat at a region boundary (azra's "Done", crypt1's
+    // "vig", ...).
+    //
+    // The table is the switch in FUN_1002bc6c, verbatim.
+    struct VignetteDefinition {
+        int firstSprite = 0;
+        int lastSprite = 0;   // inclusive
+        int firstTextId = 0;
+        int slides() const { return lastSprite - firstSprite + 1; }
+    };
+    static bool VignetteById(int id, VignetteDefinition& out);
+
+    // Set by the Vignette handler, drained by main.cpp, which owns the
+    // screen. Cleared on read.
+    bool TakePendingVignette(VignetteDefinition& out) {
+        if (!m_PendingVignettePending) return false;
+        m_PendingVignettePending = false;
+        out = m_PendingVignette;
+        return true;
+    }
+
+    // M44: `CreateEntity(typeId, x, y, z)` -- the four-argument form.
+    // crypt1.s's EnterZone handler spawns Umbra Keth with it, at typeId
+    // 274 (a *monster*, not an item), so this is the non-item-shaped
+    // category the roadmap's second sub-bullet asks about. The position
+    // is handed back to the host through here rather than acted on
+    // directly: creating a live creature needs a MonsterExecutable plus a
+    // world instance, both of which live in main.cpp.
+    struct PendingCreature {
+        int typeId = 0;
+        int x = 0, y = 0, z = 0;
+        // Filled in by the host once it has built the real instance, so
+        // that the script's own follow-up calls (crypt1.s immediately does
+        // `UmbraKeth.SetCanTeleport(true)`) reach the right object.
+        skiExecutable* object = nullptr;
+    };
+    // Hands the host both the request and the live script object it
+    // already built, transferring ownership. Returns false when nothing is
+    // waiting. Declared here, defined in the .cpp where MonsterExecutable
+    // is complete.
+    bool TakePendingCreature(PendingCreature& out, std::unique_ptr<MonsterExecutable>& script);
+
 private:
     MenuStack& m_Stack;
     std::map<std::string, skiExecutable*> m_Entities;
     const sk::EntityTypeTable* m_EntityTypes = nullptr;
     std::unique_ptr<ItemExecutable> m_PendingCreatedEntity;
+    ZoneRegions* m_ZoneRegions = nullptr;  // M44: see SetZoneRegions()
+    VignetteDefinition m_PendingVignette;
+    bool m_PendingVignettePending = false;
+    PendingCreature m_PendingCreature;
+    std::unique_ptr<MonsterExecutable> m_PendingCreatureScript;
+    bool m_PendingCreaturePending = false;
 };
 
 }  // namespace sk_bindings

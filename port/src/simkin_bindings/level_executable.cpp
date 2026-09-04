@@ -7,6 +7,7 @@
 #include "audio/audio_engine.h"
 #include "simkin_bindings/item_executable.h"
 #include "simkin_bindings/menu_stack.h"
+#include "simkin_bindings/monster_executable.h"
 #include "simkin_bindings/native_binding_common.h"
 #include "simkin_bindings/player_executable.h"
 #include "skExecutableContext.h"
@@ -24,6 +25,32 @@ LevelExecutable::~LevelExecutable() = default;
 
 std::unique_ptr<ItemExecutable> LevelExecutable::TakePendingCreatedEntity() {
     return std::move(m_PendingCreatedEntity);
+}
+
+// M44: FUN_1002bc6c's switch, verbatim. Note case 5's caption id is a
+// decimal 700 rather than the 0xf3x/0xf4x run the other five use, and that
+// it is the only five-slide vignette.
+bool LevelExecutable::VignetteById(int id, VignetteDefinition& out) {
+    switch (id) {
+        case 0: out = {0xe0, 0xe3, 0xf30 + 9}; return true;  // delfhide.s
+        case 1: out = {0xdc, 0xdf, 0xf40 + 9}; return true;  // crypt1.s
+        case 2: out = {0xe4, 0xe7, 0xf41}; return true;      // drgnfld.s
+        case 3: out = {0xe8, 0xeb, 0xf3d}; return true;      // ghstpass.s
+        case 4: out = {0xec, 0xef, 0xf45}; return true;      // glaciercrawl.s
+        case 5: out = {0xf0, 0xf4, 700}; return true;        // azra.s
+        default: break;
+    }
+    // The real default arm returns without arming anything.
+    return false;
+}
+
+bool LevelExecutable::TakePendingCreature(PendingCreature& out,
+                                           std::unique_ptr<MonsterExecutable>& script) {
+    if (!m_PendingCreaturePending) return false;
+    m_PendingCreaturePending = false;
+    out = m_PendingCreature;
+    script = std::move(m_PendingCreatureScript);
+    return true;
 }
 
 bool LevelExecutable::method(const skString& methodName, skRValueArray& args,
@@ -94,6 +121,106 @@ bool LevelExecutable::method(const skString& methodName, skRValueArray& args,
             }
         }
         returnValue = skRValue(0);
+        return true;
+    }
+    // ---- M44: the named-region natives (see level_executable.h) ----
+    if (methodName == skString("LockZone") && args.entries() == 1) {
+        std::string name = ToStdString(args[0].str());
+        int tiles = m_ZoneRegions ? m_ZoneRegions->LockRegion(name) : 0;
+        std::printf("  [zone] LockZone(\"%s\") -- %d tile(s) blocked\n", name.c_str(), tiles);
+        return true;
+    }
+    if (methodName == skString("UnlockZone") && args.entries() == 1) {
+        std::string name = ToStdString(args[0].str());
+        int tiles = m_ZoneRegions ? m_ZoneRegions->UnlockRegion(name) : 0;
+        std::printf("  [zone] UnlockZone(\"%s\") -- %d tile(s) opened\n", name.c_str(), tiles);
+        return true;
+    }
+    if (methodName == skString("LightRect") && args.entries() == 5) {
+        if (m_ZoneRegions) {
+            m_ZoneRegions->LightRect(args[0].intValue(), args[1].intValue(), args[2].intValue(),
+                                      args[3].intValue(), args[4].intValue());
+        }
+        return true;
+    }
+    if (methodName == skString("Vignette") && args.entries() == 1) {
+        int id = args[0].intValue();
+        if (VignetteById(id, m_PendingVignette)) {
+            m_PendingVignettePending = true;
+        } else {
+            // The real default arm does nothing but a debug wait.
+            std::printf("Level: Vignette(%d) -- no such vignette\n", id);
+        }
+        return true;
+    }
+    // M44: the zone-effects dispatcher's other four bindings
+    // (SpawnWithinRadius, TickZones, AddInterestPoint, ClearInterestPoints)
+    // are deliberately left to soft-fail: a grep of the entire shipped
+    // script corpus finds **zero** call sites for any of them, so there is
+    // nothing to be faithful to and no way to check an implementation.
+    // Recorded rather than guessed at, the same treatment SetClipSize/
+    // SetFireRate/SetReloadFrames already get in ItemExecutable.
+    if (methodName == skString("GetZone") && args.entries() == 1) {
+        // The real handler returns the room object itself, which scripts
+        // only ever compare against null. Nothing in the corpus calls a
+        // method on the result, so a plain "does this region exist"
+        // boolean carries the same information without inventing a script-
+        // visible object with no members.
+        std::string name = ToStdString(args[0].str());
+        returnValue = skRValue(m_ZoneRegions && m_ZoneRegions->HasRegion(name));
+        return true;
+    }
+    if (methodName == skString("CreateEntity") && args.entries() == 4) {
+        // M44: the four-argument form -- `Level.CreateEntity(274, x, y, z)`
+        // in crypt1.s's EnterZone("UmbraHere") branch. typeId 274 is a
+        // monster, i.e. exactly the non-item-shaped category the
+        // one-argument form below refuses. Building a live creature needs
+        // both a MonsterExecutable and a world instance, so the request is
+        // parked here and main.cpp does the work on its next tick -- the
+        // same defer-to-the-host shape TakePendingCreatedEntity() already
+        // uses for an item -- except that the *script object* is built
+        // here and returned straight away, because crypt1.s null-checks
+        // the result and immediately calls `SetCanTeleport(true)` on it.
+        // Only the world instance is deferred.
+        int typeId = args[0].intValue();
+        const sk::EntityTypeDescriptor* desc =
+            m_EntityTypes ? m_EntityTypes->Lookup(typeId) : nullptr;
+        bool isRealScript = desc && desc->name.size() > 2 &&
+                             desc->name.compare(desc->name.size() - 2, 2, ".s") == 0;
+        // Category 2 is entities.txt's creature/NPC category (the same one
+        // main.cpp's zone-load block resolves for placed monsters).
+        if (isRealScript && desc->category == 2) {
+            std::string relPath = desc->name;
+            for (char& c : relPath) {
+                if (c == '\\') c = '/';
+            }
+            std::string fullPath = m_Stack.scriptRoot() + "/" + relPath;
+            skExecutableContext loadCtxt(&m_Stack.interpreter());
+            try {
+                auto monster = std::make_unique<MonsterExecutable>(
+                    skString(fullPath.c_str()), loadCtxt, m_Stack.strings(), m_Stack.player(),
+                    m_Stack);
+                skRValueArray initArgs;
+                initArgs.append(skRValue(0));  // Init's "(s)" placeholder
+                skRValue initRet;
+                skExecutableContext callCtxt(&m_Stack.interpreter());
+                monster->method(skString("Init"), initArgs, initRet, callCtxt);
+                returnValue = skRValue(static_cast<skiExecutable*>(monster.get()), false);
+                m_PendingCreature = PendingCreature{typeId, args[1].intValue(),
+                                                     args[2].intValue(), args[3].intValue(),
+                                                     monster.get()};
+                m_PendingCreatureScript = std::move(monster);
+                m_PendingCreaturePending = true;
+                return true;
+            } catch (skParseException& e) {
+                std::printf("Level: CreateEntity(%d,x,y,z) -- PARSE ERROR loading %s: %s\n", typeId,
+                            fullPath.c_str(), e.toString().ptr());
+            } catch (skRuntimeException& e) {
+                std::printf("Level: CreateEntity(%d,x,y,z) -- RUNTIME ERROR loading %s: %s\n",
+                            typeId, fullPath.c_str(), e.toString().ptr());
+            }
+        }
+        returnValue = skRValue();  // "not found" -- see GetEntity()'s miss case
         return true;
     }
     if (methodName == skString("CreateEntity") && args.entries() == 1) {

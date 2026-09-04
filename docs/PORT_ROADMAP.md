@@ -3125,25 +3125,146 @@ algorithms.
       resolving them by filename silently mis-read a creature's blaze
       (typeId 50) and DoomHammer (4017) as their alternate variants.
 
+- **M44 -- the `Zone/Level` global object: named regions, and what M38
+  left.** Closes the whole three-part bullet. RE writeups in
+  `docs/ZONE_FORMAT.md` ("`.zon` is the named-region list") and
+  `docs/WORLD_MODEL.md` ("Entering a named region, and the zone effects");
+  smoke test `src/tests/m44_zone_region_smoke.cpp` (29 checks).
+
+    - **Where a named zone region lives: `<zone>.zon`.** The file this
+      project decoded byte-for-byte three milestones ago without
+      recognising what it was *for*. `ZONE_FORMAT.md` had the record --
+      `u16 count` then 72-byte `{u16 a,b,c,d; char name[64]}` -- and
+      guessed that two of the four fields "index into some zone-wide array
+      sized by zmpTotal (portal/neighbor list? texture-atlas range? light
+      index?)". They are **coordinates in a flipped axis**: the record is
+      an axis-aligned tile rectangle, and `b`/`d` are stored as
+      `gridHeight - y`.
+
+      The find itself was embarrassingly direct once the right question
+      was asked -- `grep -rl battle41` over the install tree returns
+      `lothcav.s` and `lothcav.zon`. What took the work was proving the
+      rectangle reading, and three independent things do:
+      azra's region named `start` decodes to x 118..121, y 42..46 and
+      azra's `.ent` player-start tile is (118, 46); every record in all 21
+      zones has `x0 < x1` and `y0 < y1` after the flip; and
+      `LockZone`/`UnlockZone` iterate the pair of ranges straight over the
+      cell grid, which only type-checks as a rectangle.
+
+      With that, `EnterZone(name)` works: main.cpp diffs the set of
+      regions containing the player once per tick and fires the zone-root
+      script's own handler on entry. The end-to-end test is crypt1 --
+      whose spawn tile sits inside one of its two regions named `vig`, and
+      whose script says `if (zone = "vig") Level.Vignette(1)`.
+
+    - **Inclusive containment, half-open iteration -- and the data that
+      settles it.** `LockZone`/`UnlockZone` run `for (x = x0; x < x1)`
+      loops, so locking a region misses its last row and column.
+      Containment is inclusive, though: across all 21 zones, 12 spawn
+      tiles land inside a region, every one of those regions is named like
+      an arrival point (`start`, `entry`, `Entrance`, `Enter`, `Exit`,
+      `Zvoldoor`, `vig`), and four of the twelve hold *only* under
+      inclusive bounds because the spawn sits exactly on the far edge.
+      Both conventions reproduced as found rather than reconciled.
+
+    - **`LockZone`/`UnlockZone` are asymmetric, and it is observable.**
+      Lock goes through the name-to-room map (one rectangle) and
+      **assigns** 4 to each cell's second byte; Unlock walks all 40 room
+      slots with `strcmp` and clears bit 2 on **every** rectangle sharing
+      the name. Names are not unique -- azra has four called `YouSure` --
+      so locking blocks one doorway and unlocking opens all four. The
+      second byte of a `.zmp` cell had no known meaning and was skipped by
+      this port's loader entirely; it is the block flag, and a locked tile
+      now stops movement (30-odd real `UnlockZone("swdoor")`-shaped call
+      sites, all gating a barrier behind a key or a lever).
+
+    - **Correction: `level+0x44c` is the encounter list, not the region
+      list.** The bullet this milestone closes said both `EnterZone`'s
+      tags and the spawner's regions "are looked up the same way --
+      `FUN_100731b4` against a list at `level+0x44c`". They are looked up
+      the same way, but that is not the list: `FUN_100731b4` searches a
+      wide-string binary tree at `levelObj+0x84` built from `.zon` at load
+      time, while `level+0x44c` holds registered `Encounter` objects.
+      `FUN_1002ef44` walks the encounter list *first*, and a region an
+      encounter claims never reaches the script at all.
+
+    - **The per-level tile-change journal, which is save state.** Every
+      Lock/Unlock routes through `FUN_1006d7bc`, a fixed 100-entry array
+      at `level+0x100` of `{i16 x, i16 y, u16 savedByte}` that overwrites
+      an existing entry for the same tile rather than appending. That is
+      exactly "the cells this level has diverged from its `.zmp` in" -- a
+      concrete piece of `SAVE_FORMAT.md`'s open "what is inside a
+      `<level>.dat`". Implemented and asserted.
+
+    - **`CreateEntity`'s non-item category.** The four-argument form,
+      `Level.CreateEntity(274, x, y, z)` in crypt1.s's own
+      `EnterZone("UmbraHere")` branch, creates a **creature** -- the
+      category the one-argument loot-bag form refuses. Implemented: the
+      script object is built and returned synchronously (crypt1.s
+      null-checks it and immediately calls `SetCanTeleport(true)`), and
+      the world instance is created by the host on its next tick.
+
+    - **Zone effects: two of the six matter.** `LightRect(x0,y0,x1,y1,n)`
+      overwrites the baked light of a half-open tile rectangle with
+      `n << 8` -- 8 call sites, all passing 64, lighting one alcove per
+      puzzle step in crypt2 and the arena umbra_keth appears in.
+      `Vignette(n)` turns out to be a **screen mode**, not an effect: a
+      full-screen slideshow that stops the player, advances one slide per
+      7 seconds and skips on any key. The table of all six (sprite runs
+      and caption ids) is recovered from `FUN_1002bc6c`'s switch and
+      implemented as a real screen.
+
+      The other four -- `SpawnWithinRadius`, `TickZones`,
+      `AddInterestPoint`, `ClearInterestPoints` -- have **zero call sites
+      anywhere in the shipped corpus**, so they keep soft-failing. Same
+      treatment `SetClipSize`/`SetFireRate`/`SetReloadFrames` already get.
+
+    - **Two engine-hardcoded region names, both dead.** `FUN_10070534`
+      strcmp's the entered region against `"Minefield"` -- which calls a
+      function that is **empty** in the shipped build -- and strcasecmp's
+      it against `"FinalEscape"`, discarding the result. Neither name
+      appears in any `.zon`.
+
+    - **Faithfully not implemented: the region-entry trigger walk.**
+      `FUN_1002ef44`'s third step selects triggers with flag 8 whose name
+      matches the region, then calls the fire routine as
+      `FUN_10090818(trigger, 1, *(engine+0x618))` -- mode 1 with the
+      **world object** as the notifying entity. Mode 1 requires
+      `entity == trigger->doorObject` and the trap branch requires an
+      AddEntity match; the world object is neither, for any trigger any
+      shipped script builds. The walk selects triggers it then cannot
+      fire. Recorded rather than reproduced.
+
+    - **Narrows the `0x1f` bullet.** `FUN_1001b788` is the fade-arming
+      function M42 was hunting -- it writes the deferred `SetScreenMode`
+      target at `engine+0x5ac`. Its complete call-site set is `1`, `5`,
+      `0xc`, `0x20`, plus the attract slideshow's `1..0x10` run and the
+      vignette's `0x20..0x24` run. **0x1f is in none of them**, so that
+      mode is not any fade target; the vignette run starting one above it
+      is the nearest thing to a lead.
+
+    - **Still not implemented: encounter spawning.** The Encounter object
+      model (sets, per-region limits, respawn) has been in place since
+      M38, and regions now resolve to real rectangles -- but placing
+      creatures inside one needs a free-tile search this port does not
+      have. `EnterRegion()` returns the matching encounter and main.cpp
+      logs it rather than silently dropping it, so the gap is visible in
+      the log. See "Next milestones".
+
 ## Next milestones (not yet started)
 
 Roughly in priority order for reaching "actually playable," not commitments:
 
-- **`Zone/Level` global object -- what M38 left.** The trigger half is
-  done (M38); these are the remaining pieces of the same bullet:
-    - **Where a named zone region lives.** `EnterZone(s)`'s tags
-      (`"Skelos_Dead"`, `"YouSure"`, `"ghasts"`, ...) and the Encounter
-      spawner's regions (`"battle41"`, `"fight12W"`, ...) are looked up the
-      same way -- `FUN_100731b4` against a list at `level+0x44c` -- and M38
-      ruled out the obvious source by dumping every named `.ent` placement
-      in `lothcav.ent`/`ghstpass.ent`/`crypt1.ent`: none of these names
-      appears. With that list's real source found, both `EnterZone` and
-      `SpawnEncounter` become straightforward (the spawner's own object
-      model, sets and limits included, is already implemented and tested).
-    - `CreateEntity`/`CreateEntityScript`'s non-item-shaped categories and
-      save/load-level state.
-    - Zone effects beyond `SetZone` (`Vignette`/`SpawnWithinRadius`/
-      `LightRect`/`AddInterestPoint`, dispatcher `FUN_1002f074`).
+- **Encounter spawning.** The last piece of M38's bullet that M44 did not
+  finish. The Encounter object model (sets, per-region limits, respawn
+  seconds) has been implemented and tested since M38, and M44 gave the
+  regions real rectangles -- so `EnterRegion()` correctly identifies which
+  encounter claims a region and main.cpp logs it. What is missing is the
+  placement itself: `FUN_1008a76c(encounter, room, index)` picks positions
+  inside the room's rectangle for each creature in the chosen set, and
+  neither that function nor a free-tile search has been done here. Roughly
+  the same work `CreateEntity`'s creature form (M44) already does once per
+  call, times a set.
 - **What `SetAttachedWeapon` actually writes.** Re-opened by M43: M39 had
   it as `monster+0x304` with no consumer, but that offset is
   `SetMeleeRoll`'s and has a very real consumer (see M43's correction).
@@ -3164,12 +3285,24 @@ Roughly in priority order for reaching "actually playable," not commitments:
   not the serialization within each member: how `character.dat` lays out
   player stats/inventory/quest flags, and how a `<level>.dat` stores a
   zone's entity state. M5's four slots are still simulated in memory.
+  **M44 found one concrete piece of the `<level>.dat` half**: the tile
+  journal at `level+0xfc`/`+0x100`, a fixed 100-entry array of
+  `{i16 x, i16 y, u16 cellByte1}` that every `LockZone`/`UnlockZone`
+  writes through, keyed by tile so it holds the level's divergence from
+  its `.zmp` rather than a history. Implemented (`Zone::tileChanges()`);
+  what it is serialized *as* is still unknown.
 - **Which scenario `FUN_1002c010`'s mode 0x1f means.** M42 identified the
   other three (3 = zone travel, 4 = saving, 10 = loading a saved game) plus
   1 and 5, by walking `SetScreenMode`'s call sites. 0x1f never appears as a
   literal argument, and M42 found why: the screen fade (`FUN_1004fc50`)
   calls `SetScreenMode` with a deferred target read from `engine+0x5ac`,
   so whoever arms that fade is where the value comes from.
+  **M44 found the arming function and closed that avenue**:
+  `FUN_1001b788(engine, mode, flag)` writes `engine+0x5ac`, and its
+  complete call-site set is `1`, `5`, `0xc`, `0x20`, the attract
+  slideshow's `1..0x10` run and the vignette's `0x20..0x24` run. 0x1f is
+  in none of them, so it is not a fade target either. The vignette run
+  beginning one above it is the only remaining lead.
 - **The real weapon-swing trigger** -- M25's RE pass fully decompiled the
   first-person viewmodel's draw function and struct shape but couldn't
   find the native call site that actually starts a swing (writes

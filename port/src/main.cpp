@@ -16,6 +16,7 @@
 #include <fstream>
 #include <map>
 #include <memory>
+#include <set>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -205,6 +206,30 @@ std::string SpriteLabel(const std::string& callback) {
 // AiAttack/AiPursue itself (only AiDetect(), confirmed by grepping the
 // whole monsters/*.s corpus), so there's no real state machine to
 // match, just parameters (chaseRadius etc.) to honor.
+// M44: the host side of LevelExecutable::ZoneRegions -- see that class for
+// why the Level global reaches the zone through an interface rather than
+// including world/zone.h (sk_bindings deliberately does not link sk_world).
+// Points at whatever zone is live; harmlessly inert between zones.
+class LiveZoneRegions : public sk_bindings::LevelExecutable::ZoneRegions {
+public:
+    void SetZone(sk::Zone* zone) { m_Zone = zone; }
+    bool HasRegion(const std::string& name) const override {
+        return m_Zone && !m_Zone->RegionsNamed(name).empty();
+    }
+    int LockRegion(const std::string& name) override {
+        return m_Zone ? m_Zone->LockRegion(name) : 0;
+    }
+    int UnlockRegion(const std::string& name) override {
+        return m_Zone ? m_Zone->UnlockRegion(name) : 0;
+    }
+    void LightRect(int x0, int y0, int x1, int y1, int level) override {
+        if (m_Zone) m_Zone->LightRect(x0, y0, x1, y1, level);
+    }
+
+private:
+    sk::Zone* m_Zone = nullptr;
+};
+
 struct MonsterInstance {
     std::unique_ptr<sk_bindings::MonsterExecutable> script;
     float x = 0, y = 0, z = 0;
@@ -919,6 +944,35 @@ void RenderLoadingScreen(sk::Backbuffer& backbuffer, sk::SpriteArchive& sprites,
     if (frame) backbuffer.Blit(40, 166, *frame);
 }
 
+// M44: `Level.Vignette(n)` -- the full-screen story slideshow. See
+// LevelExecutable::VignetteDefinition for the recovered table and for the
+// real screen-mode machinery this stands in for.
+//
+// The real one advances one screen mode per 0x700 engine time units
+// (0x700 / 0x100 = 7 seconds at the engine's own 1/256s clock), draws the
+// slide's sprite at (0xe, 5) and its caption underneath, and lets any key
+// skip straight out. All three are reproduced; what is not is the fade
+// between slides, which lives in the screen-mode controller this port
+// does not have.
+constexpr int kVignetteSlideUnits = 0x700;
+constexpr int kVignetteSpriteX = 0xe;
+constexpr int kVignetteSpriteY = 5;
+
+void RenderVignette(sk::Backbuffer& backbuffer, sk::SpriteArchive& sprites,
+                     const sk::StringTable& strings,
+                     const sk_bindings::LevelExecutable::VignetteDefinition& def, int slide) {
+    backbuffer.Fill(kBackgroundColor);
+    const sk::Sprite* art = sprites.GetSprite(def.firstSprite + slide);
+    if (art) backbuffer.Blit(kVignetteSpriteX, kVignetteSpriteY, *art);
+    // The real draw puts the caption at y=0x73 with a fixed wrap width;
+    // this port's font helper has no wrapper, so the string is drawn
+    // centred on one line -- the same simplification the loading screen's
+    // own banner already makes.
+    std::string caption = strings.Get(def.firstTextId + slide);
+    int textX = (sk::Backbuffer::kWidth - sk::BitmapFont::TextWidth(caption)) / 2;
+    sk::BitmapFont::DrawString(backbuffer, (std::max)(0, textX), 0x73, caption, kTitleColor);
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -1117,6 +1171,19 @@ int main(int argc, char** argv) {
     // up (unlike gameDoors/gameMonsters, which stay fixed-size for a
     // zone's whole lifetime).
     std::vector<PickupInstance> gamePickups;
+    // M44: which named `.zon` regions the player is currently standing in,
+    // by index into Zone::regions(). The real engine tracks this per
+    // actor and fires `FUN_1002ef44` on a transition; here it is a set
+    // diffed once per tick, which gives the same edge-triggered behaviour
+    // without a room pointer on every entity. Names are not unique -- azra
+    // has four rectangles called "YouSure" -- so this is indexed by
+    // rectangle, and walking out of one "YouSure" into another really does
+    // fire EnterZone("YouSure") again, exactly as the real per-room
+    // tracking would.
+    std::set<size_t> gameRegionsOccupied;
+    // M44: the LockZone/UnlockZone/GetZone bridge -- see LiveZoneRegions.
+    LiveZoneRegions gameZoneRegions;
+    stack.level().SetZoneRegions(&gameZoneRegions);
     sk::Camera gameCamera;
     // M25: first-person weapon viewmodel -- see simkin_bindings/
     // weapon_viewmodel.h's comment for the real RE ground truth this
@@ -1131,6 +1198,11 @@ int main(int argc, char** argv) {
     // when the request came in) and every later "Travel to: <zone>" one.
     bool loadingScreenActive = false;
     int loadingScreenTick = 0;
+    // M44: `Level.Vignette(n)` -- see RenderVignette().
+    sk_bindings::LevelExecutable::VignetteDefinition vignetteDef;
+    bool vignetteActive = false;
+    int vignetteSlide = 0;
+    int vignetteTimer = 0;
     bool loadingScreenIsFirstZone = false;
     std::string loadingScreenZoneName;
     sk::ZoneRenderer zoneRenderer;
@@ -1188,6 +1260,39 @@ int main(int argc, char** argv) {
             return;
         }
 
+        // M44: a vignette takes over the whole screen until it ends, the
+        // same way the loading screen below does -- the real one is a
+        // screen mode, and a screen mode is exclusive. Armed by
+        // Level.Vignette(n) from inside an EnterZone handler.
+        if (stack.level().TakePendingVignette(vignetteDef)) {
+            vignetteActive = true;
+            vignetteSlide = 0;
+            vignetteTimer = kVignetteSlideUnits;
+            std::printf("shadowkey-port: vignette -- %d slide(s), sprites %d..%d, text %d\n",
+                        vignetteDef.slides(), vignetteDef.firstSprite, vignetteDef.lastSprite,
+                        vignetteDef.firstTextId);
+        }
+        if (vignetteActive) {
+            // Any key skips out, exactly as the real tick's own
+            // InputState_GetButton2 sweep does.
+            bool skip = false;
+            for (int slot = 0; slot < static_cast<int>(sk::ButtonSlot::kCount); ++slot) {
+                if (input.ConsumeJustPressed(static_cast<sk::ButtonSlot>(slot))) skip = true;
+            }
+            vignetteTimer -= sk_bindings::kAiFrameDeltaUnits;
+            if (vignetteTimer <= 0) {
+                ++vignetteSlide;
+                vignetteTimer = kVignetteSlideUnits;
+            }
+            if (skip || vignetteSlide >= vignetteDef.slides()) {
+                vignetteActive = false;
+            } else {
+                RenderVignette(backbuffer, spriteArchive, strings, vignetteDef, vignetteSlide);
+                window.Present(backbuffer);
+                return;
+            }
+        }
+
         // M26: real loading screen -- see RenderLoadingScreen()'s comment.
         // Latches loadingScreenActive the instant a request comes in
         // (initial game start or a real Level.LoadLevel() transition,
@@ -1234,6 +1339,15 @@ int main(int argc, char** argv) {
                 // it already in place.
                 soundArchive.LoadCategory(scriptRoot, stack.requestedZone());
                 gameZone = std::move(zone);
+                // M44: LockZone/UnlockZone write straight into the cell
+                // grid, so the Level global needs the live zone. Repointed
+                // on every zone load.
+                gameZoneRegions.SetZone(gameZone.get());
+                // M44: a fresh zone starts with nobody inside any region,
+                // so the first tick fires EnterZone for wherever the
+                // player spawns -- which is what azra's "start"/"help1"
+                // regions are for.
+                gameRegionsOccupied.clear();
                 gameCamera.x = static_cast<float>(gameZone->playerStartX);
                 gameCamera.y = static_cast<float>(gameZone->playerStartY);
                 gameCamera.z = static_cast<float>(gameZone->playerStartZ) + sk::kEyeHeightOffset;
@@ -1733,6 +1847,79 @@ int main(int argc, char** argv) {
                         }
                         trap.inside = overlapping;
                     }
+                }
+
+                // M44: `Level.CreateEntity(typeId, x, y, z)` -- the
+                // creature form (crypt1.s's EnterZone("UmbraHere") spawns
+                // Umbra Keth with it). LevelExecutable built and Init'd the
+                // script object already, since the calling script needs it
+                // back immediately; what is left is the world instance,
+                // which only exists on this side. Drained here rather than
+                // at the call site because the call comes from inside a
+                // live script frame, the same reason PickupItem() and
+                // SummonMe()'s SetPosition() are both deferred.
+                {
+                    sk_bindings::LevelExecutable::PendingCreature req;
+                    std::unique_ptr<sk_bindings::MonsterExecutable> script;
+                    while (stack.level().TakePendingCreature(req, script)) {
+                        if (!script) continue;
+                        const sk::EntityTypeDescriptor* desc = entityTypes.Lookup(req.typeId);
+                        MonsterInstance inst;
+                        inst.x = static_cast<float>(req.x);
+                        inst.y = static_cast<float>(req.y);
+                        inst.z = static_cast<float>(req.z);
+                        inst.modelArchiveIndex = desc ? desc->modelArchiveIndex : -1;
+                        inst.typeId = req.typeId;
+                        inst.script = std::move(script);
+                        std::printf("shadowkey-port: CreateEntity(%d) spawned \"%s\" at "
+                                    "(%d, %d, %d)\n",
+                                    req.typeId, inst.script->name().c_str(), req.x, req.y, req.z);
+                        gameMonsters.push_back(std::move(inst));
+                    }
+                }
+
+                // M44: named-region entry -- the `.zon` room list, decoded
+                // this milestone (world/zone.h's Region). Same "once the
+                // player's position for this tick is settled" placement as
+                // the trap check above, and edge-triggered for the same
+                // reason: azra's "YouSure" region opens a menu, and it must
+                // do that on crossing the boundary, not 25 times a second.
+                //
+                // The real engine tracks the room per actor and calls
+                // FUN_1002ef44 on a transition; this diffs the occupied set
+                // instead, which behaves the same and needs no per-entity
+                // room pointer. Leaving a region is deliberately silent --
+                // the engine has no ExitZone, and no shipped script has a
+                // handler for one.
+                if (gameZone && gameZoneScript && !gameZone->regions().empty()) {
+                    const int playerTx = static_cast<int>(std::floor(gameCamera.x / sk::kTileScale));
+                    const int playerTy = static_cast<int>(std::floor(gameCamera.y / sk::kTileScale));
+                    std::set<size_t> nowOccupied;
+                    const std::vector<sk::Zone::Region>& regions = gameZone->regions();
+                    for (size_t i = 0; i < regions.size(); ++i) {
+                        if (!regions[i].Contains(playerTx, playerTy)) continue;
+                        nowOccupied.insert(i);
+                        if (gameRegionsOccupied.count(i)) continue;  // already inside
+                        std::printf("shadowkey-port: entered zone region \"%s\"\n",
+                                    regions[i].name.c_str());
+                        sk_bindings::EncounterExecutable* encounter =
+                            gameZoneScript->EnterRegion(regions[i].name);
+                        if (encounter) {
+                            // The real FUN_1002ef44 spawns the encounter
+                            // here and returns without calling EnterZone.
+                            // This port has the encounter's whole object
+                            // model (sets, limits, respawn -- M38) but no
+                            // spawner: placing creatures needs a free tile
+                            // inside the region and a live MonsterInstance,
+                            // which is the same work CreateEntity's
+                            // creature form does below. Logged rather than
+                            // silently dropped, so the gap is visible.
+                            std::printf("shadowkey-port: region \"%s\" belongs to an encounter "
+                                        "(%zu set(s)) -- spawning not implemented\n",
+                                        regions[i].name.c_str(), encounter->sets().size());
+                        }
+                    }
+                    gameRegionsOccupied.swap(nowOccupied);
                 }
 
                 // Post-M11: real gravity/jump/ground-and-ceiling physics,

@@ -916,3 +916,132 @@ regeneration kinds 6/7 of the second periodic channel — and for the
 offensive spells allocates a 0x198-byte projectile whose impact is what
 eventually calls the status dispatcher. This port substitutes a direct
 `HitTarget()` call on both sides instead.
+
+---
+
+## Entering a named region, and the zone effects (M44)
+
+The regions themselves are `.zon`'s room records — see
+[`ZONE_FORMAT.md`](ZONE_FORMAT.md). This is what the engine does when the
+player walks into one.
+
+### `FUN_1002ef44(level, room)` — the entry handler
+
+```c
+uint OnEnterRoom(level, room) {
+    name = room + 0x40;
+    // 1. an encounter that names this region takes it, and stops here
+    for (node = *(level + 0x44c); node; node = node[1], ++index) {
+        if (FUN_1008af9c(node[0], name) >= 0) {
+            FUN_1008a76c(node[0], room, index);   // spawn
+            return 1;
+        }
+    }
+    // 2. otherwise the level script's own handler
+    result = FUN_10070534(level, room);           // EnterZone(name)
+    // 3. then a trigger walk -- see below
+    for (node = *(level + 0x420); node; node = node[1]) { ... }
+    return result & 0xff;
+}
+```
+
+**Correction: `level+0x44c` is the encounter list, not the region list.**
+An earlier note had it as the source of the region names, which is why the
+search for them went to `.ent`. It holds registered `Encounter` objects,
+each of which *names* regions; `FUN_1008af9c` asks whether one is bound to
+this room and returns its index.
+
+`FUN_10070534` is where the binary's UTF-16 `"EnterZone"` literal is used:
+it wraps the name in a one-element SimKin argument array and calls the
+level script through the standard scripted-call vtable slot. It also
+strcmp's the room name against two engine-hardcoded constants first —
+`"Minefield"`, which calls `FUN_100730f0` (an **empty function** in the
+shipped build), and `"FinalEscape"`, whose strcasecmp result is
+**discarded**. Neither name appears in any shipped `.zon`. Both are dead.
+
+**Step 3 selects triggers it cannot fire.** The walk picks triggers with
+flag `0x08` whose name matches the region, then calls
+`FUN_10090818(trigger, 1, *(engine+0x618))` — mode 1, with the **world
+object** as the notifying entity (`ldr r3,[r10,#0x34]; ldr r2,[r3,#0x618];
+movne r1,#1`). Inside, mode 1 requires `entity == trigger->doorObject`
+(SetDoor's own argument) and the trap branch requires the entity to match
+the trigger's AddEntity list. The world object is neither, for any trigger
+any shipped script builds. So the region-entry trigger notification is
+effectively dead code, and the port does not reproduce it.
+
+### `LockZone` / `UnlockZone`
+
+Covered in [`ZONE_FORMAT.md`](ZONE_FORMAT.md) — a named region's tiles get
+their cell's second byte written, bit 2 meaning "blocked". 30-odd real call
+sites, all `UnlockZone("swdoor")`-shaped, after a key or a lever.
+
+### The zone-effects dispatcher (`FUN_1002f074`)
+
+Eight bindings, of which the shipped scripts use **two**:
+
+| index | binding | call sites | what it does |
+|---|---|---|---|
+| 0 | `SetZone` | 20 | the zone XP budget (see M39) |
+| 1 | `LightRect` | 8 | `for (y = y0; y < y1) for (x = x0; x < x1) tile(x,y)->light = level << 8` — half-open, and **not** Y-flipped, unlike `.zon`'s own rectangles. Every call site passes 64. |
+| 2 | `Vignette` | 6 | a full-screen slideshow, below |
+| 3 | `SpawnWithinRadius` | **0** | — |
+| 4 | `AddEncounters` | several | the encounter factory (M38) |
+| 5 | `TickZones` | **0** | — |
+| 6 | `AddInterestPoint` | **0** | — |
+| 7 | `ClearInterestPoints` | **0** | — |
+
+Four of the eight have **zero call sites anywhere in the shipped script
+corpus**, so there is nothing to be faithful to and no way to check an
+implementation. Recorded rather than guessed at.
+
+### `Vignette(n)` is a screen mode, not an effect
+
+`FUN_1002bc6c` stops the player dead (zeroing `+0x98`/`+0xa0` on the world
+object), preloads a contiguous run of sprite slots, and arms a fade to
+screen mode **0x20**. Its per-frame tick `FUN_1002bdf4` then advances one
+screen mode every `0x700` engine time units (7 seconds on the 1/256s
+clock), drawing sprite `firstSprite + (mode - 0x20)` at (0xe, 5) with
+caption string `firstTextId + (mode - 0x20)` under it at y=0x73. Any key
+skips straight to mode 5.
+
+The six that ship, from the switch, verbatim:
+
+| n | sprites | first caption id | used by |
+|---|---|---|---|
+| 0 | 0xe0..0xe3 | 0xf39 | `delfhide.s` |
+| 1 | 0xdc..0xdf | 0xf49 | `crypt1.s` |
+| 2 | 0xe4..0xe7 | 0xf41 | `drgnfld.s` |
+| 3 | 0xe8..0xeb | 0xf3d | `ghstpass.s` |
+| 4 | 0xec..0xef | 0xf45 | `glaciercrawl.s` |
+| 5 | 0xf0..0xf4 | 700 | `azra.s` |
+
+Case 5 is the only five-slide one, and the only one whose caption base is
+not in the 0xf3x/0xf4x run.
+
+Every one of the six is called from an `EnterZone` handler, and four of
+them (`crypt1`, `delfhide`, `ghstpass`, `glaciercrawl`) from a region
+named `vig` that contains the zone's own spawn tile — i.e. they are
+arrival cutscenes.
+
+### `FUN_1001b788` is the fade-arming function
+
+This is the "whoever arms that fade" M42's screen-mode pass was looking
+for:
+
+```c
+void ArmFadeToMode(engine, mode, flag) {
+    engine[0x5a8] = 0x100;   // the fade counter FUN_1004fc50 counts down
+    engine[0x5ac] = mode;    // the deferred SetScreenMode target
+    engine[0x5b0] = flag;
+}
+```
+
+Its complete call-site set, across the whole binary: literal `1`, `5`,
+`0xc`, `0x20`, plus two computed runs — the attract-mode slideshow's
+`mode + 1` wrapping at `0x10` back to `1`, and the vignette's `mode + 1`
+running from `0x20` to `0x20 + slides - 1` and then falling to `5`.
+
+**0x1f appears in none of them**, so `FUN_1002c010`'s fourth gating mode
+stays unidentified — but the search space is now closed on this side: it
+is not any fade target. Worth noting that the vignette run starts at
+`0x20`, one above it.

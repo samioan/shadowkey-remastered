@@ -317,6 +317,36 @@ public:
         return true;
     }
 
+    // ---- M44: entering a named `.zon` region ----
+    //
+    // `FUN_1002ef44(level, room)` is the real entry point, and it does
+    // three things in order:
+    //
+    //   1. Walk the **encounter** list (`level+0x44c`) and, if any
+    //      encounter names this region, spawn it and stop -- an encounter
+    //      region never reaches the script.
+    //   2. Otherwise call the level script's `EnterZone(name)` handler
+    //      (`FUN_10070534`, which is where the UTF-16 literal "EnterZone"
+    //      in the binary is used).
+    //   3. Then walk the **trigger** list (`level+0x420`) and fire every
+    //      trigger whose own name matches the region.
+    //
+    // Step 1 is the correction the roadmap's own note needs: `level+0x44c`
+    // is the encounter list, not the region list. The regions themselves
+    // live in `<zone>.zon` -- see world/zone.h's Region.
+    //
+    // Returns whichever encounter matched, or null when the region fell
+    // through to the script (the host needs to know which, because
+    // spawning is its job).
+    EncounterExecutable* EnterRegion(const std::string& regionName);
+
+    // Just step 2, for a host that already knows no encounter matched.
+    void InvokeEnterZone(const std::string& regionName);
+
+    const std::vector<std::unique_ptr<EncounterExecutable>>& encounters() const {
+        return m_Encounters;
+    }
+
 private:
     // M38: object-valued script fields -- see setValue() above.
     std::map<std::string, skRValue> m_ObjectFields;

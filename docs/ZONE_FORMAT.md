@@ -1231,3 +1231,106 @@ end (not shown to be related to `.sta` — no code path connects them).
   further data-comparison lever left to pull short of an actual
   level-editor build or source. See the `azra.sta` section above and
   `tools/analyze_sta_fields.py`.
+
+---
+
+## `.zon` is the named-region list (M44)
+
+`.zon`'s room record was decoded byte-for-byte above without recognising
+what it was **for**. It is the answer to the roadmap's longest-standing
+open question, "where does a named zone region live?" — the tags
+`EnterZone(s)` receives (`"Skelos_Dead"`, `"YouSure"`, `"ghasts"`) and the
+Encounter spawner's regions (`"battle41"`, `"fight12W"`). A previous pass
+ruled out `.ent` placements by dumping every named one in three zones; the
+names are in `.zon`, and a plain `grep` for `battle41` across the install
+tree finds `lothcav.s` and `lothcav.zon` and nothing else.
+
+So the record reads:
+
+```c
+struct ZonRegionRecord {        // offset  size
+    uint16 x0;                   // 0x00    2   left edge, tile space
+    uint16 yFlippedBottom;        // 0x02    2   -> y1 = gridHeight - this
+    uint16 x1;                     // 0x04    2   right edge
+    uint16 yFlippedTop;             // 0x06    2   -> y0 = gridHeight - this
+    char   name[64];                 // 0x08   64  the region tag
+};                                          // 0x48 = 72 bytes
+```
+
+**The Y flip resolves the old open item.** This doc previously noted that
+two of the four fields are stored as `zmpTotal - field` and guessed they
+"index into some zone-wide array sized by zmpTotal (portal/neighbor list?
+texture-atlas range? light index?)". They are **coordinates in a flipped
+axis**: `zmpTotal` is the `.zmp` header's grid height (this doc's own
+`ReadU16(&zmp[0x82])`), and the conversion turns a bottom-up Y into a
+top-down one. `d` is the top edge and `b` the bottom, so they swap places.
+
+Three independent confirmations:
+
+- azra's region named `start` decodes to x 118..121, y 42..46, and azra's
+  `.ent` player-start tile — from a completely different file — is
+  (118, 46).
+- Every record in all 21 zones has `x0 < x1` and, after the flip,
+  `y0 < y1`.
+- `LockZone`/`UnlockZone` iterate `for (x = x0; x < x1; ++x) for (y = y0;
+  y < y1; ++y)` straight over the cell grid. Only a rectangle type-checks.
+
+### The cell record's second byte
+
+`.zmp`'s 6-byte on-disk cell is `{u8 flags, u8 blockFlags, u16 light, u16
+zcpIndex}` — the second byte had no known meaning and was skipped by the
+port. It is what `LockZone`/`UnlockZone` write, bit 2 (`0x04`) being
+"locked". The runtime cell is 8 bytes (`engine+0x6908`, indexed
+`(width*y + x) * 8`), with the same first six.
+
+### Inclusive containment, half-open iteration
+
+The two disagree in the shipped engine, and the port reproduces both.
+
+`LockZone` (`FUN_10073470`) and `UnlockZone` (`FUN_10073380`) both run
+half-open loops, so locking a region misses its last row and column.
+Containment, though, has to be **inclusive**: checking all 21 zones' spawn
+tiles against their own rectangles, 12 land inside a region, every one of
+those regions is named like an arrival point (`start`, `entry`,
+`Entrance`, `Enter`, `Exit`, `Zvoldoor`, `vig`), and four of the twelve
+hold only under inclusive bounds because the spawn sits exactly on the far
+edge — azra's `start`, broken1's `Exit`, crypt3's `Entrance`, fearfrst's
+`Exit`. The `vig` hits corroborate: four zone scripts contain
+`if (zone = "vig") Level.Vignette(n)`, an arrival cutscene.
+
+### `LockZone` and `UnlockZone` are deliberately asymmetric
+
+| | `LockZone` (`FUN_10073470`) | `UnlockZone` (`FUN_10073380`) |
+|---|---|---|
+| lookup | the name→room **map** (`FUN_100731b4`, a wide-string binary tree at `levelObj+0x84`) | a linear walk of all **40** room slots with `strcmp` |
+| affects | one rectangle | every rectangle sharing the name |
+| write | `cellByte1 = 4` — an **assignment**, wiping the rest of the byte | `cellByte1 &= 0xfb` |
+
+Names are not unique — azra has four rectangles called `YouSure` and three
+called `queue` — so the asymmetry is observable: locking `YouSure` blocks
+one doorway, unlocking it opens all four.
+
+### The per-level tile-change journal
+
+Every Lock/Unlock routes its write through `FUN_1006d7bc(level, x, y)`,
+which maintains a fixed **100-entry** array at `level+0x100` (count at
+`level+0xfc`) of `{i16 x, i16 y, u16 savedByte}`. An existing entry for
+the same tile is overwritten rather than appended, so the array is exactly
+"the cells this level has diverged from its `.zmp` in" — the level-state
+half of a save file, and a concrete piece of `SAVE_FORMAT.md`'s open "what
+is inside a `<level>.dat`".
+
+### The room list in memory
+
+`GameEngine_InitLevel` expands each 72-byte record into a **0x84-byte**
+room slot in a fixed 40-slot array at `engine+0x5464` (count at
+`engine+0x5460`):
+
+```
+slot + 0x30 : x0      slot + 0x38 : x1
+slot + 0x34 : y1      slot + 0x3c : y0
+slot + 0x40 : char name[64]
+```
+
+and registers it in the by-name map with `FUN_10073210(levelObj, name,
+slot)`.

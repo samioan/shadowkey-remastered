@@ -359,6 +359,59 @@ bool ZoneScriptExecutable::Notify(int mode, int typeId, const std::string& entit
     return anyFired;
 }
 
+// ---- M44: entering a named region. See the header for FUN_1002ef44. ----
+
+void ZoneScriptExecutable::InvokeEnterZone(const std::string& regionName) {
+    skRValueArray args;
+    args.append(skRValue(skString(regionName.c_str())));
+    skRValue ret;
+    skExecutableContext ctxt(&m_Stack.interpreter());
+    try {
+        // Calls the base class directly, the same way ItemExecutable::
+        // InvokeOnUse() does: a zone whose script declares no EnterZone
+        // handler is the normal case (8 of the 21 shipped zone scripts
+        // have none), and should answer "no" rather than log an
+        // unresolved-native soft-fail every time the player crosses a
+        // region boundary.
+        skScriptedExecutable::method(skString("EnterZone"), args, ret, ctxt);
+    } catch (skParseException& e) {
+        std::printf("ZoneScript: PARSE ERROR in EnterZone(\"%s\"): %s\n", regionName.c_str(),
+                    e.toString().ptr());
+    } catch (skRuntimeException& e) {
+        std::printf("ZoneScript: RUNTIME ERROR in EnterZone(\"%s\"): %s\n", regionName.c_str(),
+                    e.toString().ptr());
+    }
+}
+
+EncounterExecutable* ZoneScriptExecutable::EnterRegion(const std::string& regionName) {
+    // Step 1: an encounter that names this region takes it, and the script
+    // never sees it. The real walk is over the level's encounter list in
+    // registration order and stops at the first match.
+    for (auto& encounter : m_Encounters) {
+        const std::vector<std::string>& regions = encounter->regions();
+        for (const std::string& r : regions) {
+            if (r != regionName) continue;
+            return encounter.get();
+        }
+    }
+    // Step 2: the script's own handler.
+    InvokeEnterZone(regionName);
+    // Step 3 is **deliberately not reproduced**, and that is a finding
+    // rather than an omission. The real walk over the trigger list
+    // (`level+0x420`) selects triggers with flag 8 whose name matches the
+    // region, then calls the fire routine as
+    // `FUN_10090818(trigger, 1, *(engine+0x618))` -- mode 1, with the
+    // **world object** as the notifying entity (confirmed in the
+    // disassembly: `ldr r3,[r10,#0x34]; ldr r2,[r3,#0x618]; movne r1,#1`).
+    // Inside, mode 1 requires `entity == trigger->doorObject` (SetDoor's
+    // own argument) and the trap branch requires the entity to match the
+    // trigger's AddEntity list. The world object is neither, for any
+    // trigger any shipped script builds -- so this walk selects triggers
+    // it then cannot fire. Reproducing it would be reproducing a no-op
+    // with a misleading amount of machinery.
+    return nullptr;
+}
+
 bool ZoneScriptExecutable::AnyTrapWatches(int typeId, const std::string& entityName) const {
     for (const auto& trigger : m_Triggers) {
         if (trigger->trap() && trigger->WatchesEntity(typeId, entityName)) return true;
