@@ -109,43 +109,43 @@ void SavedStats::Read(SaveStream& s) {
 // ---------------------------------------------------------------------
 void SavedEntityBase::Write(SaveStream& s) const {
     s.WriteU16(entityId);
-    s.WriteI16(f86);
+    s.WriteI16(renderFlags);
     s.WriteI32(f8c);
-    s.WriteI16(f8e);
-    s.WriteI16(f90);
+    s.WriteI16(collisionRadius);
+    s.WriteI16(collisionHeight);
     s.WriteString8(artName);
-    s.WriteU16(fe0);
+    s.WriteU16(shortNameStringId);
     s.WriteU8(f93);
     s.WriteI32(x);
     s.WriteI32(y);
     s.WriteI16(z);
-    s.WriteI16(fb2);
+    s.WriteI16(roll);
     s.WriteI16(pitch);
     s.WriteI16(yaw);
-    s.WriteString8(scriptName);
-    s.WriteU8(fca);
+    s.WriteString8(objectId);
+    s.WriteU8(skin);
     s.WriteU8(f92);
-    s.WriteU8(fd5);
-    s.WriteU8(fd8);
-    s.WriteU8(fd9);
-    s.WriteU32(fdc);
+    s.WriteU8(passable);
+    s.WriteU8(usable);
+    s.WriteU8(hasCustomName);
+    s.WriteU32(nameStringId);
     s.WriteI16(spriteId);
-    s.WriteU8(f6c);
-    s.WriteU8(f6d);
-    s.WriteU32(f70);
-    s.WriteU32(f74);
-    s.WriteU32(f78);
-    s.WriteU32(f7c);
-    s.WriteU16(f80);
+    s.WriteU8(animMode);
+    s.WriteU8(animLoopsLeft);
+    s.WriteU32(animPosition);
+    s.WriteU32(animFirstFrame);
+    s.WriteU32(animFrameSpan);
+    s.WriteU32(animLastFrame);
+    s.WriteU16(animRate);
     const int32_t now = SaveClockNow();
-    s.WriteU8(f10a);
-    s.WriteI32(deadline10c - now);
-    s.WriteI16(f110);
-    s.WriteU8(f114);
-    s.WriteI32(deadline118 - now);
-    s.WriteU8(f115);
-    s.WriteI16(f60);
-    s.WriteU8(f11c);
+    s.WriteU8(delayArmed);
+    s.WriteI32(delayDeadline - now);
+    s.WriteI16(delayArg);
+    s.WriteU8(timerArmed);
+    s.WriteI32(timerDeadline - now);
+    s.WriteU8(timerKind);
+    s.WriteI16(flags);
+    s.WriteU8(inUse);
     for (const SavedScriptVar& var : scriptVars) {
         s.WriteU8(kVarPresent);
         s.WriteStringW(var.name);
@@ -156,43 +156,43 @@ void SavedEntityBase::Write(SaveStream& s) const {
 
 void SavedEntityBase::Read(SaveStream& s) {
     entityId = s.ReadU16();
-    f86 = s.ReadI16();
+    renderFlags = s.ReadI16();
     f8c = s.ReadI32();
-    f8e = s.ReadI16();
-    f90 = s.ReadI16();
+    collisionRadius = s.ReadI16();
+    collisionHeight = s.ReadI16();
     artName = s.ReadString8();
-    fe0 = s.ReadU16();
+    shortNameStringId = s.ReadU16();
     f93 = s.ReadU8();
     x = s.ReadI32();
     y = s.ReadI32();
     z = s.ReadI16();
-    fb2 = s.ReadI16();
+    roll = s.ReadI16();
     pitch = s.ReadI16();
     yaw = s.ReadI16();
-    scriptName = s.ReadString8();
-    fca = s.ReadU8();
+    objectId = s.ReadString8();
+    skin = s.ReadU8();
     f92 = s.ReadU8();
-    fd5 = s.ReadU8();
-    fd8 = s.ReadU8();
-    fd9 = s.ReadU8();
-    fdc = s.ReadU32();
+    passable = s.ReadU8();
+    usable = s.ReadU8();
+    hasCustomName = s.ReadU8();
+    nameStringId = s.ReadU32();
     spriteId = s.ReadI16();
-    f6c = s.ReadU8();
-    f6d = s.ReadU8();
-    f70 = s.ReadU32();
-    f74 = s.ReadU32();
-    f78 = s.ReadU32();
-    f7c = s.ReadU32();
-    f80 = s.ReadU16();
+    animMode = s.ReadU8();
+    animLoopsLeft = s.ReadU8();
+    animPosition = s.ReadU32();
+    animFirstFrame = s.ReadU32();
+    animFrameSpan = s.ReadU32();
+    animLastFrame = s.ReadU32();
+    animRate = s.ReadU16();
     const int32_t now = SaveClockNow();
-    f10a = s.ReadU8();
-    deadline10c = now + s.ReadI32();
-    f110 = s.ReadI16();
-    f114 = s.ReadU8();
-    deadline118 = now + s.ReadI32();
-    f115 = s.ReadU8();
-    f60 = s.ReadI16();
-    f11c = s.ReadU8();
+    delayArmed = s.ReadU8();
+    delayDeadline = now + s.ReadI32();
+    delayArg = s.ReadI16();
+    timerArmed = s.ReadU8();
+    timerDeadline = now + s.ReadI32();
+    timerKind = s.ReadU8();
+    flags = s.ReadI16();
+    inUse = s.ReadU8();
     scriptVars.clear();
     // FUN_10066cc4 reads the tag once up front, then name/value/tag in a
     // do-while -- so a stream whose first tag is already 0xff stores no
@@ -212,38 +212,38 @@ void SavedEntityBase::Read(SaveStream& s) {
 // Drawable -- FUN_10067db0 / FUN_10067ca0
 // ---------------------------------------------------------------------
 void SavedDrawable::Write(SaveStream& s) const {
-    s.WriteI32(f12c);
-    s.WriteI32(f130);
-    s.WriteI16(f5e);
-    s.WriteU8(f6c);
-    s.WriteU32(f74);
-    s.WriteU32(f78);
-    s.WriteU16(f80);
-    s.WriteU32(f7c);
-    s.WriteU32(f70);
-    s.WriteU8(f6d);
+    s.WriteI32(animClip);
+    s.WriteI32(nextAnimClip);
+    s.WriteI16(scale);
+    s.WriteU8(animMode);
+    s.WriteU32(animFirstFrame);
+    s.WriteU32(animFrameSpan);
+    s.WriteU16(animRate);
+    s.WriteU32(animLastFrame);
+    s.WriteU32(animPosition);
+    s.WriteU8(animLoopsLeft);
 }
 
 void SavedDrawable::Read(SaveStream& s) {
-    f12c = s.ReadI32();
-    f130 = s.ReadI32();
-    f5e = s.ReadI16();
-    f6c = s.ReadU8();
-    f74 = s.ReadU32();
-    f78 = s.ReadU32();
-    f80 = s.ReadU16();
-    f7c = s.ReadU32();
-    f70 = s.ReadU32();
-    f6d = s.ReadU8();
+    animClip = s.ReadI32();
+    nextAnimClip = s.ReadI32();
+    scale = s.ReadI16();
+    animMode = s.ReadU8();
+    animFirstFrame = s.ReadU32();
+    animFrameSpan = s.ReadU32();
+    animRate = s.ReadU16();
+    animLastFrame = s.ReadU32();
+    animPosition = s.ReadU32();
+    animLoopsLeft = s.ReadU8();
 }
 
 // ---------------------------------------------------------------------
 // Spellbook -- FUN_10028a60 / FUN_10028be8
 // ---------------------------------------------------------------------
 void SavedSpellbook::Write(SaveStream& s) const {
-    s.WriteU8(f180);
-    s.WriteU8(f160);
-    s.WriteU8(f181);
+    s.WriteU8(destroy);
+    s.WriteU8(initDone);
+    s.WriteU8(isContainer);
     s.WriteI32(static_cast<int32_t>(spells.size()));
     for (const SavedSpellEntry& e : spells) {
         s.WriteI16(e.typeId);
@@ -254,9 +254,9 @@ void SavedSpellbook::Write(SaveStream& s) const {
 }
 
 void SavedSpellbook::Read(SaveStream& s) {
-    f180 = s.ReadU8();
-    f160 = s.ReadU8();
-    f181 = s.ReadU8();
+    destroy = s.ReadU8();
+    initDone = s.ReadU8();
+    isContainer = s.ReadU8();
     const int32_t count = s.ReadI32();
     spells.clear();
     for (int32_t i = 0; i < count && !s.failed(); ++i) {
@@ -274,35 +274,35 @@ void SavedSpellbook::Read(SaveStream& s) {
 // ---------------------------------------------------------------------
 void SavedItem::Write(SaveStream& s) const {
     s.WriteU8(f180);
-    s.WriteI32(f19c);
-    s.WriteI32(f1a0);
+    s.WriteI32(weaponSprite);
+    s.WriteI32(range);
     s.WriteU8(usesRangedPath);
 }
 
 void SavedItem::Read(SaveStream& s) {
     f180 = s.ReadU8();
-    f19c = s.ReadI32();
-    f1a0 = s.ReadI32();
+    weaponSprite = s.ReadI32();
+    range = s.ReadI32();
     usesRangedPath = s.ReadU8();
 }
 
 void SavedStackable::Write(SaveStream& s) const { s.WriteI32(quantity); }
 void SavedStackable::Read(SaveStream& s) { quantity = s.ReadI32(); }
 
-void SavedWearable::Write(SaveStream& s) const { s.WriteU8(f1d4); }
-void SavedWearable::Read(SaveStream& s) { f1d4 = s.ReadU8(); }
+void SavedWearable::Write(SaveStream& s) const { s.WriteU8(armorConstraint); }
+void SavedWearable::Read(SaveStream& s) { armorConstraint = s.ReadU8(); }
 
 void SavedWeapon::Write(SaveStream& s) const {
     s.WriteI16(damageMin);
     s.WriteI16(damageMax);
-    s.WriteI32(f1d0);
+    s.WriteI32(weaponType);
     s.WriteI32(quantity);
 }
 
 void SavedWeapon::Read(SaveStream& s) {
     damageMin = s.ReadI16();
     damageMax = s.ReadI16();
-    f1d0 = s.ReadI32();
+    weaponType = s.ReadI32();
     quantity = s.ReadI32();
 }
 
@@ -313,43 +313,43 @@ void SavedWeapon::Read(SaveStream& s) {
 // ---------------------------------------------------------------------
 void SavedInventoryHolder::Write(SaveStream& s) const {
     s.WriteU8(f1e8);
-    s.WriteU8(f1b9);
-    s.WriteI32(f1bc);
-    s.WriteI32(f1c0);
+    s.WriteU8(moveOrderActive);
+    s.WriteI32(moveDeltaX);
+    s.WriteI32(moveDeltaY);
     s.WriteI32(f1c4);
-    s.WriteU8(f1e1);
-    s.WriteU8(f1e2);
-    s.WriteU8(f1e4);
+    s.WriteU8(walkingState);
+    s.WriteU8(invulnerable);
+    s.WriteU8(active);
 }
 
 void SavedInventoryHolder::Read(SaveStream& s) {
     f1e8 = s.ReadU8();
-    f1b9 = s.ReadU8();
-    f1bc = s.ReadI32();
-    f1c0 = s.ReadI32();
+    moveOrderActive = s.ReadU8();
+    moveDeltaX = s.ReadI32();
+    moveDeltaY = s.ReadI32();
     f1c4 = s.ReadI32();
-    f1e1 = s.ReadU8();
-    f1e2 = s.ReadU8();
-    f1e4 = s.ReadU8();
+    walkingState = s.ReadU8();
+    invulnerable = s.ReadU8();
+    active = s.ReadU8();
 }
 
 // ---------------------------------------------------------------------
 // Actor / LinkedActor / Character
 // ---------------------------------------------------------------------
 void SavedActor::Write(SaveStream& s) const {
-    s.WriteU8(f2a8);
-    s.WriteU8(f2ac);
-    s.WriteU8(f1e2);
-    s.WriteU8(fd8);
-    s.WriteI16(f2ec);
+    s.WriteU8(aiPackage);
+    s.WriteU8(aggressive);
+    s.WriteU8(invulnerable);
+    s.WriteU8(usable);
+    s.WriteI16(lifespan);
 }
 
 void SavedActor::Read(SaveStream& s) {
-    f2a8 = s.ReadU8();
-    f2ac = s.ReadU8();
-    f1e2 = s.ReadU8();
-    fd8 = s.ReadU8();
-    f2ec = s.ReadI16();
+    aiPackage = s.ReadU8();
+    aggressive = s.ReadU8();
+    invulnerable = s.ReadU8();
+    usable = s.ReadU8();
+    lifespan = s.ReadI16();
 }
 
 void SavedLinkedActor::Write(SaveStream& s) const {
@@ -364,38 +364,38 @@ void SavedLinkedActor::Read(SaveStream& s) {
 
 void SavedCharacter::Write(SaveStream& s) const {
     s.WriteString8(levelName);
-    s.WriteU8(f398);
-    s.WriteI32(f22c);
-    s.WriteU8(f358);
-    s.WriteU8(f359);
-    s.WriteU8(f35a);
+    s.WriteU8(frozen);
+    s.WriteI32(aiState);
+    s.WriteU8(busy358);
+    s.WriteU8(usingObject);
+    s.WriteU8(busy35a);
     s.WriteI32(linkIndex);
     s.WriteI32(linkTypeId);
-    s.WriteI32(f36c);
-    s.WriteI32(f370);
-    s.WriteI32(f374);
+    s.WriteI32(returnX);
+    s.WriteI32(returnY);
+    s.WriteI32(returnZ);
     s.WriteI32(f378);
-    s.WriteI32(f37c);
-    s.WriteI32(f380);
-    s.WriteI32(f384);
+    s.WriteI32(dead37c);
+    s.WriteI32(dead380);
+    s.WriteI32(dead384);
 }
 
 void SavedCharacter::Read(SaveStream& s) {
     levelName = s.ReadString8();
-    f398 = s.ReadU8();
-    f22c = s.ReadI32();
-    f358 = s.ReadU8();
-    f359 = s.ReadU8();
-    f35a = s.ReadU8();
+    frozen = s.ReadU8();
+    aiState = s.ReadI32();
+    busy358 = s.ReadU8();
+    usingObject = s.ReadU8();
+    busy35a = s.ReadU8();
     linkIndex = s.ReadI32();
     linkTypeId = s.ReadI32();
-    f36c = s.ReadI32();
-    f370 = s.ReadI32();
-    f374 = s.ReadI32();
+    returnX = s.ReadI32();
+    returnY = s.ReadI32();
+    returnZ = s.ReadI32();
     f378 = s.ReadI32();
-    f37c = s.ReadI32();
-    f380 = s.ReadI32();
-    f384 = s.ReadI32();
+    dead37c = s.ReadI32();
+    dead380 = s.ReadI32();
+    dead384 = s.ReadI32();
 }
 
 // ---------------------------------------------------------------------

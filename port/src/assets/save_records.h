@@ -156,40 +156,96 @@ struct SavedScriptVar {
     std::string value;
 };
 
+// M52 named all but two of these; see "What the scalars are" in
+// docs/SAVE_FORMAT.md for how, and the per-field notes below for what.
 struct SavedEntityBase {  // FUN_10066614 / FUN_10066cc4
-    uint16_t entityId = 0;        // +0xc4
-    int16_t f86 = 0;              // +0x86
-    int32_t f8c = 0;              // +0x8c  a byte field, widened on the wire
-    int16_t f8e = 0;              // +0x8e
-    int16_t f90 = 0;              // +0x90
-    std::string artName;          // +0xe2  the loader sprintf()s a path from it
-    uint16_t fe0 = 0;             // +0xe0
-    uint8_t f93 = 0;              // +0x93
+    // +0xc4. Allocated in Entity::Init (FUN_100610e4) and registered in the
+    // engine's id table, so it is a runtime handle, not a type.
+    uint16_t entityId = 0;
+    // +0x86. Render flags: the two renderers test bit 1 (skip transform)
+    // and bit 2, and bit 4 is set/cleared around a kill and an equip.
+    int16_t renderFlags = 0;
+    // +0x8c. A byte in memory, widened to a word on the wire. The only
+    // field on this layer M52 could not name -- the Entity constructor
+    // zeroes it and nothing in the chain reads it back.
+    int32_t f8c = 0;
+    // +0x8e / +0x90. The collision cylinder, in 8.8 world units (256 per
+    // tile). FUN_100017c8 walks x+-radius and y+-radius against
+    // Map_GetTileAt and pushes back to the tile boundary; deactivating an
+    // entity (FUN_10005d60) zeroes both and sets `passable`.
+    int16_t collisionRadius = 0;
+    int16_t collisionHeight = 0;
+    // +0xe2. The `.ent` placement name, second copy; the loader sprintf()s
+    // an art/script path from it (ZONE_FORMAT.md's step 3).
+    std::string artName;
+    // +0xe0. String-table index for the *short* name; default 14, set
+    // beside `nameStringId` by Entity::Init.
+    uint16_t shortNameStringId = 0;
+    uint8_t f93 = 0;              // +0x93  the `PutInReverse` flag
     int32_t x = 0;                // +0x94  8.8 world units
     int32_t y = 0;                // +0x9c
     int16_t z = 0;                // +0xa4
-    int16_t fb2 = 0;              // +0xb2
+    // The three orientation channels, 0x10000 to the turn. `.ent` supplies
+    // all three per placement (ZONE_FORMAT.md).
+    int16_t roll = 0;             // +0xb2  AddRotationRoll / SetRotationRoll
     int16_t pitch = 0;            // +0xa8
     int16_t yaw = 0;              // +0xb6
-    std::string scriptName;       // +0xcb  re-registered with the object registry
-    uint8_t fca = 0;              // +0xca
-    uint8_t f92 = 0;              // +0x92
-    uint8_t fd5 = 0;              // +0xd5
-    uint8_t fd8 = 0;              // +0xd8
-    uint8_t fd9 = 0;              // +0xd9
-    uint32_t fdc = 0;             // +0xdc
+    // +0xcb. The object's own id string -- what `GetID` returns, what
+    // `HasItem` matches against, and what the object registry is keyed by.
+    // Also where the `.ent` placement name's *first* copy lands.
+    std::string objectId;
+    uint8_t skin = 0;             // +0xca  SetSkin(n), 0..12 in the corpus
+    // +0x92. Second unnamed field: zeroed by the constructor, never read.
+    uint8_t f92 = 0;
+    uint8_t passable = 0;         // +0xd5  SetPassable(bool)
+    uint8_t usable = 0;           // +0xd8  SetUsable(bool)
+    // +0xd9 / +0xdc. "This entity has a name of its own" and that name's
+    // string-table index (default 13). FUN_1006842c picks between the
+    // index and a fixed fallback slot on exactly this flag.
+    uint8_t hasCustomName = 0;
+    uint32_t nameStringId = 0;
     int16_t spriteId = 0;         // +0x4a  30000 = take it from the template
-    uint8_t f6c = 0, f6d = 0;     // +0x6c, +0x6d
-    uint32_t f70 = 0, f74 = 0, f78 = 0, f7c = 0;
-    uint16_t f80 = 0;             // +0x80
-    uint8_t f10a = 0;             // +0x10a
-    int32_t deadline10c = 0;      // +0x10c, stored as (value - now)
-    int16_t f110 = 0;             // +0x110
-    uint8_t f114 = 0;             // +0x114
-    int32_t deadline118 = 0;      // +0x118, likewise
-    uint8_t f115 = 0;             // +0x115
-    int16_t f60 = 0;              // +0x60
-    uint8_t f11c = 0;             // +0x11c
+    // --- the animation player, +0x6c..+0x80 ---------------------------
+    // Set as a group by the clip starter at Drawable vtable +0x13c
+    // (`SetAnimationRange(mode, firstFrame, frameCount, rate, loops)`) and
+    // advanced by FUN_10065438 once per frame:
+    //     position += (dt * rate) >> 8
+    // with `dt` the engine's frame delta in 8.8 *seconds*. The three frame
+    // fields are 8.8 fixed-point frame numbers -- the setter shifts its
+    // plain frame arguments left by 8 -- so 0x100 is one frame.
+    uint8_t animMode = 0;         // +0x6c  the setter's first argument; default 1
+    // +0x6d. Loops left. 0x7f means "play forever" (its own branch at the
+    // top of the tick), 0 means finished -- at which point the tick calls
+    // vtable+0x148 with `SavedDrawable::nextAnimClip`. Default 0xff.
+    uint8_t animLoopsLeft = 0;
+    uint32_t animPosition = 0;    // +0x70  8.8 frames, the play cursor
+    uint32_t animFirstFrame = 0;  // +0x74  8.8 frames
+    uint32_t animFrameSpan = 0;   // +0x78  8.8 frames; default 0x100
+    uint32_t animLastFrame = 0;   // +0x7c  8.8 frames = first + span
+    // +0x80. The internal rate: frames per second times 256. Default 0xf00
+    // = 15 fps. A model clip's own `rate` field is multiplied by 384 to get
+    // here, which is what pins that field's units (model_archive.h).
+    uint16_t animRate = 0;
+    // --- the two wall-clock timers ------------------------------------
+    // +0x10a / +0x10c / +0x110: the script `Delay(seconds, n)` timer.
+    uint8_t delayArmed = 0;
+    int32_t delayDeadline = 0;    // +0x10c, stored as (value - now)
+    int16_t delayArg = 0;         // +0x110, Delay's second argument
+    // +0x114 / +0x115 / +0x118: the native timer FUN_10068480 arms as
+    // `(armed = 1, kind = k, deadline = time(0) + seconds)`.
+    uint8_t timerArmed = 0;
+    int32_t timerDeadline = 0;    // +0x118, likewise stored relative
+    uint8_t timerKind = 0;        // +0x115
+    // +0x60. Entity flag word, default 2. Bit 0 is cleared when the entity
+    // is deactivated; the Character saver sets bit 4 on whatever it is
+    // linked to.
+    int16_t flags = 0;
+    // +0x11c. "Something is mounted on / using me". Written only by
+    // `MountGun` and `MountFlak88` and read only by `IsInUse` -- three
+    // bindings with **zero uses in the shipped scripts**, so this is
+    // saved and restored and never true. (The names are not a joke: they
+    // are what the engine's own binding table calls them.)
+    uint8_t inUse = 0;
     std::vector<SavedScriptVar> scriptVars;
 
     void Write(SaveStream& s) const;
@@ -202,16 +258,27 @@ struct SavedEntityBase {  // FUN_10066614 / FUN_10066cc4
 };
 
 struct SavedDrawable {  // FUN_10067db0 / FUN_10067ca0
-    int32_t f12c = 0;   // +0x12c
-    int32_t f130 = 0;   // +0x130
-    int16_t f5e = 0;    // +0x5e
-    uint8_t f6c = 0;    // +0x6c   -- second copy, see the header note
-    uint32_t f74 = 0;   // +0x74
-    uint32_t f78 = 0;   // +0x78
-    uint16_t f80 = 0;   // +0x80
-    uint32_t f7c = 0;   // +0x7c
-    uint32_t f70 = 0;   // +0x70
-    uint8_t f6d = 0;    // +0x6d
+    // +0x12c / +0x130, both set by the clip starter FUN_100655a8: the clip
+    // index currently playing, and the clip to switch to when it ends
+    // (`AttachEffect` arms 4, `DoFireExplosionEffect` arms 0x20). -1 in
+    // `animClip` means "no model animation".
+    int32_t animClip = 0;
+    int32_t nextAnimClip = 0;
+    // +0x5e. The model's **scale**, 8.8 fixed: `SetScale(256)` is 1x, and
+    // the shipped scripts also use 192, 352 and 512. `.ent` carries one per
+    // placement in `unkB`'s low halfword -- which corrects ZONE_FORMAT.md,
+    // where that destination was called `modelFlags`.
+    int16_t scale = 0;
+    // The animation group again -- Drawable re-writes seven of Entity's
+    // fields, in a different order, and the loader reads both copies. See
+    // the header note; names are SavedEntityBase's.
+    uint8_t animMode = 0;         // +0x6c
+    uint32_t animFirstFrame = 0;  // +0x74
+    uint32_t animFrameSpan = 0;   // +0x78
+    uint16_t animRate = 0;        // +0x80
+    uint32_t animLastFrame = 0;   // +0x7c
+    uint32_t animPosition = 0;    // +0x70
+    uint8_t animLoopsLeft = 0;    // +0x6d
 
     void Write(SaveStream& s) const;
     void Read(SaveStream& s);
@@ -225,9 +292,16 @@ struct SavedSpellEntry {  // one element of the Spellbook list
 };
 
 struct SavedSpellbook {  // FUN_10028a60 / FUN_10028be8
-    uint8_t f180 = 0;    // +0x180
-    uint8_t f160 = 0;    // +0x160
-    uint8_t f181 = 0;    // +0x181
+    // +0x180. `SetDestroy(true)` / `GetDestroy()`: the object asks to be
+    // removed. Set on a loot bag spawned by a monster's death.
+    uint8_t destroy = 0;
+    // +0x160. The `Init` guard: the binding tests it, and sets it to 1, so
+    // an entity's script `Init` runs at most once. This is why restoring
+    // script variables and re-running `Init` on load is idempotent.
+    uint8_t initDone = 0;
+    // +0x181. "This is a lootable container." Set to 1 beside `destroy`
+    // when a monster drops its bag, and tested by `PickupItem`.
+    uint8_t isContainer = 0;
     // +0x16c is the list's own count -- written as a plain i32 field and
     // read back as the loop bound, so it must agree with `spells`.
     std::vector<SavedSpellEntry> spells;
@@ -238,8 +312,10 @@ struct SavedSpellbook {  // FUN_10028a60 / FUN_10028be8
 
 struct SavedItem {  // FUN_1006d35c / FUN_1006d2ac
     uint8_t f180 = 0;    // +0x180  SetAnimationFrames / SetReloadFrames share it
-    int32_t f19c = 0;    // +0x19c
-    int32_t f1a0 = 0;    // +0x1a0
+    // +0x19c. `SetWeaponSprite(n)` -- the sprite drawn in the player's hand
+    // for this item; the shipped weapons use 72/104/120/136.
+    int32_t weaponSprite = 0;
+    int32_t range = 0;           // +0x1a0  SetRange(384) / SetRange(16384)
     uint8_t usesRangedPath = 0;  // +0x1a7 -- SetRange(v > 0x400), see M49
 
     void Write(SaveStream& s) const;
@@ -253,29 +329,53 @@ struct SavedStackable {  // FUN_1002ed3c / FUN_1002ed04
 };
 
 struct SavedWearable {  // FUN_10047584 / FUN_1004754c
-    uint8_t f1d4 = 0;  // +0x1d4
+    // +0x1d4. `SetArmorConstraint(AR_Light|AR_Medium|AR_Heavy)` -- the
+    // armour weight class, 0/1/2 (game_constants.cpp), 58 uses across the
+    // shipped armour scripts. A u32 in memory, a byte on the wire.
+    uint8_t armorConstraint = 0;
     void Write(SaveStream& s) const;
     void Read(SaveStream& s);
 };
 
+// The Item branch is a *tree*: Weapon and Armor are siblings, so +0x1cc and
+// +0x1d0 hold different things depending on which one this record is. The
+// save function is shared, and nothing on the wire distinguishes them --
+// the typeId's `entities.txt` category does (4 = weapon, 6 = armor,
+// 15 = shield). Field names below are the Weapon reading, with the Armor
+// reading in the comment.
 struct SavedWeapon {  // FUN_1002eaa0 / FUN_1002ea0c
-    int16_t damageMin = 0;  // +0x1cc  SetDamageMin
-    int16_t damageMax = 0;  // +0x1ce  SetDamageMax
-    int32_t f1d0 = 0;       // +0x1d0
+    // +0x1cc. `SetDamageMin` on a weapon; `SetArmorValue` on armour, where
+    // it is the piece's armour rating.
+    int16_t damageMin = 0;
+    int16_t damageMax = 0;  // +0x1ce  SetDamageMax; unused by armour
+    // +0x1d0. `SetWeaponType(WR_Dagger|WR_LongBlade|WR_Axe|...)` on a
+    // weapon; `SetArmorType(n)` on armour, where it also selects the
+    // piece's display text.
+    int32_t weaponType = 0;
     int32_t quantity = 0;   // +0x1c4  same field Stackable writes
     void Write(SaveStream& s) const;
     void Read(SaveStream& s);
 };
 
 struct SavedInventoryHolder {  // FUN_10005164 / FUN_10005320
-    uint8_t f1e8 = 0;   // +0x1e8
-    uint8_t f1b9 = 0;   // +0x1b9
-    int32_t f1bc = 0;   // +0x1bc
-    int32_t f1c0 = 0;   // +0x1c0
+    // +0x1e8. Set to 1 by this class's own constructor (FUN_10000004) and
+    // cleared by the one subclass constructor at FUN_1009037c -- so it is a
+    // fixed per-class discriminator that the save carries anyway.
+    uint8_t f1e8 = 0;
+    // +0x1b9 / +0x1bc / +0x1c0: the move order `SetState` issues. It sets
+    // the flag and stores the offset to the target as
+    // `(target.x - self.x) * 20`, `(target.y - self.y) * 20`.
+    uint8_t moveOrderActive = 0;
+    int32_t moveDeltaX = 0;
+    int32_t moveDeltaY = 0;
     int32_t f1c4 = 0;   // +0x1c4
-    uint8_t f1e1 = 0;   // +0x1e1
-    uint8_t f1e2 = 0;   // +0x1e2
-    uint8_t f1e4 = 0;   // +0x1e4
+    uint8_t walkingState = 0;  // +0x1e1  GetWalkingState; the ctor default is 1
+    uint8_t invulnerable = 0;  // +0x1e2  SetInvulnerable(bool)
+    // +0x1e4. `SetActive(bool)` (FUN_10005d60): turning an entity off also
+    // clears its native timer, clears flag bit 0, zeroes the whole
+    // motion/orientation group and the collision cylinder, and makes it
+    // passable. Saved because a script can leave an entity switched off.
+    uint8_t active = 0;
     // The children are counted first (a full pass over the list asking
     // each one's vtable +0x104 whether it is saveable at all), then
     // written as `i32 typeId` + the child's own record. Note the typeId
@@ -285,11 +385,17 @@ struct SavedInventoryHolder {  // FUN_10005164 / FUN_10005320
 };
 
 struct SavedActor {  // FUN_10086514 / FUN_10086454
-    uint8_t f2a8 = 0;   // +0x2a8  a 32-bit field truncated to a byte on save
-    uint8_t f2ac = 0;   // +0x2ac
-    uint8_t f1e2 = 0;   // +0x1e2  -- second copy
-    uint8_t fd8 = 0;    // +0xd8   -- second copy
-    int16_t f2ec = 0;   // +0x2ec
+    // +0x2a8. The current AI package -- what `GetCurrentAIPackage` returns
+    // and what `AiAttack`/`AiDetect`/`AiFlee`/`AiPursue`/`AiSleep`/
+    // `AiSpellAssistTarget` each set. A 32-bit field truncated to a byte
+    // on save, which is fine for six packages.
+    uint8_t aiPackage = 0;
+    uint8_t aggressive = 0;  // +0x2ac  SetAggressive(bool) / Aggressive()
+    uint8_t invulnerable = 0;  // +0x1e2  -- second copy
+    uint8_t usable = 0;        // +0xd8   -- second copy
+    // +0x2ec. `SetLifespan(n)`, a binding with **zero uses** in the shipped
+    // scripts -- saved and restored, never set.
+    int16_t lifespan = 0;
     void Write(SaveStream& s) const;
     void Read(SaveStream& s);
 };
@@ -311,20 +417,46 @@ struct SavedCharacter {  // FUN_1001e754 / FUN_1001ea54
     // level"); a multiplayer session writes the player's original one
     // instead. FUN_1001ea54 strcpy()s it straight back into the engine.
     std::string levelName;
-    uint8_t f398 = 0;    // +0x398
-    int32_t f22c = 0;    // +0x22c
-    uint8_t f358 = 0;    // +0x358
-    uint8_t f359 = 0;    // +0x359
-    uint8_t f35a = 0;    // +0x35a
+    // +0x398. `SetFrozen` / `SetParalyzed` -- two bindings, one byte,
+    // and **neither is used by any shipped script**.
+    uint8_t frozen = 0;
+    // +0x22c. The AI/behaviour state. The think step (FUN_1001d778) copies
+    // it to +0x230 before running, and starts a 0x400/0x800 transition
+    // timer when it comes back changed. -1 in the Character constructor,
+    // 7 in the one subclass constructor that overrides it.
+    int32_t aiState = 0;
+    // +0x358 / +0x359 / +0x35a. Three "busy" flags that gate the think
+    // step: it refuses to run while any is set. **Nothing in the image
+    // ever sets one.** They are written to zero by the constructor and by
+    // FUN_1001d3e0, cleared again by the release path, and tested in three
+    // places -- an entire mechanism that is saved, restored, and dead.
+    uint8_t busy358 = 0;
+    uint8_t usingObject = 0;   // +0x359, the one with a visible purpose below
+    uint8_t busy35a = 0;
     // +0x364/+0x368 are saved indirectly: the index of the linked entity
     // within the engine's own entity list, and that entity's typeId; or
     // -1/-1 when there is none. The loader parks them at +0x35c/+0x360
-    // untouched and resolves them later (vtable +0x254).
+    // untouched and resolves them later (vtable +0x254 = FUN_1001ecb4,
+    // which walks the engine's entity list by index for the first and the
+    // character's own inventory by typeId for the second).
+    //
+    // What they link to: +0x364 is the entity this character is *using* --
+    // taking it sets that entity's `inUse` -- and +0x368 is an item held in
+    // the character's own inventory. Both are reachable only through this
+    // fixup: no gameplay path assigns either.
     int32_t linkIndex = -1;
     int32_t linkTypeId = -1;
-    int32_t f36c = 0, f370 = 0, f374 = 0;
+    // +0x36c/+0x370/+0x374. The position to put the character back at when
+    // it stops using the linked entity -- FUN_1001ecb4 copies these three
+    // straight into x/y/z. Guarded by `usingObject`, so also unreachable.
+    int32_t returnX = 0, returnY = 0, returnZ = 0;
     int32_t f378 = 0;    // +0x378, a halfword widened on the wire
-    int32_t f37c = 0, f380 = 0, f384 = 0;
+    // +0x37c/+0x380/+0x384. **Provably dead**: across the whole image
+    // these three are touched by nothing except this save function and its
+    // loader. The loader writes them, the saver reads them, and no other
+    // code path in the game does either -- not even the constructor. Three
+    // words of pure round-trip ballast.
+    int32_t dead37c = 0, dead380 = 0, dead384 = 0;
     void Write(SaveStream& s) const;
     void Read(SaveStream& s);
 };

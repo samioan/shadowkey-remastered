@@ -100,6 +100,9 @@ add_library(sk_save STATIC
   src/assets/save_archive.cpp
   src/assets/save_records.cpp
   src/assets/save_stream.cpp
+  # M52: dragonstar.set, the settings file -- the same "what does the
+  # engine persist" question, so it lives beside the save format.
+  src/assets/game_config.cpp
 )
 target_include_directories(sk_save PUBLIC src)
 
@@ -399,3 +402,9 @@ target_link_libraries(save_records_smoke PRIVATE sk_bindings sk_save)
 # src/tests/m51_audio_mixing_smoke.cpp.
 add_executable(audio_mixing_smoke src/tests/m51_audio_mixing_smoke.cpp)
 target_link_libraries(audio_mixing_smoke PRIVATE sk_bindings)
+
+# What the save record's scalars actually are, the animation rate's units,
+# and dragonstar.set -- the settings file. See
+# src/tests/m52_save_fields_smoke.cpp.
+add_executable(save_fields_smoke src/tests/m52_save_fields_smoke.cpp)
+target_link_libraries(save_fields_smoke PRIVATE sk_save sk_world)

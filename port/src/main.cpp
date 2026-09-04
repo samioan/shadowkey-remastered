@@ -21,6 +21,7 @@
 #include <string>
 #include <vector>
 
+#include "assets/game_config.h"
 #include "assets/sound_archive.h"
 #include "assets/sprite_archive.h"
 #include "assets/string_table.h"
@@ -298,7 +299,9 @@ int AdvanceMonsterAnimation(MonsterInstance& m, sk::ModelArchive& models) {
 
     constexpr float kTickSeconds = 0.04f;  // the fixed 25Hz tick, engine/game_clock.h
     m.animTime += kTickSeconds;
-    float rate = clip->rate > 0 ? static_cast<float>(clip->rate) : 10.0f;
+    // M52: `rate` is in units of 1.5 fps, not fps -- the engine multiplies
+    // it by 384 into an 8.8-per-second cursor rate. See AnimationClip.
+    float rate = clip->rate > 0 ? clip->fps() : 10.0f * sk::kRateToFps;
     int advanced = static_cast<int>(m.animTime * rate);
     int frameInClip;
     if (m.animHoldLastFrame) {
@@ -1139,6 +1142,45 @@ int main(int argc, char** argv) {
                        L"shadowkey-port (M6: 3D zone renderer)");
 
     sk::InputState input;
+
+    // M52: `dragonstar.set` -- the one configuration file the real engine
+    // writes (assets/game_config.h). Loading it here is the counterpart of
+    // the real loader running before the front end: the action map, the
+    // two volumes and the mute-on-call flag all come back, and anything
+    // the file does not mention keeps the default the constructors gave
+    // it. A missing file is not an error -- a first run has none.
+    const std::string configPath =
+        sk::ExecutableDirectory() + "/" + sk::GameConfig::kFileName;
+    sk::GameConfig config;
+    config.CaptureBindings(input);
+    config.soundVolume = audioEngine.sfxVolumePercent();
+    config.musicVolume = audioEngine.musicVolumePercent();
+    if (config.Load(configPath)) {
+        config.ApplyBindings(input);
+        audioEngine.SetSfxVolumePercent(config.soundVolume);
+        audioEngine.SetMusicVolumePercent(config.musicVolume);
+        stack.SetMuteOnCall(config.muteOnCall);
+        std::printf("loaded %s\n", configPath.c_str());
+    }
+    // The real `SaveConfig` is a script binding the options screen calls,
+    // so writing on exit is not what the engine does -- but the engine
+    // also cannot be closed by a window button. Capture-then-write keeps
+    // the file in step with whatever the Options screen changed.
+    struct ConfigWriter {
+        sk::GameConfig& cfg;
+        const sk::InputState& input;
+        sk::AudioEngine& audio;
+        sk_bindings::MenuStack& stack;
+        std::string path;
+        ~ConfigWriter() {
+            cfg.CaptureBindings(input);
+            cfg.soundVolume = audio.sfxVolumePercent();
+            cfg.musicVolume = audio.musicVolumePercent();
+            cfg.muteOnCall = stack.muteOnCall();
+            cfg.Save(path);
+        }
+    } configWriter{config, input, audioEngine, stack, configPath};
+
     window.SetKeyCallback([&](int vkCode, bool down) {
         if (auto slot = sk::MapPcKeyToButtonSlot(vkCode)) {
             input.SetButton(*slot, down);

@@ -129,6 +129,15 @@ public:
     void Rebind(Action action, ButtonSlot slot) {
         bindingOffset_[static_cast<size_t>(action)] = static_cast<int>(slot);
     }
+    // The raw table entry, -1 when unbound. This is exactly what the real
+    // `SaveConfig` writes into `dragonstar.set`'s ACTIONMAP block and what
+    // its loader feeds back through Rebind (assets/game_config.h).
+    int binding(Action action) const {
+        return bindingOffset_[static_cast<size_t>(action)];
+    }
+    void RebindRaw(Action action, int slot) {
+        bindingOffset_[static_cast<size_t>(action)] = slot;
+    }
 
 private:
     void InitDefaultBindings() {

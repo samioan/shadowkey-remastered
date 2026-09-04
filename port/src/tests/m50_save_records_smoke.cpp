@@ -67,43 +67,43 @@ sk::SavedEntity MakeRecord(sk::SavedEntityKind kind) {
     rec.kind = kind;
     rec.entity.entityId = 0x1234;
     rec.entity.artName = "azra_rat";
-    rec.entity.scriptName = "trthgar";
+    rec.entity.objectId = "trthgar";
     rec.entity.x = 0x00051800;
     rec.entity.y = -0x00032000;
     rec.entity.z = 0x0140;
     rec.entity.yaw = -0x4000;
     rec.entity.pitch = 0x0800;
     rec.entity.spriteId = 30000;
-    rec.entity.f6c = 0x11;
-    rec.entity.f6d = 0x22;
-    rec.entity.f70 = 0xdeadbeefu;
-    rec.entity.deadline10c = 1'000'000;
-    rec.entity.deadline118 = 1'000'050;
+    rec.entity.animMode = 0x11;
+    rec.entity.animLoopsLeft = 0x22;
+    rec.entity.animPosition = 0xdeadbeefu;
+    rec.entity.delayDeadline = 1'000'000;
+    rec.entity.timerDeadline = 1'000'050;
     rec.entity.scriptVars.push_back({"saved_Open", "1"});
     rec.entity.scriptVars.push_back({"saved_bCanOpen", "0"});
     // Deliberately different from the entity root's own copies -- the
     // Drawable layer re-writes seven of the same fields.
-    rec.drawable.f6c = 0x33;
-    rec.drawable.f6d = 0x44;
-    rec.drawable.f70 = 0xcafebabeu;
-    rec.drawable.f12c = 7;
+    rec.drawable.animMode = 0x33;
+    rec.drawable.animLoopsLeft = 0x44;
+    rec.drawable.animPosition = 0xcafebabeu;
+    rec.drawable.animClip = 7;
     rec.item.usesRangedPath = 1;
-    rec.item.f19c = 0x400;
+    rec.item.weaponSprite = 0x400;
     rec.stackable.quantity = 12;
-    rec.wearable.f1d4 = 5;
+    rec.wearable.armorConstraint = 5;
     rec.weapon.damageMin = 3;
     rec.weapon.damageMax = 9;
     rec.weapon.quantity = 2;
     rec.spellbook.spells.push_back({4010, 3, false, 0});
     rec.spellbook.spells.push_back({4020, 0, true, 77});
-    rec.holder.f1bc = 0x1111;
+    rec.holder.moveDeltaX = 0x1111;
     rec.stats.attack = 62;
     rec.stats.defense = 41;
     rec.stats.health = 23;
     rec.stats.gold = 250;
     rec.stats.experience = 12345;
     rec.stats.level = 4;
-    rec.actor.f2ec = -3;
+    rec.actor.lifespan = -3;
     rec.linkedActor.link224 = 8;
     rec.character.levelName = "azra";
     rec.character.linkIndex = 2;
@@ -331,8 +331,8 @@ int main(int argc, char** argv) {
         sk::SavedEntity back;
         back.kind = sk::SavedEntityKind::Drawable;
         back.Read(s);
-        Check(back.drawable.f6c == 0x33 && back.entity.f6c == 0x11 &&
-                  back.drawable.f70 == 0xcafebabeu && back.entity.f70 == 0xdeadbeefu,
+        Check(back.drawable.animMode == 0x33 && back.entity.animMode == 0x11 &&
+                  back.drawable.animPosition == 0xcafebabeu && back.entity.animPosition == 0xdeadbeefu,
               "+0x6c/+0x70 are written twice, by Drawable and by Entity, and both survive");
     }
     {

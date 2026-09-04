@@ -186,10 +186,32 @@ clips 0-3 and its model carries 4 records; the creatures that name clip 8
 resolve to models carrying 9 or 11. That correspondence was the original
 reason to look at the trailer at all.
 
-**Still unconfirmed:** `rate`'s units. Observed values are 1, 3, 5, 6, 10,
-11, 15, 17 and 29. Frames per second is the reading that produces sane
-playback (and what the PC port uses), but nothing in the decompiled code
-has been traced to it yet.
+**`rate`'s units, resolved (M52).** The consumer is `FUN_100655a8`, the
+engine's clip starter: it reads exactly this record out of the model and
+converts the field before storing it on the object as
+`internalRate = clipRate * 384` (with a shortcut branch setting `0xf00`
+directly when `clipRate == 10`, which is the same value). The animation
+tick `FUN_10065438` then advances an 8.8 fixed-point *frame* cursor by
+`(dt * internalRate) >> 8`, where `dt` is the engine's frame delta in 8.8
+fixed-point **seconds** (`elapsedMs * 256 / 1000`, clamped to `[4, 64]`,
+i.e. 15.6..250 ms). One second therefore advances the cursor by exactly
+`internalRate`, and a frame is 256 cursor units:
+
+```
+framesPerSecond = internalRate / 256 = clipRate * 1.5
+```
+
+So the field is **not frames per second**: it is frames per second in
+units of 1.5. The archive's overwhelmingly common value of 10 means
+**15 fps**, not 10, and the range 1..29 spans 1.5..43.5 fps. The PC port
+read it as fps and was therefore a third too slow on every animation; see
+`AnimationClip::fps()` and `kRateToFps` in
+[`port/src/world/model_archive.h`](../port/src/world/model_archive.h),
+asserted by `src/tests/m52_save_fields_smoke.cpp`.
+
+The same function is where the *caller* can scale a clip: its last
+argument is an override rate, defaulting to `0xf00`, applied as
+`internalRate * override / 0xf00`.
 
 Verified by `port/src/tests/m29_animation_smoke.cpp`, which walks the real
 archive and asserts the partition property for every animated entry.
@@ -214,8 +236,10 @@ argument) is now doubly confirmed by real bytes agreeing with both.
   trailer is the animation clip table, one 6-byte record per clip, so its
   size tracks clip count (not frame count, which is why `H1 * 6` never
   fitted). See "The trailer" above.
-- `AnimationClip::rate`'s units — frames per second is the working reading,
-  not yet traced to a decompiled consumer.
+- ~~`AnimationClip::rate`'s units.~~ — **resolved (M52)**: the field is
+  frames per second in units of 1.5 (the engine multiplies it by 384 into
+  an 8.8-per-second cursor rate), so the common value 10 is 15 fps. See
+  "The trailer" above.
 - `azra.sta`'s format is still unresolved — but the "per-zone entity/actor
   placement" guess below was **wrong**: that role is `.ent` (see
   `ZONE_FORMAT.md`), and `.sta` isn't even one-per-zone (only `azra.sta`

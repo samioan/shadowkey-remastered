@@ -202,7 +202,7 @@ consistent with a fixed-point engine.
 
 ### The chain
 
-Thirty-two vtables carry a `+0x130`/`+0x134` pair. Between them they name
+Thirty-one vtables carry a `+0x130`/`+0x134` pair. Between them they name
 thirteen distinct save functions, and those thirteen form **one
 inheritance chain**, each writing its own fields and then tail-calling
 its base's — so the wire order is most-derived first:
@@ -225,6 +225,11 @@ Entity              FUN_10066614 / FUN_10066cc4   (5 vtables)
 plus one non-virtual leaf, the **stats block** (`FUN_1004a284` /
 `FUN_1004a6f4`), which Actor and Player each call on their own block
 (`actor+0x224` / `player+0x3ac`).
+
+> **Corrected (M52).** This said "thirty-two" while the per-class counts
+> beside it added to thirty-one; the counts were right. Reproducible with
+> `shadowkey/ghidra/scripts/list_save_vtables.py`, which enumerates the
+> vtables and reads slot `+0x130` out of each.
 
 **Nothing is version-tagged.** No magic, no field count, no per-record
 length: a record is exactly as long as the class that wrote it, and a
@@ -396,6 +401,243 @@ thing in `character.dat` and it is how a load knows what to load:
 `FUN_1001ea54` `strcpy`s it straight back into the engine. (A
 multiplayer session writes `player+0x1078` instead, next to *"Saving %s
 as original level"*.)
+
+## What the scalars are (M52)
+
+M50 left roughly forty fields pinned only by width and position. This
+names all but two of them, and the method is worth stating because it is
+mechanical rather than a series of guesses.
+
+### The method: the dispatchers are the same tree as the save functions
+
+Every native binding lives in a class dispatcher's `switch`
+(`SIMKIN_NATIVE_API.md`), and a dispatcher tail-calls its base's on a
+name it does not recognise. Following those tail calls recovers the class
+hierarchy independently of the save functions -- and it comes out
+**identical, layer for layer**:
+
+```
+10061a60 Entity          <- FUN_10066614 Entity
+ +- 10065a70 Drawable         <- FUN_10067db0 Drawable
+     +- 1006ca90 Item              <- FUN_1006d35c Item
+     |   +- 1002c848 Stackable         <- FUN_1002ed3c Stackable
+     |       +- 1002d3c4 Weapon            <- FUN_1002eaa0 Weapon
+     |       +- 1002da3c Armor             (shares Weapon's, see below)
+     |       +- 10046328 Wearable          <- FUN_10047584 Wearable
+     +- 10028594 Spellbook         <- FUN_10028a60 Spellbook
+         +- 1002de24 Spell
+         +- 10003810 InventoryHolder   <- FUN_10005164 InventoryHolder
+             +- 10084924 Actor             <- FUN_10086514 Actor
+             +- 1001e2f8 Character         <- FUN_1001e754 Character
+                 +- 1003f130 Player            <- FUN_10043308 Player
+```
+
+So a field offset that appears inside exactly one binding's `case` block
+is that binding's field. Two things make the join trustworthy rather than
+merely suggestive, and both had to be built in:
+
+- **Vtable-call offsets are not fields.** `(**(code **)(vt + 0x8c))(...)`
+  is a slot index. Unfiltered, `Entity+0x8c` "means" `SetUseText` purely
+  because `SetUseText` makes a virtual call through slot `+0x8c`.
+- **The chain is a tree, not a line.** Sibling branches reuse offsets for
+  different fields: `Stackable+0x1bc` is an item's weight while
+  `InventoryHolder+0x1bc` is a step toward a move target, and both
+  branches independently use `+0x180`. A field is only attributed from
+  dispatchers on its own root-to-leaf path.
+
+The join's own sanity check is that it re-derives what M50 already knew
+from elsewhere: `+0x94`/`+0x9c`/`+0xa4` come back as
+`GetPositionX`/`Y`/`Z`, `+0xa8`/`+0xb6` as pitch and turn, `+0x1c4` as
+`SetQuantity`, `+0x1cc`/`+0x1ce` as `SetDamageMin`/`Max`, `+0x2a8` as the
+AI package. Tool: `shadowkey/ghidra/scripts/name_save_fields.py`, on top
+of a one-shot whole-program decompile (`pyghidra_dump_program.py`). Every
+name below was then checked against the shipped scripts' real argument
+values.
+
+### The Entity layer
+
+| offset | name | evidence |
+|---|---|---|
+| `+0x4a` | sprite id | 30000 sentinel, ctor |
+| `+0x60` | flag word (default 2) | bit 0 cleared on deactivate; bit 4 set on a linked entity |
+| `+0x6c`..`+0x80` | **the animation player** | see below |
+| `+0x86` | render flags | the two renderers test bits 1 and 2 |
+| `+0x8c` | *unnamed* | zeroed by the ctor, read by nothing |
+| `+0x8e` | **collision radius** | `FUN_100017c8` walks `x±r`, `y±r` against `Map_GetTileAt` |
+| `+0x90` | **collision height** | zeroed together with the radius by `SetActive(false)` |
+| `+0x92` | *unnamed* | zeroed by the ctor, read by nothing |
+| `+0x93` | `PutInReverse` flag | binding unused by any script |
+| `+0x94`/`+0x9c`/`+0xa4` | x / y / z | `GetPositionX`/`Y`/`Z` |
+| `+0xa8`/`+0xb2`/`+0xb6` | pitch / **roll** / yaw | `SetRotationPitch`/`Roll`/`Turn`; `.ent` supplies all three |
+| `+0xc4` | runtime entity id | allocated and registered in `Entity::Init` |
+| `+0xca` | **skin index** | `SetSkin(0..12)` across the corpus |
+| `+0xcb` | **object id string** | what `GetID` returns; the `.ent` name's first copy |
+| `+0xd5` | passable | `SetPassable(bool)` |
+| `+0xd8` | usable | `SetUsable(bool)` |
+| `+0xd9` | **has a name of its own** | `FUN_1006842c` branches on it |
+| `+0xdc` | **name string id** (default 13) | the index that branch uses |
+| `+0xe0` | **short-name string id** (default 14) | `GetName`/`GetShortName` index it x4 |
+| `+0xe2` | the `.ent` name, second copy | the loader sprintf()s a path from it |
+| `+0x10a`/`+0x10c`/`+0x110` | **the `Delay` timer** | armed flag, deadline, second argument |
+| `+0x114`/`+0x115`/`+0x118` | **the native timer** | `FUN_10068480(obj, seconds, kind)` |
+| `+0x11c` | in use | `MountGun`/`MountFlak88` set it, `IsInUse` reads it |
+
+Two deadlines, not one: `Delay(n, k)` is the script-facing timer and
+`FUN_10068480` is the native one, and each has its own armed flag beside
+it. Both are stored as `value - time(0)` and re-based on load, which is
+what makes a wall-clock deadline survive being saved on one day and
+loaded on another.
+
+### The animation player, `+0x6c`..`+0x80` -- and the model's `rate`
+
+The seven fields `Drawable` re-writes turn out to be one mechanism, set as
+a group by the clip starter at `Drawable` vtable `+0x13c` and advanced by
+`FUN_10065438` once per frame:
+
+```
++0x6c  mode              (the setter's first argument, default 1)
++0x6d  loops remaining   (0x7f = forever; 0 ends the clip)
++0x70  play cursor       8.8 fixed-point frames
++0x74  first frame       8.8
++0x78  frame span        8.8 (default 0x100 = one frame)
++0x7c  last frame        8.8 = first + span
++0x80  rate              frames per second x 256 (default 0xf00 = 15 fps)
+```
+
+and `Drawable`'s own two fields are the clip indices: `+0x12c` is the clip
+playing now, `+0x130` the clip to switch to when it ends -- `AttachEffect`
+arms 4, `DoFireExplosionEffect` arms 0x20.
+
+**This resolves `AnimationClip::rate`'s units**, which `MODEL_FORMAT.md`
+had open. `FUN_100655a8` reads the clip record straight out of the model
+and converts it: `internalRate = clipRate * 384`, taking `0xf00` as a
+shortcut for the common value 10. The tick advances the 8.8 cursor by
+`(dt * rate) >> 8` with `dt` the frame delta in 8.8 *seconds*
+(`elapsedMs * 256 / 1000`, clamped to `[4, 64]`), so one second advances
+the cursor by exactly `rate`, and a frame is 256 units:
+
+```
+framesPerSecond = rate / 256 = clipRate * 1.5
+```
+
+The field is therefore **not frames per second** -- it is fps in units of
+1.5, and the archive's overwhelmingly common value of 10 means **15 fps**,
+not 10. The port was a third too slow everywhere; fixed in
+`world/model_archive.h`.
+
+### The other layers
+
+| offset | layer | name |
+|---|---|---|
+| `+0x5e` | Drawable | **model scale**, 8.8 (`SetScale(256)` is 1x) |
+| `+0x160` | Spellbook | the **`Init` guard** -- set to 1 on first run |
+| `+0x180` | Spellbook | `SetDestroy` / `GetDestroy` |
+| `+0x181` | Spellbook | **is a lootable container** |
+| `+0x19c` | Item | `SetWeaponSprite(n)` |
+| `+0x1a0`/`+0x1a7` | Item | range, and the ranged-path flag (M49) |
+| `+0x1cc`/`+0x1ce` | Weapon | damage min/max -- **armour value** on the Armor sibling |
+| `+0x1d0` | Weapon | `SetWeaponType` -- **`SetArmorType`** on Armor |
+| `+0x1d4` | Wearable | **armour weight class**, `AR_Light`/`AR_Medium`/`AR_Heavy` |
+| `+0x1b9`/`+0x1bc`/`+0x1c0` | InventoryHolder | the **move order** `SetState` issues: flag, then `(target - self) x 20` per axis |
+| `+0x1e1` | InventoryHolder | walking state (ctor default 1) |
+| `+0x1e2` | InventoryHolder | `SetInvulnerable(bool)` |
+| `+0x1e4` | InventoryHolder | **`SetActive(bool)`** |
+| `+0x2a8` | Actor | current AI package |
+| `+0x2ac` | Actor | `SetAggressive(bool)` |
+| `+0x2ec` | Actor | `SetLifespan(n)` |
+| `+0x22c` | Character | AI/behaviour state |
+| `+0x398` | Character | `SetFrozen` / `SetParalyzed` |
+
+`Weapon` and `Armor` are siblings sharing one save function, so nothing on
+the wire distinguishes "damage 3-7" from "armour rating 3"; the typeId's
+`entities.txt` category does (4 = weapon, 6 = armor, 15 = shield).
+
+`SetActive(false)` (`FUN_10005d60`) is worth spelling out because it is
+what makes several of these fields matter at once: it clears the native
+timer, clears flag bit 0, zeroes the whole motion and orientation group
+*and* the collision cylinder, and sets `passable`. A script can leave an
+entity switched off, so all of that has to survive a save.
+
+### What is saved and can never happen
+
+Three separate mechanisms are fully serialized and unreachable, which is
+the same shape of finding M51 turned up in the mixer.
+
+- **`Character`'s "using an object".** `+0x35c`/`+0x360` save the index of
+  a linked entity and the typeId of an inventory item; the post-load fixup
+  (`FUN_1001ecb4`, vtable `+0x254`) resolves them into `+0x364`/`+0x368`,
+  and `+0x36c`/`+0x370`/`+0x374` hold the position to put the character
+  back at when it lets go. All of it is gated on `+0x359`, and **nothing
+  in the image ever sets `+0x359`** -- nor its two neighbours `+0x358` and
+  `+0x35a`, three "busy" flags the think step tests and only ever clears.
+- **`+0x37c`, `+0x380` and `+0x384`.** Across the whole image these three
+  words are touched by the save function, its loader, and *nothing else*
+  -- not even the constructor. Pure round-trip ballast.
+- **`+0x11c`, and eight bindings with no callers.** `MountGun`,
+  `MountFlak88`, `IsInUse`, `SetLifespan`, `SetFrozen`, `SetParalyzed`,
+  `PutInReverse` and `GetWalkingState` are implemented, write or read
+  saved fields, and are called by **no shipped script**. (`MountFlak88` is
+  the engine's own name for it.)
+
+## The configuration files (M52)
+
+M40 listed `levelinfo.txt`, `dragonstar.cfg` and `dragonstar.set` and read
+none of them. Two of the three do not exist.
+
+**`levelinfo.txt` is dead.** Its full path (`0x100ab238`) and the
+`"%d\n%d\n"` format beside it (`0x100ab264`) are referenced by no word
+anywhere in the image, so nothing can open the file or use that format.
+**`dragonstar.cfg` is deader**: only a bare filename exists for it, with no
+full path anywhere at all.
+
+Both survive in exactly one place. `DeleteAllGames` (GameEngine binding
+`0x2e`) wipes the four slots and then unlinks seven named files:
+
+```
+current.sav  dragonstar.cfg  dragonstar.set  ngen.log
+levelinfo.txt  tmp.big  6r51.cfg
+```
+
+-- a cleanup list written against a longer file set than this build
+produces. Of the seven it only ever creates `current.sav`, `game0..3.sav`
+and `dragonstar.set`.
+
+### `dragonstar.set`
+
+The settings file, and plain text. Writer `FUN_10019c04` (`SaveConfig`,
+GameEngine `0x71`) opens it `"wt"`; reader `FUN_100199e0` opens it `"rt"`,
+`fscanf("%s")`s a key and `strcmp`s it against five:
+
+```
+ACTIONMAP
+16
+<button slot for action 0>
+... sixteen lines ...
+LANGUAGE
+<n>
+SOUNDVOLUME
+<0..100>
+MUSICVOLUME
+<0..100>
+MUTEONCALL
+<0|1>
+```
+
+Three details are asymmetries rather than a tidy round trip:
+
+- **The writer hardcodes 16**, the reader honours the file's own count.
+  The real binding table has 17 entries (`INPUT_HANDLING.md`), so the 17th
+  is never written and never restored.
+- **The writer refuses below 5000 bytes free**, showing its
+  "free space - %d" message and setting the engine's save-failed flag
+  rather than writing a truncated file -- that is what `SaveConfigFailed`
+  is for.
+- **Volumes are not a settings struct.** The writer reads `soundMgr+0xabc`
+  and `soundMgr+0xab8` directly and the reader calls the two volume
+  setters. Those are exactly M51's `SoundFXSlider` and `MusicSlider`
+  fields, arrived at from a completely different direction.
+
+Implemented in [`port/src/assets/game_config.h`](../port/src/assets/game_config.h).
 
 ## What is still open
 

@@ -50,16 +50,42 @@ struct ModelFace {
 // or 11. That is exactly what `SetIdleAnimation`/`SetWalkAnimation`/
 // `SetSwingAnimation`/`SetDeathAnimation`/`PlayAnimation` pass.
 //
-// `rate`'s units are **not** confirmed -- observed values are 1, 3, 5, 6,
-// 10, 11, 15, 17, 29, and this port reads them as frames per second (see
-// world/model_archive.cpp), which produces sane-looking playback but is an
-// interpretation, not a decompiled fact.
+// **`rate`'s units, resolved (M52).** The consumer is the engine's own
+// clip starter, `FUN_100655a8`, which reads exactly this record out of the
+// model and converts the field before storing it on the object:
+//
+//     internalRate = clipRate * 384          // and `if (clipRate == 10)
+//                                            //  internalRate = 0xf00` --
+//                                            //  the same value, taken as
+//                                            //  a shortcut for the common
+//                                            //  case
+//
+// The animation tick (`FUN_10065438`) then advances an 8.8 fixed-point
+// frame cursor by `(dt * internalRate) >> 8`, where `dt` is the engine's
+// frame delta in 8.8 fixed-point **seconds** (`elapsedMs * 256 / 1000`,
+// clamped to [4, 64] i.e. 15.6..250 ms). Substituting, one second of real
+// time advances the cursor by `internalRate`, and a frame is 256 cursor
+// units, so:
+//
+//     framesPerSecond = internalRate / 256 = clipRate * 1.5
+//
+// So the field is **not** frames per second: it is frames per second in
+// units of 1.5, and the file's overwhelmingly common value of 10 means
+// **15 fps**, not 10. kRateToFps below is that 1.5, and it is why this
+// port's playback was a third too slow everywhere.
 struct AnimationClip {
     int startFrame = 0;
     int endFrame = 0;  // exclusive
-    int rate = 10;     // frames per second, unconfirmed -- see above
+    int rate = 10;     // in units of 1.5 fps -- see kRateToFps
     int frameCount() const { return endFrame - startFrame; }
+    // The clip's real playback speed, frames per second.
+    float fps() const { return static_cast<float>(rate) * 1.5f; }
 };
+
+// `AnimationClip::rate` -> frames per second. See the comment above: the
+// engine multiplies the field by 384 into an 8.8-per-second cursor rate,
+// and 384/256 is 1.5.
+constexpr float kRateToFps = 1.5f;
 
 struct Model {
     // All frames back to back: `frameCount * vertsPerFrame` entries, so

@@ -259,7 +259,17 @@ per-field mapping:
 | `0x10` | `rotOrScale[2]` | object `+0xa8` (orientation channel) |
 | `0x12` | `rotOrScale[3]` | **never read — dead** |
 | `0x14` | `unkA` (low u16) | object `+0xb6` (orientation channel) |
-| `0x18` | `unkB` (low u16) | object `+0x5e`, `modelFlags` |
+| `0x18` | `unkB` (low u16) | object `+0x5e`, the model **scale** (see the M52 note below) |
+
+> **Later correction (M52).** The destination `+0x5e` is not
+> "`modelFlags`" — it is the model's **scale**, in the engine's 8.8 fixed
+> point. Its script binding is `SetScale`, and the shipped scripts call it
+> with 192, 256, 352 and 512, where 256 is 1.0; `SetActive`'s reset path
+> and the Drawable save record treat it as one halfword beside the
+> orientation channels. So `unkB`'s low halfword is a per-placement size
+> multiplier, which is also why `rotOrScale`'s name was half right: two
+> rotations, and the scale lives one field along. See
+> `SAVE_FORMAT.md`'s "What the scalars are".
 
 So only 2 of the 4 `rotOrScale` fields are used at all — `idx0`/`idx2`,
 both real angle data, feeding 2 of the object's 3 orientation channels.

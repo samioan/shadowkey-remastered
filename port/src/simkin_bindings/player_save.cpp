@@ -183,7 +183,7 @@ sk::SavedEntity PlayerExecutable::BuildSaveRecord(const std::string& levelName) 
         e.typeId = item->templateId();
         e.stackable.quantity = item->quantity();
         e.item.usesRangedPath = item->usesRangedPath() ? 1 : 0;
-        e.entity.scriptName = item->scriptPath();
+        e.entity.objectId = item->scriptPath();
         e.entity.artName = item->name();
         rec.inventory.push_back(std::move(e));
     }
@@ -247,7 +247,7 @@ void PlayerExecutable::ApplySaveRecord(const sk::SavedEntity& record, MenuStack&
     m_LeftItem = nullptr;
     m_RightItem = nullptr;
     for (const sk::SavedEntity& child : record.inventory) {
-        const std::string& path = child.entity.scriptName;
+        const std::string& path = child.entity.objectId;
         if (path.empty()) continue;
         skExecutableContext loadCtxt(&stack.interpreter());
         try {

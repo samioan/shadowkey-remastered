@@ -4018,19 +4018,112 @@ algorithms.
       XAudio2 rather than reproducing the saturating integer accumulator
       sample by sample.
 
+- **M52 -- what the save record's scalars are, and the settings file.**
+  Two of M40/M50's leftovers, closed together because the same
+  whole-program pass answers both. RE writeup in
+  [`docs/SAVE_FORMAT.md`](SAVE_FORMAT.md) ("What the scalars are" and "The
+  configuration files"); smoke test `src/tests/m52_save_fields_smoke.cpp`
+  (33 checks).
+
+    - **The method: the binding dispatchers are the same tree as the save
+      functions.** Every native binding lives in a class dispatcher's
+      `switch`, and a dispatcher tail-calls its base's on a name it does
+      not recognise. Following those tail calls recovers the class
+      hierarchy independently -- and it comes out **identical to the save
+      chain, layer for layer** (`10061a60` Entity -> `10065a70` Drawable
+      -> `1006ca90` Item / `10028594` Spellbook -> ... -> `1003f130`
+      Player). So an offset appearing inside exactly one binding's `case`
+      block is that binding's field. Two corrections had to be built into
+      the join before it was trustworthy: a `(**(code **)(vt + 0x8c))(...)`
+      is a **vtable slot, not a field** (unfiltered, `Entity+0x8c` "means"
+      `SetUseText` purely because `SetUseText` calls through slot `+0x8c`),
+      and **the chain is a tree, not a line**, so sibling branches reuse
+      offsets -- `Stackable+0x1bc` is an item's weight while
+      `InventoryHolder+0x1bc` is a step toward a move target. Its own
+      sanity check is that it re-derives what M50 already knew from
+      elsewhere: `+0x94`/`+0x9c`/`+0xa4` come back as
+      `GetPositionX`/`Y`/`Z`, `+0x1cc`/`+0x1ce` as `SetDamageMin`/`Max`,
+      `+0x2a8` as the AI package. New tools:
+      `shadowkey/ghidra/scripts/pyghidra_dump_program.py` (one whole-program
+      decompile, 2006 functions, 0 failures, so later questions are a local
+      grep) and `name_save_fields.py` (the join itself).
+
+    - **Named: all but two.** The Entity layer alone gives up the
+      **collision cylinder** (`+0x8e` radius, `+0x90` height -- the wall
+      resolver walks `x±r`/`y±r` against `Map_GetTileAt`), **roll**
+      (`+0xb2`, the third orientation channel beside pitch and yaw),
+      **skin** (`+0xca`), **passable**/**usable**, the **object id string**
+      `GetID` returns (`+0xcb`), a **name flag and two string-table ids**
+      (`+0xd9`/`+0xdc`/`+0xe0`), and **two separate wall-clock timers** --
+      the script `Delay(n, k)` at `+0x10a`/`+0x10c`/`+0x110` and a native
+      one at `+0x114`/`+0x115`/`+0x118`, each with its own armed flag.
+      Elsewhere: `+0x1e4` is **`SetActive`**, `+0x160` is the **`Init`
+      guard** that makes re-running a restored entity's `Init` idempotent,
+      `+0x1d4` is the **armour weight class** (`AR_Light`/`Medium`/`Heavy`,
+      58 uses in the corpus), and `+0x1b9`/`+0x1bc`/`+0x1c0` are the
+      **move order** `SetState` issues as `(target − self) × 20` per axis.
+      Only `+0x8c` and `+0x92` are left: zeroed by the constructor, read by
+      nothing. Every name was then checked against the shipped scripts'
+      real argument values.
+
+    - **The animation player, and `AnimationClip::rate` (a second
+      milestone closed).** The seven fields Drawable re-writes are one
+      mechanism: mode, loops-remaining (`0x7f` = forever), and four 8.8
+      fixed-point **frame** fields plus a rate, set as a group by the clip
+      starter at vtable `+0x13c` and advanced by `FUN_10065438`. That
+      pins the model file's own `rate` field, open since M29:
+      `FUN_100655a8` converts it as `internalRate = clipRate * 384`, and
+      the tick advances the cursor by `(dt * rate) >> 8` with `dt` in 8.8
+      **seconds**, so `fps = rate / 256 = clipRate * 1.5`. The field is
+      **not frames per second** -- it is fps in units of 1.5, and the
+      archive's common value of 10 means **15 fps**. The port read it as
+      fps and was a third too slow on every animation; fixed.
+
+    - **A correction to `ZONE_FORMAT.md`.** The `.ent` record's `unkB` low
+      halfword lands in object `+0x5e`, which that doc called
+      `modelFlags`. It is the model's **scale**, 8.8 fixed: its binding is
+      `SetScale`, and the scripts call it with 192, 256, 352 and 512,
+      where 256 is 1.0.
+
+    - **Three mechanisms that are saved and cannot happen.** The same
+      shape of finding M51 turned up in the mixer. `Character`'s "using an
+      object" is complete -- two link ids saved indirectly, a post-load
+      fixup that resolves both, and a stored position to return to -- and
+      **nothing in the image ever sets the flag that arms it**, nor its
+      two neighbouring busy flags, which are only ever cleared.
+      `Character+0x37c`/`+0x380`/`+0x384` are touched by the save
+      function, its loader, and *nothing else in the image* -- not even
+      the constructor: three words of pure round-trip ballast. And eight
+      bindings that write or read saved fields (`MountGun`,
+      `MountFlak88`, `IsInUse`, `SetLifespan`, `SetFrozen`,
+      `SetParalyzed`, `PutInReverse`, `GetWalkingState`) have **no caller
+      in any shipped script**.
+
+    - **The three config files: one exists.** `levelinfo.txt`'s full path
+      and the `"%d\n%d\n"` format beside it are referenced by **no word
+      anywhere in the image**, so nothing can open the file;
+      `dragonstar.cfg` is worse -- only a bare filename exists for it, with
+      no full path at all. Both survive only inside `DeleteAllGames`'
+      seven-name cleanup list (`current.sav`, `dragonstar.cfg`,
+      `dragonstar.set`, `ngen.log`, `levelinfo.txt`, `tmp.big`,
+      `6r51.cfg`), written against a longer file set than this build
+      produces. **`dragonstar.set` is the whole of it**: plain text, five
+      keys (`ACTIONMAP` + count + 16 button slots, `LANGUAGE`,
+      `SOUNDVOLUME`, `MUSICVOLUME`, `MUTEONCALL`), writer `FUN_10019c04`
+      and reader `FUN_100199e0`. Three asymmetries reproduced: the writer
+      hardcodes 16 while the table has 17 slots (so the 17th never
+      persists), the writer refuses below 5000 bytes free rather than
+      truncating (that is what `SaveConfigFailed` is for), and the volumes
+      are read from and written to the **mixer** rather than a settings
+      struct -- `soundMgr+0xabc` and `+0xab8`, which is M51's
+      `SoundFXSlider`/`MusicSlider` pair arrived at from a completely
+      different direction. Implemented as `assets/game_config.h`, loaded
+      at startup and written on exit.
+
 ## Next milestones (not yet started)
 
 Roughly in priority order for reaching "actually playable," not commitments:
 
-- **The unidentified scalars inside a save record** -- M50 closed the
-  save format itself, but roughly forty fields across the Entity,
-  Drawable and InventoryHolder layers are pinned only by *width and
-  position* (the save/load pair agrees on both); what they mean is still
-  open. They round-trip verbatim and nothing in this port needs them
-  yet. `levelinfo.txt` (two decimal integers, `"%d
-%d
-"`) and
-  `dragonstar.cfg`/`.set` are also unread.
 - **Which scenario `FUN_1002c010`'s mode 0x1f means.** M42 identified the
   other three (3 = zone travel, 4 = saving, 10 = loading a saved game) plus
   1 and 5, by walking `SetScreenMode`'s call sites. 0x1f never appears as a
@@ -4043,11 +4136,10 @@ Roughly in priority order for reaching "actually playable," not commitments:
   slideshow's `1..0x10` run and the vignette's `0x20..0x24` run. 0x1f is
   in none of them, so it is not a fade target either. The vignette run
   beginning one above it is the only remaining lead.
-- **`AnimationClip::rate`'s real units** (M29) -- frames per second is the
-  working reading and looks right in motion, but it hasn't been traced to a
-  decompiled consumer. (A parenthetical here used to say `SetAttachedWeapon`
-  was resolved as having no consumer in the shipped engine. That was wrong
-  twice over and is withdrawn -- see M46.)
+- **Two fields in an entity that nothing names** -- `+0x8c` and `+0x92`.
+  M52 named every other scalar in the save record; these two are zeroed by
+  the Entity constructor, carried by the save format, and read by no code
+  in the image. Not obviously worth more effort, but they are what is left.
 - **Two scripts this port still cannot place** -- `crypt2/controller.s`
   and `twilite/steamsound.s`. M51 decoded what their sound calls *mean*
   (and slot 83 turns out to be `NULL.wav` in every manifest, so
