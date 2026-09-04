@@ -472,6 +472,76 @@ public:
     // Every shipped script that sets it is a caster.
     bool playSpellCasting() const { return m_PlaySpellCasting; }
 
+    // M46: SetAttachedWeapon -> `monster+0x2c2`, a **signed 16-bit
+    // models.idx archive index**, initialised to -1 by the constructor
+    // (FUN_100815e0) -- "no weapon in hand".
+    //
+    // The engine draws it as a *second whole model welded to the body*.
+    // The monster's render override (`FUN_10083490`) runs before the
+    // normal actor draw:
+    //
+    //   if (actor->attachedWeapon != -1) {
+    //       model = engine->modelCache[0x6b38][attachedWeapon];
+    //       if (model) {
+    //           t = Transform();                       // FUN_1006807c
+    //           t.pos    = actor->+0x94, +0x9c;
+    //           t.orient = actor->+0xa4, +0xa8, +0xb2, +0xb6;
+    //           t.scale  = actor->+0x5e;               // SetScale
+    //           t.anim   = actor->+0x64 .. +0x80;      // incl. frame +0x70
+    //           Actor3D_TransformAndSubmitModel(engine, t, actor->+0x2d4, 0, -1);
+    //       }
+    //   }
+    //   thunk_FUN_10064ffc(actor);                     // then the body
+    //
+    // Copying the whole animation block rather than a bone offset is not
+    // laziness: the five weapon models are **frame-aligned exports of the
+    // humanoid rig**. Every one of them carries 144 frames and a
+    // byte-identical 11-clip table to `male_long_tunic` / `male_short_
+    // tunic` / `female_long_tunic` / `female_short_tunic` / `delfran` --
+    // and those eleven are the *only* models in the 226-entry archive with
+    // 144 frames. So the hand's motion is baked into the weapon's own
+    // vertices, and handing it the body's absolute frame index is the
+    // whole attachment mechanism. (`FUN_10065f7c`'s rotation-matrix
+    // attachment path, described in RENDERER_3D.md, is a different
+    // mechanism and is not what this uses.)
+    //
+    // The five values the shipped scripts pass are exactly the five weapon
+    // models, and they sit at the same archive indices in all 21 real
+    // zones' `<zone>_models.txt` (only `menu_models.txt`, the main-menu
+    // pseudo-zone, leaves them NULL).
+    static constexpr int kNoAttachedWeapon = -1;
+    static constexpr int kWeaponModelSword = 222;   // sword.bin
+    static constexpr int kWeaponModelMace = 223;    // mace.bin
+    static constexpr int kWeaponModelDagger = 224;  // dagger.bin
+    static constexpr int kWeaponModelBow = 225;     // bow.bin
+    static constexpr int kWeaponModelAxe = 226;     // ax.bin
+    int attachedWeaponModel() const { return m_AttachedWeaponModel; }
+
+    // The second consumer, and the reason the field is gameplay state and
+    // not just decoration: the AI tick (`FUN_10082224`) hardcodes the bow's
+    // archive index when deciding whether this creature can attack at
+    // range.
+    //
+    //   ranged = (stats->equipped != 0 && stats->equipped->isRanged)   // +0x48, +0x1a7
+    //         || actor->spellSlot0 != 0                                 // +0x310
+    //         || actor->attachedWeapon == 225;                          // +0x2c2
+    //
+    // A ranged creature skips the facing-cone test (`|yawDelta| < 0x200`)
+    // and skips the melee reach/LOS raycast (`FUN_10082004`) entirely --
+    // it just attacks anything inside `SetAttackRange`.
+    //
+    // The `== 225` clause is corroborated perfectly by the corpus: all 24
+    // scripts that pass 225 are archers (`archer_guard`, `elite_bowman`,
+    // `deadeye`, `arrow_shade`, ...) and no script that passes any other
+    // value is.
+    //
+    // The equipped-weapon clause is not reproduced -- this port's monsters
+    // carry no inventory item in the stats block's `+0x48` slot, so it can
+    // never be the deciding term.
+    bool ranged() const {
+        return hasSpells() || m_AttachedWeaponModel == kWeaponModelBow;
+    }
+
     // ---- M43: SetMob is a stat template, not just a flag ----
     //
     // M39 read the handler's first line (`monster+0x2ef = 1`, the zone-XP
@@ -571,6 +641,9 @@ private:
     int m_BlindSpellSlot = -1;  // monster+0x32c, 0xff when there is none
     int m_MeleeRoll = 0;        // monster+0x304
     bool m_PlaySpellCasting = false;  // monster+0x2bd
+    // M46: monster+0x2c2, -1 from the constructor -- see
+    // attachedWeaponModel().
+    int m_AttachedWeaponModel = kNoAttachedWeapon;
     int m_Skin = 0;
     int m_Scale = 256;  // 8.8 fixed point, 256 == 1:1
     int m_IdleAnim = -1;

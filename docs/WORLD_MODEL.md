@@ -1195,3 +1195,145 @@ flag. One Tunnel Wight, one time, in the whole game. Until then, walking
 into `battle41` *does* reach the encounter (the region walk matches by
 name, not by state) and the gate refuses — which also means `EnterZone`
 never fires for that region, since the encounter claimed it.
+
+---
+
+## The attached weapon (M46)
+
+`SetAttachedWeapon` was the roadmap's last "curiosity" item, carried with
+two claims attached. Both were wrong. M39 read the field as
+`monster+0x304`; M43 showed that offset belongs to `SetMeleeRoll`, which
+left the field unknown again. And the entry said no shipped script calls
+it — the corpus has **92 calls across 86 creature scripts**.
+
+### The field
+
+Monster binding index 12, dispatcher case `0xc`:
+
+```c
+case 0xc:                                        // SetAttachedWeapon(n)
+    monster->attachedWeapon /* +0x2c2 */ = AtomToInt(args[0]);
+```
+
+A **signed 16-bit `models.idx` archive index**, initialised to `-1` by the
+constructor (`FUN_100815e0`: `*(u16*)(this + 0x2c2) = 0xffff`). `-1` rather
+than `0` matters, because `0` is a valid archive slot.
+
+Why it stayed unknown so long is worth recording: every consumer loads it
+with `LDRSH`, and `pyghidra_find_reads.py` only matches `LDR` with an
+immediate offset. That is the same blind spot that produced M39's wrong
+answer. Grepping the *decompiled* corpus instead
+(`pyghidra_grep_decompiled.py 0x2c2`) finds exactly five sites in 2006
+functions: the constructor, the dispatcher's write, and three consumers.
+
+### Consumer 1 — `FUN_10083490`, the monster's render override
+
+```c
+void MonsterActor::Render(actor) {
+    if (actor->attachedWeapon != -1) {
+        model = engine->modelCache[0x6b38][actor->attachedWeapon];
+        if (model) {
+            t = Transform();                        // FUN_1006807c
+            t.pos    = actor->+0x94, +0x9c;
+            t.orient = actor->+0xa4, +0xa8, +0xb2, +0xb6;
+            t.scale  = actor->+0x5e;                // SetScale
+            t.anim   = actor->+0x64 .. +0x80;       // incl. frame index +0x70
+            Actor3D_TransformAndSubmitModel(engine, t, actor->+0x2d4, 0, -1);
+        }
+    }
+    thunk_FUN_10064ffc(actor);                      // then draw the body
+}
+```
+
+A second whole model, welded to the body, drawn *before* the ordinary
+actor draw and sharing the actor's position, orientation, scale and
+**absolute animation frame**.
+
+Copying the whole animation block instead of applying a bone offset is not
+a shortcut — the weapon models are **frame-aligned exports of the humanoid
+rig**. Checked against the real archive:
+
+| slot | file | frames | clips | skins |
+|---|---|---|---|---|
+| 20–23 | `female_long_tunic` / `female_short_tunic` / `male_long_tunic` / `male_short_tunic` | 144 | 11 | 8 / 16 / 19 / 13 |
+| 53 | `delfran.bin` | 144 | 11 | 4 |
+| 222–226 | `sword` / `mace` / `dagger` / `bow` / `ax` | 144 | 11 | 1 |
+| 18 | `rat.bin` (for contrast) | 57 | 4 | 4 |
+
+The body models' large skin counts are what `SetSkin()` picks from — one
+rig dressed as a guard, a bandit, a soldier. The weapons have exactly one
+skin each, which is why the render override never needs to carry the
+body's skin across.
+
+All five weapons carry a **byte-identical clip table** to the humanoid
+bodies — `(0,1,10) (1,22,10) (22,31,10) (31,42,10) (42,66,10) (66,98,10)
+(98,106,10) (106,116,3) (116,127,3) (127,138,10) (138,144,10)` — and those
+eleven models (plus one duplicate dagger at slot 25) are the *only*
+144-frame entries in the 226-entry archive. The hand's motion is baked
+into the weapon's own vertices; handing it the body's frame index is the
+entire attachment mechanism.
+
+This is a *different* mechanism from `FUN_10065f7c`, the rotation-matrix
+attachment path `RENDERER_3D.md` describes. That one computes a child
+transform from a parent's; this one does not.
+
+`actor+0x2d4`, passed through as the submit call's third argument, is
+**not** a skin index — it is the actor's slot in a registry at
+`engine+0x14620` (`registry[slot] = actor`, written by `FUN_100866c0` /
+`FUN_10086f9c` and cleared by the death routine). The body's own draw
+passes the same value; only the mode byte differs (`0` for the weapon, `2`
+for the body).
+
+### Consumer 2 — `FUN_10082224`, the AI's ranged test
+
+The bow's archive index is **hardcoded in the AI**:
+
+```c
+bool ranged = (stats->equipped /* +0x48 */ && stats->equipped->isRanged /* +0x1a7 */)
+           || actor->spellSlot0 /* +0x310 */ != 0
+           || actor->attachedWeapon /* +0x2c2 */ == 225;      // bow.bin
+```
+
+A ranged creature skips the facing-cone test (`|yawDelta| < 0x200`) and
+skips the melee reach/LOS raycast (`FUN_10082004`) entirely — it attacks
+anything inside `SetAttackRange` outright. A melee creature must pass the
+raycast, retried once at a fixed reach of `0xc` if the first attempt fails
+without setting flag bit 1.
+
+The corpus corroborates the `== 225` clause exactly. The five values any
+script ever passes are:
+
+| value | model | calls | who passes it |
+|---|---|---|---|
+| 222 | `sword.bin` | 29 | guards, soldiers, swordsmen |
+| 223 | `mace.bin` | 6 | brawlers |
+| 224 | `dagger.bin` | 10 | thugs, named NPCs |
+| 225 | `bow.bin` | 27 | **every archer, and nothing else** |
+| 226 | `ax.bin` | 20 | raiders, bandits |
+
+All 24 distinct scripts passing 225 are archers (`archer_guard`,
+`elite_bowman`, `deadeye`, `arrow_shade`, `ace_archer`, `icebowman`, …),
+and no script passing any other value is. No shipped script both attaches
+a weapon and calls `AddSpell`, so in practice the two implemented clauses
+of the test are disjoint.
+
+The five indices hold the same five models in **all 21 real zones'**
+`<zone>_models.txt`; only `menu_models.txt` (the main-menu pseudo-zone)
+leaves them NULL.
+
+### Consumer 3 — `FUN_1003c1c0`, multiplayer replication
+
+```c
+actor = LookupEntityById(engine->entityRegistry /* +0x5cc */, msg->entityId /* +4 */);
+if (!actor) { sprintf(scratch, "..."); User::After(10000); }
+else actor->attachedWeapon = msg->weaponModel /* +6 */;
+```
+
+Not called directly from anywhere — its address appears once in the
+binary, as one slot of a **48-entry handler table at `0x100fdf34`** whose
+every entry lies in the `0x10038000`–`0x1003c000` networking block. So the
+attached weapon is replicated over the wire, alongside the same block's
+`engine+0x5c0` ("session active") and `engine+0x5d0` (outbound sender)
+that `ReplicateTeleport` and the attack path also gate on. The `else`
+branch is a debug leftover: it formats a message into a discarded stack
+buffer and sleeps 10 ms without retrying.

@@ -131,11 +131,24 @@ follow-up.
   then renders that model. **Correction** (see `ZONE_FORMAT.md`):
   `actor+0x2c2` isn't a literal animation-frame counter as first guessed —
   `engine+0x6b38` is the global `models.idx`-archive-index-keyed model
-  cache populated per-zone from `<zone>_models.txt`, so `actor+0x2c2` is
-  the entity's assigned **model archive index**, set once when the entity
-  is placed from `<zone>.ent`. The per-model vertex-animation *frame* (the
-  MD2-style keyframe within one model resource) is the separate `actor+0x70`
-  field documented in `MODEL_FORMAT.md`.
+  cache populated per-zone from `<zone>_models.txt`, so `actor+0x2c2` is a
+  **model archive index**. The per-model vertex-animation *frame* (the
+  MD2-style keyframe within one model resource) is the separate
+  `actor+0x70` field documented in `MODEL_FORMAT.md`.
+
+  **Second correction (M46, `WORLD_MODEL.md`'s "The attached weapon")**:
+  the index in `actor+0x2c2` is *not* the entity's own body model, and is
+  not set at `<zone>.ent` placement time. It is the **attached weapon**,
+  written only by the Monster script binding `SetAttachedWeapon(n)`
+  (dispatcher case `0xc`) and defaulting to `-1`; `FUN_10083490` is a
+  monster-class render *override* that draws that second model with the
+  body's transform and animation frame and then falls through to
+  `thunk_FUN_10064ffc` for the body itself. The body's own model pointer
+  is `actor+0x54`, resolved through the type descriptor exactly as
+  `ZONE_FORMAT.md` traces. Every shipped call passes one of five values
+  — 222 `sword` / 223 `mace` / 224 `dagger` / 225 `bow` / 226 `ax` — and
+  those five models are frame-aligned exports of the same 144-frame
+  humanoid rig, which is why sharing the body's frame index works.
 
 All three confirm actors are driven by a **real 3D model + keyframe animation
 system**: model resources are unpacked per current frame index, transformed

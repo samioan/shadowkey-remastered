@@ -340,3 +340,10 @@ target_link_libraries(zone_region_smoke PRIVATE sk_bindings sk_world)
 # bookkeeping. See src/tests/m45_encounter_spawn_smoke.cpp.
 add_executable(encounter_spawn_smoke src/tests/m45_encounter_spawn_smoke.cpp)
 target_link_libraries(encounter_spawn_smoke PRIVATE sk_bindings sk_world)
+
+# SetAttachedWeapon's real field (monster+0x2c2) -- the five weapon models,
+# the bow's hardcoded ranged test, and the frame-aligned humanoid rig that
+# makes sharing the body's animation frame correct. See
+# src/tests/m46_attached_weapon_smoke.cpp.
+add_executable(attached_weapon_smoke src/tests/m46_attached_weapon_smoke.cpp)
+target_link_libraries(attached_weapon_smoke PRIVATE sk_bindings sk_world)

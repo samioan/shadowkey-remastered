@@ -291,8 +291,9 @@ Prioritization, driven by the port goal rather than raw coverage:
       descriptor (`EntityTypeDescriptor_Lookup`, a BST at `engine+0xbe34`).
       Also identified the outer framing of `<zone>.sur`, `.zon`, `.pth`
       along the way (not decoded field-by-field) and corrected an earlier
-      `RENDERER_3D.md` guess (`actor+0x2c2` is the model archive index, not
-      a literal animation-frame counter). Full writeup:
+      `RENDERER_3D.md` guess (`actor+0x2c2` is a model archive index, not
+      a literal animation-frame counter — and, per M46, specifically the
+      *attached weapon's* index, not the entity's own). Full writeup:
       [`ZONE_FORMAT.md`](ZONE_FORMAT.md).
 
 - [x] Found where `engine+0xbe34`'s type-descriptor BST itself comes from:

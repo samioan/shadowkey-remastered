@@ -2922,6 +2922,29 @@ int main(int argc, char** argv) {
                     pe.scale = m.script->scale();
                     pe.frameIndex = AdvanceMonsterAnimation(m, modelArchive);
                     frameEntities.push_back(pe);
+                    // M46: the creature's SetAttachedWeapon() model, drawn
+                    // as a second whole model sharing the body's transform
+                    // *and* its absolute animation frame -- which is
+                    // exactly what the real monster render override
+                    // (FUN_10083490) does, and is correct because the five
+                    // weapon models are frame-aligned exports of the same
+                    // 144-frame humanoid rig (identical 11-clip table; see
+                    // monster_executable.h). Note the frame index is
+                    // reused, not recomputed: running the clip lookup
+                    // against the weapon's own table would be a different
+                    // (if here identical) thing, and the engine plainly
+                    // copies `actor+0x70` across.
+                    if (m.script->attachedWeaponModel() !=
+                        sk_bindings::MonsterExecutable::kNoAttachedWeapon) {
+                        sk::PlacedEntity weapon = pe;
+                        weapon.modelArchiveIndex = m.script->attachedWeaponModel();
+                        // Every weapon model has skinCount 1, so skin 0 is
+                        // its only skin -- and the real code does not copy
+                        // the body's skin into the weapon's transform
+                        // block either.
+                        weapon.skinIndex = 0;
+                        frameEntities.push_back(weapon);
+                    }
                 }
                 for (const DoorInstance& d : gameDoors) {
                     // Real wall-facing heading from the .ent placement, plus

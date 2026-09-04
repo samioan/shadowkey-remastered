@@ -317,11 +317,21 @@ For each record:
 This also **corrects/refines** a `RENDERER_3D.md` note: the animated-actor
 model lookup there (`engine+0x6b38 + frameIndex*4`, indexed by `actor+0x2c2`,
 described as a "16-bit current frame field") is the *same* `engine+0x6b38`
-cache — `actor+0x2c2` is not a literal animation-frame counter, it's the
-entity's assigned **model archive index**, set once at placement time from
-the type descriptor exactly as traced here. The per-model *animation* frame
-(for the MD2-style vertex table within one model resource) is the unrelated
-`actor+0x70` field documented in `MODEL_FORMAT.md`.
+cache — `actor+0x2c2` is not a literal animation-frame counter, it's a
+**model archive index**. The per-model *animation* frame (for the MD2-style
+vertex table within one model resource) is the unrelated `actor+0x70` field
+documented in `MODEL_FORMAT.md`.
+
+> **Later correction (M46).** The second half of that sentence was wrong
+> and has been withdrawn: `actor+0x2c2` is *not* the entity's own model
+> index and is *not* set at placement time from the type descriptor. It is
+> the **attached weapon** index, written only by the Monster binding
+> `SetAttachedWeapon(n)` and defaulting to `-1`, and `FUN_10083490` draws
+> it as a second model on top of the body. The chain traced above — type
+> descriptor `+0xc` → `engine+0x6b38[archiveIndex]` → the object's model
+> pointer at `actor+0x54` — is unaffected and still correct; only the
+> field it was attributed to was. See `WORLD_MODEL.md`'s "The attached
+> weapon".
 
 ## Where the type-descriptor tree itself comes from: `entities.txt`
 

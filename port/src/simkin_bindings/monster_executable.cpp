@@ -506,6 +506,14 @@ bool MonsterExecutable::method(const skString& methodName, skRValueArray& args,
         m_PlaySpellCasting = args[0].boolValue();
         return true;
     }
+    if (methodName == skString("SetAttachedWeapon") && args.entries() == 1) {
+        // M46: `monster+0x2c2`, a signed 16-bit models.idx index. 92 call
+        // sites across 86 shipped creature scripts, and the only values
+        // any of them pass are 222/223/224/225/226 -- sword, mace, dagger,
+        // bow, ax. See attachedWeaponModel().
+        m_AttachedWeaponModel = args[0].intValue();
+        return true;
+    }
     if (methodName == skString("SetDamageMin") && args.entries() == 1) {
         m_DamageMin = args[0].intValue();
         return true;

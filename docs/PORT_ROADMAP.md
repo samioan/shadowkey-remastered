@@ -3318,16 +3318,101 @@ algorithms.
       called. `lothcav.s` calls it once. `SetRespawnSeconds` and
       `TickZones` really do have zero call sites.
 
+- **M46 -- what `SetAttachedWeapon` actually writes.** The roadmap's last
+  "curiosity" item, which turned out to be neither unknown nor unused. RE
+  writeup in `docs/WORLD_MODEL.md` ("The attached weapon"); smoke test
+  `src/tests/m46_attached_weapon_smoke.cpp` (45 checks).
+
+    - **The field is `monster+0x2c2`**, a signed 16-bit `models.idx`
+      archive index, initialised to `-1` by the constructor
+      (`FUN_100815e0`). Dispatcher case `0xc`, one line. It stayed unknown
+      because every consumer loads it with `LDRSH` and
+      `pyghidra_find_reads.py` only matches `LDR` with an immediate offset
+      -- the exact blind spot that produced M39's wrong answer. Grepping
+      the decompiled corpus instead finds all five sites in one pass.
+
+    - **Both of the roadmap entry's claims were wrong.** It said the field
+      was unknown (it is one grep away) and that the corpus had **zero
+      call sites**. The corpus has **92, across 86 creature scripts** --
+      making this one of the most widely used monster bindings in the
+      game, not a curiosity. The bullet was written from a grep that
+      missed them.
+
+    - **It is drawn as a second whole model welded to the body.**
+      `FUN_10083490` is a monster-class render override: if the field is
+      not `-1` it looks the model up in the `engine+0x6b38` cache, copies
+      the actor's position, orientation, scale (`+0x5e`) and **entire
+      animation block including the absolute frame index (`+0x70`)**, submits
+      it, and only then falls through to the ordinary actor draw for the
+      body.
+
+      That works because the weapon models are **frame-aligned exports of
+      the humanoid rig**: all five carry 144 frames and a byte-identical
+      11-clip table to `male_long_tunic` / `male_short_tunic` /
+      `female_long_tunic` / `female_short_tunic` / `delfran`, and those
+      eleven (plus a duplicate dagger at slot 25) are the *only* 144-frame
+      entries in the 226-entry archive. Asserted directly against
+      `models.huge`, with `rat.bin` (57 frames, 4 clips) as the negative
+      control. Implemented in `main.cpp` by pushing a second
+      `PlacedEntity` that reuses the body's frame index rather than
+      re-running the clip lookup, which is what the engine does.
+
+    - **The five values are the five weapon models**: 222 `sword.bin`,
+      223 `mace.bin`, 224 `dagger.bin`, 225 `bow.bin`, 226 `ax.bin` --
+      at the same archive indices in **all 21 real zones'**
+      `<zone>_models.txt` (only `menu_models.txt` leaves them NULL). 86
+      creature scripts were previously drawn empty-handed.
+
+    - **225 is hardcoded in the AI.** `FUN_10082224`'s ranged test is
+      `equippedIsRanged || spellSlot0 != 0 || attachedWeapon == 225`, and
+      a ranged creature skips both the facing-cone test and the melee
+      reach/LOS raycast. The corpus corroborates the clause exactly: all
+      24 scripts passing 225 are archers and no script passing any other
+      value is. Exposed as `MonsterExecutable::ranged()`.
+
+      **Deliberately changes no behaviour in this port's tick.** The port's
+      attack gate already has neither a facing cone (it turns to face the
+      player immediately before swinging) nor an attack-time raycast --
+      that second omission is a stated, reasoned choice recorded at the
+      gate itself, because reinstating it makes creatures in doorways walk
+      into the player instead of stopping to swing. So every creature here
+      already behaves like a ranged one, and wiring `ranged()` in would
+      mean *adding* the raycast for melee creatures, i.e. reversing that
+      decision. Recorded rather than faked.
+
+      The equipped-weapon clause is also not reproduced: it reads an
+      inventory item from the stats block's `+0x48`, which this port's
+      monsters never carry.
+
+    - **The field is replicated over the wire.** `FUN_1003c1c0` has no
+      direct callers; its address appears once in the binary, as one slot
+      of a 48-entry handler table at `0x100fdf34` whose every entry lies
+      in the `0x10038000`-`0x1003c000` networking block. It sets another
+      entity's attached weapon by entity id, gated by the same
+      `engine+0x5c0` / `engine+0x5cc` / `engine+0x5d0` trio the attack
+      path and `ReplicateTeleport` use. Nothing about multiplayer is
+      implemented here; this is recorded because it is the third consumer
+      and it identifies that table.
+
+    - **Corrections to two older docs.** `RENDERER_3D.md` and
+      `ZONE_FORMAT.md` both said `actor+0x2c2` was the entity's *own*
+      model archive index, set at `<zone>.ent` placement time from the
+      type descriptor. It is the attached weapon's index, set only by this
+      binding. The descriptor chain those docs trace (descriptor `+0xc` ->
+      `engine+0x6b38[index]` -> the object's model pointer at
+      `actor+0x54`) is unaffected -- only the field it was attributed to
+      was wrong. Both now carry the correction inline.
+
+    - **Left open:** `actor+0x2d4`, the submit call's third argument,
+      turns out not to be a skin index but the actor's slot in a registry
+      at `engine+0x14620`. What `Poly3D_ClipAndDispatch` does with it (and
+      with the mode byte that differs between the weapon's draw and the
+      body's, `0` vs `2`) is not chased here.
+
 ## Next milestones (not yet started)
 
 Roughly in priority order for reaching "actually playable," not commitments:
 
-- **What `SetAttachedWeapon` actually writes.** Re-opened by M43: M39 had
-  it as `monster+0x304` with no consumer, but that offset is
-  `SetMeleeRoll`'s and has a very real consumer (see M43's correction).
-  Binding index 12 on the Monster class; its own field is unknown again.
-  Still no evidence any shipped script uses it -- the corpus has zero call
-  sites -- so this stays a curiosity rather than a gap.
 - **The rest of a real cast (`FUN_10046764`).** M43 decompiled it but
   reproduces only its effect: the real cast deducts magicka, applies the
   self-targeted spells inline (heals, cures, buffs, and the periodic
