@@ -213,12 +213,23 @@ bool PlayerExecutable::method(const skString& methodName, skRValueArray& args,
         // (a real item's real owner, ~50% of the corpus's real call sites)
         // routes here too once an item's been picked up -- GetOwner()
         // returns the player object directly (item_executable.cpp).
-        // Every real call in the corpus is single-argument; no per-call
-        // volume is ever passed, so a fixed full-volume one-shot is the
-        // best-evidenced default (a documented choice, not decompiled).
+        // M51: the real dispatcher is
+        // `PlaySound(id, volume = 100, directional = false, repeats = 1)`
+        // -- FUN_10061a60 case 0x25 builds three optional skRValues with
+        // exactly those defaults and hands them to FUN_1001b198. The
+        // corpus uses one argument 120 times and all four exactly once
+        // (twilite/steamsound.s's `PlaySound(65, 75, 1, 255)`: a quieter,
+        // directional, endlessly repeating steam hiss), which is what
+        // pinned the meaning of each.
+        //
+        // `directional` is not panning -- see sound_mixing.h; it asks for
+        // a small (<= 12.5%) cut based on the *emitter's* facing, and is
+        // applied by the caller that knows the geometry, not here.
         if (m_Sounds && m_Audio) {
             const sk::Sound* sound = m_Sounds->GetSound(args[0].intValue());
-            if (sound) m_Audio->PlaySfx(*sound);
+            const int volume = args.entries() >= 2 ? args[1].intValue() : sk::kDefaultSoundVolume;
+            const int repeats = args.entries() >= 4 ? args[3].intValue() : sk::kDefaultSoundRepeats;
+            if (sound) m_Audio->PlaySfx(*sound, volume, repeats);
         }
         return true;
     }

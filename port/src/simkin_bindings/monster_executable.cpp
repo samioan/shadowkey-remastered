@@ -378,9 +378,23 @@ bool MonsterExecutable::method(const skString& methodName, skRValueArray& args,
         // umbra_keth.s's `PlaySound(83)`) -- same real per-zone-manifest
         // slot-index convention PlayerExecutable::PlaySound() documents in
         // full (assets/sound_archive.h).
+        // M51: the real dispatcher is
+        // `PlaySound(id, volume = 100, directional = false, repeats = 1)`
+        // -- FUN_10061a60 case 0x25 builds three optional skRValues with
+        // exactly those defaults and hands them to FUN_1001b198. The
+        // corpus uses one argument 120 times and all four exactly once
+        // (twilite/steamsound.s's `PlaySound(65, 75, 1, 255)`: a quieter,
+        // directional, endlessly repeating steam hiss), which is what
+        // pinned the meaning of each.
+        //
+        // `directional` is not panning -- see sound_mixing.h; it asks for
+        // a small (<= 12.5%) cut based on the *emitter's* facing, and is
+        // applied by the caller that knows the geometry, not here.
         if (m_Stack.sounds() && m_Stack.audio()) {
             const sk::Sound* sound = m_Stack.sounds()->GetSound(args[0].intValue());
-            if (sound) m_Stack.audio()->PlaySfx(*sound);
+            const int volume = args.entries() >= 2 ? args[1].intValue() : sk::kDefaultSoundVolume;
+            const int repeats = args.entries() >= 4 ? args[3].intValue() : sk::kDefaultSoundRepeats;
+            if (sound) m_Stack.audio()->PlaySfx(*sound, volume, repeats);
         }
         return true;
     }

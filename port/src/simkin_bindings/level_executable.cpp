@@ -174,18 +174,19 @@ bool LevelExecutable::method(const skString& methodName, skRValueArray& args,
         // PlayMusic() (replaces whatever was playing) rather than a
         // one-shot -- IsMusic() is just a defensive check in case a
         // future/unseen real call ever targets a real .wav slot instead.
-        // volume (0-100 in the one real corpus value seen, 100) maps
-        // linearly to XAudio2's 0.0-1.0 gain.
+        // M51: `volume` is 0-100 and goes through the engine's own
+        // 101-entry volume curve (audio/sound_mixing.h), not the linear
+        // mapping this used to assume -- the curve is close to linear but
+        // is a hand-tweaked table, so it is applied verbatim.
         if (m_Stack.sounds() && m_Stack.audio()) {
             int soundId = args[0].intValue();
-            int volume = args.entries() >= 2 ? args[1].intValue() : 100;
-            float gain = (std::max)(0.0f, (std::min)(1.0f, static_cast<float>(volume) / 100.0f));
+            int volume = args.entries() >= 2 ? args[1].intValue() : sk::kDefaultSoundVolume;
             const sk::Sound* sound = m_Stack.sounds()->GetSound(soundId);
             if (sound) {
                 if (m_Stack.sounds()->IsMusic(soundId)) {
-                    m_Stack.audio()->PlayMusic(*sound, gain);
+                    m_Stack.audio()->PlayMusic(*sound, volume);
                 } else {
-                    m_Stack.audio()->PlaySfx(*sound, gain);
+                    m_Stack.audio()->PlaySfx(*sound, volume);
                 }
             }
         }

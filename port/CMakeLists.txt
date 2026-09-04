@@ -82,6 +82,7 @@ target_include_directories(sk_entity_types PUBLIC src)
 add_library(sk_audio STATIC
   src/assets/sound_archive.cpp
   src/audio/audio_engine.cpp
+  src/audio/sound_mixing.cpp
   src/audio/vorbis_decoder.cpp
   src/audio/wav_file.cpp
 )
@@ -391,3 +392,10 @@ target_link_libraries(arrow_projectile_smoke PRIVATE sk_bindings sk_world)
 # src/tests/m50_save_records_smoke.cpp.
 add_executable(save_records_smoke src/tests/m50_save_records_smoke.cpp)
 target_link_libraries(save_records_smoke PRIVATE sk_bindings sk_save)
+
+# The engine's own mixer -- the volume curve, the distance/direction
+# attenuation, the eight-voice cap, the music fade, and the native sound
+# triggers that no script ever calls. See
+# src/tests/m51_audio_mixing_smoke.cpp.
+add_executable(audio_mixing_smoke src/tests/m51_audio_mixing_smoke.cpp)
+target_link_libraries(audio_mixing_smoke PRIVATE sk_bindings)

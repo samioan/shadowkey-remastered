@@ -732,6 +732,24 @@ bool MenuExecutable::method(const skString& methodName, skRValueArray& args,
         m_Stack.RequestQuit();
         return true;
     }
+    // M51: the two real music-fade bindings (GameEngine indices 11 and
+    // 12, FUN_100090bc / FUN_1000915c), four real call sites in the whole
+    // corpus: multiplayermenu.s fades the front-end track out on entry
+    // and back in on exit, and mainmenu.s and bluetooth.s each un-fade on
+    // their own way back.
+    //
+    // The asymmetry in the real pair is worth keeping: FadeMusic() only
+    // records a restore target when the music is *currently audible*, so
+    // fading twice, or fading from silence, leaves nothing for
+    // UnFadeMusic() to come back to and it does nothing at all.
+    if (methodName == skString("FadeMusic") && args.entries() == 0) {
+        if (m_Stack.audio()) m_Stack.audio()->FadeMusic();
+        return true;
+    }
+    if (methodName == skString("UnFadeMusic") && args.entries() == 0) {
+        if (m_Stack.audio()) m_Stack.audio()->UnFadeMusic();
+        return true;
+    }
     if (methodName == skString("ShowCredits") && args.entries() == 0) {
         m_Stack.ShowCredits();
         return true;

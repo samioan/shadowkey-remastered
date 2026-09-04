@@ -299,6 +299,10 @@ public:
         return it != m_MonstersKilled.end() ? it->second : 0;
     }
     int experience() const { return m_Experience; }
+    // M51: SetSex's own field (player+0xfac, M50). The native jump picks
+    // pl_jump_female.wav for 0 and pl_jump_male.wav otherwise, which is
+    // what fixes the polarity.
+    int sex() const { return m_Sex; }
 
     // M19: PickupItem()'s handler only records *which* live object asked
     // (a raw, non-owning skiExecutable*) -- it's called from mid-way

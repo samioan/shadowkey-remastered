@@ -391,6 +391,11 @@ public:
     // needs a host-triggered call, played from main.cpp's monster-attack
     // block at the same point it already rolls damage against the player.
     void PlayAttackNoise();
+    // M51: the slot itself, so a caller that knows where the creature is
+    // standing can attenuate by distance the way the real
+    // world-positioned play path (FUN_1001b198) does -- PlayNoise() above
+    // has no listener to measure against and always plays at full volume.
+    int attackNoiseId() const { return m_AttackNoiseId; }
 
     // Clamps m_CurrentHealth at 0 and flips alive() false there -- does
     // NOT itself invoke OnKilled(), matching ItemExecutable::

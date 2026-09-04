@@ -1059,6 +1059,17 @@ int main(int argc, char** argv) {
     sk::AudioEngine audioEngine;
     audioEngine.Init();
 
+    // M51: the engine's two ways of starting a sound.
+    //
+    // `FUN_1001b204` plays at the *listener's* own position -- it passes
+    // the player's x/y as the source, so the distance term is always zero
+    // and the sound is heard at full volume. Every UI and player-action
+    // sound goes through it.
+    auto playPlayerSound = [&](int slot, int volume = sk::kDefaultSoundVolume) {
+        const sk::Sound* sfx = soundArchive.GetSound(slot);
+        if (sfx) audioEngine.PlaySfx(*sfx, volume);
+    };
+
     // The real N-Gage menu/UI font (bitmap_font.h/.cpp's class
     // comments, docs/GRAPHICS_FORMAT.md). IS the device ROM's own
     // Ceurope.gdr after all -- confirmed by decompiling shadowkey's
@@ -1093,6 +1104,19 @@ int main(int argc, char** argv) {
     // M21: Level.CreateEntity() needs entities.txt to resolve a typeId --
     // see level_executable.h's class comment.
     stack.level().SetEntityTypes(&entityTypes);
+
+    // M51: the front-end's own music, which M27 could only guess at.
+    // `FUN_1002707c` -- the "back to the front end" path (it resets the
+    // level, clears the multiplayer session and drops the player) --
+    // loads the `menu` sound bank by name and then calls
+    // `FUN_1001b180(engine, 0x46, 100, 0xff)`: slot 70 of
+    // menu_sounds.txt, which is `battle3.ogg`, at volume 100, repeating
+    // 255 times. That is the trigger no script has, and it is native
+    // because returning to the menu is native.
+    soundArchive.LoadCategory(scriptRoot, sk::kMenuSoundCategory);
+    if (const sk::Sound* menuMusic = soundArchive.GetSound(sk::kSoundMenuMusic)) {
+        audioEngine.PlayMusic(*menuMusic);
+    }
 
     std::string mainMenuPath = std::string(scriptRoot) + "/mainmenu.s";
     try {
@@ -1203,6 +1227,23 @@ int main(int argc, char** argv) {
     LiveZoneRegions gameZoneRegions;
     stack.level().SetZoneRegions(&gameZoneRegions);
     sk::Camera gameCamera;
+    // M51: the other way -- `FUN_1001b198` takes a real world position and
+    // attenuates by distance from the listener before playing. The curve
+    // is linear in *squared* distance, so its 512 hardcodes an audible
+    // radius of sqrt(512) ~ 22.6 tiles, and anything inside one tile is
+    // at full volume. `directional` additionally asks for the emitter-
+    // facing term (at most a 12.5% cut); no shipped call site this port
+    // reaches uses it, so it is offered but defaulted off.
+    auto playWorldSound = [&](int slot, float worldX, float worldY,
+                              int volume = sk::kDefaultSoundVolume) {
+        const sk::Sound* sfx = soundArchive.GetSound(slot);
+        if (!sfx) return;
+        const int dx = static_cast<int>(gameCamera.x - worldX);
+        const int dy = static_cast<int>(gameCamera.y - worldY);
+        const int attenuated = sk::PositionalVolume(volume, dx, dy);
+        if (attenuated <= 0) return;
+        audioEngine.PlaySfx(*sfx, attenuated);
+    };
     // M25: first-person weapon viewmodel -- see simkin_bindings/
     // weapon_viewmodel.h's comment for the real RE ground truth this
     // recreates.
@@ -1307,6 +1348,11 @@ int main(int argc, char** argv) {
         // M27: reaps one-shot SFX voices that finished playing -- see
         // AudioEngine::Update()'s own comment.
         audioEngine.Update();
+        // M51: advance an in-flight FadeMusic()/UnFadeMusic(). The real
+        // fade lives in the audio tick at 5 units per 256-sample buffer;
+        // this drives it by wall-clock instead, so it takes the same
+        // ~0.64s either way.
+        audioEngine.TickMusicFade(sk::kMixBufferSamples * 1000 / sk::kSampleRateHz);
 
         if (stack.quitRequested()) {
             window.Close();
@@ -2111,8 +2157,20 @@ int main(int argc, char** argv) {
                                                           // floors over one big tick step
                 constexpr float kHeadroom = 60.0f;    // world units, eye-to-ceiling clearance
                 if (onGround && input.ConsumeBoundJustPressed(sk::Action::Jump)) {
-                    gameVelZ = kJumpSpeed;
-                    onGround = false;
+                    // M51: the real jump (FUN_10044400) is not free. It
+                    // refuses outright unless current fatigue is above 5,
+                    // spends 5, and plays pl_jump_female.wav (slot 91) or
+                    // pl_jump_male.wav (92) chosen on player+0xfac -- the
+                    // field SetSex writes (M50). So slot 91 is what a
+                    // character with sex 0 uses, which makes 0 female.
+                    if (stack.player().actorFatigue() > sk::kJumpFatigueCost) {
+                        stack.player().SetActorFatigue(stack.player().actorFatigue() -
+                                                        sk::kJumpFatigueCost);
+                        playPlayerSound(stack.player().sex() == 0 ? sk::kSoundJumpFemale
+                                                                  : sk::kSoundJumpMale);
+                        gameVelZ = kJumpSpeed;
+                        onGround = false;
+                    }
                 }
                 gameVelZ -= kGravity;
                 if (gameVelZ < -kMaxFallSpeed) gameVelZ = -kMaxFallSpeed;
@@ -2541,14 +2599,20 @@ int main(int argc, char** argv) {
                                     sk_bindings::EngineYawFromPortYaw(m.facingYaw),
                                     /*pitch=*/0, sk_bindings::kBowProjectileTypeId,
                                     std::rand() % dmgMax, m.script->attack()));
-                                m.script->PlayAttackNoise();
+                                playWorldSound(m.script->attackNoiseId(), m.x, m.y);
                             } else {
                                 int dmg = sk_bindings::RollDamage(
                                     m.script->attack(), stack.player().defense(),
                                     stack.player().armorRating(), m.script->damageMin(),
                                     m.script->damageMax());
+                                // M51: FUN_10044814 plays slot 80 on any
+                                // positive incoming damage, before it
+                                // applies it -- the same sample a
+                                // connecting swing uses, so an impact is
+                                // one sound whichever way it is going.
+                                if (dmg > 0) playPlayerSound(sk::kSoundAttackHit);
                                 stack.player().ApplyDamage(dmg);
-                                m.script->PlayAttackNoise();
+                                playWorldSound(m.script->attackNoiseId(), m.x, m.y);
                             }
                         }
                     } else {
@@ -2920,9 +2984,7 @@ int main(int argc, char** argv) {
                         // Slot 1 -- barch_firebow.wav in 21 of the 22
                         // shipped sound tables, and the same slot every
                         // archer script's SetAttackNoise(1) names.
-                        const sk::Sound* bow =
-                            soundArchive.GetSound(sk_bindings::kBowFireSound);
-                        if (bow) audioEngine.PlaySfx(*bow);
+                        playPlayerSound(sk_bindings::kBowFireSound);
                         // `rand() % weapon->damageMax` -- the minimum is
                         // simply not consulted on the ranged path, unlike
                         // the melee RandomRange(min, max) below.
@@ -2971,7 +3033,19 @@ int main(int argc, char** argv) {
                             target = &m;
                         }
                     }
-                    if (!target) return;
+                    if (!target) {
+                        // M51: a swing that finds nothing in range plays
+                        // pl_attack_sword.wav (slot 81) and a swing that
+                        // finds something plays pl_attack_impale.wav (80).
+                        // FUN_100425bc picks between exactly those two on
+                        // exactly this condition -- whether the target
+                        // search produced anything, not whether the damage
+                        // roll landed -- so a connecting swing that rolls
+                        // zero still sounds like a hit.
+                        playPlayerSound(sk::kSoundAttackMiss);
+                        return;
+                    }
+                    playPlayerSound(sk::kSoundAttackHit);
                     if (handItem && !isWeapon) {
                         // M22: a real spell's own HitTarget()/DoAttackRoll()
                         // (ItemExecutable) applies damage itself -- nothing

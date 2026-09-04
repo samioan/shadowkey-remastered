@@ -20,6 +20,18 @@ struct AudioEngine::Impl {
     // actually moves a slider.
     int sfxVolumePercent = 100;
     int musicVolumePercent = 100;
+    // M51: the real music-fade state machine (audio/sound_mixing.h) plus
+    // the volume the last PlayMusic() asked for, which is what the fade
+    // scales and what UnFadeMusic() restores to.
+    MusicFade fade;
+    int musicRequestedVolume = kDefaultSoundVolume;
+    int musicCurrentVolume = kDefaultSoundVolume;
+    int fadeAccumulatorMs = 0;
+
+    void ApplyMusicGain() {
+        if (!musicVoice) return;
+        musicVoice->SetVolume(VoiceGain(musicVolumePercent, musicCurrentVolume));
+    }
 
     IXAudio2SourceVoice* CreateVoiceFor(const Sound& sound) {
         WAVEFORMATEX fmt = {};
@@ -68,22 +80,35 @@ bool AudioEngine::Init() {
     return true;
 }
 
-void AudioEngine::PlaySfx(const Sound& sound, float volume01) {
-    if (!impl_->engine || sound.empty()) return;
+void AudioEngine::PlaySfx(const Sound& sound, int volume, int repeats) {
+    if (!impl_->engine || sound.empty() || repeats <= 0) return;
+    // The engine's mix loop stops after eight playing voices, so a ninth
+    // concurrent sound is inaudible. Reap finished voices first so the
+    // cap counts what is actually sounding.
+    Update();
+    if (static_cast<int>(impl_->sfxVoices.size()) >= kMaxSimultaneousVoices) return;
     IXAudio2SourceVoice* voice = impl_->CreateVoiceFor(sound);
     if (!voice) return;
     XAUDIO2_BUFFER buf = {};
     buf.AudioBytes = static_cast<UINT32>(sound.samples.size() * sizeof(int16_t));
     buf.pAudioData = reinterpret_cast<const BYTE*>(sound.samples.data());
     buf.Flags = XAUDIO2_END_OF_STREAM;
+    // A repeat count, not a loop flag -- the real queue writes it into
+    // the sound object's own `repeats` byte. 255 means "until something
+    // stops it", which is how both the music path and an entity-attached
+    // ambient arm themselves.
+    if (repeats >= kRepeatForever) {
+        buf.LoopCount = XAUDIO2_LOOP_INFINITE;
+    } else if (repeats > 1) {
+        buf.LoopCount = static_cast<UINT32>(repeats - 1);
+    }
     voice->SubmitSourceBuffer(&buf);
-    // Scaled by the real Options screen's SoundFXSlider value.
-    voice->SetVolume(volume01 * static_cast<float>(impl_->sfxVolumePercent) / 100.0f);
+    voice->SetVolume(VoiceGain(impl_->sfxVolumePercent, volume));
     voice->Start();
     impl_->sfxVoices.push_back(voice);
 }
 
-void AudioEngine::PlayMusic(const Sound& sound, float volume01) {
+void AudioEngine::PlayMusic(const Sound& sound, int volume, int repeats) {
     if (!impl_->engine || sound.empty()) return;
     StopMusic();
     IXAudio2SourceVoice* voice = impl_->CreateVoiceFor(sound);
@@ -91,12 +116,41 @@ void AudioEngine::PlayMusic(const Sound& sound, float volume01) {
     XAUDIO2_BUFFER buf = {};
     buf.AudioBytes = static_cast<UINT32>(sound.samples.size() * sizeof(int16_t));
     buf.pAudioData = reinterpret_cast<const BYTE*>(sound.samples.data());
-    buf.LoopCount = XAUDIO2_LOOP_INFINITE;
+    if (repeats >= kRepeatForever) {
+        buf.LoopCount = XAUDIO2_LOOP_INFINITE;
+    } else if (repeats > 1) {
+        buf.LoopCount = static_cast<UINT32>(repeats - 1);
+    }
     voice->SubmitSourceBuffer(&buf);
-    // Scaled by the real Options screen's MusicSlider value.
-    voice->SetVolume(volume01 * static_cast<float>(impl_->musicVolumePercent) / 100.0f);
-    voice->Start();
+    impl_->musicRequestedVolume = volume;
+    impl_->musicCurrentVolume = volume;
+    impl_->fade.Reset();
     impl_->musicVoice = voice;
+    impl_->ApplyMusicGain();
+    voice->Start();
+}
+
+void AudioEngine::FadeMusic() { impl_->fade.Fade(impl_->musicCurrentVolume); }
+
+void AudioEngine::UnFadeMusic() { impl_->fade.UnFade(); }
+
+bool AudioEngine::musicFading() const {
+    return impl_->fade.fadingOut() || impl_->fade.fadingIn();
+}
+
+void AudioEngine::TickMusicFade(int deltaMs) {
+    if (!impl_->fade.fadingOut() && !impl_->fade.fadingIn()) return;
+    // One step per mixing buffer in the original. This port advances by
+    // however many buffer-times have elapsed, so the fade takes the same
+    // wall-clock time it does on the device regardless of frame rate.
+    constexpr int kBufferMs = kMixBufferSamples * 1000 / kSampleRateHz;  // 32
+    impl_->fadeAccumulatorMs += deltaMs;
+    while (impl_->fadeAccumulatorMs >= kBufferMs) {
+        impl_->fadeAccumulatorMs -= kBufferMs;
+        impl_->musicCurrentVolume = impl_->fade.Step(impl_->musicCurrentVolume);
+        if (!impl_->fade.fadingOut() && !impl_->fade.fadingIn()) break;
+    }
+    impl_->ApplyMusicGain();
 }
 
 void AudioEngine::SetSfxVolumePercent(int percent) {
@@ -107,9 +161,7 @@ void AudioEngine::SetMusicVolumePercent(int percent) {
     impl_->musicVolumePercent = percent < 0 ? 0 : (percent > 100 ? 100 : percent);
     // Re-gain an already-looping track so a music slider is audible while
     // it's being dragged, not only on the next PlayMusic().
-    if (impl_->musicVoice) {
-        impl_->musicVoice->SetVolume(static_cast<float>(impl_->musicVolumePercent) / 100.0f);
-    }
+    impl_->ApplyMusicGain();
 }
 
 int AudioEngine::sfxVolumePercent() const { return impl_->sfxVolumePercent; }

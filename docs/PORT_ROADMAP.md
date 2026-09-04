@@ -3894,6 +3894,130 @@ algorithms.
       real-data checks above wherever the format names something the
       shipped scripts also name.
 
+- **M51 -- audio's remaining gaps.** M27's own five open items, closed
+  together, because they were one system. RE writeup in
+  [`docs/AUDIO_FORMAT.md`](AUDIO_FORMAT.md) ("The mixer"); smoke test
+  `src/tests/m51_audio_mixing_smoke.cpp` (42 checks).
+
+    - **The mixer, and what it is not.** The sound manager is
+      `app->+0x3a8`: 256 sound objects, an 8-entry command queue, two
+      master volumes, and a per-buffer tick (`FUN_10008b34`) that zeroes a
+      32-bit accumulator, mixes every playing slot and clamps to 16 bits.
+      **There is no panning anywhere** -- one accumulator, one channel --
+      so "positional audio" turns out to be a volume model only. Two
+      structural facts fall out: **at most eight voices sound at once**
+      (the loop `break`s at eight, walking in *slot order*, so the cap is
+      "lowest manifest slot number wins" rather than oldest or loudest),
+      and **every voice is halved before summing**, which is the headroom
+      that makes eight fit in 16 bits.
+
+    - **The volume/pan formula, in full.** Per voice
+      (`FUN_100080a0`): `accum += ((curve[master] * curve[voice] >> 8) *
+      (sample >> 1)) >> 8`, where `curve` is a **101-entry i16 table at
+      0x100a5e9e** indexed by a 0..100 volume. It is a 2.56-per-unit ramp
+      -- 98 of its 100 steps are 2 or 3 -- with exactly one **5-unit jump
+      at index 13** (30 -> 35 where a ramp gives 33) and a flat step at
+      the top. That single 5 is why the table is transcribed verbatim
+      rather than recomputed. And the master volume is picked **per
+      voice**, not per bus: a slot gets the music volume if it is the one
+      slot `+0xac0` names and the SFX volume otherwise.
+
+    - **Distance is linear in *squared* distance.** `FUN_10027980`:
+      `d2 = (dx*dx >> 8) + (dy*dy >> 8)`; full volume when `d2 >> 8` is
+      0 (inside one tile), silent at 512, and
+      `(volume << 16)/0x20000 * (0x20000 - d2) >> 16` in between. The 512
+      bounds the *square*, so the audible radius is sqrt(512) ~ **22.6
+      tiles**, not 512 -- 96 at four tiles, 87 at eight, 50 at sixteen, 5
+      at twenty-two. `FUN_10064e00` is the same formula with a
+      per-entity range, for a looping ambient attached to an object.
+
+    - **The direction term is arithmetically dead.** The third
+      `PlaySound` argument asks for an extra cut based on the angle
+      between the listener's bearing and the **emitter's own heading**
+      (a directional source, not a listener with ears -- consistent with
+      there being no pan). But the step is `(volume >> 3) / 32`, an
+      integer divide, which is **zero for every volume below 256**, and a
+      volume is 0..100. So the whole branch subtracts exactly zero at
+      every angle. Reproduced exactly, because the arithmetic is the
+      finding.
+
+    - **`PlaySound`'s real signature**, from the dispatcher's own
+      skRValue defaults: `PlaySound(id, volume = 100, directional =
+      false, repeats = 1)`. **`repeats` is a count, not a loop flag** --
+      the queue writes it into the sound object's own repeat byte, and
+      255 is simply the largest a byte holds, which is what the music
+      path and an entity ambient arm themselves with. The corpus uses one
+      argument 120 times and all four **exactly once**
+      (`twilite/steamsound.s`'s `PlaySound(65, 75, 1, 255)`: a quieter,
+      directional, endlessly repeating steam hiss), and that one call is
+      what pinned each argument.
+
+    - **The native trigger table, and a correction to M27.** There are
+      exactly two ways into the mixer -- `FUN_1001b198` (a world
+      position) and `FUN_1001b204` (the listener's own position, so
+      always full volume) -- and between their 27 call sites the engine
+      plays: **1** on a ranged shot, **59** on a chest, **63** on the
+      native door path, **80** on a melee swing that finds a target *and*
+      on the player taking damage *and* on the player dying, **81** on a
+      swing that finds nothing, **87** on level-up and on the cheat
+      sequence, **91/92** on a jump, and **99/100** in the UI. So 80 and
+      81 are **hit and miss**, not two weapon classes; and a jump is not
+      free -- it is refused below 5 fatigue and spends 5. 91 vs 92 is
+      chosen on `player+0xfac`, the field `SetSex` writes (M50), which
+      makes **sex 0 female**.
+
+      M27 recorded ids 79-82 and 88-96 as "native-only, triggered by the
+      engine's own movement/combat code". Half of that was right. The
+      other half -- **79, 90, 93, 94, 95, 96** -- is triggered by nothing
+      at all, native or scripted. **The shipped game has no footstep
+      sounds and no death voice lines.** The samples are real and mapped
+      in 14 of the 22 manifests; nothing plays them. Corrected in
+      `AUDIO_FORMAT.md`.
+
+    - **The main-menu music.** `FUN_1002707c`, the native "return to the
+      front end" path, loads the sound bank named `"menu"` and calls
+      `FUN_1001b180(engine, 0x46, 100, 0xff)` -- `menu_sounds.txt` slot
+      70, `battle3.ogg`, volume 100, repeating 255 times. No script
+      triggers it because returning to the menu is not a scripted event,
+      which is why M27 could not find one.
+
+    - **The fade, and the two sliders.** `FadeMusic`/`UnFadeMusic`
+      (GameEngine 11 and 12, four real call sites around the multiplayer
+      and bluetooth menus) move the music volume **5 per 256-sample
+      buffer** -- 32 ms a step at 8 kHz, so a full fade is about
+      **0.64 s**. `FadeMusic` only records a restore target when the
+      music is currently audible, so fading from silence leaves
+      `UnFadeMusic` with nothing to do; the asymmetry is reproduced. And
+      the native slider handler (`FUN_1007f8f8`) matches a slider's own
+      name against two wide strings and writes `+0xabc` for
+      **`SoundFXSlider`** and `+0xab8` for **`MusicSlider`** -- exactly
+      the two `AddMenuSlider` rows `options.s` declares.
+
+    - **Three more dead bindings.** `SetAmbientSound` (GameEngine 103)
+      reads its argument through `AtomToInt` and then **does nothing with
+      it**; `SetAmbient`, `StopSound` and `CreateSound` are implemented
+      but have **zero call sites** in the corpus. The entity-attached
+      looping ambient behind `SetAmbient` (`FUN_100681f0` /
+      `FUN_10064e00`) is fully decoded and reachable by nothing.
+
+    - **Wired up in the port**: the curve, both attenuation terms, the
+      eight-voice cap, the fade, the four-argument `PlaySound` on the
+      Player/Monster/Level bindings, `FadeMusic`/`UnFadeMusic` on the menu
+      binding, the front-end music, and the five real native triggers
+      (melee hit, melee miss, taking damage, jump with its fatigue cost,
+      and the ranged shot). A creature's attack noise now attenuates by
+      distance; the player's own sounds go through the listener-position
+      path, which is what the engine does.
+
+    - **Left recorded, not implemented.** The bearing function
+      (`FUN_1001c20c`) is a normalised-vector lookup quantised to a 32x32
+      grid; this port uses a real `atan2`, which is unobservable given
+      the term it feeds is zero. And the sound object's own start/decode
+      path (its `vtable+0x10`, and the Symbian media server behind it)
+      was not decompiled -- the port applies the recovered *gain* through
+      XAudio2 rather than reproducing the saturating integer accumulator
+      sample by sample.
+
 ## Next milestones (not yet started)
 
 Roughly in priority order for reaching "actually playable," not commitments:
@@ -3924,12 +4048,12 @@ Roughly in priority order for reaching "actually playable," not commitments:
   decompiled consumer. (A parenthetical here used to say `SetAttachedWeapon`
   was resolved as having no consumer in the shipped engine. That was wrong
   twice over and is withdrawn -- see M46.)
-- **Audio's remaining narrower gaps** (M27, `docs/AUDIO_FORMAT.md`
-  resolved the core system) -- native-only player-action sounds (attack/
-  jump/death/footsteps, never called from any script); main-menu
-  background music (no real script trigger found); `crypt2/controller.s`/
-  `twilite/steamsound.s`'s own unresolved loading mechanisms; positional/
-  3D audio; the exact volume/pan mixing formula.
+- **Two scripts this port still cannot place** -- `crypt2/controller.s`
+  and `twilite/steamsound.s`. M51 decoded what their sound calls *mean*
+  (and slot 83 turns out to be `NULL.wav` in every manifest, so
+  controller.s's call is silent anyway), but neither script's own
+  placement mechanism is one of the entity categories the zone-load block
+  resolves, so neither is ever loaded.
 
 ## Verification approach
 
