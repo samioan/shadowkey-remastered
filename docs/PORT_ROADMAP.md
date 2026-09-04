@@ -2935,6 +2935,49 @@ algorithms.
     - `docs/WORLD_MODEL.md`'s raycaster section updated with the tier
       table, the zoom correction, and both details above.
 
+- [x] **M42 -- the screen-mode question, and a correction it turned up.**
+  An RE-only milestone: no port behaviour changes, but three roadmap
+  items move.
+    - **Three of the four `FUN_1002c010` gating modes are identified.**
+      `FUN_1006a344` is `SetScreenMode(controller, mode)`, writing
+      `this+0x78`; walking its 13 call sites gives:
+      **1** = normal gameplay (set by `GameEngine_InitLevel` when a level
+      finishes loading, and by the menu stack on Quit), **3** = a zone /
+      level change (`FUN_1006c31c`, the level-change entry point),
+      **4** = **saving** (see below), **5** = a menu/UI mode, and
+      **10** = loading a saved game (`LoadGame`'s own path). That matches
+      M26's note that modes 3 and 10 additionally draw the "Travel to:
+      `<zone>`" banner: those are exactly the two that travel.
+      **0x1f is still unidentified** -- but the reason it resisted a
+      literal-argument search is now known: the screen fade
+      (`FUN_1004fc50`) calls `SetScreenMode` with a *deferred* target
+      stored at `engine+0x5ac`, so that mode need never appear as a
+      literal at any call site.
+    - **Correction: `FUN_10018e70` is the save-game writer, not a
+      crash/error display.** `docs/WORLD_MODEL.md` had it as the latter
+      since the first pass over the `0x1006Bxxx` cluster, and that made
+      `FUN_1006c31c` read as "load level or show an error dialog". It is
+      really "**autosave `current.sav`, and abort the level change if that
+      fails**" -- which is why per-level `<level>.dat` members exist at
+      all. The confusion is understandable: the writer does return a
+      non-zero code on failure, but the code is `3`, "not enough free disk
+      space". Full writeup in `SAVE_FORMAT.md`, including the two members
+      it writes (`character.dat` and `<level>.dat`), the add-vs-replace
+      pair (`FUN_1000a21c`/`FUN_1000a9f4`), the disk-space check, the
+      literal 3/10/30/50/70 progress percentages it feeds mode 4's bar --
+      and one nice behavioural detail: it swaps the player's live position
+      for a stored entry point before serializing and back afterwards, so
+      a save records where you came in, not where you are standing.
+    - **`SetAttachedWeapon` is stored and unused in the shipped engine
+      too.** It writes `monster+0x304`; an exhaustive scan for `LDR`s of
+      that offset across the whole image finds exactly one function, and
+      that one is mesh/skeleton code operating on an unrelated struct. So
+      the port storing it and never drawing a second model is *faithful*,
+      not a gap -- recorded as an exhaustive-search result the same way
+      M25's swing trigger was.
+    - **Still open**: `AnimationClip::rate`'s units. Frames per second
+      remains the working reading and still has no traced consumer.
+
 ## Next milestones (not yet started)
 
 Roughly in priority order for reaching "actually playable," not commitments:
@@ -2967,13 +3010,12 @@ Roughly in priority order for reaching "actually playable," not commitments:
   not the serialization within each member: how `character.dat` lays out
   player stats/inventory/quest flags, and how a `<level>.dat` stores a
   zone's entity state. M5's four slots are still simulated in memory.
-- **Which scenario each of `FUN_1002c010`'s 4 gating modes means** -- the
-  function itself is resolved (M26: a zone-transition loading-progress
-  bar, not the earlier "enemy lock-on/target health bar" guess, corrected
-  by the user with a real reference). What is still open is narrower:
-  which of the 4 real `ScreenModeController` mode values that gate it
-  (3, 4, 10, 0x1f) maps to which real scenario -- zone travel vs.
-  save-load vs. initial boot splash, etc. M26's entry has the details.
+- **Which scenario `FUN_1002c010`'s mode 0x1f means.** M42 identified the
+  other three (3 = zone travel, 4 = saving, 10 = loading a saved game) plus
+  1 and 5, by walking `SetScreenMode`'s call sites. 0x1f never appears as a
+  literal argument, and M42 found why: the screen fade (`FUN_1004fc50`)
+  calls `SetScreenMode` with a deferred target read from `engine+0x5ac`,
+  so whoever arms that fade is where the value comes from.
 - **The real weapon-swing trigger** -- M25's RE pass fully decompiled the
   first-person viewmodel's draw function and struct shape but couldn't
   find the native call site that actually starts a swing (writes
@@ -2985,8 +3027,9 @@ Roughly in priority order for reaching "actually playable," not commitments:
   that already drives combat resolution, undecompiled.
 - **`AnimationClip::rate`'s real units** (M29) -- frames per second is the
   working reading and looks right in motion, but it hasn't been traced to a
-  decompiled consumer. Likewise `SetAttachedWeapon` (a second model drawn
-  in a creature's hand) is still stored-and-unused.
+  decompiled consumer. (`SetAttachedWeapon`, previously listed here, is
+  resolved: M42's exhaustive scan found no consumer in the shipped engine
+  either, so storing-and-ignoring it is faithful.)
 - **Audio's remaining narrower gaps** (M27, `docs/AUDIO_FORMAT.md`
   resolved the core system) -- native-only player-action sounds (attack/
   jump/death/footsteps, never called from any script); main-menu

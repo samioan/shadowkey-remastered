@@ -77,6 +77,48 @@ real device-written file contains.
 | `FUN_1000b41c` | destructor |
 | `FUN_1000b49c` | delete a save file |
 
+## The writer
+
+`FUN_10018e70(engine, filename, showProgress)` is the save routine.
+(An earlier pass recorded it as a crash/error display function — see the
+correction in [`WORLD_MODEL.md`](WORLD_MODEL.md).) In order:
+
+1. Saves the current `ScreenModeController` mode and sets **mode 4**, the
+   mode `FUN_1002c010`'s progress bar draws in. The progress values it
+   feeds that bar are literal percentages: **3, 10, 30, 50, 70**.
+2. **Checks free disk space** — the device's free bytes, less a 512000-byte
+   headroom, plus whatever the existing file already occupies, against an
+   estimate built from the serialized sizes. Too little, and it restores
+   the previous mode and returns **3**, which is the value
+   `ActuallySaveGame` checks before showing its own failure message.
+3. Serializes the player/camera object through its vtable slot `+0x130`
+   into a 0x14-byte byte-buffer object (`FUN_1008c06c`; `+8` is the data
+   pointer, `+0xc` the length), plus `FUN_100187d0` for the rest of the
+   game state.
+4. Opens the archive and writes two members: `character.dat`, then
+   `"%s.dat"` formatted with the current level name — the pair the debug
+   string *"Using %s to save our previous level"* sits beside.
+5. Restores the previous screen mode and returns 0.
+
+Members are added or replaced through two separate functions, chosen by
+whether the name is already in the table: `FUN_1000b100` looks it up,
+`FUN_1000a21c(archive, name, data, length)` **appends a new member** and
+`FUN_1000a9f4(...)` **replaces an existing one**.
+
+**One behavioural detail worth keeping.** Before serializing, the routine
+swaps the player/camera's live position and heading
+(`+0x94`/`+0x9c`/`+0xa4`/`+0xb6`) for a stored set at
+`+0x1068`/`+0x106c`/`+0x1070`/`+0x1074`, and swaps them back afterwards —
+so a save records an entry/respawn point rather than exactly where the
+player is standing. It is guarded by `engine+0x5c0` and a
+`FUN_1000db04(engine+0x5cc)` check on the multiplayer session, i.e. it
+applies to single-player saves.
+
+**Autosave before a level change.** `FUN_1006c31c` (the level-change
+entry point) calls this writer on `current.sav` *first*, and **aborts the
+level change** if it fails — which is why `current.sav` and the
+per-level `<level>.dat` members exist at all.
+
 ## The script-facing API
 
 All on the GameEngine root class (trie `0x14cf0`, dispatcher

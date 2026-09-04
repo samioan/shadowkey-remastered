@@ -23,11 +23,20 @@ Chasing `ScreenModeController`'s remaining vtable slots (`+0x2c`
 `FUN_1006c31c`, `+0x30`/`+0x34` `FUN_1006be18`/`FUN_1006bdc8`) showed
 this cluster is **save/load and level-transition management**, not
 rendering: file-existence checks (`ESTLIB::fopen`/`fclose` probes on a
-`sprintf`'d save-slot filename), a "load level or show an error dialog"
-routine (`FUN_1006c31c`, which calls the earlier-identified crash/error
-display function `FUN_10018e70` on failure), and a level-unload/cleanup
-routine (`FUN_1006c240`). Correcting the previous doc's guess: this
-isn't where the 3D/tile rendering code lives.
+`sprintf`'d save-slot filename), a level-change routine (`FUN_1006c31c`),
+and a level-unload/cleanup routine (`FUN_1006c240`). Correcting the
+previous doc's guess: this isn't where the 3D/tile rendering code lives.
+
+> **Correction (M42).** This paragraph used to describe `FUN_1006c31c` as
+> "load level or show an error dialog", calling "the earlier-identified
+> crash/error display function `FUN_10018e70` on failure".
+> `FUN_10018e70` is not an error display — it is the **save-game writer**
+> (see [`SAVE_FORMAT.md`](SAVE_FORMAT.md)), and `FUN_1006c31c` calls it
+> *first*, unconditionally, to autosave `current.sav` before changing
+> level, aborting the change if the save fails. What gave the wrong
+> impression is that it does show a message on failure and returns a
+> non-zero code — but the code is `3`, "not enough free disk space", and
+> the caller that reads it is `ActuallySaveGame`.
 
 ## `engine+0x5cc` is GAMECOMMS (networking), not the world
 
