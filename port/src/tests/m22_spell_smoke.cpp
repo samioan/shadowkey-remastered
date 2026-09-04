@@ -109,9 +109,15 @@ int main(int argc, char** argv) {
         std::printf("m22_spell_smoke: FAILED -- RUNTIME ERROR: %s\n", e.toString().ptr());
         return 1;
     }
-    bool magicResistOk = rat->magicResistance() == 3;
-    std::printf("Azra_Rat.s magicResistance(): %d (expected 3) %s\n", rat->magicResistance(),
-                magicResistOk ? "OK" : "FAILED");
+    // M43 CORRECTION: not the 3 the script's SetMagicResistance() line
+    // says. Azra_Rat.s's Init() ends with SetMob(4), and that handler is a
+    // zone-scaled stat template that overwrites the block the lines above
+    // it just filled in -- 22 is tier 4's `zoneDifficulty * 2 + 20` in
+    // azra, whose difficulty is 1. See MonsterExecutable::ApplyMobTemplate.
+    bool magicResistOk = rat->magicResistance() == 22;
+    std::printf("Azra_Rat.s magicResistance(): %d (expected 22 -- SetMob(4) overwrote the "
+                "script's own 3) %s\n",
+                rat->magicResistance(), magicResistOk ? "OK" : "FAILED");
     if (!magicResistOk) ok = false;
 
     // --- Part 4: the payoff -- real HitTarget()/DoAttackRoll() ---
@@ -147,12 +153,17 @@ int main(int argc, char** argv) {
                 healthBefore, healthAfter, noDamageOk ? "OK" : "FAILED");
     if (!noDamageOk) ok = false;
 
+    // M43: the two stat penalties land on a creature, the blind *flag*
+    // does not -- the real branch guards it with `if (!target->
+    // vtable[0xe4]())`, i.e. "only if the target is not a monster". See the
+    // Blind case in item_executable.cpp's DoAttackRoll for the sign flip
+    // and where the predicate's meaning was finally pinned.
     bool blindEffectOk =
-        rat->blinded() &&
+        !rat->blinded() &&
         rat->statModifier(sk_bindings::MonsterExecutable::kStatAttack) == -10 &&
         rat->statModifier(sk_bindings::MonsterExecutable::kStatDefense) == -10;
-    std::printf("...and instead applies the real Blind effect (-10 attack, -10 defense, blind "
-                "flag): %s\n",
+    std::printf("...and instead applies the real Blind effect (-10 attack, -10 defense; the flag "
+                "itself is player-only): %s\n",
                 blindEffectOk ? "OK" : "FAILED");
     if (!blindEffectOk) ok = false;
 

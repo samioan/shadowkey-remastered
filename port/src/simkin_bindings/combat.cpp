@@ -40,17 +40,37 @@ bool RollSpellHit(int casterPower, int targetResistance) {
     return (std::rand() % 0x101) < chance;
 }
 
+// M43: the real melee model, transcribed -- see combat.h.
+int MeleeHitChance(int attackerAttack, int defenderDefense) {
+    int total = attackerAttack + defenderDefense;
+    if (total == 0) total = 1;
+    // `if (total == attack) chance = 0x80` -- the zero-defense case, which
+    // the real code deliberately caps at half rather than letting the
+    // division produce a certainty.
+    if (total == attackerAttack) return 0x80;
+    return (attackerAttack << 16) / (total << 8);
+}
+
+bool RollMeleeHit(int attackerAttack, int defenderDefense) {
+    return (std::rand() % 0x100) <= MeleeHitChance(attackerAttack, defenderDefense);
+}
+
 int RollDamage(int attackerAttack, int defenderDefense, int defenderArmor, int dmgMin,
                 int dmgMax) {
-    int hitChance = 50 + (attackerAttack - defenderDefense) * 5;
-    hitChance = (std::max)(10, (std::min)(95, hitChance));
-    if ((std::rand() % 100) >= hitChance) return 0;  // miss
+    if (!RollMeleeHit(attackerAttack, defenderDefense)) return 0;  // miss
 
     int lo = (std::min)(dmgMin, dmgMax);
     int hi = (std::max)(dmgMin, dmgMax);
-    int raw = hi > lo ? lo + std::rand() % (hi - lo + 1) : lo;
-    int mitigated = raw - defenderArmor / 2;
-    return (std::max)(1, mitigated);
+    // The real spread: `span = max - min; if (span < 1) span = 1;
+    // roll = rand % span` -- exclusive at the top, so a 3..6 weapon rolls
+    // 3, 4 or 5 and never 6. Transcribed rather than corrected.
+    int span = hi - lo;
+    if (span < 1) span = 1;
+    int raw = lo + std::rand() % span;
+    // ...and the full armour rating comes off, not half of it, with a
+    // blocked hit dealing literally nothing (`if (0 < damage) DoDamage`).
+    int mitigated = raw - defenderArmor;
+    return (std::max)(0, mitigated);
 }
 
 bool InInteractRange(float playerX, float playerY, float playerYaw, float targetX, float targetY,

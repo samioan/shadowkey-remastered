@@ -1,22 +1,60 @@
 #pragma once
 
-// Combat vertical-slice: shared damage-roll formula for both attack
-// directions (player-on-monster, monster-on-player). Deliberately
-// from-scratch -- no RE ground truth exists for the real
-// attack/defense-to-damage formula (docs/WORLD_MODEL.md notes the real
-// actor combat/stats system was never traced past the ~250-method
-// native surface itself; the Character-stats class's own DoDamage/
-// GetAttack/GetDefense/TestStrength were never decompiled), same
-// footing as render3d/camera.h's kEyeHeightOffset or main.cpp's gravity
-// constants -- a documented design choice, not a recovered constant.
+// Combat: the shared melee resolution for both attack directions
+// (player-on-monster, monster-on-player).
+//
+// M43 -- this file's long-standing "deliberately from-scratch, no RE
+// ground truth exists for the real attack/defense-to-damage formula" note
+// is now retired for melee. The real one is recovered, and the reason it
+// got looked for is worth recording: M43's SetMob pass turned the shipped
+// creature stats into *real* numbers (a level-1-zone Azra_Rat's defense is
+// 62, not the 4 its script literally says), and feeding those into an
+// invented linear `50 + (attack - defense) * 5` produced nonsense. A
+// recovered stat needs its recovered consumer.
+//
+// The two functions it took are FUN_1004b620 (the to-hit gate) and the
+// damage tail of FUN_100835b8 (the creature attack routine).
 
 namespace sk_bindings {
 
-// hitChance% = clamp(50 + (attackerAttack - defenderDefense) * 5, 10, 95);
-// on a hit, damage = max(1, RandomInRange(dmgMin, dmgMax) - defenderArmor / 2);
-// a miss deals 0. Simple and transparent on purpose -- easy to retune
-// once real playtesting (this port can't self-verify "does this feel
-// right") says otherwise.
+// FUN_1004b620, the melee to-hit gate:
+//
+//   total = attack + defense;  if (total == 0) total = 1;
+//   chance = (total == attack) ? 0x80 : (attack << 16) / (total << 8);
+//
+// i.e. `attack * 256 / (attack + defense)` in 0..256 -- the same ratio
+// model as the magic gate below, and kept in the same integer order so the
+// truncation matches step for step.
+//
+// The zero-defense special case is the interesting one, and it is the
+// *opposite* of the magic gate's: where a zero-resistance target is a
+// guaranteed magical hit (`chance == 0x100`), a zero-defense target caps
+// out at 0x80, half. The division would have produced exactly 0x100 there,
+// so this is a deliberate substitution, not a guard against overflow.
+int MeleeHitChance(int attackerAttack, int defenderDefense);
+
+// `rand % 0x100 <= chance` -- note the `<=`, and note the roll is over
+// [0, 255] against a chance that can reach 256, so a very lopsided matchup
+// really is a certainty even though the zero-defense case is not.
+//
+// The real function follows a successful roll with a second, separate
+// dodge/block test through the defender's own stats vtable (+0x14), which
+// is not decompiled and is not reproduced here -- so this port's melee
+// lands slightly more often than the shipped game's.
+bool RollMeleeHit(int attackerAttack, int defenderDefense);
+
+// The whole melee resolution: the gate above, then the damage tail of
+// FUN_100835b8:
+//
+//   span = damageMax - damageMin;  if (span < 1) span = 1;
+//   damage = damageMin + rand % span - defenderArmorRating;
+//   if (damage > 0) DoDamage(damage);
+//
+// Two details worth keeping: the spread is **exclusive** at the top (a 3..6
+// weapon rolls 3, 4 or 5), and the defender's *full* armour rating is
+// subtracted, with a fully-absorbed hit dealing literally nothing rather
+// than a courtesy 1. Returns 0 for a miss and for an absorbed hit alike --
+// which is what the real code does too, since both skip the DoDamage call.
 int RollDamage(int attackerAttack, int defenderDefense, int defenderArmor, int dmgMin, int dmgMax);
 
 // M20 (ranged weapons): true if (targetX,targetY) is within `range` world
@@ -50,8 +88,9 @@ bool InInteractRange(float playerX, float playerY, float playerYaw, float target
 // M22 (spellcasting): a spell's damage roll -- `rating` is the casting
 // item's own real SetRating() value (e.g. blaze.s's SetRating(2)),
 // `targetMagicResistance` the real monster's SetMagicResistance() (M12).
-// Deliberately from-scratch, same "no RE ground truth for the real
-// formula" footing as RollDamage().
+// Deliberately from-scratch: unlike RollDamage() above, this covers only
+// the spells that are *not* in the real dispatcher's typeId table, where by
+// definition there is no real formula to recover.
 //
 // M33/M34 update: the *effect* half is no longer unmodelled -- the real
 // selector (FUN_100458e4) is decompiled and nine of its branches are

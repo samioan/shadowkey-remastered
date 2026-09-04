@@ -291,16 +291,22 @@ int main(int argc, char** argv) {
                       v->statModifier(Monster::kStatAttack) == -10 && v->baseAttack() == before,
                   "Drain applies -10 to attack, leaving the base stat untouched");
         }
-        // Blind: attack -10 AND defense -10, plus the blind flag.
+        // Blind: attack -10 AND defense -10 -- and, M43-corrected, the
+        // blind *flag* only when the target is not a creature. The real
+        // guard is `if (!target->vtable[0xe4]())`, and M43 pinned
+        // `vtable+0xe4` as the monster predicate (FUN_1002fd30 resolves a
+        // monster through it and the player through 0xcc), which flips the
+        // reading this assertion used to encode. See the player-target half
+        // of the same effect in m43_monster_caster_smoke.cpp.
         {
             auto spell = cast("spells/Blind.s");
             auto v = LoadMonster(std::string(scriptRoot) + "/arat.s", interpreter, strings, stack);
             makeVulnerable(*v);
             hit(*spell, *v);
-            Check(spell->statusEffect() == Item::kEffectBlind && v->blinded() &&
+            Check(spell->statusEffect() == Item::kEffectBlind && !v->blinded() &&
                       v->statModifier(Monster::kStatAttack) == -10 &&
                       v->statModifier(Monster::kStatDefense) == -10,
-                  "Blind applies -10 attack and -10 defense, and sets the blind flag");
+                  "Blind applies -10 attack and -10 defense to a creature, but not the flag");
         }
         // Disease: the `magnitude < 7` branch is -2 attack, otherwise -3,
         // plus a flat -3 defense either way, both for a fixed 30s. M37

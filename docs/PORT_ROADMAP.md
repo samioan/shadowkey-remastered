@@ -2975,8 +2975,155 @@ algorithms.
       the port storing it and never drawing a second model is *faithful*,
       not a gap -- recorded as an exhaustive-search result the same way
       M25's swing trigger was.
+      **WITHDRAWN by M43**: `monster+0x304` is `SetMeleeRoll`'s field, not
+      this one, and it does have a consumer -- the scan missed it because
+      the read is an `LDRSH`. See M43's correction; `SetAttachedWeapon` is
+      back on the open list.
     - **Still open**: `AnimationClip::rate`'s units. Frames per second
       remains the working reading and still has no traced consumer.
+
+- **M43 -- monsters as spell casters, and the four things that turned out
+  to be behind that.** The last implementable item on the "Next milestones"
+  list. M37 had recovered the real caster stat and the magic hit gate but
+  read both off the *player*, and Absorb's heal always went to the player
+  too -- correct only for as long as nothing else could cast. 32 shipped
+  creature scripts call `AddSpell`. Full RE writeup in
+  `docs/WORLD_MODEL.md`'s "Creature casting, `SetMob`, and the melee
+  model"; smoke test `src/tests/m43_monster_caster_smoke.cpp` (33 checks
+  against real shipped scripts).
+
+  It did not stay a one-function milestone. Each of the five steps was
+  forced by the one before it.
+
+    - **`FUN_1002fd30`, and the two vtable predicates it pins.** Three
+      lines: `vtable+0xe4` true means "a monster", with its stats block at
+      `actor+0x224`; `vtable+0xcc` true means "the player", block at
+      `actor+0x3ac`. **A monster and the player own the same stats-block
+      layout**, and every status primitive in the engine (`FUN_1004aa28`,
+      `FUN_1004bae8`, `FUN_1004bb88`, `FUN_10049780`, `FUN_1004bc60`,
+      `FUN_1004bbd0`) takes *that block*, never the actor. The status
+      dispatcher's first two lines resolve caster and target through it
+      alike, which is what makes the whole system symmetric.
+
+      Reflected in the port by `simkin_bindings/actor_stats.h` (the block,
+      with the timed modifiers, effect flags, both periodic channels and
+      the paralysis lockout that had lived on `MonsterExecutable` since
+      M33) and `spell_actor.h` (the two predicates, plus
+      `ResolveSpellActor()` = `FUN_1002fd30`). `MonsterExecutable` and
+      `PlayerExecutable` implement it; the old accessors stayed as
+      forwarders, so nothing that already used them changed.
+
+    - **Three branch guards were being read backwards.** With the
+      predicates pinned: **Blind**'s flag lands on the *player only* (a
+      blinded creature takes the two -10s and nothing more -- this port had
+      it exactly inverted, with a note reasoning that it did not matter
+      because only creatures could be targets; both halves were wrong).
+      **Fear** works on a *creature only*. **DeadToDust** spares a living
+      *creature* but not the player.
+
+    - **The caster is `spell+0x170`, the spell's own owner.** The magnitude
+      rule's first arm is guarded by `owner->vtable[0xcc]()`, i.e. it only
+      ever means *the player's* level -- a creature-cast spell always
+      scales with the spell's own `SetLevel`. That is why every shipped
+      caster script pairs each `AddSpell` with an explicit
+      `Item.SetLevel(n)` that differs from the creature's own level.
+
+    - **`AddSpell` / `SetMeleeRoll` / `FUN_1008457c` / `FUN_100835b8` --
+      the creature's actual loadout and attack choice.** A fixed four-slot
+      `{u8 chance, Spell*}` table at `monster+0x30c`, cumulative
+      `rand(0,100)` thresholds (which the scripts' own comments confirm:
+      `tunnel_wight.s` adds three at 30/70/100 and annotates them "30%",
+      "40% of the time", "30%"), a cached Blind slot at `+0x32c` so a
+      caster never re-blinds an already-blind target, and a melee-vs-cast
+      branch whose direction is the reverse of its name -- a **higher**
+      `SetMeleeRoll` means **less** melee, and the default 0 means never
+      melee at all, which is exactly what the eight mage scripts that add
+      spells and never call it rely on.
+
+    - **`SetMob` is a stat template, not a flag -- and it is a
+      prerequisite for creature casting.** M39 read the handler's first
+      line (`monster+0x2ef = 1`, the zone-XP opt-in) and stopped. The rest
+      is a nested four-tier `switch` that **overwrites most of what the
+      script just set by hand**, scaled by `FUN_1008467c`, a 21-entry
+      zone-name-to-difficulty table (in the game's own progression order,
+      azra 1 ... crypt3 21). Full table of the four templates in
+      `WORLD_MODEL.md`.
+
+      The tell is exact: the magic gate is `spellcast + 2 * willpower` and
+      returns 0 when that is `<= 0`, so a `SetSpellcast(0)` creature with
+      no willpower could never land a spell. **21 of the 32 caster scripts
+      call `SetSpellcast(0)`. All 21 call `SetMob`. All 11 that do not call
+      `SetMob` set a real spellcast instead.** No exceptions in either
+      direction across the whole corpus. What `SetMob` gives them is a
+      willpower.
+
+      The consequence is broad: a creature's script literals are mostly
+      dead weight. `monsters/Azra_Rat.s` writes `SetAttack(3)`,
+      `SetDefense(4)`, `SetMaxHealth(12)` and then `SetMob(4)` -- in azra
+      it actually fights with attack 8, defense 62 and 23 hit points.
+      `m12_combat_smoke` used to assert those literals and now asserts what
+      overrides them.
+
+    - **...which forced the melee model.** `combat.h` had carried a
+      from-scratch `clamp(50 + (attack - defense) * 5, 10, 95)` since the
+      combat slice, on the explicit grounds that no ground truth existed.
+      A real defense of 62 makes that formula nonsense, so the real one had
+      to be found, and it is two functions. `FUN_1004b620`:
+      `chance = attack * 256 / (attack + defense)`, rolled as
+      `rand % 0x100 <= chance` -- the same ratio model as the magic gate,
+      with a zero-defense case that is its exact opposite (capped at half,
+      not made certain). Plus the damage tail of `FUN_100835b8`:
+      `damageMin + rand % max(1, damageMax - damageMin) - fullArmourRating`,
+      exclusive at the top, and a fully-absorbed hit deals literally
+      nothing. Both `RollDamage`'s "deliberately from-scratch" note and
+      `WORLD_MODEL.md`'s "the actor combat system was never traced" are
+      retired for melee.
+
+      One knock-on: the player's `baseAttack`/`baseDefense` placeholders
+      went from 10 to 50, to sit on the same scale as the rest of that
+      placeholder block (every attribute there is 50) and as the creature
+      side, which stopped being a placeholder this milestone. Still a
+      documented placeholder, not a recovered value.
+
+    - **Two more status branches, found by asking what creatures cast.**
+      4008 `spells\Weakness.s` (-10 attack for `magnitude + 8`, byte-for-byte
+      identical to Drain) and 4021 `spells\FeebleBlade.s` (`magnitude + 5`).
+      Neither is in the player's spell list, which is why nine passes over
+      this dispatcher went by without them.
+
+    - **Correction: Paralyze's duration is `(magnitude + 4)` seconds**, read
+      straight off the branch. The port had `magnitude * 5`, which its own
+      comment admitted was a shape rather than a recovered value -- the
+      difference between a raider's `SetLevel(5)` Paralyze holding the
+      player for 9 seconds and for 25.
+
+    - **Correction: `monster+0x304` is `SetMeleeRoll`, not
+      `SetAttachedWeapon`.** M39 recorded "`SetAttachedWeapon` writes
+      `monster+0x304`, and an exhaustive scan for that offset finds no real
+      consumer, so storing and ignoring it is faithful". The offset belongs
+      to dispatcher case 9 = `SetMeleeRoll` (binding index 9; cases 0, 2, 6,
+      8, 9 and 10 all map 1:1 to their binding names, each confirmed by what
+      they write), and it has a very real consumer in `FUN_100835b8`'s
+      melee-vs-spell branch. The scan missed it because
+      `pyghidra_find_reads.py` matches `LDR` with an immediate offset and
+      the read is an `LDRSH`. `SetAttachedWeapon`'s own field is back to
+      unknown -- see "Next milestones".
+
+    - **The player can now be a spell target at all**, which is the half
+      that had no representation before: `PlayerExecutable` gained the
+      shared stats block, a per-tick `TickStatusEffects()` driven from
+      main.cpp's game tick alongside every creature's `TickAi()`, and
+      `attack()`/`defense()`/`armorRating()` that fold in live modifiers.
+      A creature's Poison, Disease, Drain, Weakness, FeebleBlade, Blind,
+      HarmArmor, Paralyze and IgniteFoe all do something to the player now
+      instead of landing and vanishing.
+
+    - **Also implemented:** `SetPlaySpellCasting` (`monster+0x2bd`, the
+      cast sound), and `statusEffect()` now resolves a spell by its real
+      entity typeId (`templateId()`) before falling back to the script
+      path -- creature spells all arrive through `Level.CreateEntity`, and
+      resolving them by filename silently mis-read a creature's blaze
+      (typeId 50) and DoomHammer (4017) as their alternate variants.
 
 ## Next milestones (not yet started)
 
@@ -2997,14 +3144,21 @@ Roughly in priority order for reaching "actually playable," not commitments:
       save/load-level state.
     - Zone effects beyond `SetZone` (`Vignette`/`SpawnWithinRadius`/
       `LightRect`/`AddInterestPoint`, dispatcher `FUN_1002f074`).
-- **Monsters as spell casters.** M37 implemented the real caster stat and
-  hit gate, but always reads them off the *player*:
-  `MonsterExecutable::spellToHit()` exists and is correct, and
-  `crypt2/pergan_asuul_crypt2.s` really does cast these spells at the
-  player via `AddSpell(Level.CreateEntity(4024), 35)` -- but nothing in
-  this port routes a creature's own cast through `DoAttackRoll`, and
-  Absorb's heal unconditionally targets the player. Correct today only
-  because nothing but the player casts here.
+- **What `SetAttachedWeapon` actually writes.** Re-opened by M43: M39 had
+  it as `monster+0x304` with no consumer, but that offset is
+  `SetMeleeRoll`'s and has a very real consumer (see M43's correction).
+  Binding index 12 on the Monster class; its own field is unknown again.
+  Still no evidence any shipped script uses it -- the corpus has zero call
+  sites -- so this stays a curiosity rather than a gap.
+- **The rest of a real cast (`FUN_10046764`).** M43 decompiled it but
+  reproduces only its effect: the real cast deducts magicka, applies the
+  self-targeted spells inline (heals, cures, buffs, and the periodic
+  channel's regeneration kinds 6 and 7 -- the two `WORLD_MODEL.md` records
+  as "set somewhere else, not yet found"), and for offensive spells spawns
+  a 0x198-byte projectile whose *impact* is what calls the status
+  dispatcher. This port calls `HitTarget()` directly on both sides
+  instead, so spells are hitscan and the self-targeted half of the spell
+  list does nothing. A projectile system is the missing piece.
 - **What is inside a save file's members** -- M40 decoded the container
   (an archive of named blobs, `SAVE_FORMAT.md`) and implemented it, but
   not the serialization within each member: how `character.dat` lays out

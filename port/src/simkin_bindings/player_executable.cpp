@@ -98,7 +98,18 @@ int PlayerExecutable::armorRating() const {
             total += item->armorValue();
         }
     }
-    return total;
+    // M43: a creature's HarmArmor lands here now (shadow_tentacle.s and
+    // tunnel_wight.s both cast it), so the same timed modifier a creature
+    // has always carried applies to the player too. Clamped at 0.
+    total += m_Stats.statModifier(ActorStats::kStatArmor);
+    return total < 0 ? 0 : total;
+}
+
+// M43: the stats block's own per-frame tick -- see actor_stats.h. Identical
+// to the creature side, because it is literally the same code on the same
+// class; the only difference is which DoDamage it routes through.
+void PlayerExecutable::TickStatusEffects(int deltaUnits) {
+    m_Stats.Tick(deltaUnits, [this](int damage) { ApplyDamage(damage); });
 }
 
 void PlayerExecutable::ApplyDamage(int amount) {

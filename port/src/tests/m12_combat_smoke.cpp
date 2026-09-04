@@ -87,6 +87,12 @@ int main(int argc, char** argv) {
     // LoadStartingInventory already establishes for a real .s file.
     skInterpreter interpreter;
     sk_bindings::MenuStack stack(scriptRoot, interpreter, &strings);
+    // M43: SetMob's stat template scales with the difficulty of the zone
+    // the creature is standing in (FUN_1008467c maps a level name to
+    // 1..21), which the engine reads off the live level. main.cpp's
+    // zone-load block sets this before any creature script runs; a test
+    // that loads a zone directly has to say so itself.
+    stack.RequestZoneChange(zoneName);
 
     bool ok = true;
     skExecutableContext loadCtxt(&interpreter);
@@ -115,13 +121,38 @@ int main(int argc, char** argv) {
         std::printf("%s: %d (expected %d) %s\n", label, actual, expected, pass ? "OK" : "FAILED");
         if (!pass) ok = false;
     };
-    check("attack", rat->attack(), 3);
-    check("defense", rat->defense(), 4);
-    check("damageMin", rat->damageMin(), 3);
-    check("damageMax", rat->damageMax(), 6);
-    check("armorValue", rat->armorValue(), 2);
-    check("maxHealth", rat->maxHealth(), 12);
-    check("currentHealth (starts full)", rat->currentHealth(), 12);
+    // M43 -- CORRECTED, and the correction is the point of this block now.
+    // These are NOT azra_rat.s's own SetAttack(3)/SetDefense(4)/
+    // SetDamageMin(3)/SetDamageMax(6)/SetArmorValue(2)/SetMaxHealth(12).
+    // The last line of that Init() is `SetMob(4)`, and the real handler
+    // (dispatcher 0x10084924 case 0) is a four-tier stat template scaled by
+    // the difficulty of the zone the creature is in -- it overwrites every
+    // one of the values the lines above it set. azra's difficulty is 1
+    // (FUN_1008467c's table, in the game's own progression order), so tier
+    // 4 gives:
+    //
+    //   attack    = (L>>1)*8 + 8  =  8      (script said 3)
+    //   defense   = L*2 + 60      =  62     (script said 4)
+    //   damageMin = (L>>1)*3 + 6  =  6      (script said 3)
+    //   damageMax = (L>>1)*4 + 8  =  8      (script said 6)
+    //   armour    = 1                       (script said 2)
+    //   maxHealth = L*8 + 15      =  23     (script said 12)
+    //
+    // The script's own literals turn out to be dead weight for any creature
+    // that ends with SetMob -- which is most of them. See
+    // MonsterExecutable::ApplyMobTemplate for the full four tiers and for
+    // why this got found (a creature's willpower, and therefore its ability
+    // to land a spell at all, comes from here).
+    check("attack (SetMob(4) template, not the script's 3)", rat->attack(), 8);
+    check("defense (not the script's 4)", rat->defense(), 62);
+    check("damageMin (not the script's 3)", rat->damageMin(), 6);
+    check("damageMax (not the script's 6)", rat->damageMax(), 8);
+    check("armorValue (every tier pins it to 1)", rat->armorValue(), 1);
+    check("maxHealth (not the script's 12)", rat->maxHealth(), 23);
+    check("currentHealth (SetMob ends with SetHealth(max))", rat->currentHealth(), 23);
+    // ...and the fields SetMob does *not* touch still come from the script.
+    check("expWorth (untouched by the template)", rat->expWorth(), 40);
+    check("level (untouched -- azra_rat.s never calls SetLevel)", rat->level(), 0);
     // M31: chaseRadius() now returns real world units, not the raw script
     // value. SetChaseRadius/SetAttackRange are compared against
     // `(dx^2 + dy^2) / 256` (the decompiled FUN_100683d4), so the script's
@@ -144,12 +175,12 @@ int main(int argc, char** argv) {
     // without throwing (it soft-fails cleanly through unimplemented
     // quest-tracking calls -- see monster_executable.cpp's comment).
     rat->ApplyDamage(5);
-    if (!rat->alive() || rat->currentHealth() != 7) {
+    if (!rat->alive() || rat->currentHealth() != 23 - 5) {
         std::printf("m12_combat_smoke: FAILED -- after 5 damage, health=%d alive=%s\n",
                     rat->currentHealth(), rat->alive() ? "true" : "false");
         ok = false;
     }
-    rat->ApplyDamage(7);
+    rat->ApplyDamage(23 - 5);
     if (rat->alive() || rat->currentHealth() != 0) {
         std::printf("m12_combat_smoke: FAILED -- after lethal damage, health=%d alive=%s\n",
                     rat->currentHealth(), rat->alive() ? "true" : "false");
@@ -158,18 +189,44 @@ int main(int argc, char** argv) {
     rat->InvokeOnKilled();  // must not throw/crash -- see its own comment
     std::printf("InvokeOnKilled() returned normally: OK\n");
 
-    // 6. RollDamage bounds sanity -- not a statistical test (avoids
-    // flakiness), just confirms the formula never produces a
-    // nonsensical result across many rolls.
+    // 6. The melee model itself. M43 replaced this port's invented
+    // `clamp(50 + (attack - defense) * 5, 10, 95)` with the real gate,
+    // FUN_1004b620:
+    //
+    //   total  = attack + defense;  if (total == 0) total = 1;
+    //   chance = (total == attack) ? 0x80 : (attack << 16) / (total << 8);
+    //   hit    = (rand % 0x100) <= chance;
+    //
+    // -- the same ratio model as the magic gate, and it had to be found
+    // because SetMob's now-real defense values (62 for the first rat in the
+    // game) are meaningless to a linear formula.
+    {
+        using sk_bindings::MeleeHitChance;
+        check("hit chance is attack*256/(attack+defense) (10 vs 30)", MeleeHitChance(10, 30), 64);
+        check("...and an even matchup is exactly half", MeleeHitChance(20, 20), 128);
+        // The zero-defense case is the real function's own substitution:
+        // the division would give 0x100 (a certainty) and it writes 0x80
+        // instead. Deliberate, and the opposite of the magic gate's
+        // zero-resistance certainty.
+        check("a zero-defense target is capped at half, not made certain", MeleeHitChance(10, 0),
+              0x80);
+        check("...and two zeroes do not divide by zero", MeleeHitChance(0, 0), 0);
+    }
+    // Bounds sanity on the whole roll -- not a statistical test (avoids
+    // flakiness), just that it never produces a nonsensical result. The
+    // real spread is exclusive at the top (`rand % (max - min)`), so a 3..6
+    // weapon never rolls 6, and the defender's full armour comes off.
     bool rollsOk = true;
+    bool sawHit = false;
     for (int i = 0; i < 500; ++i) {
         int dmg = sk_bindings::RollDamage(/*attackerAttack=*/10, /*defenderDefense=*/2,
-                                           /*defenderArmor=*/4, /*dmgMin=*/3, /*dmgMax=*/6);
-        if (dmg < 0 || dmg > 6) rollsOk = false;
+                                           /*defenderArmor=*/1, /*dmgMin=*/3, /*dmgMax=*/6);
+        if (dmg < 0 || dmg > 5 - 1) rollsOk = false;
+        if (dmg > 0) sawHit = true;
     }
     std::printf("RollDamage bounds (500 rolls, attacker favored): %s\n",
-                rollsOk ? "OK" : "FAILED");
-    if (!rollsOk) ok = false;
+                rollsOk && sawHit ? "OK" : "FAILED");
+    if (!rollsOk || !sawHit) ok = false;
 
     std::printf("\nm12_combat_smoke: %s\n", ok ? "OK" : "FAILED");
     return ok ? 0 : 1;

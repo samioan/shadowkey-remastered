@@ -23,7 +23,9 @@
 #include <string>
 #include <vector>
 
+#include "simkin_bindings/actor_stats.h"
 #include "simkin_bindings/native_stub_executable.h"
+#include "simkin_bindings/spell_actor.h"
 #include "skRValue.h"
 
 class skInterpreter;
@@ -39,7 +41,7 @@ namespace sk_bindings {
 class ItemExecutable;
 class MenuStack;
 
-class PlayerExecutable : public NativeStubExecutable {
+class PlayerExecutable : public NativeStubExecutable, public SpellActor {
 public:
     // M27: `sounds`/`audio` may be null (every test constructs a
     // PlayerExecutable without them, via MenuStack's own matching
@@ -193,6 +195,49 @@ public:
     // player more health than their maximum.
     void SetHealth(int value);
 
+    // ---- M43: SpellActor (spell_actor.h) ----
+    //
+    // The player is the `vtable+0xcc` side of FUN_1002fd30, with its stats
+    // block at actor+0x3ac. Being a SpellActor is what makes the player a
+    // legal *target*: 32 shipped creature scripts call AddSpell, and every
+    // one of those spells lands here.
+    //
+    // The stats block is the same class the creatures use, so a poisoned,
+    // blinded, drained or burning player is modelled by the same code that
+    // already modelled a poisoned creature -- which is exactly the sharing
+    // the real engine has. attack()/defense()/armorRating() below fold in
+    // any live modifier the way MonsterExecutable's already did.
+    bool isPlayerActor() const override { return true; }
+    bool isMonsterActor() const override { return false; }
+    ActorStats& actorStats() override { return m_Stats; }
+    int actorLevel() const override { return m_Level; }
+    int actorHealth() const override { return m_Health; }
+    void SetActorHealth(int value) override { SetHealth(value); }
+    void ApplyActorDamage(int amount) override { ApplyDamage(amount); }
+    bool actorAlive() const override { return m_Health > 0; }
+
+    // The effective values, with any active timed status modifier folded
+    // in -- the same treatment MonsterExecutable::attack()/defense()/
+    // armorValue() already give a creature, now that a creature can cast
+    // Drain, Weakness, FeebleBlade, Blind, Disease and HarmArmor at the
+    // player. Clamped at 0.
+    int attack() const {
+        return (std::max)(0, m_BaseAttack + m_Stats.statModifier(ActorStats::kStatAttack));
+    }
+    int defense() const {
+        return (std::max)(0, m_BaseDefense + m_Stats.statModifier(ActorStats::kStatDefense));
+    }
+
+    // The stats block's own per-frame tick -- the poison/burn damage
+    // channels and every timed expiry. main.cpp calls this once per game
+    // tick with the same kAiFrameDeltaUnits every creature uses.
+    void TickStatusEffects(int deltaUnits);
+
+    bool paralyzed() const { return m_Stats.paralyzed(); }
+    bool blinded() const { return m_Stats.blinded(); }
+    bool poisoned() const { return m_Stats.poisoned(); }
+    bool burning() const { return m_Stats.burning(); }
+
     // M17: real quest-state tracking, so dialogue trees like
     // snowline/tanyinconvo.s (M16) progress across repeated visits
     // instead of always soft-failing into their first-visit branch. A
@@ -266,7 +311,18 @@ private:
     int m_Strength = 50, m_StrengthBonus = 0;
     int m_Will = 50, m_Speed = 50, m_Personality = 50;
     int m_Intelligence = 50, m_Agility = 50, m_Endurance = 50, m_Luck = 50;
-    int m_BaseDefense = 10, m_BaseAttack = 10;
+    // M43 raised these from 10 to 50, to sit on the same scale as the rest
+    // of this placeholder block (every attribute above is 50) -- and, more
+    // to the point, on the same scale as the creature side, which stopped
+    // being a placeholder this milestone. SetMob's recovered stat template
+    // gives the very first rat in the game a defense of 62, and the
+    // recovered melee gate is a ratio, `attack * 256 / (attack + defense)`:
+    // at 10 the player would have hit that rat 14% of the time. Still a
+    // documented placeholder, not a recovered value -- the real numbers
+    // come from a character-creation stat system this port does not have --
+    // but a placeholder that is at least the right order of magnitude for
+    // the formula now consuming it.
+    int m_BaseDefense = 50, m_BaseAttack = 50;
     // M37: the two *base* stats the real spell to-hit / resistance
     // formulas are built from (`+0x04` and `+0x06` of the stats block) --
     // what statsscreen.s shows is the derived value, computed in
@@ -274,6 +330,8 @@ private:
     // stored number. Same fixed-placeholder footing as the rest of the
     // block (see the class comment); the *formulas* are recovered.
     int m_Spellcast = 50, m_MagicResistance = 0;
+    // M43: the player's own stats block (actor+0x3ac) -- see actor_stats.h.
+    ActorStats m_Stats;
 
     std::vector<std::unique_ptr<ItemExecutable>> m_Inventory;
     ItemExecutable* m_LeftItem = nullptr;

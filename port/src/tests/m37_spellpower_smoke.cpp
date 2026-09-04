@@ -147,11 +147,16 @@ int main() {
 
             int vsRat = SpellHitChance(power, rat->spellResistance());
             int vsLakvan = SpellHitChance(power, lakvan->spellResistance());
-            // rat: 3, lakvan: 45. The whole point of the model is that the
-            // second is meaningfully harder while the first is nearly free.
-            Check(vsRat == (power << 16) / ((power + 3) * 0x100) && vsRat > vsLakvan,
+            // M43: the rat's resistance is no longer the 3 its script
+            // literally sets -- its Init() ends with SetMob(4), which
+            // overwrites the whole stat block from a zone-scaled template
+            // (monster_executable.h's ApplyMobTemplate). lakvan.s has no
+            // SetMob, so its 45 stands. The point of the model survives the
+            // change intact: the boss is still meaningfully harder.
+            Check(vsRat == (power << 16) / ((power + rat->spellResistance()) * 0x100) &&
+                      vsRat > vsLakvan && rat->spellResistance() < 45,
                   "chance = power*256/(power+resistance), and Lakvan (45) resists far more than a "
-                  "rat (3)");
+                  "rat");
             Check(SpellHitChance(power, 0) == 0x100,
                   "an unresisting target yields exactly 0x100 -- the engine's own certain-hit case");
             Check(sk_bindings::RollSpellHit(power, 0),

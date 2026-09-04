@@ -1895,6 +1895,16 @@ int main(int argc, char** argv) {
                 // between.
                 std::vector<size_t> gameDiedFromEffect;
 
+                // M43: the player's own stats block ticks on exactly the
+                // same schedule and through exactly the same code (see
+                // simkin_bindings/actor_stats.h) -- it is one class with two
+                // owners in the real engine, not two parallel systems. This
+                // is what makes a creature's Poison, IgniteFoe, Blind,
+                // Disease, Drain, Weakness, FeebleBlade and HarmArmor
+                // actually do something to the player rather than land and
+                // vanish.
+                stack.player().TickStatusEffects(sk_bindings::kAiFrameDeltaUnits);
+
                 for (size_t monsterIndex = 0; monsterIndex < gameMonsters.size(); ++monsterIndex) {
                     MonsterInstance& m = gameMonsters[monsterIndex];
                     const bool wasAliveBeforeTick = m.script->alive();
@@ -2037,12 +2047,25 @@ int main(int argc, char** argv) {
                         // this port's invented fixed ~1s cooldown.
                         if (m.script->ConsumeAttackCadence(
                                 sk_bindings::kAiFrameDeltaUnits)) {
-                            int dmg = sk_bindings::RollDamage(
-                                m.script->attack(), stack.player().baseDefense(),
-                                stack.player().armorRating(), m.script->damageMin(),
-                                m.script->damageMax());
-                            stack.player().ApplyDamage(dmg);
-                            m.script->PlayAttackNoise();
+                            // M43: the real melee-vs-spell branch
+                            // (FUN_100835b8). A creature with a spell in
+                            // slot 0 rolls SetMeleeRoll against rand(0,100)
+                            // and casts unless the roll reaches it -- so a
+                            // script that adds spells but never calls
+                            // SetMeleeRoll (bandit_mage.s, highwaymage.s,
+                            // yelnicin.s) casts on every single attack, and
+                            // one that sets 75 (every floater, every ghost)
+                            // casts about three attacks in four.
+                            if (!m.script->RollForMelee()) {
+                                m.script->CastSpellAt(&stack.player());
+                            } else {
+                                int dmg = sk_bindings::RollDamage(
+                                    m.script->attack(), stack.player().defense(),
+                                    stack.player().armorRating(), m.script->damageMin(),
+                                    m.script->damageMax());
+                                stack.player().ApplyDamage(dmg);
+                                m.script->PlayAttackNoise();
+                            }
                         }
                     } else {
                         m.aiState = MonsterInstance::AiState::Chasing;
@@ -2305,7 +2328,11 @@ int main(int argc, char** argv) {
                     } else {
                         int dmgMin = isWeapon ? handItem->damageMin() : 1;
                         int dmgMax = isWeapon ? handItem->damageMax() : 3;
-                        int dmg = sk_bindings::RollDamage(stack.player().baseAttack(),
+                        // M43: attack(), not baseAttack() -- a creature can
+                        // Drain, Weaken, FeebleBlade, Disease or Blind the
+                        // player now, and every one of those is a timed
+                        // modifier on the player's own attack stat.
+                        int dmg = sk_bindings::RollDamage(stack.player().attack(),
                                                            target->script->defense(),
                                                            target->script->armorValue(), dmgMin,
                                                            dmgMax);

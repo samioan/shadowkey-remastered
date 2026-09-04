@@ -32,20 +32,32 @@ ItemExecutable::ItemExecutable(const skString& filename, skExecutableContext& ct
 }
 
 ItemExecutable::StatusEffect ItemExecutable::statusEffect() const {
-    // M37: when the script declared its own typeId, use it -- that is
-    // literally what FUN_100458e4 switches on, and it is the only way to
-    // separate the two typeIds that share blaze.s (50 scales with the
-    // caster, 4006 is a flat 45..50) and the two that share DoomHammer.s.
-    switch (m_SpellType) {
+    // M37: the spell entity's own typeId, which is literally what
+    // FUN_100458e4 switches on (`spell+0xc8`), and the only way to separate
+    // the two typeIds that share blaze.s (50 scales with the caster, 4006
+    // is a flat 45..50) and the two that share DoomHammer.s.
+    //
+    // M43: prefer a real one. `m_TemplateId` is the typeId
+    // Level.CreateEntity() stamped on this object, i.e. exactly the real
+    // field; `m_SpellType` is the script's own SetSpellType(), which the
+    // scroll/unique wrappers declare and which stands in when a spell was
+    // loaded straight from a path instead. Creature spells all come through
+    // CreateEntity, so before this they resolved only by filename -- which
+    // silently mis-read a creature's blaze (typeId 50) and DoomHammer
+    // (4017) as their alternate variants.
+    int typeId = m_SpellType != 0 ? m_SpellType : m_TemplateId;
+    switch (typeId) {
         case 50: return kEffectBlaze;
         case 4002: return kEffectDeadToDust;
         case 4006: return kEffectBlazeGreater;
+        case 4008: return kEffectWeakness;     // M43
         case 4009: return kEffectAbsorb;
         case 4010: return kEffectBlind;
         case 4012:
         case 4017: return kEffectDoomHammer;
         case 4018: return kEffectDrain;
         case 4020: return kEffectFear;
+        case 4021: return kEffectFeebleBlade;  // M43
         case 4023: return kEffectHarmArmor;
         case 4024: return kEffectIgniteFoe;
         case 4025: return kEffectParalyze;
@@ -95,6 +107,9 @@ ItemExecutable::StatusEffect ItemExecutable::statusEffect() const {
         return kEffectDoomHammer;
     }
     if (endsWith("spells/deathhowl.s")) return kEffectDeathHowl;
+    // M43: the two branches only creatures cast.
+    if (endsWith("spells/weakness.s")) return kEffectWeakness;
+    if (endsWith("spells/feebleblade.s")) return kEffectFeebleBlade;
     return kEffectNone;
 }
 
@@ -305,10 +320,21 @@ bool ItemExecutable::method(const skString& methodName, skRValueArray& args,
         // when present, is a real per-spell status-effect id (e.g.
         // blaze.s's own DoAttackRoll(target,1)) this port doesn't model
         // (RollSpellDamage()'s own comment) -- only damage applies.
-        auto* target = static_cast<MonsterExecutable*>(args[0].obj());
-        if (target && target->alive()) {
+        // M43: both sides resolve through the same ResolveSpellActor() the
+        // real dispatcher's own first two lines use (FUN_1002fd30, see
+        // spell_actor.h), so the player is a legal target and a creature is
+        // a legal caster. Before this the target was blind-cast to
+        // MonsterExecutable* and the caster was hardcoded to the player --
+        // correct only for as long as nothing but the player cast anything.
+        SpellActor* target = ResolveSpellActor(args[0].obj());
+        if (target && target->actorAlive()) {
             StatusEffect effect = statusEffect();
-            PlayerExecutable& caster = m_Stack.player();
+            // `spell+0x170`. Null falls back to the player, which is what
+            // every unclaimed ItemExecutable in this port actually belongs
+            // to; the real cast path refuses to fire an ownerless spell at
+            // all, so there is no third case to model.
+            SpellActor* caster = m_SpellOwner ? m_SpellOwner
+                                              : static_cast<SpellActor*>(&m_Stack.player());
 
             // M33: the effect's magnitude is NOT args[1] -- FUN_100458e4
             // never looks at the script's argument. The proof is in the
@@ -326,15 +352,28 @@ bool ItemExecutable::method(const skString& methodName, skRValueArray& args,
             //
             // The full real rule, including its fallback:
             //
-            //   if (!scroll && (caster == null || casterIsCharacter))
-            //        magnitude = casterLevel;
-            //   else magnitude = spell->level;   // the Spell SetLevel
+            //   if (!scroll && (owner == null || owner->vtable[0xcc]()))
+            //        magnitude = casterStats->level;   // stats+0x34
+            //   else magnitude = spell->level;         // the Spell SetLevel
             //
             // That fallback is why the shipped scroll/unique wrappers
             // (spells\IgniteScroll.s SetLevel(8), U_Blaze_lvl5.s
             // SetLevel(5), ...) are precisely the spell scripts that call
             // SetLevel and no plain spell does.
-            int magnitude = m_Scroll ? m_SpellLevel : caster.level();
+            //
+            // M43: `vtable+0xcc` is the **player** predicate (spell_actor.h),
+            // which means the caster's level is only ever the *player's*
+            // level -- a creature-cast spell always takes the second arm and
+            // scales with the spell's own SetLevel. That is exactly why the
+            // shipped creature scripts pair every AddSpell with an
+            // Item.SetLevel: pergan_asuul_crypt2.s's `SetLevel(12)` for
+            // IgniteFoe, shriekfloater.s's `SetLevel(7)` for Disease (which
+            // sits precisely on that branch's own `magnitude < 7` boundary),
+            // and so on for 34 more.
+            bool casterIsPlayer = !caster || caster->isPlayerActor();
+            int magnitude = (!m_Scroll && casterIsPlayer)
+                                ? (caster ? caster->actorLevel() : 0)
+                                : m_SpellLevel;
             // The real clamp, transcribed literally: `if (0x18 < mag) mag =
             // 0x19` -- a ceiling of 25, and the same 25 that divides
             // Absorb's heal, so "magnitude / 25" is a fraction of the level
@@ -352,7 +391,7 @@ bool ItemExecutable::method(const skString& methodName, skRValueArray& args,
                 case kEffectBlaze:
                     // `local_250 = 3; iVar11 = casterStats ? mag*3+3 : 6`.
                     dmgMin = 3;
-                    dmgMax = magnitude * 3 + 3;
+                    dmgMax = caster ? magnitude * 3 + 3 : 6;
                     break;
                 case kEffectBlazeGreater:
                     // The one branch with no magnitude term at all.
@@ -360,11 +399,17 @@ bool ItemExecutable::method(const skString& methodName, skRValueArray& args,
                     dmgMax = 50;
                     break;
                 case kEffectDeadToDust:
-                    // Guarded in the real code by "target is undead"
-                    // (`vtable+0xe4` and FUN_10086f88) -- it returns
-                    // without doing anything at all otherwise. This port
-                    // has SetUndead() stored on MonsterExecutable, so the
-                    // guard is real, see undead() below.
+                    // The real branch's own guard, in its own position --
+                    // before anything else in the branch:
+                    //
+                    //   if (target->vtable[0xe4]() && !isUndead(target))
+                    //       return 1;
+                    //
+                    // M43 pins `vtable+0xe4` as the **monster** predicate
+                    // (spell_actor.h), so this reads "a creature that is not
+                    // undead is immune" -- and says nothing about the
+                    // player, who takes it either way.
+                    if (target->isMonsterActor() && !target->actorUndead()) return true;
                     dmgMin = (magnitude + 1) * 2;
                     dmgMax = (magnitude + 1) * 5;
                     break;
@@ -406,32 +451,62 @@ bool ItemExecutable::method(const skString& methodName, skRValueArray& args,
             // applies no poison at all rather than a weaker one. It
             // replaces the flat resistance *subtraction* this port used
             // until now, which had no basis in the decompile.
-            if (effect != kEffectNone &&
-                !RollSpellHit(caster.spellToHit(), target->spellResistance())) {
+            //
+            // M43: both stats now come off whoever is actually involved.
+            // The real defaults for a missing stats block are asymmetric
+            // and reproduced -- an ownerless spell still hits at power 100,
+            // a target with no stats block resists at 0.
+            int casterPower = caster ? caster->spellToHit() : 100;
+            int targetResistance = target->spellResistance();
+            if (effect != kEffectNone && !RollSpellHit(casterPower, targetResistance)) {
                 return true;
             }
-            // DeadToDust's own target guard, which the real branch applies
-            // before anything else.
-            if (effect == kEffectDeadToDust && !target->undead()) return true;
 
             // The roll, then the damage -- `if (0 < max)` is the real
             // guard, which is exactly what keeps the pure-status branches
             // from dealing 0 damage and printing a damage message.
             int rolled = dmgMin;
             if (dmgMin != dmgMax) rolled = dmgMin + std::rand() % (dmgMax - dmgMin + 1);
-            if (dmgMax > 0) target->ApplyDamage(rolled);
+            if (dmgMax > 0) target->ApplyActorDamage(rolled);
 
+            // M43: every status primitive below now runs on the target's
+            // **stats block** rather than on a MonsterExecutable, which is
+            // where the real engine has always kept them -- FUN_1004aa28,
+            // FUN_1004bae8 and FUN_1004bb88 all take a stats block, and a
+            // monster and the player each own one. That is what lets a
+            // creature poison, blind, drain or paralyse the player with the
+            // same code that already did it to a creature.
+            ActorStats& targetStats = target->actorStats();
             switch (effect) {
                 case kEffectFear:
                     // FUN_100458e4's Fear branch:
-                    // FUN_10086b98(target, 4, magnitude * 5).
-                    target->SetAiPackageTimed(MonsterExecutable::kAiFlee, magnitude * 5);
+                    //
+                    //   if (!target->vtable[0xe4]()) return 1;
+                    //   FUN_10086b98(target, 4, magnitude * 5);
+                    //
+                    // i.e. only a creature can be feared -- the player has
+                    // no AI package to put into flee. SetActorAiPackageTimed
+                    // is a no-op on the player for exactly that reason.
+                    if (!target->isMonsterActor()) return true;
+                    target->SetActorAiPackageTimed(MonsterExecutable::kAiFlee, magnitude * 5);
                     break;
                 case kEffectParalyze:
-                    // The Paralyze branch arms the target's action lockout
-                    // (monster+0x294) through a vtable call; the same
-                    // magnitude-scaled duration shape is used here.
-                    target->SetParalyzed(magnitude * 5 * 256);
+                    // M43 -- CORRECTED. The duration was a guess (the note
+                    // here read "the same magnitude-scaled duration shape is
+                    // used"); the real branch is
+                    //
+                    //   (**(stats+0x80 vtable + 0x44))(stats, (mag + 4) * 0x100)
+                    //
+                    // -- `(magnitude + 4)` seconds, not `magnitude * 5`. At
+                    // the shipped creature levels that is the difference
+                    // between a raider's Paralyze (SetLevel(5)) locking the
+                    // player for 9 seconds and for 25.
+                    //
+                    // The real branch also reaches the lockout through the
+                    // stats block's own vtable, taking the *monster* path
+                    // when the stats block belongs to one -- the same call
+                    // either way, which is why it works on both.
+                    targetStats.SetParalyzed((magnitude + 4) * 256);
                     break;
                 // ---- M33: the remaining real branches, transcribed from
                 // FUN_100458e4. Each is a combination of the two decompiled
@@ -440,40 +515,69 @@ bool ItemExecutable::method(const skString& methodName, skRValueArray& args,
                 case kEffectDrain:
                     // `iVar3 = -10; duration = magnitude + 8; stat = 1`
                     // falling into the shared FUN_1004aa28 tail.
-                    target->ApplyStatModifier(MonsterExecutable::kStatAttack, -10,
-                                               magnitude + 8);
+                    targetStats.ApplyStatModifier(ActorStats::kStatAttack, -10, magnitude + 8);
+                    break;
+                // ---- M43: the dispatcher's last two status branches.
+                // Both fall into the same FUN_1004aa28 tail as Drain, with
+                // the same -10 on stat 1 and only the duration differing --
+                // Weakness is byte-for-byte identical to Drain, and
+                // FeebleBlade is three seconds shorter. Neither is a spell
+                // the player can cast, which is why they went unfound until
+                // this pass asked what *creatures* cast: tunnel_wight.s is
+                // the only Weakness caster in the game, and highwaymage.s /
+                // highwaymage_cskye.s / shadow_tentacle.s the only
+                // FeebleBlade ones.
+                case kEffectWeakness:
+                    // `iVar3 = -10; duration = magnitude + 8; stat = 1`.
+                    targetStats.ApplyStatModifier(ActorStats::kStatAttack, -10, magnitude + 8);
+                    break;
+                case kEffectFeebleBlade:
+                    // `iVar3 = -10; duration = magnitude + 5; stat = 1`.
+                    targetStats.ApplyStatModifier(ActorStats::kStatAttack, -10, magnitude + 5);
                     break;
                 case kEffectHarmArmor:
                     // `iVar3 = -magnitude; duration = magnitude + 8; stat = 7`.
-                    target->ApplyStatModifier(MonsterExecutable::kStatArmor, -magnitude,
-                                               magnitude + 8);
+                    targetStats.ApplyStatModifier(ActorStats::kStatArmor, -magnitude, magnitude + 8);
                     break;
                 case kEffectBlind: {
                     // Two -10 modifiers (attack and defense) for
-                    // `magnitude + 5`, plus effect flag 4 -- which the real
-                    // code applies only when the target is not the player.
-                    // Every target this port can cast at is a creature, so
-                    // the flag always applies here.
+                    // `magnitude + 5`, plus effect flag 4.
+                    //
+                    // M43 -- CORRECTED, and the correction is a sign flip.
+                    // The flag is guarded by
+                    //
+                    //   if (!target->vtable[0xe4]()) FUN_1004bae8(stats, 4, dur);
+                    //
+                    // and `vtable+0xe4` is the **monster** predicate, not
+                    // the player one -- FUN_1002fd30 pins both (see
+                    // spell_actor.h). So the blindness flag itself lands
+                    // only on the **player**; a blinded creature takes the
+                    // two stat penalties and nothing more. The note here
+                    // used to say the opposite and then reason that it did
+                    // not matter because only creatures could be targets.
+                    // Both halves of that are now wrong.
                     int blindDuration = magnitude + 5;
-                    target->ApplyStatModifier(MonsterExecutable::kStatAttack, -10, blindDuration);
-                    target->ApplyStatModifier(MonsterExecutable::kStatDefense, -10, blindDuration);
-                    target->ApplyEffectFlag(MonsterExecutable::kEffectFlagBlind, 0, blindDuration);
+                    targetStats.ApplyStatModifier(ActorStats::kStatAttack, -10, blindDuration);
+                    targetStats.ApplyStatModifier(ActorStats::kStatDefense, -10, blindDuration);
+                    if (!target->isMonsterActor()) {
+                        targetStats.ApplyEffectFlag(ActorStats::kEffectFlagBlind, 0, blindDuration);
+                    }
                     break;
                 }
                 case kEffectDisease:
                     // `delta = (magnitude < 7) ? -2 : -3` on attack, a flat
                     // -3 on defense, both for a fixed 0x1e (30) -- the only
                     // effect with a duration that ignores magnitude.
-                    target->ApplyStatModifier(MonsterExecutable::kStatAttack,
-                                               magnitude < 7 ? -2 : -3, 30);
-                    target->ApplyStatModifier(MonsterExecutable::kStatDefense, -3, 30);
+                    targetStats.ApplyStatModifier(ActorStats::kStatAttack,
+                                                   magnitude < 7 ? -2 : -3, 30);
+                    targetStats.ApplyStatModifier(ActorStats::kStatDefense, -3, 30);
                     break;
                 case kEffectPoison:
                     // `FUN_1004bae8(target, 8, magnitude)` -- effect flag 8
                     // with damage-over-time kind 3, which the DoT tick
                     // passes straight to DoDamage: 3 points every 256 delta
                     // units for `magnitude` seconds.
-                    target->ApplyEffectFlag(MonsterExecutable::kEffectFlagPoison, 3, magnitude);
+                    targetStats.ApplyEffectFlag(ActorStats::kEffectFlagPoison, 3, magnitude);
                     break;
                 // ---- M34: the two branches that carry their own damage ----
                 //
@@ -513,9 +617,16 @@ bool ItemExecutable::method(const skString& methodName, skRValueArray& args,
                     // the real integer order below so the truncation
                     // matches step for step rather than only in the
                     // algebra.
+                    //
+                    // M43: the heal lands on `iVar3`, the **caster's** stats
+                    // block, which was already true in the decompile and
+                    // only ever looked like "the player" because nothing
+                    // else could cast. Five shipped creatures cast Absorb
+                    // (mountain_wight.s, tunnel_wight.s and three Pergan
+                    // Asuul variants) and every one of them heals itself.
                     int q = (magnitude << 16) / 6400;
                     int drained = (rolled * 256 * q) >> 16;
-                    caster.SetHealth(caster.health() + drained + 6);
+                    if (caster) caster->SetActorHealth(caster->actorHealth() + drained + 6);
                     break;
                 }
                 case kEffectIgniteFoe: {
@@ -534,7 +645,7 @@ bool ItemExecutable::method(const skString& methodName, skRValueArray& args,
                     // reading, from a completely different write; the
                     // visual itself has no emitter system here to attach
                     // to and is not reproduced.
-                    target->ApplyBurn(1, magnitude * 2);
+                    targetStats.ApplyBurn(1, magnitude * 2);
                     break;
                 }
                 // ---- M37: the four damage-only branches. Their whole
@@ -557,8 +668,14 @@ bool ItemExecutable::method(const skString& methodName, skRValueArray& args,
                     // resolve to a typeId, so it keeps the from-scratch
                     // rating-scaled formula (and stays outside the real hit
                     // gate, which has no meaning without a real branch).
-                    int dmg = RollSpellDamage(m_Rating, target->magicResistance());
-                    target->ApplyDamage(dmg);
+                    //
+                    // M43: `targetResistance` in place of the raw
+                    // SetMagicResistance() this used to read straight off a
+                    // MonsterExecutable -- the same number for a creature
+                    // (whose willpower is always 0, no creature script calls
+                    // SetWillpower), and defined for the player as well.
+                    int dmg = RollSpellDamage(m_Rating, targetResistance);
+                    target->ApplyActorDamage(dmg);
                     break;
                 }
             }

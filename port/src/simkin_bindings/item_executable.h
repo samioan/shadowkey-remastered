@@ -25,6 +25,7 @@
 #include <vector>
 
 #include "simkin_bindings/native_stub_executable.h"
+#include "simkin_bindings/spell_actor.h"
 #include "skScriptedExecutable.h"
 
 class skInterpreter;
@@ -145,6 +146,13 @@ public:
         kEffectDeadToDust,     // 4002 spells\DeadToDust.s
         kEffectDoomHammer,     // 4012 + 4017 spells\DoomHammer.s
         kEffectDeathHowl,      // 4035 spells\DeathHowl.s
+        // ---- M43: the last two status branches, both found by asking
+        // which spells *creatures* cast. Neither is in the player's own
+        // spell list, which is why nine passes over this dispatcher went by
+        // without them: 4008 is cast only by tunnel_wight.s and 4021 only
+        // by highwaymage.s / highwaymage_cskye.s / shadow_tentacle.s.
+        kEffectWeakness,       // 4008 spells\Weakness.s
+        kEffectFeebleBlade,    // 4021 spells\FeebleBlade.s
     };
     StatusEffect statusEffect() const;
 
@@ -168,6 +176,18 @@ public:
     // is fixed by the scroll, everything else scales with who cast it.
     int spellLevel() const { return m_SpellLevel; }
     bool scroll() const { return m_Scroll; }
+
+    // M43: `spell+0x170` -- **who is casting this**. The real
+    // status-effect dispatcher reads the caster off the spell itself, never
+    // off a global "the player"; the Monster class's AddSpell binding sets
+    // it with `FUN_1006d510(spell, monster)`, and the cast path refuses to
+    // fire a spell with no owner at all (`FUN_1006d518(spell) != 0`).
+    //
+    // Null means "the player's", which is what every ItemExecutable in this
+    // port that a creature did not explicitly claim actually is -- the
+    // player's inventory owns them. DoAttackRoll falls back accordingly.
+    void SetSpellOwner(SpellActor* owner) { m_SpellOwner = owner; }
+    SpellActor* spellOwner() const { return m_SpellOwner; }
 
     // Host-side accessors -- used by MenuExecutable's inventory-table
     // population (DisplayWeaponsPage etc.) and PlayerExecutable's equip
@@ -314,6 +334,7 @@ private:
     int m_SpellType = 0;
     int m_SpellLevel = 0;
     bool m_Scroll = false;
+    SpellActor* m_SpellOwner = nullptr;  // M43: see SetSpellOwner()
     // M36: see destroyWhenEmpty()/templateId() above.
     bool m_DestroyWhenEmpty = false;
     int m_TemplateId = -1;

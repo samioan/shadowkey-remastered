@@ -39,9 +39,12 @@
 
 #include <algorithm>
 #include <cmath>
+#include <memory>
 #include <string>
 #include <vector>
 
+#include "simkin_bindings/actor_stats.h"
+#include "simkin_bindings/spell_actor.h"
 #include "skScriptedExecutable.h"
 
 class skInterpreter;
@@ -85,12 +88,17 @@ constexpr int kAiAttackCadenceThreshold = 0x100;
 
 class MenuStack;
 class PlayerExecutable;
+class ItemExecutable;
 
-class MonsterExecutable : public skScriptedExecutable {
+class MonsterExecutable : public skScriptedExecutable, public SpellActor {
 public:
     // `strings` may be null, same fallback convention as ItemExecutable.
     MonsterExecutable(const skString& filename, skExecutableContext& ctxt,
                        const sk::StringTable* strings, PlayerExecutable& player, MenuStack& stack);
+    // Out of line so ItemExecutable (m_OwnedSpells, M43) only has to be a
+    // complete type in the .cpp -- same reason LevelExecutable's own
+    // destructor is declared here rather than defaulted inline.
+    ~MonsterExecutable() override;
 
     bool method(const skString& methodName, skRValueArray& args, skRValue& returnValue,
                 skExecutableContext& context) override;
@@ -240,71 +248,37 @@ public:
         return 16.0f * std::sqrt(static_cast<float>(scaledSquared));
     }
 
-    // ---- M33: the real timed status effects ----
+    // ---- M33/M34: the real timed status effects ----
     //
-    // Decompiled from FUN_100458e4 (the status-effect dispatcher, which
-    // selects on the spell entity's own entities.txt typeId) and its two
-    // primitives, FUN_1004aa28 (a timed stat modifier) and FUN_1004bae8
-    // (a timed effect flag). See docs/WORLD_MODEL.md.
-    //
-    // The stat indices are the ones FUN_1004ad40 switches on; the three
-    // the status effects actually touch are confirmed against the
-    // character-stats dispatcher (0x10048244), where SetAttack writes the
-    // stat block's first short, SetDefense its second and SetArmorValue
-    // its seventh:
-    enum StatIndex { kStatAttack = 1, kStatDefense = 2, kStatArmor = 7 };
+    // M43 moved the implementation to ActorStats (actor_stats.h), which is
+    // where the real engine keeps it: every one of these primitives takes
+    // the *stats block*, an object a monster and the player each own a copy
+    // of at their own fixed offset. These stay as forwarders so nothing
+    // that already read them had to change, and so the enum names below
+    // keep working unqualified.
+    using StatIndex = ActorStats::StatIndex;
+    using EffectFlag = ActorStats::EffectFlag;
+    using PeriodicKind = ActorStats::PeriodicKind;
+    static constexpr int kStatAttack = ActorStats::kStatAttack;
+    static constexpr int kStatDefense = ActorStats::kStatDefense;
+    static constexpr int kStatArmor = ActorStats::kStatArmor;
+    static constexpr int kEffectFlagBlind = ActorStats::kEffectFlagBlind;
+    static constexpr int kEffectFlagPoison = ActorStats::kEffectFlagPoison;
+    static constexpr int kPeriodicBurn = ActorStats::kPeriodicBurn;
 
-    // FUN_1004bae8's effect-flag bits (stats block +0x44).
-    enum EffectFlag { kEffectFlagBlind = 4, kEffectFlagPoison = 8 };
-
-    // FUN_1004aa28 mode 1: apply a timed modifier to one stat, but only
-    // if it is *stronger* than whatever is already on that stat (the real
-    // function compares absolute deltas and returns early otherwise, then
-    // removes the weaker one before adding). Duration is in seconds; the
-    // real code stores an absolute expiry of `now + duration * 0x100`, the
-    // same <<8 convention every other engine timer uses.
-    void ApplyStatModifier(int statIndex, int delta, int durationSeconds);
-
-    // FUN_1004bae8: set an effect flag and arm the shared effect timer.
-    // `dotKind` is the real +0x76 value -- 3 for poison, 0 for a flag with
-    // no damage-over-time (blind).
-    void ApplyEffectFlag(int flagBit, int dotKind, int durationSeconds);
-
-    // ---- M34: the stats block's *second* periodic channel ----
-    //
-    // FUN_10049780 runs two independent periodic channels. The first
-    // (+0x72/+0x74/+0x76) is the effect-flag channel above -- poison. The
-    // second (+0x78/+0x7a/+0x7c) is a separate timer with its own `kind`
-    // selector, and the tick implements three of them:
-    enum PeriodicKind {
-        kPeriodicNone = 0,
-        kPeriodicMagickaRegen = 6,  // +0x2c += spellPower, once per second
-        kPeriodicHealthRegen = 7,   // health += spellPower, clamped to max
-        kPeriodicBurn = 8,          // health -= (+0x76), and kills at 0
-    };
-
-    // The IgniteFoe branch of FUN_100458e4, which is the only place in the
-    // whole status-effect dispatcher that arms this channel:
-    //
-    //   target->kind        = 8;                  // +0x7c
-    //   target->burnTimer   = magnitude << 9;     // +0x78, magnitude*2 sec
-    //   target->burnAccum   = 0;                  // +0x7a
-    //   target->dotKind     = 1;                  // +0x76  <-- see below
-    //
-    // Note the last write: the burn's per-tick damage lives in +0x76, the
-    // *same field poison uses* for both its kind and its damage. The two
-    // channels genuinely share it in the real engine, so poisoning a
-    // burning creature really does make its flames tick for 3 instead of 1
-    // (and vice versa). Reproduced rather than tidied up -- see the tick.
-    void ApplyBurn(int damagePerTick, int durationSeconds);
-
-    bool burning() const { return m_BurnTimer > 0 && m_BurnKind == kPeriodicBurn; }
-
-    bool blinded() const { return (m_EffectFlags & kEffectFlagBlind) != 0; }
-    bool poisoned() const { return (m_EffectFlags & kEffectFlagPoison) != 0; }
-
-    // Net modifier currently applied to a stat (0 when nothing is active).
-    int statModifier(int statIndex) const;
+    void ApplyStatModifier(int statIndex, int delta, int durationSeconds) {
+        m_Stats.ApplyStatModifier(statIndex, delta, durationSeconds);
+    }
+    void ApplyEffectFlag(int flagBit, int dotKind, int durationSeconds) {
+        m_Stats.ApplyEffectFlag(flagBit, dotKind, durationSeconds);
+    }
+    void ApplyBurn(int damagePerTick, int durationSeconds) {
+        m_Stats.ApplyBurn(damagePerTick, durationSeconds);
+    }
+    bool burning() const { return m_Stats.burning(); }
+    bool blinded() const { return m_Stats.blinded(); }
+    bool poisoned() const { return m_Stats.poisoned(); }
+    int statModifier(int statIndex) const { return m_Stats.statModifier(statIndex); }
 
     // ---- M32: the real AI package state machine (monster+0x2a8) ----
     //
@@ -332,8 +306,8 @@ public:
     // action lockout. The attack function's very first test is
     // `monster+0x294 < 1`, and the tick only steers toward a target while
     // it is exactly 0, so a paralysed creature neither swings nor turns.
-    void SetParalyzed(int durationUnits) { m_ParalysisTimer = durationUnits; }
-    bool paralyzed() const { return m_ParalysisTimer > 0; }
+    void SetParalyzed(int durationUnits) { m_Stats.SetParalyzed(durationUnits); }
+    bool paralyzed() const { return m_Stats.paralyzed(); }
 
     // Per-tick countdowns for both timers above. `deltaUnits` is the
     // engine's own per-frame delta (the value FUN_1001afa4 returns) --
@@ -411,6 +385,119 @@ public:
     // explicitly once it observes alive() go false).
     void ApplyDamage(int amount);
 
+    // ---- M43: SpellActor (spell_actor.h) ----
+    //
+    // A creature is the `vtable+0xe4` side of FUN_1002fd30's two-way
+    // resolution, and its stats block is the one at actor+0x224.
+    bool isPlayerActor() const override { return false; }
+    bool isMonsterActor() const override { return true; }
+    ActorStats& actorStats() override { return m_Stats; }
+    int actorLevel() const override { return m_Level; }
+    int actorHealth() const override { return m_CurrentHealth; }
+    void SetActorHealth(int value) override;
+    void ApplyActorDamage(int amount) override { ApplyDamage(amount); }
+    bool actorAlive() const override { return m_Alive && !m_Destroyed; }
+    bool actorUndead() const override { return undead(); }
+    void SetActorAiPackageTimed(int package, int durationUnits) override {
+        SetAiPackageTimed(package, durationUnits);
+    }
+
+    // ---- M43: the real creature spell table (monster+0x30c..+0x32c) ----
+    //
+    // The Monster class's AddSpell binding (dispatcher 0x10084924 case 8,
+    // and the identical standalone FUN_10086ab0) fills a fixed **four-slot**
+    // table of `{ u8 chance; Spell* spell; }` 8-byte records, taking the
+    // first slot that is either empty or already holds the same spell
+    // typeId -- so a fifth distinct spell is dropped with a debug log, and
+    // re-adding one replaces it rather than duplicating.
+    //
+    // `chance` is a **cumulative** threshold over a rand(0, 100), which is
+    // what the shipped scripts' own comments say: tunnel_wight.s adds three
+    // spells at 30 / 70 / 100 and annotates them "30%" / "40% of the time"
+    // / "30%". The one-argument form `AddSpell(Item)` stores 100, i.e.
+    // always.
+    static constexpr int kSpellSlots = 4;
+    // `0xfaa`. AddSpell caches the slot of a Blind spell specially, in
+    // `monster+0x32c`, so the AI can avoid re-casting it -- see
+    // ChooseSpell().
+    static constexpr int kBlindSpellTypeId = 4010;
+    // The sound the melee/spell branch plays on a cast, when the script set
+    // SetPlaySpellCasting(true): `FUN_1001b198(engine, 6, x, y, ...)`.
+    static constexpr int kSpellCastSoundId = 6;
+    struct SpellSlot {
+        int chance = 0;                        // +0x30c + 8*i
+        ItemExecutable* spell = nullptr;       // +0x310 + 8*i
+    };
+    const SpellSlot& spellSlot(int index) const { return m_SpellSlots[index]; }
+    // `monster+0x310` -- the melee/spell branch's own test is literally
+    // "is slot 0 occupied", not "do I have any spell".
+    bool hasSpells() const { return m_SpellSlots[0].spell != nullptr; }
+
+    // SetMeleeRoll -> `monster+0x304`, and the branch that reads it
+    // (FUN_100835b8):
+    //
+    //   if (slot0 == 0 || (meleeRoll != 0 && meleeRoll <= rand(0,100)))
+    //        ... melee ...
+    //   else ... cast ...
+    //
+    // Note the direction, which the name does not suggest: a creature
+    // melees only when the roll *reaches* the value, so a **higher**
+    // SetMeleeRoll means **less** melee, and the default of 0 means never
+    // melee at all. That default is not a quirk -- it is exactly what the
+    // shipped mage scripts rely on: bandit_mage.s, highwaymage.s and
+    // yelnicin.s call AddSpell but never SetMeleeRoll, and so cast every
+    // single attack.
+    int meleeRoll() const { return m_MeleeRoll; }
+    bool RollForMelee() const;
+
+    // FUN_1008457c: choose a spell for this attack. Returns null when the
+    // roll lands past the last filled slot (possible when the thresholds do
+    // not run up to 100) or when the chosen slot is empty.
+    //
+    // `targetBlinded` drives the real special case at the top of that
+    // function: a creature that knows Blind (typeId 4010, whose slot index
+    // it caches in `monster+0x32c` at AddSpell time) and whose current
+    // target is *already* blinded skips the roll entirely and casts the
+    // first non-Blind spell it has, rather than wasting the turn.
+    ItemExecutable* ChooseSpell(bool targetBlinded) const;
+
+    // The whole spell half of the attack, host side: choose, then run the
+    // spell's own HitTarget() at `target`. Returns true if a spell was
+    // cast. `FUN_10046680`'s per-spell cooldown is deliberately not
+    // reproduced -- it applies only when the owner is the player
+    // (`vtable+0xcc`), so a creature-owned spell is never gated by it.
+    bool CastSpellAt(SpellActor* target);
+
+    // SetPlaySpellCasting -> `monster+0x2bd`: play sound id 6 on casting.
+    // Every shipped script that sets it is a caster.
+    bool playSpellCasting() const { return m_PlaySpellCasting; }
+
+    // ---- M43: SetMob is a stat template, not just a flag ----
+    //
+    // M39 read the handler's first line (`monster+0x2ef = 1`, the zone-XP
+    // opt-in) and stopped there. The rest of dispatcher case 0 is a nested
+    // `switch (tier)` over four templates that **overwrite** most of the
+    // stats the script just set by hand, scaled by the difficulty of the
+    // zone the creature is standing in.
+    //
+    // This turned up as a prerequisite for creature casting rather than as
+    // a separate find: 21 of the 32 shipped caster scripts call
+    // SetSpellcast(0), which would give a spell-to-hit of 0 and, through
+    // the gate's `if (power <= 0) return 0`, a spell that can never land.
+    // All 21 call SetMob; all 11 that do not call SetMob set a real
+    // spellcast instead. No exceptions either way. What SetMob gives them
+    // is a willpower, and the gate is `spellcast + 2 * willpower`.
+
+    // FUN_1008467c: 21 zone names to 1..21, in the game's own progression
+    // order, and 1 for anything unlisted. Case-insensitive, as the real
+    // strcasecmp chain is.
+    static int ZoneDifficulty(const std::string& zoneName);
+
+    // The template itself. `bonus` is SetMob's optional second argument,
+    // added to the zone's difficulty before anything is derived from it
+    // (crypt1/shriekfloater_q65.s's `SetMob(3, 1)`).
+    void ApplyMobTemplate(int tier, int bonus);
+
     // Runs the real script's OnKilled() handler, same
     // skParseException/skRuntimeException-catching convention
     // PlayerExecutable::LoadStartingInventory already uses for a script
@@ -468,25 +555,22 @@ private:
     int m_AiPackage = kAiAsleep;
     int m_SavedAiPackage = kAiIdle;  // monster+0x2fc
     int m_AiPackageTimer = 0;        // monster+0x300
-    int m_ParalysisTimer = 0;        // monster+0x294
     int m_AttackCadence = 0;         // monster+0x2c4
-    // M33: status effects. At most one modifier per stat -- the real
-    // FUN_1004aa28 replaces a weaker one and rejects a weaker new one, so
-    // a list is never needed.
-    struct StatModifier {
-        int statIndex = 0;
-        int delta = 0;
-        int remaining = 0;  // engine delta units
-    };
-    std::vector<StatModifier> m_StatModifiers;
-    int m_EffectFlags = 0;    // stats block +0x44
-    int m_EffectTimer = 0;    // +0x72, `duration << 8`
-    int m_DotKind = 0;        // +0x76 -- 3 = poison, 1 = burn (shared, see ApplyBurn)
-    int m_DotAccumulator = 0; // +0x74
-    // M34: the second periodic channel -- see PeriodicKind/ApplyBurn().
-    int m_BurnTimer = 0;        // +0x78, `duration << 8`
-    int m_BurnAccumulator = 0;  // +0x7a
-    int m_BurnKind = kPeriodicNone;  // +0x7c
+    // M33/M34/M43: the stats block -- see actor_stats.h. Holds the timed
+    // stat modifiers, the effect flags and both periodic channels, plus the
+    // paralysis lockout.
+    ActorStats m_Stats;
+    // M43: the creature's own spells. It *owns* them -- the real AddSpell
+    // adds the spell entity to the monster's object collection
+    // (`FUN_1006cf38(monster+0x1f8, spell)`) and sets itself as its owner
+    // (`FUN_1006d510(spell, monster)`) -- so the unique_ptrs live here,
+    // taken from LevelExecutable's pending-CreateEntity slot the same way
+    // ItemExecutable::AddObject already claims a loot bag's contents.
+    std::vector<std::unique_ptr<ItemExecutable>> m_OwnedSpells;
+    SpellSlot m_SpellSlots[kSpellSlots];
+    int m_BlindSpellSlot = -1;  // monster+0x32c, 0xff when there is none
+    int m_MeleeRoll = 0;        // monster+0x304
+    bool m_PlaySpellCasting = false;  // monster+0x2bd
     int m_Skin = 0;
     int m_Scale = 256;  // 8.8 fixed point, 256 == 1:1
     int m_IdleAnim = -1;

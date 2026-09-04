@@ -1,0 +1,231 @@
+#pragma once
+
+// M43: the actor **stats block** -- the object every timed status effect
+// actually lives on in the real engine.
+//
+// This is not a port-side abstraction invented to share code. It is the
+// real architecture, and recovering it is what M43's "monsters as spell
+// casters" pass turned up. `FUN_1002fd30(actor)` resolves an actor to one
+// of these:
+//
+//     if (actor->vtable[0xe4]())        return actor + 0x224;   // a monster
+//     else if (actor->vtable[0xcc]())   return actor + 0x3ac;   // the player
+//     else                              return 0;
+//
+// -- two different offsets into two unrelated classes, one shared layout.
+// Every status primitive in the engine takes *this* pointer, never the
+// actor: FUN_1004aa28 (timed stat modifier), FUN_1004bae8 (timed effect
+// flag), FUN_1004bb88 (SetHealth), FUN_10049780 (the two periodic
+// channels), FUN_1004bc60/FUN_1004bbd0 (spell to-hit / resistance). So a
+// monster and the player are the same thing as far as being poisoned,
+// blinded, drained or set on fire is concerned -- which is exactly what has
+// to be true for a monster to cast at the player.
+//
+// Everything here was decompiled for M33/M34 and lived on
+// MonsterExecutable until now; M43 moved it, unchanged, to where the real
+// engine keeps it. MonsterExecutable's own accessors remain as forwarders,
+// so nothing that already used them had to change.
+
+#include <algorithm>
+#include <cstdlib>
+#include <vector>
+
+namespace sk_bindings {
+
+class ActorStats {
+public:
+    // The stat indices FUN_1004ad40 switches on; the three the status
+    // effects actually touch are confirmed against the character-stats
+    // dispatcher (0x10048244), where SetAttack writes the stat block's
+    // first short, SetDefense its second and SetArmorValue its seventh.
+    enum StatIndex { kStatAttack = 1, kStatDefense = 2, kStatArmor = 7 };
+
+    // FUN_1004bae8's effect-flag bits (stats block +0x44).
+    enum EffectFlag { kEffectFlagBlind = 4, kEffectFlagPoison = 8 };
+
+    // The second periodic channel's `kind` selector (+0x7c). FUN_10049780
+    // implements three; only the burn is reachable from the status-effect
+    // dispatcher (IgniteFoe is its single arming site).
+    enum PeriodicKind {
+        kPeriodicNone = 0,
+        kPeriodicMagickaRegen = 6,  // +0x2c += spell power, once per second
+        kPeriodicHealthRegen = 7,   // health += spell power, clamped to max
+        kPeriodicBurn = 8,          // health -= (+0x76), and kills at 0
+    };
+
+    // FUN_1004aa28 mode 1: apply a timed modifier to one stat, but only if
+    // it is *stronger* than whatever is already on that stat (the real
+    // function compares absolute deltas and returns early otherwise, then
+    // removes the weaker one before adding). Duration is in seconds; the
+    // real code stores an absolute expiry of `now + duration * 0x100`, the
+    // same <<8 convention every other engine timer uses.
+    void ApplyStatModifier(int statIndex, int delta, int durationSeconds) {
+        int durationUnits = durationSeconds * 256;  // the real `duration * 0x100`
+        for (StatModifier& m : m_StatModifiers) {
+            if (m.statIndex != statIndex) continue;
+            if (std::abs(delta) <= std::abs(m.delta)) return;  // weaker -- rejected
+            m.delta = delta;
+            m.remaining = durationUnits;
+            return;
+        }
+        m_StatModifiers.push_back({statIndex, delta, durationUnits});
+    }
+
+    // FUN_1004bae8: OR the flag into the bitmask, set the damage-over-time
+    // kind, and arm the shared effect timer as `duration << 8`.
+    void ApplyEffectFlag(int flagBit, int dotKind, int durationSeconds) {
+        m_EffectFlags |= flagBit;
+        m_DotKind = dotKind;
+        m_EffectTimer = durationSeconds * 256;
+        m_DotAccumulator = 0;
+    }
+
+    // FUN_100458e4's IgniteFoe branch, in its own write order. Note the
+    // last write: the burn's per-tick damage lives in +0x76, the *same
+    // field poison uses* for both its kind and its damage. The two channels
+    // genuinely share it in the real engine, so poisoning a burning
+    // creature really does make its flames tick for 3 instead of 1 (and
+    // vice versa). Reproduced rather than tidied up -- see Tick().
+    void ApplyBurn(int damagePerTick, int durationSeconds) {
+        m_BurnKind = kPeriodicBurn;
+        m_BurnTimer = durationSeconds * 256;  // the real `magnitude << 9`
+        m_BurnAccumulator = 0;
+        m_DotKind = damagePerTick;  // +0x76 -- deliberately the shared field
+    }
+
+    // The real action lockout (a monster's own field is +0x294; the
+    // Paralyze branch reaches it through a vtable slot on the stats block,
+    // FUN_100458e4's `(**(code **)(*(int *)(iVar4 + 0x80) + 0x44))`, which
+    // is why it works against the player too). Duration is already in
+    // engine delta units, not seconds.
+    void SetParalyzed(int durationUnits) { m_ParalysisTimer = durationUnits; }
+    bool paralyzed() const { return m_ParalysisTimer > 0; }
+
+    // Net modifier currently applied to a stat (0 when nothing is active).
+    int statModifier(int statIndex) const {
+        for (const StatModifier& m : m_StatModifiers) {
+            if (m.statIndex == statIndex) return m.delta;
+        }
+        return 0;
+    }
+
+    bool blinded() const { return (m_EffectFlags & kEffectFlagBlind) != 0; }
+    bool poisoned() const { return (m_EffectFlags & kEffectFlagPoison) != 0; }
+    bool burning() const { return m_BurnTimer > 0 && m_BurnKind == kPeriodicBurn; }
+
+    // The two periodic channels plus every expiry, one frame's worth.
+    // `dealDamage(int)` stands in for the stats block's own DoDamage vtable
+    // slot -- a template so each owner can route it through whatever guards
+    // it has (a monster's SetInvulnerable, say) without a callback
+    // allocation per tick.
+    template <class DealDamage>
+    void Tick(int deltaUnits, DealDamage&& dealDamage) {
+        if (m_ParalysisTimer > 0) {
+            m_ParalysisTimer -= deltaUnits;
+            if (m_ParalysisTimer < 0) m_ParalysisTimer = 0;
+        }
+
+        // M33: timed stat modifiers expire independently of each other.
+        for (size_t i = 0; i < m_StatModifiers.size();) {
+            m_StatModifiers[i].remaining -= deltaUnits;
+            if (m_StatModifiers[i].remaining <= 0) {
+                m_StatModifiers.erase(m_StatModifiers.begin() + static_cast<long>(i));
+            } else {
+                ++i;
+            }
+        }
+
+        // M33: the shared effect timer (stats block +0x72). When it runs
+        // out the flags clear -- blindness lifts, poison stops.
+        if (m_EffectTimer > 0) {
+            m_EffectTimer -= deltaUnits;
+            if (m_EffectTimer <= 0) {
+                m_EffectTimer = 0;
+                // M34 correction. The real expiry is not a clear-to-zero:
+                //
+                //   flags  = 2;   // an assignment, not an &=
+                //   dotKind = 3;
+                //
+                // Bit 1 is left set (its meaning is not decoded -- nothing
+                // in this port reads any bit but blind's 4 and poison's 8,
+                // for which `= 2` and `= 0` are identical), and dotKind is
+                // *reset to poison's 3* rather than cleared. That second
+                // write used to be unobservable, because channel 1 stops
+                // ticking the moment its own timer hits zero. It stops
+                // being unobservable now that the burn channel reads the
+                // same field: a poison wearing off while a creature is on
+                // fire really does triple its burn from 1/sec to 3/sec.
+                // Faithful, and the reason this is written the odd way.
+                m_EffectFlags = 2;
+                m_DotKind = 3;
+                m_DotAccumulator = 0;
+            } else if (m_DotKind > 0) {
+                // The real damage-over-time tick (FUN_10049780):
+                //
+                //   accumulator += frameDelta;
+                //   if ((accumulator >> 8) > 0) { accumulator = 0;
+                //                                 DoDamage(dotKind); }
+                //
+                // Note the `+0x76` field is both the effect kind *and* the
+                // damage dealt -- it is passed straight to DoDamage -- so
+                // poison's 3 means three points every 256 delta units, the
+                // same "one second" every other engine timer counts in. The
+                // real code zeroes the accumulator rather than subtracting,
+                // so a long frame cannot bank extra ticks; reproduced.
+                m_DotAccumulator += deltaUnits;
+                if (m_DotAccumulator >= 256) {
+                    m_DotAccumulator = 0;
+                    dealDamage(m_DotKind);
+                }
+            }
+        }
+
+        // M34: the second periodic channel (+0x78/+0x7a/+0x7c). Same
+        // one-second accumulator shape as channel 1, but selected by its
+        // own `kind`. Kinds 6 and 7 read the stats block's spell-power
+        // short, which this port has no equivalent of and nothing
+        // decompiled so far arms, so they are documented rather than
+        // guessed at.
+        //
+        // Note kind 8 writes health *directly* instead of going through
+        // DoDamage the way poison does, so a burn is not reduced by armour
+        // or resistance at all -- it is the flat 1/sec it says it is. Both
+        // owners route it through their own damage entry point anyway, so
+        // that a real SetInvulnerable(true) quest NPC still cannot be
+        // burned to death.
+        if (m_BurnTimer > 0) {
+            if (m_BurnKind == kPeriodicBurn) {
+                m_BurnAccumulator += deltaUnits;
+                if (m_BurnAccumulator >= 256) {
+                    m_BurnAccumulator = 0;
+                    dealDamage(m_DotKind);
+                }
+            }
+            m_BurnTimer -= deltaUnits;
+            if (m_BurnTimer <= 0) {
+                m_BurnTimer = 0;
+                m_BurnKind = kPeriodicNone;
+            }
+        }
+    }
+
+private:
+    // At most one modifier per stat -- the real FUN_1004aa28 replaces a
+    // weaker one and rejects a weaker new one, so a list is never needed.
+    struct StatModifier {
+        int statIndex = 0;
+        int delta = 0;
+        int remaining = 0;  // engine delta units
+    };
+    std::vector<StatModifier> m_StatModifiers;
+    int m_EffectFlags = 0;     // +0x44
+    int m_EffectTimer = 0;     // +0x72, `duration << 8`
+    int m_DotKind = 0;         // +0x76 -- 3 = poison, 1 = burn (shared, see ApplyBurn)
+    int m_DotAccumulator = 0;  // +0x74
+    int m_BurnTimer = 0;        // +0x78, `duration << 8`
+    int m_BurnAccumulator = 0;  // +0x7a
+    int m_BurnKind = kPeriodicNone;  // +0x7c
+    int m_ParalysisTimer = 0;   // a monster's own +0x294
+};
+
+}  // namespace sk_bindings

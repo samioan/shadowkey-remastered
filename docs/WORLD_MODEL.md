@@ -694,3 +694,225 @@ comes from `FUN_1004bc60`, defaulting to 100 when there is no caster stats
 block, and `targetResistance` from `FUN_1004bbd0`. Implemented in the
 port as of M37, replacing the flat resistance-subtraction model it used
 before, which had no basis in the decompile.
+
+---
+
+## Creature casting, `SetMob`, and the melee model (M43)
+
+The port's last implementable roadmap item was "monsters as spell casters".
+Chasing it turned into the largest single correction pass so far, because
+the answer was not one function but a chain of five — and because two of
+them overturn readings recorded above.
+
+### `FUN_1002fd30`: the two vtable predicates, finally pinned
+
+Everything else here follows from three lines:
+
+```c
+int FUN_1002fd30(actor) {
+    if (actor->vtable[0xe4]())       return actor + 0x224;   // a monster
+    else if (actor->vtable[0xcc]())  return actor + 0x3ac;   // the player
+    else                             return 0;
+}
+```
+
+So **`vtable+0xe4` is "is a monster"** and **`vtable+0xcc` is "is the
+player"**, and a monster and the player own *the same stats-block layout*
+at two different offsets. The status-effect dispatcher's first two lines
+call this on the spell's owner and on the target, which is what makes the
+whole system symmetric.
+
+Three branches read the wrong way round until this was pinned:
+
+| branch | real guard | what it means |
+|---|---|---|
+| **Blind** (4010) | `if (!target->vtable[0xe4]()) applyFlag(4)` | the blindness *flag* lands on the **player only**; a blinded creature takes the two -10 stat penalties and nothing more |
+| **Fear** (4020) | `if (!target->vtable[0xe4]()) return 1` | fear works on a **creature only** — the player has no AI package to flee with |
+| **DeadToDust** (4002) | `if (target->vtable[0xe4]() && !isUndead(target)) return 1` | a *living creature* is immune; the player is not |
+
+### The caster is the spell's owner, not the player
+
+`spell+0x170` is the spell's **owner**, and the magnitude rule reads:
+
+```c
+if (!spell->scroll && (owner == 0 || owner->vtable[0xcc]()))
+     magnitude = casterStats->level;   // stats+0x34 -- the player's level
+else magnitude = spell->level;         // spell+0x1d0 -- the Spell's SetLevel
+```
+
+With `0xcc` pinned, the second arm is **every creature-cast spell**. That
+is why all 32 shipped caster scripts pair each `AddSpell` with an explicit
+`Item.SetLevel(n)`, and why those levels differ from the creature's own
+`SetLevel` (`monsters/tunnel_wight.s` is level 9 and gives its Absorb 7).
+
+### `AddSpell` / `SetMeleeRoll` — the creature spell table
+
+Dispatcher `0x10084924` case 8 (and the identical standalone
+`FUN_10086ab0`) fills a fixed **four-slot** table on the monster:
+
+```c
+struct { u8 chance; Spell* spell; } slots[4];   // +0x30c, 8 bytes apart
+int  blindSlot;                                 // +0x32c, 0xff for none
+```
+
+- The slot search takes the first slot that is empty **or already holds the
+  same spell typeId**, so re-adding replaces; a fifth distinct spell is
+  dropped with a debug log.
+- `AddSpell(Item)` stores **100**; `AddSpell(Item, n)` stores `n`.
+- `chance` is a **cumulative** threshold over `rand(0, 100)`, matching the
+  scripts' own comments: `tunnel_wight.s` adds three at 30 / 70 / 100 and
+  annotates them "30%", "40% of the time", "30%".
+- A Blind spell (typeId 4010) has its slot index cached in `+0x32c`.
+
+**`FUN_1008457c` — the chooser.** Walks the table until a slot's threshold
+reaches the roll, returning nothing if it runs off the end. Ahead of that
+sits one special case: a creature that knows Blind and whose current target
+already carries effect flag 4 skips the roll entirely and casts its first
+non-Blind spell instead, rather than wasting the turn.
+
+**`FUN_100835b8` — melee or spell.** `SetMeleeRoll` writes `monster+0x304`,
+and the branch is:
+
+```c
+if (slots[0].spell == 0 || (meleeRoll != 0 && meleeRoll <= rand(0,100)))
+     ... melee ...
+else ... cast ...
+```
+
+Note the direction, which the name does not suggest: a creature melees only
+when the roll **reaches** the value, so a **higher** `SetMeleeRoll` means
+**less** melee, and the default of 0 means *never* melee. That default is
+load-bearing — `bandit_mage.s`, `highwaymage.s` and `yelnicin.s` call
+`AddSpell` and never `SetMeleeRoll`, and so cast on every single attack.
+
+`FUN_10046680`'s per-spell cooldown only applies when the owner is the
+player (`vtable+0xcc`), so creature spells are never gated by it.
+
+`SetPlaySpellCasting` writes `monster+0x2bd`, which the cast branch reads
+to decide whether to play sound id 6. Every shipped script that sets it is
+a caster.
+
+### `SetMob` is a stat template, and it is what makes creature casting work
+
+An earlier pass read `SetMob`'s first line (`monster+0x2ef = 1`, the
+zone-XP opt-in) and stopped there. The rest of dispatcher case 0 is a
+nested `switch (tier)` that **overwrites most of what the script just set
+by hand**, scaled by the zone the creature is standing in:
+
+```
+L = ZoneDifficulty(<current level name>) + <optional 2nd argument>
+H = L >> 1
+```
+
+`ZoneDifficulty` is `FUN_1008467c`, a flat `strcasecmp` chain over 21 zone
+names returning 1..21 — in the game's own progression order, which is
+itself a useful artifact:
+
+> azra 1, delfhide 2, erthcave 3, ghstpass 4, twilite 5, snowline 6,
+> fearfrst 7, ffarena 8, drgnfld 9, raiders 10, dstar_w 11, dstar_e 12,
+> LothCav 13, lakvan 14, broken1 15, broken2 16, stouttp 17,
+> GlacierCrawl 18, crypt1 19, crypt2 20, crypt3 21
+
+Anything unlisted is 1. The four templates:
+
+| field | tier 1 | tier 2 | tier 3 | tier 4 |
+|---|---|---|---|---|
+| attack (`+0x00`) | `H*8+8` | `1` | `H*6+6` | `H*8+8` |
+| defense (`+0x02`) | `L*2+60` | `H*2+40` | `L*2+50` | `L*2+60` |
+| magic resistance (`+0x06`) | `L*3+20` | `H*2+20` | `L*3+20` | `L*2+20` |
+| damage min (`+0x08`) | `H*3+6` | `1` | `H*2+5` | `H*3+6` |
+| damage max (`+0x0a`) | `H*4+8` | `1` | `H*3+6` | `H*4+8` |
+| armour (`+0x0c`) | `1` | `1` | `1` | `1` |
+| **willpower (`+0x1a`)** | `1` | `H*3+15` | `(L/3)*4+15` | `1` |
+| max health (`+0x24`) | `L*10+20` | `L*7+15` | `L*8+15` | `L*8+15` |
+
+followed by `SetHealth(maxHealth)`. Tier 2 is the caster tier — attack and
+both damage bounds pinned to 1, and by far the largest willpower term.
+
+**Why this is a prerequisite for creature casting.** The magic to-hit gate
+is `spellcast + 2 * willpower`, and the chance is 0 whenever that is
+`<= 0`. **21 of the 32 shipped caster scripts call `SetSpellcast(0)`** — a
+creature with no willpower could never land a spell. All 21 call `SetMob`;
+all 11 that do not call `SetMob` set a real `SetSpellcast` instead. The
+split is exact, with no exceptions in either direction across the whole
+corpus, and it is what pins the reading.
+
+The consequence for the rest of this document: **a creature's script
+literals are mostly dead weight**. `monsters/Azra_Rat.s` says
+`SetAttack(3) SetDefense(4) SetDamageMin(3) SetDamageMax(6)
+SetArmorValue(2) SetMaxHealth(12)`, then ends with `SetMob(4)` — so in azra
+it actually fights with attack 8, defense 62, damage 6..8, armour 1 and 23
+hit points.
+
+### The melee model, recovered
+
+That last fact is what forced the next one. `combat.h` had carried a
+from-scratch `clamp(50 + (attack - defense) * 5, 10, 95)` since the combat
+slice, on the documented grounds that no ground truth existed. Feeding a
+real defense of 62 into a linear formula produces nonsense, so the real one
+had to be found. It is two functions.
+
+**`FUN_1004b620` — the to-hit gate:**
+
+```c
+total  = attack + defense;  if (total == 0) total = 1;
+chance = (total == attack) ? 0x80 : (attack << 16) / (total << 8);
+hit    = (rand % 0x100) <= chance;
+```
+
+i.e. `attack * 256 / (attack + defense)` — the same ratio model as the
+magic gate. The zero-defense case is the interesting one and is the
+**opposite** of the magic gate's: where a zero-resistance target is a
+guaranteed magical hit (`chance == 0x100`), a zero-defense target is capped
+at `0x80`, half. The division would have produced exactly `0x100` there, so
+that is a deliberate substitution rather than an overflow guard.
+
+A successful roll is followed by a second dodge/block test through the
+defender's stats vtable (`+0x14`), which is not decompiled.
+
+**The damage tail of `FUN_100835b8`:**
+
+```c
+span   = damageMax - damageMin;  if (span < 1) span = 1;
+damage = damageMin + rand % span - defenderArmorRating;
+if (damage > 0) DoDamage(damage, attackerStats, 0, 0);
+```
+
+The spread is **exclusive** at the top — a 3..6 weapon rolls 3, 4 or 5 —
+and the defender's **full** armour rating is subtracted, with a
+fully-absorbed hit dealing literally nothing rather than a courtesy 1.
+
+`FUN_10047f64` and `FUN_1004801c` are `GetAttack`/`GetDefense`: base
+`stats+0x00` / `stats+0x02` plus a bonus derived from `+0x14` / `+0x18` and,
+for the player only, a class perk.
+
+### Two more status branches
+
+Asking which spells *creatures* cast turned up the dispatcher's last two
+unimplemented arms, both absent from the player's own spell list:
+
+| typeId | script | branch | cast by |
+|---|---|---|---|
+| 4008 | `spells\Weakness.s` | -10 attack for `magnitude + 8` | `tunnel_wight.s` only |
+| 4021 | `spells\FeebleBlade.s` | -10 attack for `magnitude + 5` | `highwaymage.s`, `highwaymage_cskye.s`, `shadow_tentacle.s` |
+
+Weakness is byte-for-byte identical to Drain (4018).
+
+### Correction: Paralyze's duration
+
+The Paralyze branch is `(**(stats+0x80 vtable + 0x44))(stats, (magnitude
++ 4) * 0x100)` — **`magnitude + 4` seconds**. The port had `magnitude * 5`,
+which its own comment admitted was a shape rather than a recovered value.
+At the shipped creature levels that is the difference between a raider's
+Paralyze (`SetLevel(5)`) locking the player for 9 seconds and for 25.
+
+### `FUN_10046764` — what a real cast does
+
+Not reproduced in the port (there is no projectile system here, and the
+player's own casting already takes the same shortcut), but recorded: the
+real cast deducts magicka against the caster's stats, applies any
+self-targeted half of the spell inline — heals, cures, buffs, the
+regeneration kinds 6/7 of the second periodic channel — and for the
+offensive spells allocates a 0x198-byte projectile whose impact is what
+eventually calls the status dispatcher. This port substitutes a direct
+`HitTarget()` call on both sides instead.

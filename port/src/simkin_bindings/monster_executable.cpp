@@ -1,5 +1,6 @@
 #include "simkin_bindings/monster_executable.h"
 
+#include <cctype>
 #include <cstdio>
 #include <cstdlib>
 
@@ -7,6 +8,8 @@
 #include "assets/string_table.h"
 #include "audio/audio_engine.h"
 #include "simkin_bindings/combat.h"
+#include "simkin_bindings/item_executable.h"
+#include "simkin_bindings/level_executable.h"
 #include "simkin_bindings/menu_stack.h"
 #include "simkin_bindings/native_binding_common.h"
 #include "simkin_bindings/player_executable.h"
@@ -26,6 +29,8 @@ MonsterExecutable::MonsterExecutable(const skString& filename, skExecutableConte
       m_Player(player),
       m_Stack(stack),
       m_Interpreter(ctxt.getInterpreter()) {}
+
+MonsterExecutable::~MonsterExecutable() = default;
 
 std::string MonsterExecutable::name() const {
     if (m_Strings && m_NameId >= 0) return m_Strings->Get(m_NameId);
@@ -134,45 +139,183 @@ void MonsterExecutable::InvokeOnKilled() {
     }
 }
 
-int MonsterExecutable::statModifier(int statIndex) const {
-    for (const StatModifier& m : m_StatModifiers) {
-        if (m.statIndex == statIndex) return m.delta;
+// M34's SetHealth (FUN_1004bb88), which is the same three-instruction
+// clamp on either side of the fight -- Absorb heals whoever cast it, and
+// as of M43 that can be a creature.
+void MonsterExecutable::SetActorHealth(int value) {
+    m_CurrentHealth = value;
+    if (m_CurrentHealth > m_MaxHealth) m_CurrentHealth = m_MaxHealth;
+    if (m_CurrentHealth < 0) m_CurrentHealth = 0;
+}
+
+// ---- M43: SetMob's stat template ----
+
+int MonsterExecutable::ZoneDifficulty(const std::string& zoneName) {
+    // FUN_1008467c: a flat strcasecmp chain over 21 zone names, returning
+    // 1..21 in the game's own progression order, and 1 for anything not
+    // listed. Transcribed verbatim, order included -- the order *is* the
+    // data, and it doubles as a statement about how the game intends its
+    // zones to be sequenced.
+    static const char* const kZones[] = {
+        "azra",     "delfhide", "erthcave", "ghstpass",     "twilite", "snowline", "fearfrst",
+        "ffarena",  "drgnfld",  "raiders",  "dstar_w",      "dstar_e", "LothCav",  "lakvan",
+        "broken1",  "broken2",  "stouttp",  "GlacierCrawl", "crypt1",  "crypt2",   "crypt3",
+    };
+    for (size_t i = 0; i < sizeof(kZones) / sizeof(kZones[0]); ++i) {
+        const char* candidate = kZones[i];
+        size_t n = 0;
+        bool equal = true;
+        for (; candidate[n] && n < zoneName.size(); ++n) {
+            if (std::tolower(static_cast<unsigned char>(candidate[n])) !=
+                std::tolower(static_cast<unsigned char>(zoneName[n]))) {
+                equal = false;
+                break;
+            }
+        }
+        if (equal && candidate[n] == '\0' && n == zoneName.size()) {
+            return static_cast<int>(i) + 1;
+        }
     }
-    return 0;
+    return 1;
 }
 
-void MonsterExecutable::ApplyStatModifier(int statIndex, int delta, int durationSeconds) {
-    // FUN_1004aa28's mode-1 path: if this stat already carries a
-    // modifier, the incoming one only takes effect when its magnitude is
-    // strictly greater (the real code compares absolute values and
-    // returns early otherwise, then unlinks the weaker record before
-    // adding the new one). So there is never more than one per stat.
-    int durationUnits = durationSeconds * 256;  // the real `duration * 0x100`
-    for (StatModifier& m : m_StatModifiers) {
-        if (m.statIndex != statIndex) continue;
-        if (std::abs(delta) <= std::abs(m.delta)) return;  // weaker -- rejected
-        m.delta = delta;
-        m.remaining = durationUnits;
-        return;
+void MonsterExecutable::ApplyMobTemplate(int tier, int bonus) {
+    // Dispatcher 0x10084924 case 0, the nested `switch (tier)`. The whole
+    // template is driven by one number:
+    //
+    //   L = ZoneDifficulty(<current level name>) + <optional 2nd argument>
+    //   H = L >> 1
+    //
+    // -- so the same creature script is weaker in azra (L = 1) than in
+    // crypt3 (L = 21), and every one of these writes lands *after* the
+    // script's own SetAttack/SetDefense/SetMaxHealth/etc., overwriting
+    // them. That is why the 21 shipped caster scripts that call SetMob all
+    // pass SetSpellcast(0) and placeholder damage values, while the 11 that
+    // do not call SetMob all set real ones: the split is exact, with no
+    // exceptions in either direction across the whole corpus.
+    //
+    // Willpower is the field that makes this a prerequisite for creature
+    // casting at all. The magic to-hit gate is `spellcast + 2*willpower`,
+    // and `chance = 0` whenever that is <= 0 -- so a SetSpellcast(0)
+    // creature with no willpower could never land a spell. It is SetMob
+    // that gives it one.
+    if (tier < 1 || tier > 4) return;  // the real `if (3 < tier - 1u)` bail
+    const int L = ZoneDifficulty(m_Stack.requestedZone()) + bonus;
+    const int H = L >> 1;
+    m_ArmorValue = 1;  // every tier, unconditionally
+    switch (tier) {
+        case 1:
+            m_Attack = H * 8 + 8;
+            m_Defense = L * 2 + 60;
+            m_DamageMin = H * 3 + 6;
+            m_DamageMax = H * 4 + 8;
+            m_Will = 1;
+            m_MagicResistance = L * 3 + 20;
+            m_MaxHealth = L * 10 + 20;
+            break;
+        case 2:
+            // The caster tier: attack and both damage bounds pinned to 1,
+            // and by far the largest willpower term. bandit_mage.s,
+            // highwaymage.s and drgnfld/bandit_mage_q31.s are exactly the
+            // scripts that use it.
+            m_Attack = 1;
+            m_Defense = H * 2 + 40;
+            m_DamageMin = 1;
+            m_DamageMax = 1;
+            m_Will = H * 3 + 15;
+            m_MagicResistance = H * 2 + 20;
+            m_MaxHealth = L * 7 + 15;
+            break;
+        case 3:
+            m_Attack = H * 6 + 6;
+            m_Defense = L * 2 + 50;
+            m_DamageMin = H * 2 + 5;
+            m_DamageMax = H * 3 + 6;
+            // The one division in the whole template, and a magic multiply
+            // in the binary rather than a written divide.
+            m_Will = (L / 3) * 4 + 15;
+            m_MagicResistance = L * 3 + 20;
+            m_MaxHealth = L * 8 + 15;
+            break;
+        case 4:
+            m_Attack = H * 8 + 8;
+            m_Defense = L * 2 + 60;
+            m_DamageMin = H * 3 + 6;
+            m_DamageMax = H * 4 + 8;
+            m_Will = 1;
+            // The one place tier 4 differs from tier 1: L*2 rather than
+            // L*3. Otherwise the two share every value but max health.
+            m_MagicResistance = L * 2 + 20;
+            m_MaxHealth = L * 8 + 15;
+            break;
+        default:
+            break;
     }
-    m_StatModifiers.push_back({statIndex, delta, durationUnits});
+    // The real tail: SetHealth(maxHealth) through FUN_1004bb88, i.e. the
+    // creature also arrives at full health for its new maximum.
+    m_CurrentHealth = m_MaxHealth;
 }
 
-void MonsterExecutable::ApplyEffectFlag(int flagBit, int dotKind, int durationSeconds) {
-    // FUN_1004bae8: OR the flag into the bitmask, set the damage-over-time
-    // kind, and arm the shared effect timer as `duration << 8`.
-    m_EffectFlags |= flagBit;
-    m_DotKind = dotKind;
-    m_EffectTimer = durationSeconds * 256;
-    m_DotAccumulator = 0;
+// ---- M43: the creature's own casting ----
+
+bool MonsterExecutable::RollForMelee() const {
+    // FUN_100835b8's own branch condition, transcribed:
+    //
+    //   if (slot0 == 0 || (meleeRoll != 0 && meleeRoll <= rand(0,100)))
+    //        melee
+    //   else cast
+    //
+    // rand(0,100) is inclusive at both ends -- FUN_100730c8 is
+    // `lo + rand % (hi - lo + 1)` -- so 101 outcomes, which is also what
+    // makes the cumulative AddSpell thresholds in ChooseSpell() land on the
+    // percentages the shipped scripts' comments claim.
+    if (!hasSpells()) return true;
+    if (m_MeleeRoll == 0) return false;
+    return m_MeleeRoll <= (std::rand() % 101);
 }
 
-void MonsterExecutable::ApplyBurn(int damagePerTick, int durationSeconds) {
-    // FUN_100458e4's IgniteFoe branch, in its own write order.
-    m_BurnKind = kPeriodicBurn;
-    m_BurnTimer = durationSeconds * 256;  // the real `magnitude << 9`
-    m_BurnAccumulator = 0;
-    m_DotKind = damagePerTick;  // +0x76 -- deliberately the shared field
+ItemExecutable* MonsterExecutable::ChooseSpell(bool targetBlinded) const {
+    // FUN_1008457c. The special case first: a creature that knows Blind and
+    // whose target is already blind skips the roll and casts the first
+    // non-Blind spell it has instead -- the real test is
+    // `monster+0x20c != 0 && monster+0x32c != -1 && (targetStats+0x44 & 4)`,
+    // i.e. "I have a target, I have a Blind spell, and the target is
+    // already under effect flag 4".
+    if (m_BlindSpellSlot >= 0 && targetBlinded) {
+        for (int i = 0; i < kSpellSlots; ++i) {
+            ItemExecutable* spell = m_SpellSlots[i].spell;
+            // The real comparison is against the spell entity's own
+            // entities.txt typeId (`spell+0xc8`), which in this port is the
+            // typeId Level.CreateEntity() stamped on it.
+            if (spell && spell->templateId() != kBlindSpellTypeId) return spell;
+        }
+    }
+
+    // The cumulative table: walk until a slot's threshold *reaches* the
+    // roll. Running off the end returns nothing at all, which is the real
+    // `if (3 < iVar3) return 0` -- reachable whenever a script's thresholds
+    // stop short of 100.
+    int roll = std::rand() % 101;
+    int index = 0;
+    while (m_SpellSlots[index].chance < roll) {
+        if (++index >= kSpellSlots) return nullptr;
+    }
+    return m_SpellSlots[index].spell;
+}
+
+bool MonsterExecutable::CastSpellAt(SpellActor* target) {
+    if (!target) return false;
+    ItemExecutable* spell = ChooseSpell(target->actorStats().blinded());
+    if (!spell) return false;
+    // The real cast is FUN_10046764 -- deduct magicka, apply any
+    // self-targeted half, then spawn a projectile that runs the damage
+    // dispatcher on impact. This port has no projectile system, and already
+    // substitutes the same direct HitTarget() call for the player's own
+    // casting (main.cpp's tryAttack); a creature's cast takes the identical
+    // shortcut rather than inventing a second, different one.
+    spell->InvokeHitTarget(dynamic_cast<skiExecutable*>(target));
+    if (m_PlaySpellCasting) PlayNoise(kSpellCastSoundId);
+    return true;
 }
 
 void MonsterExecutable::SetAiPackageTimed(int package, int durationUnits) {
@@ -195,101 +338,13 @@ void MonsterExecutable::TickAi(int deltaUnits) {
             m_AiPackage = m_SavedAiPackage;
         }
     }
-    if (m_ParalysisTimer > 0) {
-        m_ParalysisTimer -= deltaUnits;
-        if (m_ParalysisTimer < 0) m_ParalysisTimer = 0;
-    }
-
-    // M33: timed stat modifiers expire independently of each other.
-    for (size_t i = 0; i < m_StatModifiers.size();) {
-        m_StatModifiers[i].remaining -= deltaUnits;
-        if (m_StatModifiers[i].remaining <= 0) {
-            m_StatModifiers.erase(m_StatModifiers.begin() + static_cast<long>(i));
-        } else {
-            ++i;
-        }
-    }
-
-    // M33: the shared effect timer (stats block +0x72). When it runs out
-    // the flags clear -- blindness lifts, poison stops.
-    if (m_EffectTimer > 0) {
-        m_EffectTimer -= deltaUnits;
-        if (m_EffectTimer <= 0) {
-            m_EffectTimer = 0;
-            // M34 correction. The real expiry is not a clear-to-zero:
-            //
-            //   flags  = 2;   // an assignment, not an &=
-            //   dotKind = 3;
-            //
-            // Bit 1 is left set (its meaning is not decoded -- nothing in
-            // this port reads any bit but blind's 4 and poison's 8, for
-            // which `= 2` and `= 0` are identical), and dotKind is *reset
-            // to poison's 3* rather than cleared. That second write used to
-            // be unobservable, because channel 1 stops ticking the moment
-            // its own timer hits zero. It stops being unobservable now that
-            // the burn channel reads the same field: a poison wearing off
-            // while a creature is on fire really does triple its burn from
-            // 1/sec to 3/sec. Faithful, and the reason this is written the
-            // odd way it is.
-            m_EffectFlags = 2;
-            m_DotKind = 3;
-            m_DotAccumulator = 0;
-        } else if (m_DotKind > 0) {
-            // The real damage-over-time tick (FUN_10049780):
-            //
-            //   accumulator += frameDelta;
-            //   if ((accumulator >> 8) > 0) { accumulator = 0;
-            //                                 DoDamage(dotKind); }
-            //
-            // Note the `+0x76` field is both the effect kind *and* the
-            // damage dealt -- it is passed straight to DoDamage -- so
-            // poison's 3 means three points every 256 delta units, the
-            // same "one second" every other engine timer counts in. The
-            // real code zeroes the accumulator rather than subtracting,
-            // so a long frame cannot bank extra ticks; reproduced.
-            m_DotAccumulator += deltaUnits;
-            if (m_DotAccumulator >= 256) {
-                m_DotAccumulator = 0;
-                ApplyDamage(m_DotKind);
-            }
-        }
-    }
-
-    // M34: the second periodic channel (+0x78/+0x7a/+0x7c). Same one-second
-    // accumulator shape as channel 1, but selected by its own `kind`:
-    //
-    //   kind 6: magicka += spellPower
-    //   kind 7: health  += spellPower, clamped to maxHealth and to 0
-    //   kind 8: health  -= (+0x76), and on reaching 0 calls the actor's
-    //           kill vtable slot (+0x28) directly
-    //
-    // Only kind 8 is reachable from the status-effect dispatcher -- the
-    // IgniteFoe branch is its single arming site anywhere in that function.
-    // Kinds 6 and 7 read the stats block's spell-power short (+0x34), which
-    // this port has no equivalent of and nothing decompiled so far arms, so
-    // they are documented here rather than guessed at.
-    //
-    // Note kind 8 writes health *directly* instead of going through
-    // DoDamage the way poison does, so a burn is not reduced by armour or
-    // resistance at all -- it is the flat 1/sec it says it is. The one
-    // deliberate divergence: this routes through ApplyDamage() anyway, so
-    // that a real SetInvulnerable(true) quest NPC still cannot be burned to
-    // death (that guard is a port safety property, and the alternative is
-    // an essential NPC dying to a stray fire spell and stranding a quest).
-    if (m_BurnTimer > 0) {
-        if (m_BurnKind == kPeriodicBurn) {
-            m_BurnAccumulator += deltaUnits;
-            if (m_BurnAccumulator >= 256) {
-                m_BurnAccumulator = 0;
-                ApplyDamage(m_DotKind);
-            }
-        }
-        m_BurnTimer -= deltaUnits;
-        if (m_BurnTimer <= 0) {
-            m_BurnTimer = 0;
-            m_BurnKind = kPeriodicNone;
-        }
-    }
+    // M43: everything below the AI package -- the paralysis lockout, the
+    // timed stat modifiers, the effect flags and both periodic channels --
+    // lives on the stats block now (actor_stats.h), because in the real
+    // engine it always did. The damage callback routes through
+    // ApplyDamage() so that a real SetInvulnerable(true) quest NPC still
+    // cannot be poisoned or burned to death.
+    m_Stats.Tick(deltaUnits, [this](int damage) { ApplyDamage(damage); });
 }
 
 bool MonsterExecutable::ConsumeAttackCadence(int deltaUnits) {
@@ -382,6 +437,73 @@ bool MonsterExecutable::method(const skString& methodName, skRValueArray& args,
     }
     if (methodName == skString("GetSpellResistance") && args.entries() == 0) {
         returnValue = skRValue(spellResistance());
+        return true;
+    }
+    // ---- M43: the creature's own spell loadout ----
+    //
+    // Dispatcher 0x10084924 case 8, whose body is duplicated verbatim as
+    // the standalone FUN_10086ab0. The two forms differ only in the stored
+    // chance: `AddSpell(Item)` stores 100 and `AddSpell(Item, n)` stores n.
+    if (methodName == skString("AddSpell") &&
+        (args.entries() == 1 || args.entries() == 2)) {
+        // Every real call site is `Item = Level.CreateEntity(<typeId>);
+        // Item.SetLevel(n); AddSpell(Item[, chance]);` -- so the object
+        // being handed over is exactly the one LevelExecutable is still
+        // holding, and the monster takes ownership of it here (the real
+        // AddSpell adds it to the creature's own object collection and
+        // makes the creature its owner).
+        auto* spell = dynamic_cast<ItemExecutable*>(args[0].obj());
+        if (!spell) return true;
+        std::unique_ptr<ItemExecutable> owned = m_Stack.level().TakePendingCreatedEntity();
+        // Refuse anything this creature would not actually own. The slots
+        // hold raw pointers (the real table does too), so storing one whose
+        // lifetime belongs to somebody else is a dangling read waiting to
+        // happen. Every real call site is a fresh CreateEntity handed
+        // straight over, so this only rejects hypotheticals.
+        bool alreadyOwned = false;
+        for (const auto& held : m_OwnedSpells) {
+            if (held.get() == spell) alreadyOwned = true;
+        }
+        if (owned.get() != spell && !alreadyOwned) {
+            std::printf("MonsterExecutable: AddSpell -- ignoring a spell this creature does not "
+                        "own\n");
+            return true;
+        }
+        int chance = args.entries() == 2 ? args[1].intValue() : 100;
+
+        // The real slot search: take the first slot that is empty **or
+        // already holds this same spell typeId** -- so re-adding a spell
+        // replaces it instead of consuming a second slot, and a fifth
+        // distinct spell is dropped (the real code logs and returns).
+        int index = 0;
+        for (; index < kSpellSlots; ++index) {
+            if (!m_SpellSlots[index].spell) break;
+            if (m_SpellSlots[index].spell->templateId() == spell->templateId()) break;
+        }
+        if (index >= kSpellSlots) {
+            std::printf("MonsterExecutable: AddSpell -- %s already has %d spells, dropping one\n",
+                        name().c_str(), kSpellSlots);
+            return true;
+        }
+        m_SpellSlots[index].spell = spell;
+        m_SpellSlots[index].chance = chance;
+        // `FUN_1006d510(spell, monster)` -- the owner write the whole
+        // caster half of FUN_100458e4 reads back.
+        spell->SetSpellOwner(this);
+        if (owned) m_OwnedSpells.push_back(std::move(owned));
+        // `if (spell->typeId == 0xfaa) monster+0x32c = slot` -- the cached
+        // Blind slot, see ChooseSpell().
+        if (spell->templateId() == kBlindSpellTypeId) m_BlindSpellSlot = index;
+        return true;
+    }
+    if (methodName == skString("SetMeleeRoll") && args.entries() == 1) {
+        // `monster+0x304`. See meleeRoll()/RollForMelee() for the direction
+        // this reads in, which is the opposite of what the name suggests.
+        m_MeleeRoll = args[0].intValue();
+        return true;
+    }
+    if (methodName == skString("SetPlaySpellCasting") && args.entries() == 1) {
+        m_PlaySpellCasting = args[0].boolValue();
         return true;
     }
     if (methodName == skString("SetDamageMin") && args.entries() == 1) {
@@ -486,10 +608,14 @@ bool MonsterExecutable::method(const skString& methodName, skRValueArray& args,
         // place in the binary -- SetZone's own XP distribution (see
         // ZoneScriptExecutable::SetZone). So calling SetMob is what opts a
         // creature into the zone's experience budget; a scripted NPC that
-        // never calls it is skipped. The optional second argument is a
-        // per-creature adjustment added to the tier value.
+        // never calls it is skipped.
         m_Mob = args[0].intValue();
         m_CountsForZoneExperience = true;
+        // M43: and the rest of it. The XP flag is only the handler's first
+        // line -- the body is a **per-tier stat template scaled to the zone
+        // the creature is standing in**, and it overwrites most of what the
+        // script set by hand a few lines earlier.
+        ApplyMobTemplate(m_Mob, args.entries() == 2 ? args[1].intValue() : 0);
         return true;
     }
     // M28: the real animation clip numbers. Every monster script sets all

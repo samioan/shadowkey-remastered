@@ -111,6 +111,7 @@ add_library(sk_bindings STATIC
   src/simkin_bindings/player_executable.cpp
   src/simkin_bindings/popup_menu_executable.cpp
   src/simkin_bindings/slider_executable.cpp
+  src/simkin_bindings/spell_actor.cpp
   src/simkin_bindings/row_owner_ref.cpp
   src/simkin_bindings/table_executable.cpp
   src/simkin_bindings/test_armor_executable.cpp
@@ -323,3 +324,9 @@ target_include_directories(save_archive_smoke PRIVATE src)
 # Real per-frame tile visibility raycast -- see src/tests/m41_visibility_smoke.cpp.
 add_executable(visibility_smoke src/tests/m41_visibility_smoke.cpp)
 target_link_libraries(visibility_smoke PRIVATE sk_world)
+
+# Monsters as spell casters -- the real creature spell table, the
+# melee-vs-cast branch, and the player as a spell target. See
+# src/tests/m43_monster_caster_smoke.cpp.
+add_executable(monster_caster_smoke src/tests/m43_monster_caster_smoke.cpp)
+target_link_libraries(monster_caster_smoke PRIVATE sk_bindings)
