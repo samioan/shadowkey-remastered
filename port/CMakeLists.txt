@@ -347,3 +347,10 @@ target_link_libraries(encounter_spawn_smoke PRIVATE sk_bindings sk_world)
 # src/tests/m46_attached_weapon_smoke.cpp.
 add_executable(attached_weapon_smoke src/tests/m46_attached_weapon_smoke.cpp)
 target_link_libraries(attached_weapon_smoke PRIVATE sk_bindings sk_world)
+
+# The real weapon-swing trigger -- the gate, the accumulator's seed, the
+# three melee swing variants and the weapon-swap transition. See
+# src/tests/m47_weapon_swing_smoke.cpp.
+add_executable(weapon_swing_smoke src/tests/m47_weapon_swing_smoke.cpp
+                                   src/assets/sprite_archive.cpp)
+target_link_libraries(weapon_swing_smoke PRIVATE sk_bindings)

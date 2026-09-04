@@ -267,21 +267,24 @@ int main(int argc, char** argv) {
         skExecutableContext callCtxt(&interpreter);
         club->method(skString("Init"), args, ret, callCtxt);
     }
+    // M47: this guard is no longer this port's own -- it is the real
+    // trigger's own gate (`if (player->0x234 > 0) return;` in
+    // FUN_100425bc). The state it reads changed with it: an accumulator
+    // rather than a frame index, and no post-swing hold to interrupt.
     sk_bindings::StartWeaponSwing(vm, club.get());
-    for (int i = 0; i < sk_bindings::kViewmodelFrameTicks + 1; ++i) {
-        sk_bindings::TickWeaponViewmodel(vm);
-    }
-    int advanced = vm.frame;
+    for (int i = 0; i < 4; ++i) sk_bindings::TickWeaponViewmodel(vm, 0);
+    int advanced = vm.swingAccum;
+    Check(advanced > 0 && advanced < ((club->animationFrames() + 2) << 8),
+          "the swing accumulator is running down");
     sk_bindings::StartWeaponSwing(vm, club.get());  // mashing the attack key
-    Check(advanced > 0 && vm.frame == advanced,
+    Check(vm.swingAccum == advanced,
           "attacking again mid-swing does not restart the swing animation");
 
-    // The post-swing hold is still interruptible -- that is the recovery
-    // pose, and cutting it short is what chains one swing into the next.
-    vm.phase = sk_bindings::WeaponViewmodel::Phase::Hold;
-    sk_bindings::StartWeaponSwing(vm, club.get());
-    Check(vm.phase == sk_bindings::WeaponViewmodel::Phase::Swinging && vm.frame == 0,
-          "...but a new swing can still begin out of the post-swing hold");
+    // Once the accumulator empties the next swing starts normally.
+    while (vm.swingAccum != 0) sk_bindings::TickWeaponViewmodel(vm, 0);
+    Check(sk_bindings::StartWeaponSwing(vm, club.get()) &&
+              vm.swingAccum == ((club->animationFrames() + 2) << 8),
+          "...and a fresh swing begins once the previous one has finished");
 
     std::printf("\nm35_placement_menu_smoke: %s (%d failure(s))\n",
                 g_failures == 0 ? "OK" : "FAILED", g_failures);

@@ -1337,3 +1337,224 @@ attached weapon is replicated over the wire, alongside the same block's
 that `ReplicateTeleport` and the attack path also gate on. The `else`
 branch is a debug leftover: it formats a message into a discarded stack
 buffer and sleeps 10 ms without retrying.
+
+---
+
+## The weapon swing (M47)
+
+M25 decompiled the first-person viewmodel's draw function in full but
+could not find what starts a swing, and recorded that as an exhaustive
+search that came up empty: "the exact native call that writes
+`+0x230`/`+0x234`/`+0x238` wasn't found despite tracing every reachable
+write site from the Weapon class dispatcher."
+
+The search was exhaustive in the wrong direction. Grepping the decompiled
+corpus for the *write text* — `pyghidra_grep_decompiled.py "0x234) ="` and
+friends, the same technique that cracked M46 — finds every writer of all
+five fields in one pass over 2006 functions. The state lives on the
+**player object** (`engine+0x618`), not in a separate view struct, which is
+why walking outward from the Weapon dispatcher never reached it.
+
+### The fields
+
+| field | meaning |
+|---|---|
+| `player+0x204` | the active weapon `Item*` |
+| `player+0x22c` | its `SetWeaponSprite()` slot, cached |
+| `player+0x230` | the **previous** weapon's sprite slot |
+| `player+0x234` | the swing accumulator; counts down, non-zero == swinging |
+| `player+0x238` | the weapon-**swap** transition timer |
+| `player+0x244` | walk-bob phase |
+| `player+0xf48` | the player's attack cadence |
+| `item+0x17f` | swing variant, re-rolled per swing: 0, 5 or 10 |
+| `item+0x180` | `SetAnimationFrames` |
+| `item+0x184` | `SetReloadSpeed`, an 8.8 scale on the decay rate |
+| `item+0x19c` | `SetWeaponSprite` |
+| `item+0x179` | `SetThrowingWeapon` |
+| `item+0x17a` | `SetBow` — and `SetCrossbow`, one field for both |
+| `item+0x1a0` / `+0x1a7` | `SetRange`, and "uses the ranged attack path" = `range > 0x400` |
+
+**Two of M25's readings were wrong.** `+0x230` is not an "alternate/swing
+sprite" and `+0x238` is not a "post-swing hold": they are the previous
+weapon's sprite and a weapon-swap timer. A swing has no hold phase at all —
+it ends when its accumulator runs out.
+
+### `FUN_100425bc(player)` — the player's attack function, and the trigger
+
+Not reachable by a callers-of search (it is dispatched virtually), which is
+the other reason M25 missed it.
+
+```c
+if (player->attackCooldown /* +0xf48 */ > 0) {      // the player's attack cadence,
+    player->attackCooldown -= frameDelta();          // the analogue of monster+0x2c4
+    return;
+}
+player->attackCooldown = stats->attackSpeed /* +0x1c, i16 */;
+if (player->weapon && player->weapon->usesRangedPath /* +0x1a7 */)
+    player->attackCooldown *= 6;                     // ranged fires six times slower
+
+if (player->swapTimer  > 0) return;                  // mid weapon-swap
+if (player->swingAccum > 0) return;                  // already swinging
+player->fatigue /* +0x3d8 */ -= 4;  if (< 0) = 0;    // a swing costs 4 fatigue
+
+weapon = player->weapon;
+if (weapon && weapon->frames != 0) {
+    if (!weapon->throwingWeapon && !weapon->bow) {
+        // three swing variants: 0 half the time, 10 a quarter, 5 a quarter
+        weapon->variant = (rand()&1) ? 0 : ((rand()&1) ? 10 : 5);
+        player->swingAccum = (weapon->frames + 2) << 8;
+    } else {
+        player->swingAccum = weapon->frames << 8;    // no variant, no +2
+    }
+}
+player->swayPhase = 0;
+```
+
+Two more entries share the swing half: `FUN_10042394(player, item)` — "use
+item at target", which starts a swing after a cast succeeds — and
+`FUN_1001d880(player)`, player vtable **+0x190**, a bare "start a swing"
+with the same gate but no `+2`.
+
+### The sprite arithmetic, and why a weapon owns 16 sprite slots
+
+The draw function walks the accumulator down:
+
+```c
+delta = frameDelta * 4;                                   // 40 at the 25Hz tick
+if (weapon->reloadSpeed /* +0x184 */ != 0x100)
+    delta = weapon->reloadSpeed * delta >> 8;
+if (acc < 0x200) drawNothing();
+else slot = weapon->baseSprite
+          + (((frames + variant + 1) * 0x100 - (acc - 0x200)) >> 8);
+acc -= delta;
+```
+
+For `weapons/club.s` (`SetWeaponSprite(88)`, `SetAnimationFrames(5)`) that
+produces, exactly:
+
+| variant | slots drawn |
+|---|---|
+| 0 | 89, 90, 91, 92, 93 |
+| 5 | 94, 95, 96, 97, 98 |
+| 10 | 99, 100, 101, 102, 103 |
+
+Three five-frame swings, filling 88–103 after the idle pose at 88 — which
+is what the **16-slot spacing between weapon sprite bases** (72, 88, 104,
+120, 136) is for. Decoding those sixteen real sprites confirms it: each run
+is a visibly different swing (an overhead chop, a low sweep, a backhand),
+and 88 is the weapon simply held.
+
+A swing therefore lasts 32 ticks, about 1.3 seconds.
+
+Two details reproduced rather than tidied:
+
+- **The accumulator lands on exactly `0x200` on the final tick**, which the
+  `< 0x200` test lets through, so one extra frame at one slot past the
+  animation is drawn. Real, and one frame long.
+- **A ranged weapon starts two frames in.** Without the `+2`,
+  `weapons/bandit_longbow.s` (base 175, 4 frames) draws only 178 and 179 —
+  the last two slots of its five-slot strip. Whether that is a bug or a
+  deliberate "no windup, straight to the release" is not something the code
+  says. Nine scripts call `SetThrowingWeapon`, five `SetBow`, two
+  `SetCrossbow`; every other weapon in the game gets the three variants.
+
+`SetReloadSpeed` (`item+0x184`) has **zero call sites** in the corpus, so it
+always holds its constructed value. It has to be `0x100`, since any other
+default would rescale — or, at 0, freeze — every swing in the game; that is
+inference from the game working, not a read of the constructor.
+
+`SetAnimationFrames`, `SetReloadFrames`, `SetNumClips`, `SetClipSize`,
+`SetIsAutomatic`, `SetHasZoom`, `SetScoped`: this Item class is a **leftover
+FPS weapon class** the engine was reused with. Only the handful Shadowkey's
+own scripts call are wired to anything.
+
+### `FUN_1001d778(player, force)` — the weapon swap (vtable +0x194)
+
+```c
+if (force || (player->swingAccum < 1 && ...three more busy flags...)) {
+    player->prevSprite /* +0x230 */ = player->currentSprite /* +0x22c */;
+    ...
+    vtable[0x24c](player);                       // re-resolve currentSprite
+    if (player->currentSprite != player->prevSprite) {
+        player->swapTimer = (player->swapTimer == 0 && player->prevSprite != -1)
+                            ? 0x800 : 0x400;
+        player->swayPhase = 0;
+    }
+}
+```
+
+and in the draw:
+
+```c
+if (player->swapTimer < 0x401) y = 0x7c;         // the NEW weapon, 124px low
+else                          slot = player->prevSprite;   // the OLD one, at y=0
+player->swapTimer -= 1;
+```
+
+So a swap shows the outgoing weapon, then the incoming one raised from
+below. **The decrement is 1 per call**, which against the real 25 Hz tick
+is 82 seconds for `0x800` — impossible as an intended duration. Either the
+draw hook runs far more often than the game tick, or the seed is in the
+engine's usual 0x100-per-second units and the decrement should be the frame
+delta. Unresolved; recorded, and the port keeps the real seeds with its own
+decrement.
+
+### `FUN_1001f230(player, speed)` — the walk bob
+
+```c
+if (player->swingAccum == 0 && player->+0x1b4 == 0 && player->swapTimer == 0) {
+    phase = player->swayPhase - ((frameDelta * (speed & 0xffff)) >> 8);
+    if (phase > 0) { player->swayPhase = phase; return; }
+    phase += 0x1400;                      // one whole cycle
+} else phase = 0;                         // a swing or swap cancels the bob
+player->swayPhase = phase;
+```
+
+The draw turns that phase into a blit offset:
+
+- **x** is a triangle wave — `phase >> 8`, mirrored as `0x14 - that` above
+  `0xa00` — so 0…10 px and back.
+- **y** is `|sin(phase) * 5 >> 7|`, also 0…10 px, read from a real sine
+  table at **`0x100f4954`**: 2048 `int32` entries at stride 4, 8.8 fixed
+  point. Verified against the bytes — `k=0` → 0, `k=256` → 181 (0.7071×256),
+  `k=512` → 256, `k=1536` → −256.
+
+The index arithmetic that maps the phase into that table
+(`((((n - (n >> 0x10)) * 0x100 & 0xffff0000) + 0x40000000) >> 0x10) + 0x4000
+>> 3 & 0x1ffc`) is **not** reproduced literally: evaluated by hand across
+the phase's actual range it lands within a few entries of the table's zero
+crossings for every input, i.e. no bob at all, which cannot be the intent.
+The table and the `* 5 >> 7` scale are certain; the mapping is the one
+interpreted part. The `speed` argument's units are also unrecovered — the
+call site was not identified.
+
+### The viewmodel art is full-screen
+
+Every weapon viewmodel slot in `global.spr` is a **176×208 frame**, and the
+real blit puts a swing frame at `(0, 0)` with the sprite's full width and
+height. These are full-screen overlays of a hand holding the weapon. The
+only non-zero positions the function ever produces are the 0…10 px bob and
+the 124 px drop during a swap.
+
+### Noted in passing: the ranged attack spawns a projectile
+
+`FUN_100425bc`'s ranged branch, after starting the swing:
+
+```c
+if (weapon->usesRangedPath /* +0x1a7 */) {
+    PlaySound(engine, 1, player->x, player->y, 100, ...);
+    spread = rand() % weapon->+0x1ce;                  // i16, a per-weapon spread
+    ... target picked by five FUN_1001afb0 passes at 0x68/0x7c/0x90/0xa4/0xb8,
+        rejected if the yaw difference exceeds 0x180 ...
+    skill = FUN_10047f64(player->stats);
+    id    = weapon->bow ? 599 : 598;
+    FUN_10005730(player, id, id, spread, skill);
+    return;
+}
+```
+
+Two consecutive entity type ids, 598 for a thrown weapon and 599 for a bow.
+This is
+the same projectile machinery `PORT_ROADMAP.md`'s open "rest of a real cast"
+bullet needs, reached from the weapon side rather than the spell side —
+recorded here as a pointer, not implemented.

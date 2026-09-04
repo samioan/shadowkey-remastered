@@ -1,48 +1,215 @@
 #include "simkin_bindings/weapon_viewmodel.h"
 
-#include <algorithm>
+#include <cmath>
+#include <cstdlib>
 
 namespace sk_bindings {
 
-void StartWeaponSwing(WeaponViewmodel& vm, ItemExecutable* item) {
-    if (!item || item->weaponSprite() < 0) return;
-    // M35: a swing already in flight is not restarted. The real draw
-    // function's swing branch is gated on its progress accumulator
-    // (WeaponViewState +0x234) being non-zero, and the branch only
-    // *advances* that accumulator -- there is no path through it that
-    // resets the pose to frame 0 while it is still running. Without this
-    // guard, holding or tapping the attack key re-entered frame 0 every
-    // press, so the animation restarted continuously and never visibly
-    // played. The post-swing Hold is deliberately still interruptible:
-    // that is the recovery pose, and cutting it short to begin the next
-    // swing is what makes repeated attacks feel connected.
-    if (vm.item == item && vm.phase == WeaponViewmodel::Phase::Swinging) return;
-    vm.item = item;
-    vm.phase = WeaponViewmodel::Phase::Swinging;
-    vm.frame = 0;
-    vm.ticksInPhase = kViewmodelFrameTicks;
+namespace {
+
+// `item+0x184` (SetReloadSpeed) scales the swing's per-frame decay:
+//
+//   delta = frameDelta * 4;
+//   if (weapon->0x184 != 0x100) delta = weapon->0x184 * delta >> 8;
+//
+// **No shipped script calls SetReloadSpeed**, so the field always holds
+// whatever the Item constructor left there. It has to be 0x100, because any
+// other default would rescale (or, at 0, freeze) every swing in the game --
+// but that is inference from the game working, not a read of the
+// constructor, so the port simply takes the unscaled path.
+constexpr int kSwingDeltaPerFrame = kViewmodelFrameDeltaUnits * 4;  // 40
+
+// The swap transition's own rate is this port's choice, and the one number
+// here that is not decompiled.
+//
+// `FUN_1002b1b0` decrements `+0x238` by exactly 1 per call, and
+// `FUN_1001d778` seeds it with 0x800 or 0x400. At the real 25Hz tick that
+// is 82 or 41 seconds of showing the wrong weapon, which cannot be what
+// was intended and would be very visible here. Either the draw hook runs
+// far more often than the game tick, or the seed is in the engine's usual
+// 0x100-per-second units and the decrement should be the frame delta.
+// Unresolved; the port keeps the real seeds and picks a decrement that
+// makes 0x800 last about a second.
+constexpr int kSwapDeltaPerFrame = 0x800 / 25;
+
+// Bob-phase units per world unit moved. A port constant -- see
+// TickWeaponViewmodel(). 40 units/tick (this port's walk speed) times 6 is
+// 240, so kSwayCycle (0x1400) takes ~21 ticks, a little under a second.
+constexpr int kSwayUnitsPerWorldUnit = 6;
+
+}  // namespace
+
+int SwaySine(int index2048) {
+    // The real table at 0x100f4954: 2048 int32 entries, `sin(2*pi*k/2048)`
+    // in 8.8 fixed point. Regenerated rather than embedded (the binary is
+    // not in this repo), and checked against the real bytes at four points
+    // -- k=0 -> 0, k=256 -> 181, k=384 -> 237, k=512 -> 256, k=1536 -> -256.
+    int k = index2048 & 2047;
+    double s = std::sin(6.283185307179586 * static_cast<double>(k) / 2048.0);
+    return static_cast<int>(std::lround(s * 256.0));
 }
 
-void TickWeaponViewmodel(WeaponViewmodel& vm) {
-    if (!vm.item) return;
-    switch (vm.phase) {
-        case WeaponViewmodel::Phase::Swinging:
-            if (--vm.ticksInPhase <= 0) {
-                ++vm.frame;
-                vm.ticksInPhase = kViewmodelFrameTicks;
-                if (vm.frame >= (std::max)(1, vm.item->animationFrames())) {
-                    vm.phase = WeaponViewmodel::Phase::Hold;
-                    vm.ticksInPhase = kViewmodelHoldTicks;
-                }
-            }
-            break;
-        case WeaponViewmodel::Phase::Hold:
-            if (--vm.ticksInPhase <= 0) vm.phase = WeaponViewmodel::Phase::Idle;
-            break;
-        case WeaponViewmodel::Phase::Idle:
-            ++vm.idleSwayTick;
-            break;
+bool StartWeaponSwing(WeaponViewmodel& vm, ItemExecutable* item) {
+    // `FUN_100425bc`'s gate, in its own order: a swap locks out a swing,
+    // and so does a swing already in flight. Note there is no "hold" to
+    // interrupt -- M25's post-swing hold was a misreading of the swap
+    // timer, so the previous port's deliberately-interruptible Hold has no
+    // counterpart in the real machine and is gone.
+    if (vm.swapTimer > 0) return false;
+    if (vm.swingAccum > 0) return false;
+    if (!item || item->weaponSprite() < 0) return false;
+    // `if (weapon != 0 && weapon->+0x180 != 0)` -- a script that never
+    // called SetAnimationFrames has nothing to play.
+    int frames = item->animationFrames();
+    if (frames <= 0) return false;
+
+    vm.item = item;
+    vm.currentSprite = item->weaponSprite();
+    if (!item->ranged()) {
+        // The real roll, and the reason a melee weapon owns 16 slots: two
+        // coin flips give variant 0 half the time, 10 a quarter, 5 a
+        // quarter. Each variant is its own `frames`-long swing after the
+        // base (idle) slot.
+        if ((std::rand() & 1) == 0) {
+            vm.swingVariant = (std::rand() & 1) == 0 ? 10 : 5;
+        } else {
+            vm.swingVariant = 0;
+        }
+        vm.swingAccum = (frames + 2) << 8;
+    } else {
+        // SetBow / SetCrossbow (`item+0x17a`) and SetThrowingWeapon
+        // (`item+0x179`) both take this branch: no variant roll, and no
+        // `+2`. See ResolveViewmodelDraw() for what dropping the `+2`
+        // does to the frames a ranged weapon actually shows.
+        vm.swingAccum = frames << 8;
     }
+    vm.swayPhase = 0;
+    return true;
+}
+
+void NotifyWeaponChanged(WeaponViewmodel& vm, ItemExecutable* item) {
+    // `FUN_1001d778(player, force=0)`: a swing in flight blocks the swap
+    // (the real test also covers three other busy flags this port has no
+    // equivalent for).
+    if (vm.swingAccum > 0) return;
+    int resolved = (item && item->weaponSprite() >= 0) ? item->weaponSprite() : -1;
+    if (resolved == vm.currentSprite) {
+        vm.item = item;
+        return;
+    }
+    vm.prevSprite = vm.currentSprite;
+    vm.item = item;
+    vm.currentSprite = resolved;
+    // `(+0x238 == 0 && +0x230 != -1) ? 0x800 : 0x400` -- the long form only
+    // for a clean swap out of a weapon that was actually on screen.
+    vm.swapTimer = (vm.swapTimer == 0 && vm.prevSprite != -1) ? kSwapTimerFull : kSwapTimerShort;
+    vm.swayPhase = 0;
+}
+
+void TickWeaponViewmodel(WeaponViewmodel& vm, int speed) {
+    if (vm.swingAccum != 0) {
+        vm.swingAccum -= kSwingDeltaPerFrame;
+        if (vm.swingAccum < 0) vm.swingAccum = 0;
+        vm.swayPhase = 0;
+        return;
+    }
+    if (vm.swapTimer != 0) {
+        vm.swapTimer -= kSwapDeltaPerFrame;
+        if (vm.swapTimer < 0) vm.swapTimer = 0;
+        vm.swayPhase = 0;
+        return;
+    }
+    // `FUN_1001f230(player, speed)`: the bob phase runs down at a rate
+    // proportional to how fast the player is moving and wraps by adding a
+    // whole cycle, so standing still freezes it wherever it stopped.
+    //
+    // The real decrement is `(frameDelta * (speed & 0xffff)) >> 8`. Its
+    // `speed` argument's units are **not** recovered -- the call site was
+    // not identified, and this port's own 40-world-units-per-tick walk fed
+    // through that expression gives one bob every 5120 ticks (three and a
+    // half minutes), while the constructor's plausible-looking speed field
+    // (0x5a00) gives one every six. Neither is a walk cycle, so the rate
+    // here is a port constant chosen to put a full cycle at a bit under a
+    // second at 40 units/tick. Everything else about the bob -- the 0x1400
+    // cycle, the wrap, the reset on swing and swap, the triangle x and the
+    // sine y -- is decompiled.
+    vm.swayPhase -= speed * kSwayUnitsPerWorldUnit;
+    if (vm.swayPhase <= 0) vm.swayPhase += kSwayCycle;
+}
+
+ViewmodelDraw ResolveViewmodelDraw(const WeaponViewmodel& vm) {
+    ViewmodelDraw draw;
+    if (!vm.item) return draw;
+    int base = vm.item->weaponSprite();
+    if (base < 0) return draw;
+    draw.spriteSlot = base;
+    draw.visible = true;
+
+    if (vm.swingAccum != 0) {
+        // The swing branch. Nothing is drawn once the accumulator falls
+        // below 0x200 -- that, not a frame counter, is what ends a swing.
+        if (vm.swingAccum < kSwingAccumFloor) {
+            draw.visible = false;
+            return draw;
+        }
+        int a = vm.item->animationFrames() + vm.swingVariant + 1;
+        draw.spriteSlot = base + (((a << 8) - (vm.swingAccum - kSwingAccumFloor)) >> 8);
+        // x and y stay 0: a swing draws the frame flush at the top-left,
+        // with no bob at all.
+        //
+        // Worked through for `weapons/club.s` (base 88, 5 frames), the
+        // sequence is exactly 89,90,91,92,93 for variant 0, 94..98 for
+        // variant 5 and 99..103 for variant 10 -- three five-frame swings
+        // filling the weapon's 16-slot strip after the idle pose at 88.
+        // Confirmed against the decoded sprites: each run is a visibly
+        // distinct swing.
+        //
+        // A **ranged** weapon starts two frames in, because it does not get
+        // the `+2`: `weapons/bandit_longbow.s` (base 175, 4 frames) shows
+        // only 178 and 179, the last two slots of its 5-slot strip. Whether
+        // that is a bug or a deliberate "no windup, straight to the
+        // release" is not something the code says, so it is reproduced as
+        // found rather than corrected.
+        return draw;
+    }
+
+    if (vm.swapTimer != 0) {
+        if (vm.swapTimer > kSwapShowOld) {
+            // Still showing the weapon being put away.
+            draw.spriteSlot = vm.prevSprite;
+            if (draw.spriteSlot < 0) draw.visible = false;
+        } else {
+            // The new weapon, held low -- the real code's only use of a
+            // non-zero blit y outside the bob.
+            draw.y = kSwapRaiseY;
+        }
+        return draw;
+    }
+
+    // Idle/walking: the base (idle) frame, bobbed.
+    //
+    // x is a triangle wave off the phase, peaking at 10px halfway through
+    // the cycle. y is |sin| of the same phase scaled 5/128, so also 0..10px.
+    //
+    // The real y index is built by a chain of shifts and masks
+    // (`((((n - (n >> 0x10)) * 0x100 & 0xffff0000) + 0x40000000) >> 0x10)
+    // + 0x4000 >> 3 & 0x1ffc`) that this port does **not** reproduce
+    // literally: evaluating it by hand over the phase's actual range lands
+    // within a few entries of the table's zero crossings for every input,
+    // i.e. a bob of essentially zero, which cannot be the intent. What is
+    // certain is the table (a real 2048-entry 8.8 sine, verified) and the
+    // `* 5 >> 7` scale; the port takes the straightforward reading --
+    // normalised phase into the table, quarter-turn shifted -- and this is
+    // the one part of the viewmodel that is an interpretation.
+    int phase = vm.swayPhase;
+    if (phase <= 0) return draw;
+    int x = phase >> 8;
+    if (phase > 0xa00) x = 0x14 - x;
+    draw.x = x;
+    int index = ((phase * 2048) / kSwayCycle + 512) & 2047;
+    int y = (SwaySine(index) * 5) >> 7;
+    draw.y = y < 0 ? -y : y;
+    return draw;
 }
 
 }  // namespace sk_bindings

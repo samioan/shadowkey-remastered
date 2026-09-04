@@ -98,43 +98,39 @@ int main(int argc, char** argv) {
                 spellSwingNoOp ? "true" : "false", spellSwingNoOp ? "OK" : "FAILED");
     if (!spellSwingNoOp) ok = false;
 
-    // --- Part 3: the real payoff -- a real club.s swing runs through
-    // every phase of the state machine and lands back at Idle. ---
+    // --- Part 3: a real club.s swing runs the state machine to
+    // completion. ---
+    //
+    // M47 replaced this port's invented Swinging/Hold/Idle phases with the
+    // real accumulator (`player+0x234`), so the shape checked here changed:
+    // a swing starts at `(animationFrames + 2) << 8` for a melee weapon and
+    // ends when the accumulator drops below 0x200. The exact sprite
+    // sequence is asserted in m47_weapon_swing_smoke; this only confirms
+    // the machine still starts, runs and stops.
     sk_bindings::StartWeaponSwing(vm, club.get());
-    bool swingStarted = vm.item == club.get() &&
-                         vm.phase == sk_bindings::WeaponViewmodel::Phase::Swinging && vm.frame == 0;
-    std::printf("StartWeaponSwing(club): item set, phase=Swinging, frame=0 -- %s\n",
-                swingStarted ? "OK" : "FAILED");
+    bool swingStarted = vm.item == club.get() && vm.swinging() &&
+                         vm.swingAccum == ((club->animationFrames() + 2) << 8);
+    std::printf("StartWeaponSwing(club): item set, accumulator = (5+2)<<8 = %d -- %s\n",
+                vm.swingAccum, swingStarted ? "OK" : "FAILED");
     if (!swingStarted) ok = false;
 
-    // club.s's real animationFrames()==5 -- each frame takes
-    // kViewmodelFrameTicks ticks, so 5*kViewmodelFrameTicks ticks later the
-    // swing must have advanced through every real frame and transitioned
-    // to Hold (never skipping straight to Idle -- a real swing always
-    // pauses on its last frame first).
-    int ticksToFinishSwing = club->animationFrames() * sk_bindings::kViewmodelFrameTicks;
-    for (int i = 0; i < ticksToFinishSwing; ++i) sk_bindings::TickWeaponViewmodel(vm);
-    bool reachedHold = vm.phase == sk_bindings::WeaponViewmodel::Phase::Hold;
-    std::printf(
-        "after %d ticks (club.s's real animationFrames()=%d * frame-tick duration): phase=Hold -- "
-        "%s\n",
-        ticksToFinishSwing, club->animationFrames(), reachedHold ? "OK" : "FAILED");
-    if (!reachedHold) ok = false;
+    int swingTicks = 0;
+    while (vm.swinging() && swingTicks < 1000) {
+        sk_bindings::TickWeaponViewmodel(vm, 0);
+        ++swingTicks;
+    }
+    // (5+2)*256 = 1792, falling by 40 a tick, stops being drawn below 512.
+    bool swingRan = swingTicks == 33;
+    std::printf("the club's swing runs %d ticks (~1.3s at 25Hz) then stops -- %s\n", swingTicks,
+                swingRan ? "OK" : "FAILED");
+    if (!swingRan) ok = false;
 
-    for (int i = 0; i < sk_bindings::kViewmodelHoldTicks; ++i) sk_bindings::TickWeaponViewmodel(vm);
-    bool reachedIdle = vm.phase == sk_bindings::WeaponViewmodel::Phase::Idle;
-    std::printf("after the post-swing hold expires: phase=Idle -- %s\n",
-                reachedIdle ? "OK" : "FAILED");
-    if (!reachedIdle) ok = false;
-
-    // Idle ticking must not touch item/phase -- only idleSwayTick advances.
-    int swayBefore = vm.idleSwayTick;
-    sk_bindings::TickWeaponViewmodel(vm);
-    bool idleAdvances = vm.idleSwayTick == swayBefore + 1 &&
-                         vm.phase == sk_bindings::WeaponViewmodel::Phase::Idle && vm.item == club.get();
-    std::printf("idle ticking advances idleSwayTick without leaving Idle -- %s\n",
-                idleAdvances ? "OK" : "FAILED");
-    if (!idleAdvances) ok = false;
+    // Ticking with the player standing still must not start the bob.
+    for (int i = 0; i < 5; ++i) sk_bindings::TickWeaponViewmodel(vm, 0);
+    bool idleStable = !vm.swinging() && !vm.swapping() && vm.item == club.get();
+    std::printf("idle ticking leaves the equipped weapon on screen and nothing running -- %s\n",
+                idleStable ? "OK" : "FAILED");
+    if (!idleStable) ok = false;
 
     // --- Part 4 (M30): the real club's viewmodel art actually resolves.
     // The bug this guards: the viewmodel used to be attached to the
@@ -159,15 +155,15 @@ int main(int argc, char** argv) {
                     club->weaponSprite(), baseOk ? "OK" : "FAILED");
         if (!baseOk) ok = false;
 
-        // Every swing frame the state machine will ask for must exist too,
-        // or the swing would visibly drop frames.
+        // M47: the real swing draws base+1..base+5 for variant 0, and the
+        // variant-5/variant-10 swings run to base+15 -- a melee weapon owns
+        // a 16-slot strip, not `animationFrames()` slots from the base.
         bool framesOk = true;
-        for (int f = 0; f < club->animationFrames(); ++f) {
+        for (int f = 0; f <= 15; ++f) {
             if (!sprites.GetSprite(club->weaponSprite() + f)) framesOk = false;
         }
-        std::printf("all %d swing frames (slots %d..%d) decode -- %s\n", club->animationFrames(),
-                    club->weaponSprite(), club->weaponSprite() + club->animationFrames() - 1,
-                    framesOk ? "OK" : "FAILED");
+        std::printf("the club's whole 16-slot strip (slots %d..%d) decodes -- %s\n",
+                    club->weaponSprite(), club->weaponSprite() + 15, framesOk ? "OK" : "FAILED");
         if (!framesOk) ok = false;
     } else {
         std::printf("global.spr not loadable -- skipping viewmodel art checks\n");

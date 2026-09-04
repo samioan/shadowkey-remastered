@@ -3409,6 +3409,98 @@ algorithms.
       with the mode byte that differs between the weapon's draw and the
       body's, `0` vs `2`) is not chased here.
 
+- **M47 -- the real weapon-swing trigger.** M25's own open item, recorded
+  there as an exhaustive search that came up empty. RE writeup in
+  `docs/WORLD_MODEL.md` ("The weapon swing"); smoke test
+  `src/tests/m47_weapon_swing_smoke.cpp` (36 checks).
+
+    - **The search was exhaustive in the wrong direction.** M25 traced
+      outward from the Weapon class dispatcher. The state is on the
+      **player object** (`engine+0x618`), so nothing reachable that way
+      touches it. Grepping the decompiled corpus for the *write text*
+      (`pyghidra_grep_decompiled.py "0x234) ="`) -- M46's technique --
+      finds every writer of all five fields in one pass over 2006
+      functions. Both new gap-closing passes this session came from the
+      same lesson: search for the write, not for a path to it.
+
+    - **`FUN_100425bc(player)` is the player's attack function**, and the
+      primary trigger. It is dispatched virtually, so a callers-of search
+      finds nothing either. Besides starting the swing it carries the
+      player's own **attack cadence** (`+0xf48`, reloaded from the
+      character's attack-speed stat and multiplied by **6** for a ranged
+      weapon), the swing's **4-point fatigue cost**, and the gate: no
+      swing while a weapon swap or another swing is running. Two more
+      entries share the swing half -- `FUN_10042394` (use item / cast) and
+      player vtable **+0x190** (`FUN_1001d880`).
+
+    - **Two of M25's field readings were wrong**, and are corrected here.
+      `+0x230` is not an "alternate/swing sprite" and `+0x238` is not a
+      "post-swing hold": they are the **previous weapon's sprite** and a
+      **weapon-swap transition timer**, written by `FUN_1001d778` (player
+      vtable **+0x194**). A swing has no hold phase at all -- it ends when
+      its accumulator empties. This port's deliberately-interruptible Hold
+      had no counterpart in the real machine and is gone.
+
+    - **The payoff: a weapon owns 16 sprite slots, and melee weapons pick
+      one of three swings at random.** The accumulator starts at
+      `(SetAnimationFrames + 2) << 8` and the drawn slot is
+      `base + ((frames + variant + 1)*0x100 - (acc - 0x200)) >> 8`, where
+      `item+0x17f` is a per-swing random **variant** of 0 (half the time),
+      10 (a quarter) or 5 (a quarter). For `weapons/club.s` that is exactly
+      89-93 / 94-98 / 99-103 after the idle pose at 88 -- which is what the
+      16-slot spacing between weapon bases (72/88/104/120/136) is for.
+      Asserted frame by frame, and confirmed by decoding the sixteen real
+      sprites: three visibly different swings (overhead, low sweep,
+      backhand). A swing runs 32 ticks, about 1.3 seconds.
+
+    - **The viewmodel is a full-screen overlay, and this port was drawing
+      it wrong.** Every viewmodel slot in `global.spr` is a **176x208**
+      frame and the real blit puts a swing frame at **(0,0)**. This port
+      drew a small sprite in the bottom-right corner at a position its own
+      comment flagged as "a documented, non-decompiled screen position".
+      It now draws where the engine does.
+
+    - **Reproduced rather than tidied.** The accumulator lands on exactly
+      `0x200` on its final tick, which the `< 0x200` test lets through, so
+      one extra frame one slot past the animation is drawn -- real, and one
+      frame long. And a **ranged weapon starts two frames in**, because it
+      skips the `+2`: `bandit_longbow.s` shows only 178 and 179, the last
+      two of its five-slot strip. Whether that is a bug or a deliberate
+      "no windup, straight to the release" is not something the code says,
+      so it is left as found.
+
+    - **The walk bob is now real**, including the engine's own sine table
+      at `0x100f4954` (2048 int32 entries at stride 4, 8.8 fixed point,
+      verified at five points against the real bytes and regenerated rather
+      than embedded). x is a triangle wave 0..10px, y is `|sin| * 5 >> 7`,
+      also 0..10px, and a swing or a swap resets the phase. The previous
+      sway was an invented `sin(tick * 0.05) * 2`.
+
+    - **Three things honestly not resolved**, each recorded at the code:
+      the swap timer's decrement is 1 per call against seeds of
+      0x800/0x400, which at 25Hz is 82 seconds and cannot be the intended
+      duration (the port keeps the real seeds and picks its own rate); the
+      `speed` argument's units in the bob (its call site was not
+      identified, so the port's rate is its own constant); and the bob's
+      y-index arithmetic, which evaluated literally gives a bob of
+      essentially zero, so the port uses the straightforward reading of it.
+
+    - **`SetReloadSpeed` (`item+0x184`) has zero call sites**, so it always
+      holds its constructed value, which has to be 0x100 -- any other
+      default would rescale or freeze every swing in the game. Inference
+      from the game working, not a read of the constructor; the port takes
+      the unscaled path. The wider Item class it belongs to
+      (`SetNumClips`, `SetClipSize`, `SetIsAutomatic`, `SetHasZoom`,
+      `SetScoped`) is a **leftover FPS weapon class** the engine was reused
+      with.
+
+    - **Pointer for the still-open projectile bullet:** `FUN_100425bc`'s
+      ranged branch spawns one via `FUN_10005730` with entity type id 598
+      (thrown) or 599 (bow), after a five-pass target search and a
+      per-weapon spread roll. That is the same machinery the "rest of a
+      real cast" item needs, reached from the weapon side rather than the
+      spell side. Recorded, not implemented.
+
 ## Next milestones (not yet started)
 
 Roughly in priority order for reaching "actually playable," not commitments:
@@ -3422,6 +3514,12 @@ Roughly in priority order for reaching "actually playable," not commitments:
   dispatcher. This port calls `HitTarget()` directly on both sides
   instead, so spells are hitscan and the self-targeted half of the spell
   list does nothing. A projectile system is the missing piece.
+  **M47 found the same machinery reached from the weapon side**: the ranged
+  branch of the player's attack function (`FUN_100425bc`) spawns one via
+  `FUN_10005730` with entity type id 598 (thrown) or 599 (bow), after a
+  five-pass target search (`FUN_1001afb0` at 0x68/0x7c/0x90/0xa4/0xb8, with
+  a 0x180 yaw cutoff) and a per-weapon spread roll. Whoever picks this up
+  gets two independent call sites into the same system.
 - **What is inside a save file's members** -- M40 decoded the container
   (an archive of named blobs, `SAVE_FORMAT.md`) and implemented it, but
   not the serialization within each member: how `character.dat` lays out
@@ -3445,20 +3543,11 @@ Roughly in priority order for reaching "actually playable," not commitments:
   slideshow's `1..0x10` run and the vignette's `0x20..0x24` run. 0x1f is
   in none of them, so it is not a fade target either. The vignette run
   beginning one above it is the only remaining lead.
-- **The real weapon-swing trigger** -- M25's RE pass fully decompiled the
-  first-person viewmodel's draw function and struct shape but couldn't
-  find the native call site that actually starts a swing (writes
-  `WeaponViewState`'s `+0x230`/`+0x234`/`+0x238`), despite tracing every
-  write site reachable from the Weapon class dispatcher. Recorded as an
-  exhaustive-search-and-still-open gap rather than guessed at -- see M25's
-  own entry and `simkin_bindings/weapon_viewmodel.h`'s class comment. This
-  port currently substitutes the `UseLeftAction`/`UseRightAction` keypress
-  that already drives combat resolution, undecompiled.
 - **`AnimationClip::rate`'s real units** (M29) -- frames per second is the
   working reading and looks right in motion, but it hasn't been traced to a
-  decompiled consumer. (`SetAttachedWeapon`, previously listed here, is
-  resolved: M42's exhaustive scan found no consumer in the shipped engine
-  either, so storing-and-ignoring it is faithful.)
+  decompiled consumer. (A parenthetical here used to say `SetAttachedWeapon`
+  was resolved as having no consumer in the shipped engine. That was wrong
+  twice over and is withdrawn -- see M46.)
 - **Audio's remaining narrower gaps** (M27, `docs/AUDIO_FORMAT.md`
   resolved the core system) -- native-only player-action sounds (attack/
   jump/death/footsteps, never called from any script); main-menu

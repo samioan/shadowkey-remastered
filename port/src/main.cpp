@@ -408,22 +408,23 @@ struct PickupInstance {
 // if a specific animation frame's slot doesn't decode, and is a silent
 // no-op if the base slot itself doesn't (missing/incomplete global.spr,
 // same tolerance every other optional sprite draw in this port already has).
+// M47: the real draw, from FUN_1002b1b0. Every weapon viewmodel sprite in
+// global.spr is a full 176x208 frame and the real blit puts it at (0,0) --
+// these are full-screen overlays of a hand holding the weapon, not a small
+// icon tucked into a corner, which is where this port used to draw them.
+// The only non-zero positions the real function produces are the bob (0..10
+// px on each axis while idle/walking) and the 124px drop while a weapon
+// swap is raising the new weapon into view.
 void RenderWeaponViewmodel(sk::Backbuffer& backbuffer, const sk_bindings::WeaponViewmodel& vm,
                             sk::SpriteArchive& sprites) {
-    if (!vm.item || vm.item->weaponSprite() < 0) return;
-    int slot = vm.item->weaponSprite();
-    if (vm.phase == sk_bindings::WeaponViewmodel::Phase::Swinging) {
-        slot += (std::min)(vm.frame, (std::max)(0, vm.item->animationFrames() - 1));
-    }
-    const sk::Sprite* sprite = sprites.GetSprite(slot);
+    sk_bindings::ViewmodelDraw draw = sk_bindings::ResolveViewmodelDraw(vm);
+    if (!draw.visible || draw.spriteSlot < 0) return;
+    const sk::Sprite* sprite = sprites.GetSprite(draw.spriteSlot);
+    // A strip slot the per-zone sprite manifest didn't pull in falls back
+    // to the weapon's own base frame rather than blinking out.
     if (!sprite) sprite = sprites.GetSprite(vm.item->weaponSprite());
     if (!sprite) return;
-    int x = sk::Backbuffer::kWidth - sprite->width - 4;
-    int y = sk::Backbuffer::kHeight - sprite->height - 4;
-    if (vm.phase == sk_bindings::WeaponViewmodel::Phase::Idle) {
-        y += static_cast<int>(std::sin(vm.idleSwayTick * 0.05f) * 2.0f);
-    }
-    backbuffer.Blit(x, y, *sprite);
+    backbuffer.Blit(draw.x, draw.y, *sprite);
 }
 
 // M25: a plain outline rectangle -- ButtonExecutable's real ShowBorder
@@ -1255,7 +1256,9 @@ int main(int argc, char** argv) {
         // itself already guards for m_LeftItem/m_RightItem.
         if (gameWeaponViewmodel.item && gameWeaponViewmodel.item->markedForRemoval()) {
             gameWeaponViewmodel.item = nullptr;
-            gameWeaponViewmodel.phase = sk_bindings::WeaponViewmodel::Phase::Idle;
+            gameWeaponViewmodel.swingAccum = 0;
+            gameWeaponViewmodel.swapTimer = 0;
+            gameWeaponViewmodel.currentSprite = -1;
         }
         stack.player().PurgeRemovedItems();
         // M27: reaps one-shot SFX voices that finished playing -- see
@@ -1704,6 +1707,13 @@ int main(int argc, char** argv) {
         }
 
         if (inGame && gameZone) {
+            // M47: how far the player actually moves this tick, which is
+            // what drives the weapon viewmodel's walk bob (FUN_1001f230
+            // takes the movement speed as its second argument, and a
+            // stationary player freezes the phase). Measured rather than
+            // inferred from the keys, so a move blocked by a wall correctly
+            // counts as standing still.
+            float playerPrevX = gameCamera.x, playerPrevY = gameCamera.y;
             // M10: the real default control scheme's own CharacterManager
             // action (docs/INPUT_HANDLING.md, KeyHash by default) opens
             // the real charactermanager.s screen chain, pausing the 3D
@@ -2680,13 +2690,26 @@ int main(int argc, char** argv) {
                 // weapons/club.s does SetWeaponSprite(88) +
                 // SetAnimationFrames(5), and those global.spr slots are in
                 // the per-zone manifest the port already loads.
-                if (gameWeaponViewmodel.phase == sk_bindings::WeaponViewmodel::Phase::Idle) {
+                // M47: routed through the real weapon-swap entry
+                // (FUN_1001d778, player vtable +0x194) instead of assigning
+                // the pointer directly. Changing the item on screen now
+                // plays the real transition -- old weapon, then the new one
+                // raised from below -- rather than snapping.
+                {
                     sk_bindings::ItemExecutable* shown = stack.player().rightItem();
                     if (!shown || shown->weaponSprite() < 0) shown = stack.player().leftItem();
                     if (shown && shown->weaponSprite() < 0) shown = nullptr;
-                    gameWeaponViewmodel.item = shown;
+                    sk_bindings::NotifyWeaponChanged(gameWeaponViewmodel, shown);
                 }
-                sk_bindings::TickWeaponViewmodel(gameWeaponViewmodel);
+                // The bob's rate is the player's real movement speed this
+                // tick -- FUN_1001f230's own second argument. Standing
+                // still freezes the phase, which is what stops the weapon
+                // swaying while the player is stationary.
+                float movedX = gameCamera.x - playerPrevX;
+                float movedY = gameCamera.y - playerPrevY;
+                sk_bindings::TickWeaponViewmodel(
+                    gameWeaponViewmodel,
+                    static_cast<int>(std::sqrt(movedX * movedX + movedY * movedY)));
 
                 // M15/M16/M19: Action::Use (Key3, docs/INPUT_HANDLING.md's
                 // default scheme) interact binding -- doors (M15), usable
