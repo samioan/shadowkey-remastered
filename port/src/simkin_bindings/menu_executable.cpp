@@ -702,11 +702,22 @@ bool MenuExecutable::method(const skString& methodName, skRValueArray& args,
         return true;
     }
     if (methodName == skString("LoadGame") && args.entries() == 1) {
-        // No real save-file format exists to read a different zone/player
-        // state from yet (M5's save system is in-memory only) -- this
-        // just re-enters the same tutorial zone LoadGame() would in a
-        // real fresh save.
-        m_Stack.RequestGameStart("azra");
+        // M50: reads the slot's real character.dat back into the player
+        // and returns to the level it names -- SavedCharacter::levelName,
+        // which is the field the real loader (FUN_1001ea54) copies
+        // straight into the engine for exactly this purpose. A slot that
+        // will not load falls back to the tutorial zone, which is what
+        // this did unconditionally before a save format existed.
+        const std::string level = m_Stack.LoadGameFromSlot(args[0].intValue());
+        if (level.empty()) {
+            m_Stack.RequestGameStart("azra");
+        } else {
+            // RequestZoneChange, not RequestGameStart: the latter grants
+            // the starting inventory on its first call, which would pile
+            // a club and a loaf on top of the inventory the save just
+            // restored. Same reason M26's LoadLevel uses it.
+            m_Stack.RequestZoneChange(level);
+        }
         return true;
     }
     if (methodName == skString("NewGame") && args.entries() == 0) {

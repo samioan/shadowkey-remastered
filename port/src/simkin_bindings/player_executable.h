@@ -23,6 +23,7 @@
 #include <string>
 #include <vector>
 
+#include "assets/save_records.h"
 #include "simkin_bindings/actor_stats.h"
 #include "simkin_bindings/native_stub_executable.h"
 #include "simkin_bindings/spell_actor.h"
@@ -315,6 +316,35 @@ public:
         m_PendingPickupItem = nullptr;
         return p;
     }
+
+    // ---- M50: character.dat ----
+    //
+    // The real save's player record (`FUN_10043308`, see
+    // assets/save_records.h) is one `SavedEntity` of kind Player: the
+    // quest arrays and the character name, then the stats block, then the
+    // whole Character/InventoryHolder/Spellbook/Drawable/Entity chain,
+    // then the tail with class/race/portrait and the equipment slots.
+    //
+    // These two fill in and read back the parts this port actually
+    // models. Every field the port has no counterpart for is left at the
+    // value it was constructed with -- zero for a fresh record, and the
+    // loaded value for a record read off disk -- rather than being
+    // invented, so a round trip through the port never fabricates state
+    // it does not understand.
+    //
+    // `levelName` is the field the real loader uses to decide *which*
+    // level to load (SavedCharacter::levelName), so it belongs to the
+    // caller, not to the player object.
+    // Every inventory child this port writes uses this one record class,
+    // and a loader must resolve it back the same way -- the format itself
+    // does not say (see player_save.cpp's own note on why).
+    static constexpr sk::SavedEntityKind kInventoryChildKind = sk::SavedEntityKind::Stackable;
+    sk::SavedEntity BuildSaveRecord(const std::string& levelName) const;
+    // Restores the modelled fields. Inventory is rebuilt from each
+    // child's script path (see BuildSaveRecord's own note on where that
+    // is stored) through `stack`; a child whose script will not load is
+    // skipped with a message rather than aborting the load.
+    void ApplySaveRecord(const sk::SavedEntity& record, MenuStack& stack);
 
 private:
     const sk::StringTable* m_Strings;

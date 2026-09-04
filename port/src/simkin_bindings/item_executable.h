@@ -315,6 +315,8 @@ public:
     // PlayerExecutable::CountInventory() matches on.
     const std::string& id() const { return m_Id; }
     int quantity() const { return m_Quantity; }
+    // M50: restoring a saved stack (SavedStackable/SavedWeapon's +0x1c4).
+    void SetQuantity(int quantity) { m_Quantity = quantity; }
     const std::vector<std::unique_ptr<ItemExecutable>>& contents() const { return m_Contents; }
 
     // M22: a real spell script's own SetRating() (e.g. blaze.s's

@@ -91,6 +91,17 @@ if(WIN32)
   target_link_libraries(sk_audio PUBLIC ole32 xaudio2)
 endif()
 
+# M40/M50: the real save file -- the named-blob container, the byte
+# stream every member is written through, and the record graph that
+# stream carries. Its own library because sk_bindings needs it (a save
+# slot is a real file now) and the save smoke tests link it alone.
+add_library(sk_save STATIC
+  src/assets/save_archive.cpp
+  src/assets/save_records.cpp
+  src/assets/save_stream.cpp
+)
+target_include_directories(sk_save PUBLIC src)
+
 add_library(sk_bindings STATIC
   src/assets/string_table.cpp
   src/simkin_bindings/button_executable.cpp
@@ -109,6 +120,7 @@ add_library(sk_bindings STATIC
   src/simkin_bindings/monster_executable.cpp
   src/simkin_bindings/native_binding_common.cpp
   src/simkin_bindings/player_executable.cpp
+  src/simkin_bindings/player_save.cpp
   src/simkin_bindings/popup_menu_executable.cpp
   src/simkin_bindings/slider_executable.cpp
   src/simkin_bindings/spell_actor.cpp
@@ -123,7 +135,7 @@ add_library(sk_bindings STATIC
   src/simkin_bindings/zone_script_executable.cpp
 )
 target_include_directories(sk_bindings PUBLIC src)
-target_link_libraries(sk_bindings PUBLIC simkin sk_entity_types sk_audio)
+target_link_libraries(sk_bindings PUBLIC simkin sk_entity_types sk_audio sk_save)
 
 # --- Vendored puff (zlib's reference inflate, zlib license, see
 # third_party/puff/PROVENANCE.md) -- decompresses the zlib-wrapped
@@ -321,8 +333,8 @@ add_executable(loose_ends_smoke src/tests/m39_loose_ends_smoke.cpp)
 target_link_libraries(loose_ends_smoke PRIVATE sk_bindings)
 
 # Real on-disk save container -- see src/tests/m40_save_archive_smoke.cpp.
-add_executable(save_archive_smoke src/tests/m40_save_archive_smoke.cpp src/assets/save_archive.cpp)
-target_include_directories(save_archive_smoke PRIVATE src)
+add_executable(save_archive_smoke src/tests/m40_save_archive_smoke.cpp)
+target_link_libraries(save_archive_smoke PRIVATE sk_save)
 
 # Real per-frame tile visibility raycast -- see src/tests/m41_visibility_smoke.cpp.
 add_executable(visibility_smoke src/tests/m41_visibility_smoke.cpp)
@@ -372,3 +384,10 @@ target_link_libraries(spell_projectile_smoke PRIVATE sk_bindings sk_world)
 # src/tests/m49_arrow_projectile_smoke.cpp.
 add_executable(arrow_projectile_smoke src/tests/m49_arrow_projectile_smoke.cpp)
 target_link_libraries(arrow_projectile_smoke PRIVATE sk_bindings sk_world)
+
+# What is inside a save file's members -- the byte stream, the twelve-deep
+# record chain both members are built from, and a real character.dat
+# round-tripped through a real archive. See
+# src/tests/m50_save_records_smoke.cpp.
+add_executable(save_records_smoke src/tests/m50_save_records_smoke.cpp)
+target_link_libraries(save_records_smoke PRIVATE sk_bindings sk_save)

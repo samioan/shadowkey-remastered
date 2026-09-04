@@ -141,11 +141,31 @@ public:
     // row's own textId -- may be null, same caveat as the constructor.
     const sk::StringTable* strings() const { return m_Strings; }
 
-    // Simulated save system -- there's no real save-file format RE'd here
-    // (out of scope for the menu milestone), just enough in-memory state
-    // for the save/load/delete menu chain to behave consistently: slots
-    // start empty, ActuallySaveGame() fills one, DeleteGame()/
-    // DeleteAllGames() empty them again.
+    // M50: the save system writes real files.
+    //
+    // This was a simulated four-slot table (a `used` bool and a
+    // timestamp) for as long as no on-disk format was decoded. M40
+    // decoded the container and M50 the members, so a slot is now an
+    // actual `game0<N>.sav` -- a real SaveArchive holding a real
+    // `character.dat`, produced by PlayerExecutable::BuildSaveRecord and
+    // read back by ApplySaveRecord.
+    //
+    // The real game keeps those under `c:\system\apps\6R51\`; here the
+    // directory is whatever SetSaveDirectory() was given, defaulting to
+    // the working directory. With no directory writable the slots fall
+    // back to the old in-memory behaviour rather than failing a save, so
+    // a smoke test or a read-only checkout still exercises the menus.
+    void SetSaveDirectory(std::string dir) { m_SaveDir = std::move(dir); }
+    const std::string& saveDirectory() const { return m_SaveDir; }
+    // The level a save should record and a load should return to. Set by
+    // main.cpp's zone-load block; it is SavedCharacter::levelName, the
+    // field FUN_1001ea54 copies straight back into the engine.
+    void SetCurrentLevelName(std::string name) { m_CurrentLevel = std::move(name); }
+    const std::string& currentLevelName() const { return m_CurrentLevel; }
+    // Reads slot `slot`'s character.dat back into the player and returns
+    // the level name it was saved in ("" if the slot will not load).
+    std::string LoadGameFromSlot(int slot);
+
     // slot == -1 means "is ANY slot available" (mainmenu.s/newgamemenu.s's
     // usage); slot in [0, kSaveSlotCount) checks that one specifically.
     bool GameAvailableForLoad(int slot) const;
@@ -209,6 +229,9 @@ private:
         std::string timeStr;
     };
 
+    // "game0%d.sav" -- the real format string, from the binary.
+    std::string SlotPath(int slot) const;
+
     std::string m_ScriptRoot;
     skInterpreter& m_Interpreter;
     const sk::StringTable* m_Strings;
@@ -221,6 +244,8 @@ private:
     std::unique_ptr<LevelExecutable> m_Level;
     MenuExecutable* m_Current = nullptr;
     std::array<SaveSlot, kSaveSlotCount> m_SaveSlots;
+    std::string m_SaveDir = ".";
+    std::string m_CurrentLevel;
     bool m_QuitRequested = false;
     bool m_CreditsActive = false;
     std::vector<std::string> m_CreditsLines;

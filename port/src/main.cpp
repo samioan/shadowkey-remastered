@@ -1083,6 +1083,13 @@ int main(int argc, char** argv) {
 
     skInterpreter interpreter;
     sk_bindings::MenuStack stack(scriptRoot, interpreter, &strings, &soundArchive, &audioEngine);
+
+    // M50: save slots are real files now (menu_stack.h). The real game
+    // keeps them under `c:\systemppsR51\`; here they go beside the
+    // executable, resolved the same way as every other asset path above
+    // so a save does not land in whatever directory the game was launched
+    // from.
+    stack.SetSaveDirectory(sk::ExecutableDirectory());
     // M21: Level.CreateEntity() needs entities.txt to resolve a typeId --
     // see level_executable.h's class comment.
     stack.level().SetEntityTypes(&entityTypes);
@@ -1368,6 +1375,11 @@ int main(int argc, char** argv) {
                 return;
             }
             loadingScreenActive = false;
+            // M50: SavedCharacter::levelName -- what a save records and a
+            // load returns to. The real engine keeps it in the same place
+            // (its app object's own buffer) and FUN_1001ea54 copies it
+            // straight back out of a loaded record.
+            stack.SetCurrentLevelName(stack.requestedZone());
             stack.ClearGameStartRequest();
             auto zone = std::make_unique<sk::Zone>();
             if (zone->Load(scriptRoot, stack.requestedZone())) {

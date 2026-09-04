@@ -7,6 +7,8 @@
 #include <fstream>
 #include <sstream>
 
+#include "assets/save_archive.h"
+#include "assets/save_records.h"
 #include "simkin_bindings/game_constants.h"
 #include "simkin_bindings/level_executable.h"
 #include "simkin_bindings/menu_executable.h"
@@ -140,15 +142,33 @@ void MenuStack::ReopenMenu(const std::string& simkinPath, skiExecutable* opener)
     OpenMenu(simkinPath, opener);
 }
 
+std::string MenuStack::SlotPath(int slot) const {
+    // "game0%d.sav", the real format string -- the digit is appended to a
+    // literal "game0", so slots above 9 would collide. There are four.
+    char name[32];
+    std::snprintf(name, sizeof(name), "game0%d.sav", slot);
+    std::string path = m_SaveDir;
+    if (!path.empty() && path.back() != '/' && path.back() != '\\') path += '/';
+    return path + name;
+}
+
 bool MenuStack::GameAvailableForLoad(int slot) const {
+    // The real GameAvailableForLoad probes the files themselves (with no
+    // argument it walks 0..3), so this does too -- with the in-memory
+    // flag as the fallback for a session that could not write any.
+    auto probe = [this](int i) {
+        if (m_SaveSlots[static_cast<size_t>(i)].used) return true;
+        std::ifstream f(SlotPath(i), std::ios::binary);
+        return f.good();
+    };
     if (slot < 0) {
-        for (const auto& s : m_SaveSlots) {
-            if (s.used) return true;
+        for (int i = 0; i < kSaveSlotCount; ++i) {
+            if (probe(i)) return true;
         }
         return false;
     }
     if (slot >= kSaveSlotCount) return false;
-    return m_SaveSlots[static_cast<size_t>(slot)].used;
+    return probe(slot);
 }
 
 void MenuStack::ActuallySaveGame(int slot) {
@@ -161,16 +181,80 @@ void MenuStack::ActuallySaveGame(int slot) {
     char buf[32];
     std::strftime(buf, sizeof(buf), "%Y-%m-%d %H:%M", &local);
     s.timeStr = buf;
-    std::printf("  [MenuStack] saved to slot %d (%s)\n", slot, s.timeStr.c_str());
+
+    // One archive, one member: `character.dat`, the player's own record.
+    // The real writer adds a second member here, `<level>.dat`, built
+    // from the live entity list (FUN_100187d0) -- this port has no
+    // per-entity save state to put in one yet, so it writes the character
+    // half only. A missing member is exactly what the real reader's
+    // lookup already handles (FUN_1000b100 returns null and the caller
+    // moves on), so the file stays loadable by its own rules.
+    sk::SaveStream stream;
+    m_Player->BuildSaveRecord(m_CurrentLevel).Write(stream);
+    std::vector<sk::SaveArchive::Record> records;
+    records.push_back({sk::kCharacterMemberName, stream.bytes()});
+    const std::vector<uint8_t> bytes = sk::SaveArchive::Serialize(records);
+
+    const std::string path = SlotPath(slot);
+    std::ofstream out(path, std::ios::binary | std::ios::trunc);
+    if (!out) {
+        std::printf("  [MenuStack] slot %d: cannot write %s -- keeping it in memory only\n", slot,
+                    path.c_str());
+        return;
+    }
+    out.write(reinterpret_cast<const char*>(bytes.data()),
+              static_cast<std::streamsize>(bytes.size()));
+    std::printf("  [MenuStack] saved to slot %d (%s) -- %s, %zu bytes\n", slot, s.timeStr.c_str(),
+                path.c_str(), bytes.size());
+}
+
+std::string MenuStack::LoadGameFromSlot(int slot) {
+    if (slot < 0 || slot >= kSaveSlotCount) return "";
+    const std::string path = SlotPath(slot);
+    std::ifstream in(path, std::ios::binary);
+    if (!in) return "";
+    std::vector<uint8_t> bytes((std::istreambuf_iterator<char>(in)),
+                               std::istreambuf_iterator<char>());
+    std::vector<sk::SaveArchive::Record> records;
+    if (!sk::SaveArchive::Parse(bytes, records)) {
+        // The real open path wipes an archive whose size field disagrees
+        // with the file and starts over -- the "SaveCorrupted" case.
+        std::printf("  [MenuStack] slot %d: %s is corrupt\n", slot, path.c_str());
+        return "";
+    }
+    const sk::SaveArchive::Record* member = sk::SaveArchive::Find(records, sk::kCharacterMemberName);
+    if (!member) {
+        std::printf("  [MenuStack] slot %d: no %s member\n", slot, sk::kCharacterMemberName);
+        return "";
+    }
+    sk::SaveStream stream;
+    stream.Reset(member->data);
+    sk::SavedEntity record;
+    record.kind = sk::SavedEntityKind::Player;
+    // Nothing on the wire says what class a nested record is -- the real
+    // loader resolves it from the typeId through entities.txt. This port
+    // writes every inventory child under one class, so it reads them back
+    // under the same one. See player_save.cpp.
+    record.Read(stream, [](int32_t) { return PlayerExecutable::kInventoryChildKind; });
+    if (stream.failed()) {
+        std::printf("  [MenuStack] slot %d: %s is truncated\n", slot, sk::kCharacterMemberName);
+        return "";
+    }
+    m_Player->ApplySaveRecord(record, *this);
+    m_CurrentLevel = record.character.levelName;
+    std::printf("  [MenuStack] loaded slot %d -- \"%s\", level \"%s\"\n", slot,
+                record.player.characterName.c_str(), m_CurrentLevel.c_str());
+    return m_CurrentLevel;
 }
 
 void MenuStack::DeleteGame(int slot) {
     if (slot < 0 || slot >= kSaveSlotCount) return;
     m_SaveSlots[static_cast<size_t>(slot)] = SaveSlot{};
+    std::remove(SlotPath(slot).c_str());
 }
 
 void MenuStack::DeleteAllGames() {
-    for (auto& s : m_SaveSlots) s = SaveSlot{};
+    for (int i = 0; i < kSaveSlotCount; ++i) DeleteGame(i);
 }
 
 std::string MenuStack::GetSavedTimeStr(int slot) const {

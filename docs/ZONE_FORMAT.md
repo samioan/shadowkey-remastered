@@ -1326,9 +1326,16 @@ Every Lock/Unlock routes its write through `FUN_1006d7bc(level, x, y)`,
 which maintains a fixed **100-entry** array at `level+0x100` (count at
 `level+0xfc`) of `{i16 x, i16 y, u16 savedByte}`. An existing entry for
 the same tile is overwritten rather than appended, so the array is exactly
-"the cells this level has diverged from its `.zmp` in" — the level-state
-half of a save file, and a concrete piece of `SAVE_FORMAT.md`'s open "what
-is inside a `<level>.dat`".
+"the cells this level has diverged from its `.zmp` in".
+
+> **Correction (M50).** This paragraph used to call the journal "the
+> level-state half of a save file". It is not saved at all — a
+> `<level>.dat` holds entity records and one trailing byte, with no tile
+> data anywhere. The divergence comes back because each saved entity is
+> recreated with its SimKin variables restored and then called by name:
+> `Init`. A door whose `saved_Open` reads back as 1 re-applies its own
+> `UnlockZone` from inside `Init`, and the tile bytes follow. See
+> [`SAVE_FORMAT.md`](SAVE_FORMAT.md).
 
 ### The room list in memory
 

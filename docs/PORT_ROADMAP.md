@@ -3188,13 +3188,20 @@ algorithms.
       `FUN_1002ef44` walks the encounter list *first*, and a region an
       encounter claims never reaches the script at all.
 
-    - **The per-level tile-change journal, which is save state.** Every
-      Lock/Unlock routes through `FUN_1006d7bc`, a fixed 100-entry array
-      at `level+0x100` of `{i16 x, i16 y, u16 savedByte}` that overwrites
-      an existing entry for the same tile rather than appending. That is
-      exactly "the cells this level has diverged from its `.zmp` in" -- a
-      concrete piece of `SAVE_FORMAT.md`'s open "what is inside a
-      `<level>.dat`". Implemented and asserted.
+    - **The per-level tile-change journal.** Every Lock/Unlock routes
+      through `FUN_1006d7bc`, a fixed 100-entry array at `level+0x100` of
+      `{i16 x, i16 y, u16 savedByte}` that overwrites an existing entry
+      for the same tile rather than appending. That is exactly "the cells
+      this level has diverged from its `.zmp` in". Implemented and
+      asserted.
+
+      > **Correction (M50).** This bullet used to call the journal "save
+      > state" and "a concrete piece of what is inside a `<level>.dat`".
+      > It is neither: `<level>.dat` contains no tile data at all. The
+      > divergence is restored by re-running each saved entity's `Init`
+      > with its script variables already loaded, which re-applies the
+      > `UnlockZone` that made the change. The array is live state, not
+      > save state.
 
     - **`CreateEntity`'s non-item category.** The four-argument form,
       `Level.CreateEntity(274, x, y, z)` in crypt1.s's own
@@ -3733,21 +3740,173 @@ algorithms.
       unidentified -- "still alive" stands in for it, as everywhere else
       in this port.
 
+- **M50 -- what is inside a save file's members.** M40's own open item,
+  closed, and with it the whole save format. RE writeup in
+  [`docs/SAVE_FORMAT.md`](SAVE_FORMAT.md) ("The members"); smoke test
+  `src/tests/m50_save_records_smoke.cpp` (59 checks).
+
+    - **One stream, one chain, thirteen functions.** Every member of a
+      save file is written through a single 0x14-byte byte-stream class
+      (`FUN_1008c06c`: a `new[] 0x40000` buffer, a write cursor at
+      `+0xc`, a read cursor at `+0x10`, and no bounds check anywhere),
+      by a `Save`/`Load` pair at **vtable slots `+0x130` and `+0x134`**.
+      Thirty-two vtables carry that pair; between them they name thirteen
+      distinct save functions, and those thirteen turn out to be a single
+      inheritance chain --
+      `Entity -> Drawable -> {Item -> {Stackable -> Wearable, Weapon},
+      Spellbook -> InventoryHolder -> {Actor, LinkedActor, Character ->
+      Player}}` -- plus one non-virtual leaf, the stats block, that Actor
+      and Player each call on their own. `character.dat` is one Player
+      record; `<level>.dat` is a tagged list of everything else.
+
+    - **The stream's overload set collapses to seven primitives.**
+      Several vtable slots are byte-for-byte identical code at different
+      indices (four separate "write one byte" thunks, four "read one
+      byte") -- distinct C++ overloads that compiled to the same body. Two
+      details survive that: an i32 is written as **two i16 halves, low
+      first**, which on a little-endian target is just a 32-bit store;
+      and a **string's i16 length prefix does not count the NUL**, which
+      is the exact opposite of the container's own TOC (M40). The two
+      layers of the same file disagree, and both are reproduced.
+
+    - **Nothing is version-tagged, and the typeId is load-bearing.**
+      There is no magic, no field count and no per-record length: a
+      record is exactly as long as the class that wrote it, so a reader
+      that picks the wrong class desynchronises everything after it,
+      silently. Which class to use comes from the **typeId written
+      immediately before each record** by whoever owns it -- an i16 in the
+      level file, an i32 inside an inventory holder -- resolved through
+      `entities.txt`.
+
+    - **The quest state names itself.** `character.dat` opens with the
+      character's name and then **three interleaved 256-byte arrays**,
+      which the Player/GameState dispatcher's own bindings identify:
+      `+0x430` `SetQuestAssigned`/`QuestAssigned`, `+0x530`
+      `SetQuestCompleted`, `+0x630` `SetQuestSolved`, followed by a
+      fourth, `+0xa30`, `AddMonsterKilled`/`MonstersKilled` -- a bare
+      `+= 1` with no clamp, so the kill counter wraps at 256. Each
+      accessor is two instructions and gives its array away in the `ADD`
+      immediate.
+
+    - **The eighteen global story flags, named and verified.**
+      `+0xfd8`..`+0x101c` is not an anonymous int block: `FUN_1003e7a4`
+      and `FUN_1003ebd8` are the player object's own `getValue`/
+      `setValue`, matching a field name against eighteen hardcoded wide
+      strings, one per int. **Seventeen appear in the shipped scripts as
+      `GetPlayer().saved_X`** (`GetPlayer().saved_Guild = 3`,
+      `if(GetPlayer().saved_EndGame = 1)`); the eighteenth,
+      `saved_NA_Crystal`, appears nowhere -- a cut flag the format still
+      carries. This is the architectural point the format turns on: the
+      corpus has 309 files using some `saved_*` name and hundreds of
+      distinct names (`Level.saved_Open` alone 134 times), but those are
+      ordinary script variables that ride in *their own entity's* record
+      and die with the level. Only these eighteen live on the player, and
+      so survive a zone change. `saved_Birgidda` here versus the separate
+      `Level.saved_Birgitta` the scripts set beside it is the clearest
+      case: two stores, two spellings, both live.
+
+    - **The tile journal is not in the save at all -- `Init` is.** M44
+      found the per-level tile-change array at `level+0xfc`/`+0x100` and
+      recorded it as "the level-state half of a save file". It is not
+      serialized anywhere: `<level>.dat` contains no tile data. What
+      happens instead is that the entity root's last act is to dump its
+      script object's SimKin instance variables **as name/value text**
+      (skipping any value containing `{`, i.e. anything that reads like a
+      method body), and on load `FUN_100188dc` recreates each entity with
+      those variables already restored and then calls it by name:
+      `Init`. A door whose `saved_Open` came back as 1 re-applies its own
+      `UnlockZone` from inside `Init`, and the tile bytes follow. The
+      journal is live state, not save state.
+
+    - **`character.dat` starts with the *level* name.** `FUN_1001e754`'s
+      first field is an 8-bit string taken from `engine[0x28]+0x28`, next
+      to the debug string *"Saving %s as our current level"* -- and
+      `FUN_1001ea54` `strcpy`s it straight back into the engine. That is
+      how a load knows what to load. (A multiplayer session writes the
+      player's *original* level instead, `player+0x1078`, next to
+      *"Saving %s as original level"*.)
+
+    - **The rest of the character-creation block, all named.** `+0xf35`
+      `HasCreatedCharacter`, `+0xf38` `ChooseCharacter`, `+0xf3c`
+      `ChooseRace`, `+0xf40` `GetPortraitID`, `+0xfac` `SetSex`,
+      `+0xfb0`/`+0xfb4` the special- and race-ability ids, `+0xfc2`
+      `GetManaReduction`, `+0xf44` `GetLevelUpPoints`, `+0xf8c[8]` the
+      equipment slots by typeId, and `+0xf4c`/`+0xf68` the two five-deep
+      hand queues (with the stats block's `+0x48`/`+0x4c` saved as an
+      *index into* them, not an id). Note that **class and race are
+      32-bit in memory and one byte each on disk** -- with eight classes
+      it never matters, but it is what the format can hold.
+
+    - **Four more stats-block fields named**, from the same two-switch
+      cross-reference M43 used: `+0x10` **strength bonus**
+      (`GetStrengthBonus`), `+0x12` **health bonus** (`SetHealthBonus`/
+      `ModHealthBonus`, the one field with no stat index at all), `+0x20`
+      **personality** and `+0x22` **luck**. The block is 70 bytes and is
+      written *out of field order* -- `+0x00`..`+0x0e`, then
+      `+0x14`..`+0x2e`, then experience/level/gold, and only then
+      doubling back for `+0x10`/`+0x12`.
+
+    - **A save drops one live effect field.** The stats loader zeroes
+      `+0x70`..`+0x7a` and `+0x7c` and then fills only four halfwords, so
+      the two damage-over-time accumulators (harmless) and **`+0x7c`, the
+      second periodic channel's *kind***, are not restored. The third is
+      not harmless: a regeneration or drain effect keeps its timer
+      (`+0x78`) across a save but loses the kind that made it do
+      anything, and comes back ticking down inert. There is nowhere on
+      the wire to put it.
+
+    - **`<level>.dat`'s trailing byte identified.** `engine+0xbe0e`, the
+      one non-entity field in the file, is the "this level is ready to
+      render" gate: `GameEngine`'s constructor sets it,
+      `GameEngine_InitLevel` clears and re-sets it around a level load,
+      and `Render3DScene` refuses to draw the 3D view while it is 0.
+
+    - **M40's disk-space estimate is now legible.** `FUN_10018e70`
+      serializes the player once to measure it, resets the stream,
+      serializes the level state to measure that, and requires
+      `free + existingFileSize - 512000 >= 3 * playerBytes +
+      2 * levelBytes`.
+
+    - **The port's save slots are real files.** M5's four in-memory slots
+      are now real `game0<N>.sav` archives holding a real `character.dat`
+      (`PlayerExecutable::BuildSaveRecord` / `ApplySaveRecord`),
+      `GameAvailableForLoad` probes the files, `DeleteGame` unlinks them,
+      and `LoadGame` returns to the level the record names instead of
+      always re-entering the tutorial zone.
+
+    - **Two port-side gaps, stated rather than papered over.** An
+      `ItemExecutable` loaded straight from a `.s` file has no
+      `entities.txt` typeId (`templateId()` is -1 unless it came through
+      `Level.CreateEntity`, an M36 finding) -- and the equipment slots
+      and hand queues name items *by* typeId, so for a save this port
+      writes they come back empty. For the same reason this port writes
+      every inventory child under one record class rather than resolving
+      one per typeId: it re-runs each item's own script on load, so
+      nothing is lost, but it is not what the engine does. Both are
+      asserted in the smoke test, not glossed.
+
+    - **Still no real save file to check against**, same as M40: saves are
+      created at runtime on the device and none ships on the install
+      image. The verification is that every field is asserted against the
+      decompiled *writer*, and the writer cross-checked against its own
+      *loader* -- a genuinely independent second source, since the two are
+      separate functions that must agree byte for byte -- plus the
+      real-data checks above wherever the format names something the
+      shipped scripts also name.
+
 ## Next milestones (not yet started)
 
 Roughly in priority order for reaching "actually playable," not commitments:
 
-- **What is inside a save file's members** -- M40 decoded the container
-  (an archive of named blobs, `SAVE_FORMAT.md`) and implemented it, but
-  not the serialization within each member: how `character.dat` lays out
-  player stats/inventory/quest flags, and how a `<level>.dat` stores a
-  zone's entity state. M5's four slots are still simulated in memory.
-  **M44 found one concrete piece of the `<level>.dat` half**: the tile
-  journal at `level+0xfc`/`+0x100`, a fixed 100-entry array of
-  `{i16 x, i16 y, u16 cellByte1}` that every `LockZone`/`UnlockZone`
-  writes through, keyed by tile so it holds the level's divergence from
-  its `.zmp` rather than a history. Implemented (`Zone::tileChanges()`);
-  what it is serialized *as* is still unknown.
+- **The unidentified scalars inside a save record** -- M50 closed the
+  save format itself, but roughly forty fields across the Entity,
+  Drawable and InventoryHolder layers are pinned only by *width and
+  position* (the save/load pair agrees on both); what they mean is still
+  open. They round-trip verbatim and nothing in this port needs them
+  yet. `levelinfo.txt` (two decimal integers, `"%d
+%d
+"`) and
+  `dragonstar.cfg`/`.set` are also unread.
 - **Which scenario `FUN_1002c010`'s mode 0x1f means.** M42 identified the
   other three (3 = zone travel, 4 = saving, 10 = loading a saved game) plus
   1 and 5, by walking `SetScreenMode`'s call sites. 0x1f never appears as a
