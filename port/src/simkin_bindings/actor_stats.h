@@ -40,16 +40,33 @@ public:
     // first short, SetDefense its second and SetArmorValue its seventh.
     enum StatIndex { kStatAttack = 1, kStatDefense = 2, kStatArmor = 7 };
 
-    // FUN_1004bae8's effect-flag bits (stats block +0x44).
-    enum EffectFlag { kEffectFlagBlind = 4, kEffectFlagPoison = 8 };
+    // FUN_1004bae8's effect-flag bits (stats block +0x44). M48 adds the
+    // disease bit, which is named by the *cure*: `spells\CureDisease.s`
+    // clears exactly `0x10`, next to `spells\CurePoison.s` clearing `8`.
+    // Nothing in the decompiled status dispatcher ever sets it -- the real
+    // Disease branch is two stat modifiers and no flag -- so the bit is
+    // carried because the cure names it, not because anything raises it.
+    enum EffectFlag { kEffectFlagBlind = 4, kEffectFlagPoison = 8, kEffectFlagDisease = 0x10 };
 
     // The second periodic channel's `kind` selector (+0x7c). FUN_10049780
-    // implements three; only the burn is reachable from the status-effect
-    // dispatcher (IgniteFoe is its single arming site).
+    // implements three of them; M48 found the two arming sites the burn's
+    // did not account for, in the real cast (spell_cast.h).
     enum PeriodicKind {
         kPeriodicNone = 0,
-        kPeriodicMagickaRegen = 6,  // +0x2c += spell power, once per second
-        kPeriodicHealthRegen = 7,   // health += spell power, clamped to max
+        // M48. Sanctuary's channel, and FUN_10049780 gives it **no tick
+        // behaviour at all** -- it is purely a duration. What it gates is
+        // elsewhere: FUN_10042394 refuses to swap weapons while `+0x7c ==
+        // 4`, and the channel's own expiry stamps the player's Sanctuary
+        // re-cast cooldown.
+        kPeriodicSanctuaryTimer = 4,
+        // M48 -- CORRECTED. `+0x2c` is **fatigue**, not magicka: magicka is
+        // `+0x2e` (FUN_1004bb20 clamps it against `+0x28`, while FUN_1004bb54
+        // clamps `+0x2c` against `+0x26`), and M47 independently landed on
+        // the same field when it found a weapon swing costing 4 points of
+        // `player+0x3d8` -- which is `player+0x3ac` + 0x2c. `spells\Energize.s`
+        // arms this one.
+        kPeriodicFatigueRegen = 6,  // +0x2c += the actor's own level, once per second
+        kPeriodicHealthRegen = 7,   // health += the actor's own level, clamped to max
         kPeriodicBurn = 8,          // health -= (+0x76), and kills at 0
     };
 
@@ -101,6 +118,78 @@ public:
     void SetParalyzed(int durationUnits) { m_ParalysisTimer = durationUnits; }
     bool paralyzed() const { return m_ParalysisTimer > 0; }
 
+    // ---- M48: the four primitives the real cast's self-targeted half
+    // uses, none of which had a caller until now (spell_cast.h). ----
+
+    // FUN_1004bd08: drop one effect-flag bit and stop the shared timer.
+    // `spells\CurePoison.s`'s entire body is `FUN_1004bd08(stats, 8)`.
+    // Note the real function is a no-op when the bit is not set -- it does
+    // not zero the timer unconditionally -- so curing poison off a blinded
+    // creature leaves the blindness running.
+    void ClearEffectFlag(int flagBit) {
+        if ((m_EffectFlags & flagBit) == 0) return;
+        m_EffectFlags &= ~flagBit;
+        m_EffectTimer = 0;
+    }
+
+    // FUN_1004bd24: remove one timed modifier. The real signature takes a
+    // stat index *and a name* -- CureDisease removes the modifiers named
+    // "DISEASE" and "DISEASE_DEF", the two the Disease branch applies to
+    // attack and defense. This port's modifiers carry no name, and there is
+    // at most one per stat, so the index is the whole key.
+    void RemoveStatModifier(int statIndex) {
+        for (size_t i = 0; i < m_StatModifiers.size(); ++i) {
+            if (m_StatModifiers[i].statIndex != statIndex) continue;
+            m_StatModifiers.erase(m_StatModifiers.begin() + static_cast<long>(i));
+            return;
+        }
+    }
+
+    // FUN_10048140 (`spells\RemoveEnchantment.s`): strip every modifier
+    // whose delta is negative -- and then, separately, every modifier of
+    // kind 3, which this port has no equivalent of (every shipped call site
+    // of FUN_1004aa28 passes kind 1). So: remove the debuffs, keep the
+    // buffs. The real function also sets flag bit 1 and zeroes both the
+    // shared timer and `+0x70`, which the caller follows with
+    // FUN_1004ba84(stats, 0, 0) -- the blindness clear.
+    void RemoveNegativeStatModifiers() {
+        for (size_t i = 0; i < m_StatModifiers.size();) {
+            if (m_StatModifiers[i].delta < 0) {
+                m_StatModifiers.erase(m_StatModifiers.begin() + static_cast<long>(i));
+            } else {
+                ++i;
+            }
+        }
+        m_EffectTimer = 0;
+        m_EffectFlags |= 2;
+    }
+
+    // The second periodic channel's arming half, in the real write order:
+    //
+    //   stats[0x7a] = 0;  stats[0x7c] = kind;
+    //   stats[0x78] = (short)durationUnits;  stats[0x76] = 1;
+    //
+    // Two things are deliberate. The duration store is a **16-bit** one, so
+    // `spells\Energize.s`'s `magnitude * 0xa00` wraps negative at magnitude
+    // 13 and the effect simply never runs for a caster that high -- real,
+    // and reproduced by the cast rather than hidden here. And that last
+    // write lands on `+0x76`, the field poison and the burn already share
+    // (see ApplyBurn): arming a regeneration while poisoned really does
+    // drop the poison from 3 points a second to 1.
+    void ArmPeriodic(int kind, int dotAmount, int durationUnits) {
+        m_BurnAccumulator = 0;
+        m_BurnKind = kind;
+        m_BurnTimer = static_cast<int16_t>(durationUnits);
+        m_DotKind = dotAmount;
+    }
+    int periodicKind() const { return m_BurnKind; }
+    int periodicRemaining() const { return m_BurnTimer; }
+
+    // FUN_1004bb54 / FUN_1004bb20 live on the owners (the player already had
+    // both pools); these are the two the cast reads back.
+    int effectFlags() const { return m_EffectFlags; }
+    int dotAmount() const { return m_DotKind; }
+
     // Net modifier currently applied to a stat (0 when nothing is active).
     int statModifier(int statIndex) const {
         for (const StatModifier& m : m_StatModifiers) {
@@ -118,8 +207,13 @@ public:
     // slot -- a template so each owner can route it through whatever guards
     // it has (a monster's SetInvulnerable, say) without a callback
     // allocation per tick.
-    template <class DealDamage>
-    void Tick(int deltaUnits, DealDamage&& dealDamage) {
+    // M48: `regenerate(kind)` is the second callback FUN_10049780's kinds 6
+    // and 7 need -- it adds the actor's *own level* (`stats+0x34`, the same
+    // short every spell magnitude reads) to fatigue or to health, and only
+    // the owner knows where those live. Called once per elapsed second, the
+    // same accumulator shape the burn uses.
+    template <class DealDamage, class Regenerate>
+    void Tick(int deltaUnits, DealDamage&& dealDamage, Regenerate&& regenerate) {
         if (m_ParalysisTimer > 0) {
             m_ParalysisTimer -= deltaUnits;
             if (m_ParalysisTimer < 0) m_ParalysisTimer = 0;
@@ -182,23 +276,35 @@ public:
 
         // M34: the second periodic channel (+0x78/+0x7a/+0x7c). Same
         // one-second accumulator shape as channel 1, but selected by its
-        // own `kind`. Kinds 6 and 7 read the stats block's spell-power
-        // short, which this port has no equivalent of and nothing
-        // decompiled so far arms, so they are documented rather than
-        // guessed at.
+        // own `kind`.
+        //
+        // M48 closes the two this could not: kinds 6 and 7 read the stats
+        // block's `+0x34`, which is the actor's own **level** (the same
+        // short every spell magnitude comes from, not a separate "spell
+        // power"), and their arming sites are `spells\Energize.s` and
+        // `spells\AzraSustenance.s` in the real cast. Kind 4 is Sanctuary's
+        // and genuinely does nothing here -- it is a bare duration.
         //
         // Note kind 8 writes health *directly* instead of going through
         // DoDamage the way poison does, so a burn is not reduced by armour
         // or resistance at all -- it is the flat 1/sec it says it is. Both
         // owners route it through their own damage entry point anyway, so
         // that a real SetInvulnerable(true) quest NPC still cannot be
-        // burned to death.
+        // burned to death. Kind 6's regeneration, by contrast, has **no
+        // clamp of any kind** in the real function -- fatigue really can
+        // run past its own maximum while Energize is up. Reproduced.
         if (m_BurnTimer > 0) {
             if (m_BurnKind == kPeriodicBurn) {
                 m_BurnAccumulator += deltaUnits;
                 if (m_BurnAccumulator >= 256) {
                     m_BurnAccumulator = 0;
                     dealDamage(m_DotKind);
+                }
+            } else if (m_BurnKind == kPeriodicFatigueRegen || m_BurnKind == kPeriodicHealthRegen) {
+                m_BurnAccumulator += deltaUnits;
+                if (m_BurnAccumulator >= 256) {
+                    m_BurnAccumulator = 0;
+                    regenerate(m_BurnKind);
                 }
             }
             m_BurnTimer -= deltaUnits;
@@ -207,6 +313,14 @@ public:
                 m_BurnKind = kPeriodicNone;
             }
         }
+    }
+
+    // The pre-M48 two-argument form, kept so the callers that have no
+    // regeneration to route (tests, and anything without health/fatigue of
+    // its own) do not have to pass an empty lambda.
+    template <class DealDamage>
+    void Tick(int deltaUnits, DealDamage&& dealDamage) {
+        Tick(deltaUnits, dealDamage, [](int) {});
     }
 
 private:

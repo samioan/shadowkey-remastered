@@ -31,6 +31,65 @@ ItemExecutable::ItemExecutable(const skString& filename, skExecutableContext& ct
     }
 }
 
+int ItemExecutable::spellTypeId() const {
+    // M48. The same resolution statusEffect() has used since M43 -- a
+    // script's own SetSpellType() first, then the typeId
+    // Level.CreateEntity() stamped on this object -- but returning the id
+    // rather than the effect, because the real cast (spell_cast.h) is a
+    // switch over the id and needs the rows statusEffect() has no case for
+    // (every self-targeted spell: Energize, Sanctuary, BodyToMind, ...).
+    if (m_SpellType != 0) return m_SpellType;
+    if (m_TemplateId > 0) return m_TemplateId;
+
+    // The path fallback, which is entities.txt read the other way round.
+    // Every one of these rows is a line of the shipped entities.txt.
+    struct PathRow {
+        const char* suffix;
+        int typeId;
+    };
+    static const PathRow kRows[] = {
+        {"blaze.s", 50},
+        {"healwound.s", 51},
+        {"spells/deadtodust.s", 4002},
+        {"spells/weakness.s", 4008},
+        {"spells/absorb.s", 4009},
+        {"spells/blind.s", 4010},
+        {"spells/raisestrength.s", 4011},
+        {"spells/doomhammer.s", 4012},
+        {"spells/bodytomind.s", 4013},
+        {"spells/curedisease.s", 4014},
+        {"spells/curepoison.s", 4015},
+        {"spells/daedricweapon.s", 4016},
+        {"spells/drain.s", 4018},
+        {"spells/energize.s", 4019},
+        {"spells/fear.s", 4020},
+        {"spells/feebleblade.s", 4021},
+        {"spells/frenzy.s", 4022},
+        {"spells/harmarmor.s", 4023},
+        {"spells/ignitefoe.s", 4024},
+        {"spells/ignitescroll.s", 4024},  // its Init() is SetSpellType(4024)
+        {"spells/u_ignite_foe_8_lvl8.s", 4024},
+        {"spells/paralyze.s", 4025},
+        {"spells/removeenchantment.s", 4026},
+        {"spells/righteousness.s", 4027},
+        {"spells/sanctuary.s", 4028},
+        {"spells/shield.s", 4029},
+        {"spells/disease.s", 4033},
+        {"spells/poison.s", 4034},
+        {"spells/deathhowl.s", 4035},
+        {"spells/azrawrath.s", 4038},
+        {"spells/azrasustenance.s", 4039},
+    };
+    for (const PathRow& row : kRows) {
+        std::string s(row.suffix);
+        if (m_ScriptPath.size() >= s.size() &&
+            m_ScriptPath.compare(m_ScriptPath.size() - s.size(), s.size(), s) == 0) {
+            return row.typeId;
+        }
+    }
+    return 0;
+}
+
 ItemExecutable::StatusEffect ItemExecutable::statusEffect() const {
     // M37: the spell entity's own typeId, which is literally what
     // FUN_100458e4 switches on (`spell+0xc8`), and the only way to separate
@@ -285,6 +344,13 @@ bool ItemExecutable::method(const skString& methodName, skRValueArray& args,
     }
     if (methodName == skString("GetLevel") && args.entries() == 0) {
         returnValue = skRValue(m_SpellLevel);
+        return true;
+    }
+    if (methodName == skString("SetRefireRate") && args.entries() == 1) {
+        // M48: previously soft-failed. `spells\Sanctuary.s` is the only
+        // shipped caller -- `SetRefireRate(768); //3 secs` -- and its value
+        // is the cast cooldown FUN_10046680 gates on. See refireRate().
+        m_RefireRate = args[0].intValue();
         return true;
     }
     if (methodName == skString("SetScroll") && args.entries() == 1) {

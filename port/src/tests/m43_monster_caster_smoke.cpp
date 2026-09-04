@@ -455,14 +455,23 @@ int main(int argc, char** argv) {
             Check(floater->spellSlot(0).spell->templateId() == 4033 &&
                       floater->spellSlot(0).spell->spellLevel() == 7,
                   "shriekfloater.s casts Disease at SetLevel(7)");
-            bool cast = false;
-            for (int i = 0; i < 200 && !cast; ++i) {
-                if (!floater->RollForMelee()) cast = floater->CastSpellAt(&player);
+            // M48 -- UPDATED. CastSpellAt() no longer touches the target:
+            // the real cast runs entirely on the caster and hands back a
+            // projectile, and Disease lands only when that projectile
+            // arrives. So this section now checks the cast half, and
+            // m48_spell_projectile_smoke checks the flight and the impact
+            // that finishes the job.
+            sk_bindings::MonsterExecutable::CastAttempt attempt;
+            for (int i = 0; i < 200 && !attempt.result.cast; ++i) {
+                if (!floater->RollForMelee()) attempt = floater->CastSpellAt(&player);
             }
-            Check(cast, "a creature's own CastSpellAt() runs, with the player as the target");
-            Check(player.actorStats().statModifier(Stats::kStatAttack) == -3 &&
-                      player.actorStats().statModifier(Stats::kStatDefense) == -3,
-                  "...and Disease at magnitude 7 takes the -3 arm of its own `< 7` branch");
+            Check(attempt.result.cast && attempt.spell,
+                  "a creature's own CastSpellAt() runs the real cast on the creature");
+            Check(attempt.result.projectileSprite == 5,
+                  "...and Disease is one of the twelve spells the cast gives sprite 5");
+            Check(player.actorStats().statModifier(Stats::kStatAttack) == 0 &&
+                      player.actorStats().statModifier(Stats::kStatDefense) == 0,
+                  "...with nothing applied to the target yet -- the projectile has not flown");
         }
     }
 

@@ -115,6 +115,12 @@ public:
     // (see TakePendingPickupItem()'s comment) and marked itself for
     // removal from the world (MirrorDestroyObject()).
     void AddItem(std::unique_ptr<ItemExecutable> item);
+
+    // M48: `FUN_1006d1c0(owner+0x1f8, typeId)` -- does this actor's
+    // inventory already hold an entity of this type? The real cast's
+    // DaedricWeapon branch is guarded on it, so casting it twice does not
+    // hand out two swords.
+    bool HasItemOfTemplate(int typeId) const;
     // Erases every inventory entry marked for removal (and clears
     // m_LeftItem/m_RightItem if either pointed at one of them) -- call
     // once per tick, after any in-flight script call chain for that tick
@@ -215,6 +221,26 @@ public:
     void SetActorHealth(int value) override { SetHealth(value); }
     void ApplyActorDamage(int amount) override { ApplyDamage(amount); }
     bool actorAlive() const override { return m_Health > 0; }
+    // M48: the two pools the real cast reads and writes (spell_cast.h).
+    // Both setters are the real clamping ones -- FUN_1004bb20 against
+    // maxMagicka and FUN_1004bb54 against maxFatigue, each with a floor of
+    // zero, which is what makes "spend more than you have" simply empty the
+    // pool rather than go negative.
+    int actorMagicka() const override { return m_Magicka; }
+    int actorMaxMagicka() const override { return m_MaxMagicka; }
+    void SetActorMagicka(int value) override {
+        m_Magicka = (std::min)((std::max)(0, value), m_MaxMagicka);
+    }
+    int actorFatigue() const override { return m_Fatigue; }
+    int actorMaxFatigue() const override { return m_MaxFatigue; }
+    void SetActorFatigue(int value) override {
+        m_Fatigue = (std::min)((std::max)(0, value), m_MaxFatigue);
+    }
+    // FUN_1003e6f4. The real walk covers both equipped slots and eight
+    // more; this port checks the two hands, which is where a real
+    // discount item would have to be. No shipped entity has typeId 808, so
+    // this never fires -- see spell_actor.h.
+    bool actorHasSpellCostDiscount() const override;
 
     // The effective values, with any active timed status modifier folded
     // in -- the same treatment MonsterExecutable::attack()/defense()/

@@ -177,6 +177,29 @@ public:
     int spellLevel() const { return m_SpellLevel; }
     bool scroll() const { return m_Scroll; }
 
+    // M48: the Spell class's fourth field, `SetRefireRate` (`+0x1d2`, the
+    // sibling of SetLevel's `+0x1d0` in the same dispatcher). It is the
+    // per-spell cast cooldown FUN_10046680 gates on, and exactly one
+    // shipped script sets it:
+    //
+    //     spells\Sanctuary.s:  SetRefireRate(768);  //3 secs
+    //
+    // whose own comment is an independent confirmation that engine
+    // durations are `seconds * 0x100`. Every other spell leaves it 0, which
+    // makes the gate inert -- so the "you can only cast so often" rule the
+    // engine appears to have is really a Sanctuary-only rule. The one
+    // runtime writer is the cast itself: AzraWrath sets 400 as it fires.
+    int refireRate() const { return m_RefireRate; }
+    void SetRefireRate(int units) { m_RefireRate = units; }
+
+    // M48: the spell entity's real entities.txt typeId -- what
+    // FUN_10046764 and FUN_100458e4 both switch on. Resolved exactly the
+    // way statusEffect() already resolves it (a script's own SetSpellType,
+    // else the typeId Level.CreateEntity() stamped on the object, else the
+    // script path), but returning the id itself so the cast table can be
+    // keyed on it. 0 when this item is not a spell at all.
+    int spellTypeId() const;
+
     // M43: `spell+0x170` -- **who is casting this**. The real
     // status-effect dispatcher reads the caster off the spell itself, never
     // off a global "the player"; the Monster class's AddSpell binding sets
@@ -334,6 +357,7 @@ private:
     int m_SpellType = 0;
     int m_SpellLevel = 0;
     bool m_Scroll = false;
+    int m_RefireRate = 0;  // M48, +0x1d2 -- see refireRate()
     SpellActor* m_SpellOwner = nullptr;  // M43: see SetSpellOwner()
     // M36: see destroyWhenEmpty()/templateId() above.
     bool m_DestroyWhenEmpty = false;

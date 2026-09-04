@@ -63,6 +63,32 @@ public:
     virtual int spellToHit() const = 0;
     virtual int spellResistance() const = 0;
 
+    // M48: the two remaining pools on the shared stats block, which the
+    // real cast (spell_cast.h) reads and writes on whoever is casting:
+    //
+    //   +0x2c  fatigue, clamped against +0x26 by FUN_1004bb54
+    //   +0x2e  magicka, clamped against +0x28 by FUN_1004bb20
+    //
+    // A creature has both in the real engine for exactly the reason it has
+    // the rest of this block -- FUN_10046764 deducts a creature's magicka
+    // the same way it deducts the player's; it just does not *gate* on it
+    // (the `bVar3` branch), so a creature can always cast. No shipped
+    // creature script sets either pool, so a monster's start at 0 and the
+    // deduction clamps straight back to 0, which is what the engine does.
+    virtual int actorMagicka() const { return 0; }
+    virtual int actorMaxMagicka() const { return 0; }
+    virtual void SetActorMagicka(int /*value*/) {}
+    virtual int actorFatigue() const { return 0; }
+    virtual int actorMaxFatigue() const { return 0; }
+    virtual void SetActorFatigue(int /*value*/) {}
+
+    // M48: FUN_1003e6f4 -- "is the player carrying entity typeId 0x328",
+    // which takes 6 off every spell's cost. Only the player half of the
+    // cast consults it. 808 is not a typeId the shipped entities.txt
+    // defines, so nothing in the retail game answers true; the hook is here
+    // because the branch is, not because it fires.
+    virtual bool actorHasSpellCostDiscount() const { return false; }
+
     // FUN_1004bb88 (clamped into [0, max]) and the DoDamage vtable slot.
     virtual int actorHealth() const = 0;
     virtual void SetActorHealth(int value) = 0;

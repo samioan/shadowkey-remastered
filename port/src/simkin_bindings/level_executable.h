@@ -229,6 +229,15 @@ public:
     // that is the host's job either way.
     std::unique_ptr<MonsterExecutable> CreateCreature(int typeId);
 
+    // M48: the item half of the same thing, factored out of the
+    // one-argument CreateEntity handler so the real cast's conjure branch
+    // (`spells\DaedricWeapon.s` -> entity 4037) builds its sword through
+    // exactly the path a script would. `requireItemCategory` is the
+    // handler's own category filter; the conjure bypasses it, because
+    // 4037's entities.txt category is 16 rather than a weapon's usual 4
+    // and the real FUN_10044e08 does no category check at all.
+    std::unique_ptr<ItemExecutable> CreateItem(int typeId, bool requireItemCategory = true);
+
 private:
     MenuStack& m_Stack;
     std::map<std::string, skiExecutable*> m_Entities;

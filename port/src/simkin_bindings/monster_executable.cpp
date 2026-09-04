@@ -303,19 +303,20 @@ ItemExecutable* MonsterExecutable::ChooseSpell(bool targetBlinded) const {
     return m_SpellSlots[index].spell;
 }
 
-bool MonsterExecutable::CastSpellAt(SpellActor* target) {
-    if (!target) return false;
+MonsterExecutable::CastAttempt MonsterExecutable::CastSpellAt(SpellActor* target) {
+    CastAttempt attempt;
+    if (!target) return attempt;
     ItemExecutable* spell = ChooseSpell(target->actorStats().blinded());
-    if (!spell) return false;
-    // The real cast is FUN_10046764 -- deduct magicka, apply any
-    // self-targeted half, then spawn a projectile that runs the damage
-    // dispatcher on impact. This port has no projectile system, and already
-    // substitutes the same direct HitTarget() call for the player's own
-    // casting (main.cpp's tryAttack); a creature's cast takes the identical
-    // shortcut rather than inventing a second, different one.
-    spell->InvokeHitTarget(dynamic_cast<skiExecutable*>(target));
-    if (m_PlaySpellCasting) PlayNoise(kSpellCastSoundId);
-    return true;
+    if (!spell) return attempt;
+    // M48: the real cast, FUN_10046764. It runs entirely on the *caster* --
+    // this creature -- and hands back whatever the world still has to do.
+    // Note it does not consult `target` at all beyond the AI's own choice
+    // of spell above: an offensive spell reaches its target only if the
+    // projectile the caller launches actually gets there.
+    attempt.spell = spell;
+    attempt.result = CastSpell(*spell, *this);
+    if (attempt.result.cast && m_PlaySpellCasting) PlayNoise(kSpellCastSoundId);
+    return attempt;
 }
 
 void MonsterExecutable::SetAiPackageTimed(int package, int durationUnits) {
@@ -344,7 +345,20 @@ void MonsterExecutable::TickAi(int deltaUnits) {
     // engine it always did. The damage callback routes through
     // ApplyDamage() so that a real SetInvulnerable(true) quest NPC still
     // cannot be poisoned or burned to death.
-    m_Stats.Tick(deltaUnits, [this](int damage) { ApplyDamage(damage); });
+    // M48: the regeneration half of the second periodic channel. A creature
+    // has no fatigue pool worth speaking of (nothing sets one), but health
+    // regeneration is real -- and a creature *can* arm it, because
+    // `spells\AzraSustenance.s` is an ordinary spell entity that a script
+    // could hand to one with AddSpell.
+    m_Stats.Tick(
+        deltaUnits, [this](int damage) { ApplyDamage(damage); },
+        [this](int kind) {
+            if (kind == ActorStats::kPeriodicFatigueRegen) {
+                m_Fatigue += m_Level;
+            } else if (kind == ActorStats::kPeriodicHealthRegen) {
+                SetActorHealth(m_CurrentHealth + m_Level);
+            }
+        });
 }
 
 bool MonsterExecutable::ConsumeAttackCadence(int deltaUnits) {

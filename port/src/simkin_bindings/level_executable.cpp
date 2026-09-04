@@ -79,6 +79,40 @@ std::unique_ptr<MonsterExecutable> LevelExecutable::CreateCreature(int typeId) {
     return nullptr;
 }
 
+// M48: see the header.
+std::unique_ptr<ItemExecutable> LevelExecutable::CreateItem(int typeId, bool requireItemCategory) {
+    const sk::EntityTypeDescriptor* desc = m_EntityTypes ? m_EntityTypes->Lookup(typeId) : nullptr;
+    bool isRealScript = desc && desc->name.size() > 2 &&
+                         desc->name.compare(desc->name.size() - 2, 2, ".s") == 0;
+    if (!isRealScript) return nullptr;
+    bool isItemCategory = desc->category == 3 || desc->category == 4 || desc->category == 5 ||
+                           desc->category == 6 || desc->category == 9;
+    if (requireItemCategory && !isItemCategory) return nullptr;
+    std::string relPath = desc->name;
+    for (char& c : relPath) {
+        if (c == '\\') c = '/';
+    }
+    std::string fullPath = m_Stack.scriptRoot() + "/" + relPath;
+    skExecutableContext loadCtxt(&m_Stack.interpreter());
+    try {
+        auto item = std::make_unique<ItemExecutable>(skString(fullPath.c_str()), loadCtxt, m_Stack);
+        skRValueArray initArgs;
+        initArgs.append(skRValue(0));  // placeholder for Init's "(s)" parameter
+        skRValue initRet;
+        skExecutableContext callCtxt(&m_Stack.interpreter());
+        item->method(skString("Init"), initArgs, initRet, callCtxt);
+        item->SetTemplateId(typeId);  // M36, see ItemExecutable::templateId()
+        return item;
+    } catch (skParseException& e) {
+        std::printf("Level: CreateItem(%d) -- PARSE ERROR loading %s: %s\n", typeId,
+                    fullPath.c_str(), e.toString().ptr());
+    } catch (skRuntimeException& e) {
+        std::printf("Level: CreateItem(%d) -- RUNTIME ERROR loading %s: %s\n", typeId,
+                    fullPath.c_str(), e.toString().ptr());
+    }
+    return nullptr;
+}
+
 bool LevelExecutable::TakePendingCreature(PendingCreature& out,
                                            std::unique_ptr<MonsterExecutable>& script) {
     if (!m_PendingCreaturePending) return false;
@@ -238,39 +272,14 @@ bool LevelExecutable::method(const skString& methodName, skRValueArray& args,
         // need a MenuStack&-shaped construction this port's other loader
         // (main.cpp's zone-load block) already does differently, not
         // attempted for this native entry point.
+        // M48: the body moved to CreateItem() so the cast's conjure branch
+        // shares it; the handler's own category filter is unchanged.
         int typeId = args[0].intValue();
-        const sk::EntityTypeDescriptor* desc = m_EntityTypes ? m_EntityTypes->Lookup(typeId) : nullptr;
-        bool isRealScript =
-            desc && desc->name.size() > 2 && desc->name.compare(desc->name.size() - 2, 2, ".s") == 0;
-        bool isItemCategory = desc && (desc->category == 3 || desc->category == 4 ||
-                                        desc->category == 5 || desc->category == 6 ||
-                                        desc->category == 9);
-        if (isRealScript && isItemCategory) {
-            std::string relPath = desc->name;
-            for (char& c : relPath) {
-                if (c == '\\') c = '/';
-            }
-            std::string fullPath = m_Stack.scriptRoot() + "/" + relPath;
-            skExecutableContext loadCtxt(&m_Stack.interpreter());
-            try {
-                auto item = std::make_unique<ItemExecutable>(skString(fullPath.c_str()), loadCtxt,
-                                                               m_Stack);
-                skRValueArray initArgs;
-                initArgs.append(skRValue(0));  // placeholder for Init's "(s)" parameter
-                skRValue initRet;
-                skExecutableContext callCtxt(&m_Stack.interpreter());
-                item->method(skString("Init"), initArgs, initRet, callCtxt);
-                item->SetTemplateId(typeId);  // M36, see ItemExecutable::templateId()
-                returnValue = skRValue(static_cast<skiExecutable*>(item.get()), false);
-                m_PendingCreatedEntity = std::move(item);
-                return true;
-            } catch (skParseException& e) {
-                std::printf("Level: CreateEntity(%d) -- PARSE ERROR loading %s: %s\n", typeId,
-                            fullPath.c_str(), e.toString().ptr());
-            } catch (skRuntimeException& e) {
-                std::printf("Level: CreateEntity(%d) -- RUNTIME ERROR loading %s: %s\n", typeId,
-                            fullPath.c_str(), e.toString().ptr());
-            }
+        std::unique_ptr<ItemExecutable> item = CreateItem(typeId);
+        if (item) {
+            returnValue = skRValue(static_cast<skiExecutable*>(item.get()), false);
+            m_PendingCreatedEntity = std::move(item);
+            return true;
         }
         returnValue = skRValue();  // "not found" -- see GetEntity()'s miss case
         return true;

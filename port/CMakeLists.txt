@@ -112,6 +112,8 @@ add_library(sk_bindings STATIC
   src/simkin_bindings/popup_menu_executable.cpp
   src/simkin_bindings/slider_executable.cpp
   src/simkin_bindings/spell_actor.cpp
+  src/simkin_bindings/spell_cast.cpp
+  src/simkin_bindings/spell_projectile.cpp
   src/simkin_bindings/row_owner_ref.cpp
   src/simkin_bindings/table_executable.cpp
   src/simkin_bindings/test_armor_executable.cpp
@@ -354,3 +356,11 @@ target_link_libraries(attached_weapon_smoke PRIVATE sk_bindings sk_world)
 add_executable(weapon_swing_smoke src/tests/m47_weapon_swing_smoke.cpp
                                    src/assets/sprite_archive.cpp)
 target_link_libraries(weapon_swing_smoke PRIVATE sk_bindings)
+
+# The rest of a real cast, and the projectile it launches -- the whole
+# per-typeId cast table checked against the shipped scripts, the
+# self-targeted spells that previously did nothing, and the twelve-tick
+# flight whose impact is what runs HitTarget(). See
+# src/tests/m48_spell_projectile_smoke.cpp.
+add_executable(spell_projectile_smoke src/tests/m48_spell_projectile_smoke.cpp)
+target_link_libraries(spell_projectile_smoke PRIVATE sk_bindings sk_world)

@@ -657,13 +657,23 @@ is the effect-flag channel poison uses. The second
 
 | kind | per second |
 |------|-----------|
-| 6 | `+0x2c` (current magicka) += `+0x34` (the caster's level) |
+| 4 | — (M48: **nothing**; a bare duration, `spells\Sanctuary.s`'s) |
+| 6 | `+0x2c` (current **fatigue**) += `+0x34` (the caster's level), *unclamped* |
 | 7 | current health += `+0x34`, clamped to max and to >= 0 |
 | 8 | current health −= **`+0x76`**, and on reaching 0 calls the actor's kill vtable slot (`+0x28`) directly |
 
 IgniteFoe is the *only* site in the whole status-effect dispatcher that
-arms this channel, and it arms kind 8. Kinds 6 and 7 are regeneration and
-are set somewhere else (not yet found).
+arms this channel, and it arms kind 8. **M48 found where kinds 6 and 7 are
+armed: the real cast** (below) — `spells\Energize.s` arms 6 and
+`spells\AzraSustenance.s` arms 7 — along with a fourth kind, 4, which
+the tick implements as nothing at all.
+
+**Correction: kind 6 is fatigue, not magicka.** `+0x2c` is clamped by
+`FUN_1004bb54` against `+0x26`; magicka is `+0x2e`, clamped by
+`FUN_1004bb20` against `+0x28`. M47 landed on the same field independently
+when it found a weapon swing costing 4 points of `player+0x3d8`, which is
+`player+0x3ac` (the stats block) + 0x2c. And kind 6 has **no clamp at
+all** — an Energize really can push fatigue past its own maximum.
 
 Two details worth keeping:
 
@@ -908,14 +918,8 @@ Paralyze (`SetLevel(5)`) locking the player for 9 seconds and for 25.
 
 ### `FUN_10046764` — what a real cast does
 
-Not reproduced in the port (there is no projectile system here, and the
-player's own casting already takes the same shortcut), but recorded: the
-real cast deducts magicka against the caster's stats, applies any
-self-targeted half of the spell inline — heals, cures, buffs, the
-regeneration kinds 6/7 of the second periodic channel — and for the
-offensive spells allocates a 0x198-byte projectile whose impact is what
-eventually calls the status dispatcher. This port substitutes a direct
-`HitTarget()` call on both sides instead.
+Recorded by M43 as an outline; decompiled and implemented in full by M48 —
+see "The rest of a real cast" below.
 
 ---
 
@@ -1554,7 +1558,244 @@ if (weapon->usesRangedPath /* +0x1a7 */) {
 ```
 
 Two consecutive entity type ids, 598 for a thrown weapon and 599 for a bow.
-This is
-the same projectile machinery `PORT_ROADMAP.md`'s open "rest of a real cast"
-bullet needs, reached from the weapon side rather than the spell side —
-recorded here as a pointer, not implemented.
+Recorded here as a pointer, not implemented — and M48, which did implement
+the spell side, found this is a **different class**: the arrow is 0x16c
+bytes built by `FUN_10007da4`, the spell projectile 0x198 bytes built by
+`FUN_1005f0b4`. They share the actor base's position/velocity layout and
+nothing above it.
+
+---
+
+## The rest of a real cast, and its projectile (M48)
+
+M43 decompiled `FUN_10046764` and recorded its shape; this implements it,
+along with the projectile it exists to launch. The gap it closes is the one
+`PORT_ROADMAP.md` names: this port called `HitTarget()` straight at a
+target on both the player's and a creature's cast, so **every spell was
+hitscan and the whole self-targeted half of the spell list did nothing at
+all**.
+
+### The shape of a cast
+
+```c
+int Cast(Spell* spell) {                       // FUN_10046764
+    stats = FUN_1002fd30(spell->owner);        // the *caster's* stats block
+    level = stats->+0x34;                      // the caster's level
+    <switch 1: cost, sound, projectile art, flat impact damage>
+    if (spell->scroll) cost = 0;
+    if (ownerIsPlayer && FUN_1003e6f4(owner)) cost = max(0, cost - 6);
+    magnitude = (!scroll && ownerIsMonster) ? spell->SetLevel : level;
+    if (stats->magicka < cost && !scroll && !castByMonster) return 0;   // the only gate
+    SetMagicka(stats, stats->magicka - cost);
+    PlaySound(engine, sound, 100, ...);
+    <switch 2: the self-targeted effect, applied to `stats` right here>
+    if (projectileArt) { p = new(0x198); FUN_1005f0b4(p, owner, ...); ...; Spawn(engine, p); }
+    if (spell->scroll) { destroy the scroll }
+    return 1;
+}
+```
+
+Two things about the gate are worth keeping. A **scroll** skips the
+affordability test *and* still runs the deduction — which clamps at zero,
+so reading a scroll on an empty pool is free and harmless. And a
+**creature** skips it too (the decompile's `bVar3`), which is what lets the
+32 shipped caster scripts work while not one of them sets a magicka pool.
+
+### The table
+
+The whole first switch, flattened. `L` is the caster's level.
+
+| typeId | script | cost | sound | projectile |
+|---|---|---|---|---|
+| 50 | `blaze.s` | L+6 | 0x54 | 2 |
+| 51 | `HealWound.s` | L+10 | 0x55 | — |
+| 4002 | `spells\DeadToDust.s` | L+6 | 0x54 | 5 |
+| 4006 | `blaze.s` (greater) | **0** | 0x54 | 2, +50 flat |
+| 4008 | `spells\Weakness.s` | L+7 | 0x54 | 5 |
+| 4009 | `spells\Absorb.s` | L+20 | 0x54 | 5 |
+| 4010 | `spells\Blind.s` | L+8 | 0x54 | 2 |
+| 4011 | `spells\RaiseStrength.s` | L+14 | 0x57 | — |
+| 4012 | `spells\DoomHammer.s` | L+30 | 0x54 | 2 |
+| 4013 | `spells\BodyToMind.s` | L+3 | 0x57 | — |
+| 4014 | `spells\CureDisease.s` | **0** | 0x57 | — |
+| 4015 | `spells\CurePoison.s` | **0** | 0x57 | — |
+| 4016 | `spells\DaedricWeapon.s` | L+18 | 0x54 | — |
+| 4017 | `spells\DoomHammer.s` | L+30 | 0x54 | 2 |
+| 4018 | `spells\Drain.s` | L+20 | 0x54 | 5 |
+| 4019 | `spells\Energize.s` | L+6 | 0x57 | — |
+| 4020 | `spells\Fear.s` | L+15 | 0x54 | 5 |
+| 4021 | `spells\FeebleBlade.s` | L+5 | 0x54 | 5 |
+| 4022 | `spells\Frenzy.s` | L+16 | 0x57 | — |
+| 4023 | `spells\HarmArmor.s` | L+8 | 0x54 | 5 |
+| 4024 | `spells\IgniteFoe.s` | L+8 | 0x54 | 5 |
+| 4025 | `spells\Paralyze.s` | L+19 | 0x54 | 5 |
+| 4026 | `spells\RemoveEnchantment.s` | **12 flat** | 0x57 | — |
+| 4027 | `spells\Righteousness.s` | L+7 | 0x57 | — |
+| 4028 | `spells\Sanctuary.s` | L+2 | 0x57 | — |
+| 4029 | `spells\Shield.s` | L+6 | 0x57 | — |
+| 4033 | `spells\Disease.s` | L+6 | 0x54 | 5 |
+| 4034 | `spells\Poison.s` | L+6 | 0x54 | 5 |
+| 4035 | `spells\DeathHowl.s` | L+25 | 0x54 | 5 |
+| 4038 | `spells\AzraWrath.s` | L+20 | 0x54 | — (area) |
+| 4039 | `spells\AzraSustenance.s` | L+20 | 0x57 | — |
+| *anything else* | — | L+6 | 0x54 | — (sprintf's a warning) |
+
+Reading a branch tree that dense is the kind of thing that silently goes
+wrong, so the table is checked **three independent ways** against shipped
+data, and all three agree.
+
+1. **The `HitTarget` split is exact.** Fifteen shipped spell scripts define
+   a `HitTarget[...]` handler and fourteen do not — and the fifteen are
+   exactly the fifteen this table gives a projectile, with one explained
+   exception (`spells\AzraWrath.s`, whose damage comes from the native area
+   branch). That is the whole corpus, with no fudge.
+2. **The sound slots name themselves.** In all 21 shipped `*_sounds.txt`,
+   slot `0x54` is `pl_cast_fire.wav` and slot `0x57` is
+   `pl_cast_powerup.wav` — and the table hands 0x54 to the offensive spells
+   and 0x57 to the buffs and cures. (`0x55`, HealWound's alone, is
+   `NULL.wav` everywhere: the heal is silent in the shipped game.)
+3. **Three rows are stated outright by scripts.**
+   `spells\U_Heal_Wound_Lvl10.s` calls `SetSpellType(51)`,
+   `spells\U_Frenzy_lvl10.s` `SetSpellType(4022)` and
+   `spells\U_Blaze_lvl5.s` `SetSpellType(50)`.
+
+### The self-targeted half
+
+The second switch, which is what the fourteen `HitTarget`-less scripts
+exist for. `m` is the magnitude.
+
+| typeId | what it does to the caster |
+|---|---|
+| 51 HealWound | `SetHealth(health + 6 + m*2)`, clamped |
+| 4011 RaiseStrength | stat 9 +`m*5` for `m*10`s |
+| 4013 BodyToMind | magicka += all fatigue; fatigue = 0 |
+| 4014 CureDisease | remove the modifiers named `"DISEASE"` and `"DISEASE_DEF"`, clear flag 0x10 |
+| 4015 CurePoison | clear flag 8 — its entire body |
+| 4016 DaedricWeapon | conjure entity 4037 (`weapons\DaedricSword.s`) into the weapon slot, if absent |
+| 4019 Energize | periodic kind **6** for `m*10`s |
+| 4022 Frenzy | attack +`m` for `m*5`s |
+| 4026 RemoveEnchantment | strip every modifier with a negative delta; clear blindness |
+| 4027 Righteousness | attack **and** armour +`m`, both for `m+5`s |
+| 4028 Sanctuary | periodic kind **4** for `m*5`s |
+| 4029 Shield | armour +`m*2` for `m*10`s |
+| 4038 AzraWrath | `m*4` damage to every creature within 12000 units (`FUN_1004720c`) — ~47 tiles, i.e. the level |
+| 4039 AzraSustenance | periodic kind **7** for `m+10`s |
+
+Three details reproduced rather than tidied:
+
+- **The duration store is 16-bit.** `stats+0x78` takes a `short`, so
+  Energize's `m * 0xa00` wraps negative at magnitude 13 and the effect
+  simply never runs for a caster that high. A real bug, one branch wide.
+- **`+0x76` is written to 1 by every one of the three periodic arms**, and
+  that is the field poison and the burn *share*. So casting Energize while
+  poisoned really does drop the poison from 3 points a second to 1 — the
+  same shared-field quirk M34 found from the other direction.
+- **Kind 6 has no clamp**, so fatigue can run past its own maximum.
+
+### `FUN_10046680` — the cooldown is a Sanctuary rule
+
+Called immediately before the cast at both call sites, and it returns 1 at
+once unless the caster is the player. For the player:
+
+```c
+now = level->+0x460;                                   // the 1/256s clock
+if (player->+0xfc4 != 0 && now < player->+0xfc4 + spell->SetRefireRate) return 0;
+if (spell->typeId == 0xfbc && now < player->+0xfc8 + spell->SetRefireRate) return 0;
+if (player->+0x428 == 4) return 0;                     // unidentified state
+player->+0xfc4 = now;
+```
+
+`SetRefireRate` is the Spell class's `+0x1d2`, the sibling of `SetLevel`'s
+`+0x1d0` in dispatcher `0x10046328`. **Exactly one shipped script sets
+one** — `spells\Sanctuary.s`'s `SetRefireRate(768); //3 secs`, whose own
+comment independently confirms the `seconds * 0x100` unit — so the gate is
+inert for every other spell in the game. The only runtime writer is the
+cast itself: AzraWrath sets 400 as it fires.
+
+The two clauses are not symmetric, and the asymmetry is real: the general
+one is guarded on "something has actually been cast", the Sanctuary one is
+not. So for the first three seconds after a level's clock starts, Sanctuary
+alone is refused.
+
+`player+0xfc8`, the second stamp, is written at the tail of `FUN_10049780`
+when a kind-4 periodic channel expires — i.e. when a Sanctuary runs out.
+
+### The projectile
+
+`FUN_1005f0b4` allocates 0x198 bytes and points it where the caster is
+looking:
+
+```c
+p->x = caster->x;  p->y = caster->y;  p->z = caster->z + 0x20;
+p->vx = sinTable[yaw >> 5];                       // 0x100f4954, M47's table
+p->vy = sinTable[(yaw + 0x4000) >> 5 & 0x7ff];
+p->vz = sinTable[(-pitch) >> 5 & 0x7ff] + 0x32;
+p->radius /* +0x8e */ = 200;
+p->+0x180 = 1;                                    // "run the script's HitTarget on impact"
+p->+0x182 = flat impact damage;                   // 50 for the greater blaze, else 0
+```
+
+Note the engine's heading zero points along **+y** (`vx = sin`, `vy = cos`),
+which is a quarter turn off this port's own camera convention.
+
+The velocity comes off the sine table **unscaled**, so the speed is 0x100
+units a tick — exactly one tile. `FUN_1005f928` then flies it:
+
+```c
+x += vx; y += vy; z += vz;  clamp x,y into the map;
+if (++age >= 0xd) despawn;                        // twelve ticks of collision
+tile = Map_GetTileAt(engine, x, y);
+if (!tile) return;                                // off-map: keeps flying
+wall = ((tile[1] & 0x1c) == 4) || (tile[0] & 2);
+for (each entity overlapping the projectile's 400x400 AABB)
+    if (it is a creature or the player, and is not the caster) { Impact(); despawn; }
+if (wall) { one more creature-only sweep; despawn; }
+```
+
+So **a spell's range is twelve tiles and nothing else** — there is no
+`SetRange` on the spell side at all. The impact test is purely 2D: an x/y
+AABB, with no height test anywhere, which is also why the vertical velocity
+cannot be checked against anything.
+
+And `FUN_1005f3c8` is the impact, which is the whole point:
+
+```c
+if (p->+0x180) call p->spell's "HitTarget" through the scripted-call slot, with the target;
+if (p->+0x182 > 0 && p->owner) target->stats->DoDamage(p->+0x182, ownerStats, 0, 1);
+```
+
+`"HitTarget"` is the UTF-16 literal at `0x100b105c`. **This is why
+`blaze.s` has a `HitTarget[ (target) { DoAttackRoll(target, 1); } ]` at
+all**: the projectile's arrival is what runs the status dispatcher.
+
+The clincher is a commented-out line in that same script:
+
+```
+//Level.CreateEffect( 12, 19, 1, target.GetPositionX(), ... , 128, 16, 128, 128 );
+```
+
+against the tail of `FUN_1005f928`, for a spell whose typeId is 50 or 4006:
+
+```c
+FUN_10073528(level, 0xc, 0x13, 1, x, y, z, 0x80, 0x10, 0x80, 0x80, 0);
+```
+
+— the same call with the same twelve arguments, moved into the engine and
+hardcoded to blaze. The script author commented theirs out because the
+native projectile had taken it over.
+
+### Not reproduced
+
+**The art.** `+0x134` is 2 for blaze/Blind/DoomHammer and 5 for the other
+twelve projectile spells, and it seeds a one-frame animation range
+(`+0x140`/`+0x144`/`+0x14c` all `art << 8`) as well as being stored
+directly. It is *not* a `models.txt` index — 2 is `lantern.bin` and 5 is
+`sbarrel.bin` — so it selects from something else that has not been
+identified. The port carries the number and simulates the projectile
+without drawing it.
+
+Also not reproduced: the blaze impact effect above (this port has no
+`Level.CreateEffect`), the multiplayer mirror of the spawn and the impact,
+HealWound's extra term for a player whose class (`player+0xf3c`) is 7 (read
+through an undecompiled stats-block vtable slot), and the monster-only
+predicate at target vtable `+0x170` that the impact sweep rejects on.

@@ -3494,32 +3494,125 @@ algorithms.
       `SetScoped`) is a **leftover FPS weapon class** the engine was reused
       with.
 
-    - **Pointer for the still-open projectile bullet:** `FUN_100425bc`'s
-      ranged branch spawns one via `FUN_10005730` with entity type id 598
+    - **Pointer for the projectile bullet:** `FUN_100425bc`'s ranged
+      branch spawns one via `FUN_10005730` with entity type id 598
       (thrown) or 599 (bow), after a five-pass target search and a
-      per-weapon spread roll. That is the same machinery the "rest of a
-      real cast" item needs, reached from the weapon side rather than the
-      spell side. Recorded, not implemented.
+      per-weapon spread roll. Recorded, not implemented -- and note M48,
+      which closed the spell side, found the **arrow is a different class**
+      (0x16c bytes, constructed by `FUN_10007da4`) from the spell
+      projectile (0x198 bytes, `FUN_1005f0b4`). The two share the actor
+      base's position/velocity layout and nothing else; a real ranged
+      weapon attack is still its own piece of work.
+
+- **M48 -- the rest of a real cast, and the projectile it launches.** The
+  roadmap's own "rest of a real cast (`FUN_10046764`)" bullet, closed. RE
+  writeup in `docs/WORLD_MODEL.md` ("The rest of a real cast, and its
+  projectile"); smoke test `src/tests/m48_spell_projectile_smoke.cpp` (65
+  checks).
+
+    - **What was actually wrong.** This port called `HitTarget()` straight
+      at a target on both the player's cast and a creature's, which meant
+      two things: every spell was **hitscan**, and the fourteen shipped
+      spells with no `HitTarget` handler at all -- Energize, Sanctuary,
+      HealWound, BodyToMind, both cures, Shield, Frenzy, Righteousness,
+      RaiseStrength, RemoveEnchantment, DaedricWeapon, AzraWrath,
+      AzraSustenance -- **did nothing whatsoever**. Half the spell list was
+      inert.
+
+    - **`FUN_10046764` is a 200-line branch tree over the spell's
+      entities.txt typeId** producing four things: a magicka cost (almost
+      always `casterLevel + <per-spell bonus>`), a sound slot, whether to
+      spawn a projectile, and -- for the spells that spawn none -- a
+      self-targeted effect applied to the caster inline. The whole table is
+      in `WORLD_MODEL.md` and in `simkin_bindings/spell_cast.cpp`.
+
+    - **The table is verified three independent ways, and all three
+      agree.** Reading a Ghidra branch tree that dense is exactly the kind
+      of thing that goes wrong silently, so: (1) **the `HitTarget` split is
+      exact** -- fifteen shipped spell scripts define a `HitTarget[...]`
+      handler and fourteen do not, and the fifteen are precisely the fifteen
+      this table gives a projectile, with one explained exception
+      (`AzraWrath`, whose damage is a native area effect); (2) **the sound
+      slots name themselves** -- `0x54` is `pl_cast_fire.wav` and `0x57` is
+      `pl_cast_powerup.wav` in all 21 shipped `*_sounds.txt`, and the table
+      hands 0x54 to the offensive spells and 0x57 to the buffs and cures;
+      (3) **three rows are stated outright by scripts** that call
+      `SetSpellType(51)`, `SetSpellType(4022)` and `SetSpellType(50)`. The
+      smoke test's part 1 re-derives all three from the shipped files
+      rather than restating the port's own numbers.
+
+    - **The projectile is the mechanism, and `blaze.s` proves it.**
+      `FUN_1005f0b4` spawns a 0x198-byte entity at the caster aimed along
+      their facing; `FUN_1005f928` flies it at **0x100 units a tick --
+      exactly one tile -- for twelve ticks**, which is the only range a
+      spell has (there is no `SetRange` on the spell side at all); and
+      `FUN_1005f3c8`, the impact, **calls the spell script's own
+      `HitTarget(target)`** through the UTF-16 literal at `0x100b105c`.
+      That is why `blaze.s` has a `HitTarget[ (target) { DoAttackRoll(
+      target, 1); } ]` in the first place. The clincher is the line
+      immediately below it, commented out:
+      `//Level.CreateEffect( 12, 19, 1, target.GetPositionX(), ... )` --
+      against `FUN_1005f928`'s own tail, which for typeId 50 or 4006 calls
+      `FUN_10073528(level, 0xc, 0x13, 1, x, y, z, 0x80, 0x10, 0x80, 0x80,
+      0)`. The same call with the same twelve arguments, moved into the
+      engine and hardcoded to blaze. The author commented theirs out
+      because the native projectile had taken it over.
+
+    - **The two periodic-channel arms `WORLD_MODEL.md` recorded as "set
+      somewhere else, not yet found" are here.** `spells\Energize.s` arms
+      kind 6 and `spells\AzraSustenance.s` arms kind 7, and both add the
+      caster's own level once a second. **Correction while passing: kind 6
+      is fatigue, not magicka** -- `+0x2c` is clamped by `FUN_1004bb54`
+      against `+0x26` while magicka is `+0x2e` clamped by `FUN_1004bb20`
+      against `+0x28`, and M47 landed on the same field independently when
+      it found a swing costing 4 points of `player+0x3d8`. A fourth kind,
+      4, turns out to be Sanctuary's and to have **no tick behaviour at
+      all**; it is a bare duration that gates the weapon-swap branch of
+      `FUN_10042394` and stamps its own re-cast cooldown when it expires.
+
+    - **`SetRefireRate` (`+0x1d2`) is the cast cooldown, and it is a
+      Sanctuary-only rule.** `FUN_10046680` gates only the player, against
+      a timestamp on the player object plus the spell's own refire rate --
+      and **exactly one shipped script sets one**: `spells\Sanctuary.s`'s
+      `SetRefireRate(768); //3 secs`, whose comment is an independent
+      confirmation of the `seconds * 0x100` unit this port already uses
+      everywhere. Every other spell leaves it 0, which makes the gate
+      inert. Its two clauses are asymmetric in a way that is real: only the
+      general one is guarded on "something has actually been cast", so for
+      the first three seconds of a level Sanctuary alone is refused.
+
+    - **Three quirks reproduced rather than tidied.** The periodic
+      duration store is a **16-bit** one, so Energize's `magnitude * 0xa00`
+      wraps negative at magnitude 13 and simply never runs for a caster
+      that high. Every periodic arm writes `+0x76 = 1`, and that is the
+      field poison and the burn *share* -- so casting Energize while
+      poisoned really does drop the poison from 3 points a second to 1, the
+      same shared-field quirk M34 found from the other direction. And kind
+      6 has **no clamp**, so fatigue really can run past its own maximum.
+
+    - **What changes in the port.** Casting no longer needs a target, and
+      the invented `kSpellRange` targeting cone is gone -- the cast fires
+      down the caster's facing and the flight finds something, or does not.
+      A creature's spell can now miss by the player stepping aside. Fifteen
+      self-targeted spells do their real thing. A scroll is consumed by
+      being read. `MonsterExecutable::CastSpellAt()` no longer touches its
+      target at all.
+
+    - **Not reproduced, and recorded at the code.** The projectile's art:
+      `+0x134` is 2 for blaze/Blind/DoomHammer and 5 for the other twelve,
+      and it is *not* a `models.txt` index (2 is `lantern.bin`, 5 is
+      `sbarrel.bin`), so it selects from something unidentified -- the port
+      simulates the projectile without drawing it. Also left: the blaze
+      impact effect (no `Level.CreateEffect` here), the multiplayer mirror,
+      HealWound's extra term for a player of class 7 (an undecompiled
+      stats-block vtable slot), and the monster-only predicate at target
+      vtable `+0x170` the impact sweep rejects on (the port uses "still
+      alive", which is what the surrounding code means by it).
 
 ## Next milestones (not yet started)
 
 Roughly in priority order for reaching "actually playable," not commitments:
 
-- **The rest of a real cast (`FUN_10046764`).** M43 decompiled it but
-  reproduces only its effect: the real cast deducts magicka, applies the
-  self-targeted spells inline (heals, cures, buffs, and the periodic
-  channel's regeneration kinds 6 and 7 -- the two `WORLD_MODEL.md` records
-  as "set somewhere else, not yet found"), and for offensive spells spawns
-  a 0x198-byte projectile whose *impact* is what calls the status
-  dispatcher. This port calls `HitTarget()` directly on both sides
-  instead, so spells are hitscan and the self-targeted half of the spell
-  list does nothing. A projectile system is the missing piece.
-  **M47 found the same machinery reached from the weapon side**: the ranged
-  branch of the player's attack function (`FUN_100425bc`) spawns one via
-  `FUN_10005730` with entity type id 598 (thrown) or 599 (bow), after a
-  five-pass target search (`FUN_1001afb0` at 0x68/0x7c/0x90/0xa4/0xb8, with
-  a 0x180 yaw cutoff) and a per-weapon spread roll. Whoever picks this up
-  gets two independent call sites into the same system.
 - **What is inside a save file's members** -- M40 decoded the container
   (an archive of named blobs, `SAVE_FORMAT.md`) and implemented it, but
   not the serialization within each member: how `character.dat` lays out

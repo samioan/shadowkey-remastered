@@ -51,6 +51,8 @@
 #include "simkin_bindings/player_executable.h"
 #include "simkin_bindings/popup_menu_executable.h"
 #include "simkin_bindings/slider_executable.h"
+#include "simkin_bindings/spell_cast.h"
+#include "simkin_bindings/spell_projectile.h"
 #include "simkin_bindings/table_executable.h"
 #include "simkin_bindings/text_area_executable.h"
 #include "simkin_bindings/weapon_viewmodel.h"
@@ -1197,6 +1199,21 @@ int main(int argc, char** argv) {
     // weapon_viewmodel.h's comment for the real RE ground truth this
     // recreates.
     sk_bindings::WeaponViewmodel gameWeaponViewmodel;
+    // M48: live spell projectiles -- see simkin_bindings/spell_projectile.h.
+    // Every offensive spell, the player's and a creature's alike, now goes
+    // through one of these instead of touching its target directly.
+    std::vector<sk_bindings::SpellProjectile> gameProjectiles;
+    // M48: the player's own cast cooldown (FUN_10046680), which is the only
+    // side of the cast the gate applies to.
+    sk_bindings::SpellCastCooldown gameCastCooldown;
+    // M48: the engine's 1/256-second clock (`level+0x460`), which the cast
+    // cooldown is compared against. Advanced by the same per-frame delta
+    // every other timer in this port uses.
+    int gameClockUnits = 0;
+    // M48: the player's second periodic channel, watched for a Sanctuary
+    // channel's 4 -> 0 expiry, which is what stamps its own re-cast
+    // cooldown (`player+0xfc8`).
+    int gamePlayerPeriodicKind = 0;
     // M26: real loading-screen state -- see RenderLoadingScreen()'s own
     // comment. Active for a fixed run of ticks after stack.
     // gameStartRequested() fires (both the very first zone entered and
@@ -1259,6 +1276,19 @@ int main(int argc, char** argv) {
             gameWeaponViewmodel.swingAccum = 0;
             gameWeaponViewmodel.swapTimer = 0;
             gameWeaponViewmodel.currentSprite = -1;
+        }
+        // M48: same hazard, same tick. A projectile holds the spell script
+        // whose HitTarget() its impact runs -- and a *scroll* destroys
+        // itself the moment it is read, while its projectile is still in
+        // the air. Drop those shots rather than let the purge free the
+        // script out from under them.
+        if (!gameProjectiles.empty()) {
+            gameProjectiles.erase(
+                std::remove_if(gameProjectiles.begin(), gameProjectiles.end(),
+                                [](const sk_bindings::SpellProjectile& shot) {
+                                    return shot.spell && shot.spell->markedForRemoval();
+                                }),
+                gameProjectiles.end());
         }
         stack.player().PurgeRemovedItems();
         // M27: reaps one-shot SFX voices that finished playing -- see
@@ -1396,6 +1426,10 @@ int main(int argc, char** argv) {
                 gameTraps.clear();
                 gameTrapCandidates.clear();
                 gamePickups.clear();
+                // M48: a projectile holds raw pointers to its caster and to
+                // the spell script that owns its HitTarget handler, both of
+                // which die with the zone.
+                gameProjectiles.clear();
                 // M18: every live object this loop is about to (re)create
                 // is stale after this point -- drop any name -> object
                 // registrations from the previous zone before repopulating
@@ -2200,6 +2234,104 @@ int main(int argc, char** argv) {
                 // vanish.
                 stack.player().TickStatusEffects(sk_bindings::kAiFrameDeltaUnits);
 
+                // M48: the engine's own 1/256s clock (`level+0x460`), which
+                // the cast cooldown is compared against.
+                gameClockUnits += sk_bindings::kAiFrameDeltaUnits;
+                // M48: a Sanctuary channel expiring is what stamps its own
+                // re-cast cooldown -- the real write is at the tail of
+                // FUN_10049780, guarded on the owner being the player and
+                // the equipped item being typeId 4028.
+                {
+                    const int kind = stack.player().actorStats().periodicKind();
+                    if (gamePlayerPeriodicKind ==
+                            sk_bindings::ActorStats::kPeriodicSanctuaryTimer &&
+                        kind != sk_bindings::ActorStats::kPeriodicSanctuaryTimer) {
+                        gameCastCooldown.sanctuaryTime = gameClockUnits;
+                    }
+                    gamePlayerPeriodicKind = kind;
+                }
+
+                // M48: the world-side half of a real cast. Everything that
+                // happens to the *caster* has already happened inside
+                // CastSpell() by the time this runs; what is left is the
+                // projectile, AzraWrath's area damage, DaedricWeapon's
+                // conjured sword and a scroll's own destruction.
+                //
+                // The one behavioural change worth calling out: casting no
+                // longer needs a target. The real cast never looks for one
+                // -- it fires a projectile down the caster's facing and
+                // lets the flight find something -- which is why this is
+                // the fix for spells having been hitscan.
+                auto applyCastResult = [&](sk_bindings::ItemExecutable* spell,
+                                           sk_bindings::SpellActor* caster,
+                                           const sk_bindings::SpellCastResult& cast, float castX,
+                                           float castY, float castZ, float castYaw,
+                                           float castPitch) {
+                    if (cast.soundId >= 0) {
+                        // The two slots every shipped `*_sounds.txt` names:
+                        // 0x54 pl_cast_fire.wav, 0x57 pl_cast_powerup.wav.
+                        const sk::Sound* sfx = soundArchive.GetSound(cast.soundId);
+                        if (sfx) audioEngine.PlaySfx(*sfx);
+                    }
+                    if (cast.projectileSprite != 0) {
+                        gameProjectiles.push_back(sk_bindings::SpawnSpellProjectile(
+                            spell, caster, static_cast<int>(castX), static_cast<int>(castY),
+                            static_cast<int>(castZ),
+                            sk_bindings::EngineYawFromPortYaw(castYaw),
+                            sk_bindings::EngineAngleFromRadians(castPitch), cast.projectileSprite,
+                            cast.impactDamage));
+                    }
+                    if (cast.areaDamage > 0) {
+                        // FUN_1004720c: every creature in the level within
+                        // 12000 units, the caster excluded. No sightline
+                        // test and no facing test -- the real loop walks
+                        // the level's whole creature list.
+                        for (MonsterInstance& victim : gameMonsters) {
+                            if (victim.script.get() == caster) continue;
+                            if (!victim.script->alive() || victim.script->destroyed()) continue;
+                            const float adx = victim.x - castX, ady = victim.y - castY;
+                            if (std::sqrt(adx * adx + ady * ady) >
+                                static_cast<float>(sk_bindings::kAreaSpellRange)) {
+                                continue;
+                            }
+                            victim.script->ApplyDamage(cast.areaDamage);
+                        }
+                    }
+                    if (cast.conjureTypeId != 0) {
+                        // DaedricWeapon. The real branch searches the
+                        // caster's inventory for typeId 4037 first and only
+                        // creates one if it is missing -- reproduced
+                        // through the same Level.CreateEntity path a script
+                        // would use.
+                        if (!stack.player().HasItemOfTemplate(cast.conjureTypeId)) {
+                            std::unique_ptr<sk_bindings::ItemExecutable> conjured =
+                                stack.level().CreateItem(cast.conjureTypeId, false);
+                            if (conjured) stack.player().AddItem(std::move(conjured));
+                        }
+                    }
+                    if (cast.consumeScroll) spell->MarkForRemoval();
+                };
+
+                // The cast itself, for the player's side: the cooldown gate,
+                // FUN_10046764, and then the world half above.
+                auto runSpellCast = [&](sk_bindings::ItemExecutable* spell,
+                                        sk_bindings::SpellActor* caster, float castX, float castY,
+                                        float castZ, float castYaw, float castPitch) -> bool {
+                    if (!spell || !caster) return false;
+                    if (spell->spellTypeId() == 0) return false;  // not a spell at all
+                    if (caster->isPlayerActor() &&
+                        !sk_bindings::SpellCastAllowed(*spell, gameCastCooldown, gameClockUnits)) {
+                        return false;
+                    }
+                    sk_bindings::SpellCastResult cast = sk_bindings::CastSpell(*spell, *caster);
+                    if (!cast.cast) return false;
+                    if (caster->isPlayerActor()) {
+                        sk_bindings::NoteSpellCast(gameCastCooldown, gameClockUnits);
+                    }
+                    applyCastResult(spell, caster, cast, castX, castY, castZ, castYaw, castPitch);
+                    return true;
+                };
+
                 for (size_t monsterIndex = 0; monsterIndex < gameMonsters.size(); ++monsterIndex) {
                     MonsterInstance& m = gameMonsters[monsterIndex];
                     const bool wasAliveBeforeTick = m.script->alive();
@@ -2352,7 +2484,19 @@ int main(int argc, char** argv) {
                             // one that sets 75 (every floater, every ghost)
                             // casts about three attacks in four.
                             if (!m.script->RollForMelee()) {
-                                m.script->CastSpellAt(&stack.player());
+                                // M48: the real cast. The creature pays for
+                                // it and applies any self-targeted half
+                                // itself; an offensive spell now leaves the
+                                // muzzle as a projectile aimed along the
+                                // creature's facing, which is what makes a
+                                // caster's spell miss when the player steps
+                                // aside.
+                                sk_bindings::MonsterExecutable::CastAttempt attempt =
+                                    m.script->CastSpellAt(&stack.player());
+                                if (attempt.spell && attempt.result.cast) {
+                                    applyCastResult(attempt.spell, m.script.get(), attempt.result,
+                                                     m.x, m.y, m.z, m.facingYaw, 0.0f);
+                                }
                             } else {
                                 int dmg = sk_bindings::RollDamage(
                                     m.script->attack(), stack.player().defense(),
@@ -2551,6 +2695,77 @@ int main(int argc, char** argv) {
                 }
                 gameDiedFromEffect.clear();
 
+                // M48: fly every live spell projectile one tick. This is
+                // where a spell actually reaches its target -- the impact
+                // runs the spell script's own HitTarget(), which is what
+                // calls DoAttackRoll and therefore the whole status-effect
+                // dispatcher. Before this the cast called HitTarget()
+                // directly and spells were hitscan.
+                if (!gameProjectiles.empty()) {
+                    std::vector<sk_bindings::ProjectileTarget> projectileTargets;
+                    projectileTargets.reserve(gameMonsters.size() + 1);
+                    for (MonsterInstance& victim : gameMonsters) {
+                        if (!victim.script->alive() || victim.script->destroyed()) continue;
+                        sk_bindings::ProjectileTarget entry;
+                        entry.actor = victim.script.get();
+                        entry.script = victim.script.get();
+                        entry.x = static_cast<int>(victim.x);
+                        entry.y = static_cast<int>(victim.y);
+                        // The real half-extents come off the target's own
+                        // vtable (+0x44 / +0x48). This port has no per-model
+                        // bounds, so both use the projectile's own radius --
+                        // the same 200 the engine gives the projectile.
+                        entry.halfWidth = sk_bindings::kProjectileRadius;
+                        entry.halfDepth = sk_bindings::kProjectileRadius;
+                        projectileTargets.push_back(entry);
+                    }
+                    {
+                        // The player is a legal target throughout -- the
+                        // sweep's filter is "a creature *or* the player",
+                        // which is what lets a caster's fireball hit you.
+                        sk_bindings::ProjectileTarget self;
+                        self.actor = &stack.player();
+                        self.script = &stack.player();
+                        self.x = static_cast<int>(gameCamera.x);
+                        self.y = static_cast<int>(gameCamera.y);
+                        self.halfWidth = sk_bindings::kProjectileRadius;
+                        self.halfDepth = sk_bindings::kProjectileRadius;
+                        projectileTargets.push_back(self);
+                    }
+                    auto projectileBlocked = [&](int tileX, int tileY) {
+                        if (!gameZone || !gameZone->InBounds(tileX, tileY)) return false;
+                        const sk::ZmpCell& cell = gameZone->CellAt(tileX, tileY);
+                        // `((tile[1] & 0x1c) == 4) || (tile[0] & 2)`.
+                        return cell.IsWall() || (cell.blockFlags & 0x1c) == 0x04;
+                    };
+                    for (sk_bindings::SpellProjectile& shot : gameProjectiles) {
+                        sk_bindings::ProjectileImpact impact = sk_bindings::TickSpellProjectile(
+                            shot, gameZone->width(), gameZone->height(), projectileBlocked,
+                            projectileTargets);
+                        if (!impact.hit || !impact.target) continue;
+                        // The impact may have killed a creature; that owes
+                        // exactly the same handling a killing blow does.
+                        for (MonsterInstance& victim : gameMonsters) {
+                            if (victim.script.get() != impact.target) continue;
+                            if (victim.script->alive()) break;
+                            victim.script->InvokeOnKilled();
+                            spawnLoot(victim);
+                            if (gameZoneScript) gameZoneScript->NotifyKilled(victim.typeId);
+                            if (victim.encounter) {
+                                victim.encounter->NoteDied(victim.encounterRegion);
+                                victim.encounter = nullptr;
+                            }
+                            break;
+                        }
+                    }
+                    gameProjectiles.erase(
+                        std::remove_if(gameProjectiles.begin(), gameProjectiles.end(),
+                                        [](const sk_bindings::SpellProjectile& shot) {
+                                            return !shot.alive;
+                                        }),
+                        gameProjectiles.end());
+                }
+
                 // Player attack -- UseLeftAction/UseRightAction (Key7/
                 // Key5, real decoded default bindings, previously unused)
                 // swing/fire whichever hand's weapon is equipped (bare-
@@ -2582,6 +2797,22 @@ int main(int argc, char** argv) {
                     // reasoning M20 already established for ranged
                     // weapons reusing them over a "fire" key.
                     bool isWeapon = handItem && handItem->itemType() == sk_bindings::kItemTypeWeapon;
+                    // M48: a spell leaves here entirely. The real cast
+                    // (`FUN_10046764`) never looks for a target -- it
+                    // charges the caster, applies its self-targeted half,
+                    // and launches a projectile down the caster's facing.
+                    // So casting no longer needs anything in range, and a
+                    // spell that is all buff (Energize, Sanctuary,
+                    // HealWound, ...) finally does something when there is
+                    // nothing to shoot at, which is the larger half of the
+                    // bug this closes. The invented kSpellRange targeting
+                    // cone goes with it; a spell's real reach is its
+                    // projectile's twelve-tile flight.
+                    if (handItem && !isWeapon && handItem->spellTypeId() != 0) {
+                        runSpellCast(handItem, &stack.player(), gameCamera.x, gameCamera.y,
+                                      gameCamera.z, gameCamera.yaw, gameCamera.pitch);
+                        return;
+                    }
                     float range =
                         handItem ? (isWeapon ? static_cast<float>(handItem->range()) : kSpellRange)
                                  : kMeleeRange;

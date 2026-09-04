@@ -109,7 +109,34 @@ int PlayerExecutable::armorRating() const {
 // to the creature side, because it is literally the same code on the same
 // class; the only difference is which DoDamage it routes through.
 void PlayerExecutable::TickStatusEffects(int deltaUnits) {
-    m_Stats.Tick(deltaUnits, [this](int damage) { ApplyDamage(damage); });
+    // M48 adds the second callback: FUN_10049780's periodic kinds 6 and 7,
+    // which `spells\Energize.s` and `spells\AzraSustenance.s` arm. Both add
+    // the actor's own level once a second -- kind 6 to fatigue with no
+    // clamp at all, kind 7 to health through the clamping setter.
+    m_Stats.Tick(
+        deltaUnits, [this](int damage) { ApplyDamage(damage); },
+        [this](int kind) {
+            if (kind == ActorStats::kPeriodicFatigueRegen) {
+                m_Fatigue += m_Level;  // the real branch has no ceiling here
+            } else if (kind == ActorStats::kPeriodicHealthRegen) {
+                SetHealth(m_Health + m_Level);
+            }
+        });
+}
+
+bool PlayerExecutable::HasItemOfTemplate(int typeId) const {
+    for (const std::unique_ptr<ItemExecutable>& item : m_Inventory) {
+        if (item && item->templateId() == typeId) return true;
+    }
+    return false;
+}
+
+bool PlayerExecutable::actorHasSpellCostDiscount() const {
+    const ItemExecutable* hands[] = {m_LeftItem, m_RightItem};
+    for (const ItemExecutable* item : hands) {
+        if (item && item->templateId() == 0x328) return true;
+    }
+    return false;
 }
 
 void PlayerExecutable::ApplyDamage(int amount) {

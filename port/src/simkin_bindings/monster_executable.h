@@ -45,6 +45,7 @@
 
 #include "simkin_bindings/actor_stats.h"
 #include "simkin_bindings/spell_actor.h"
+#include "simkin_bindings/spell_cast.h"
 #include "skScriptedExecutable.h"
 
 class skInterpreter;
@@ -401,6 +402,15 @@ public:
     void SetActorAiPackageTimed(int package, int durationUnits) override {
         SetAiPackageTimed(package, durationUnits);
     }
+    // M48: a creature owns the same two pools the player does, because it
+    // owns the same stats block -- FUN_10046764 deducts a creature's
+    // magicka exactly as it deducts the player's. It just never *gates* on
+    // it, which is what lets the 32 shipped caster scripts work while none
+    // of them sets a pool at all: every creature starts (and stays) at 0.
+    int actorMagicka() const override { return m_Magicka; }
+    void SetActorMagicka(int value) override { m_Magicka = value < 0 ? 0 : value; }
+    int actorFatigue() const override { return m_Fatigue; }
+    void SetActorFatigue(int value) override { m_Fatigue = value < 0 ? 0 : value; }
 
     // ---- M43: the real creature spell table (monster+0x30c..+0x32c) ----
     //
@@ -461,12 +471,23 @@ public:
     // first non-Blind spell it has, rather than wasting the turn.
     ItemExecutable* ChooseSpell(bool targetBlinded) const;
 
-    // The whole spell half of the attack, host side: choose, then run the
-    // spell's own HitTarget() at `target`. Returns true if a spell was
-    // cast. `FUN_10046680`'s per-spell cooldown is deliberately not
-    // reproduced -- it applies only when the owner is the player
-    // (`vtable+0xcc`), so a creature-owned spell is never gated by it.
-    bool CastSpellAt(SpellActor* target);
+    // The whole spell half of the attack, host side: choose a spell, then
+    // run the real cast (`FUN_10046764`, spell_cast.h) on it.
+    // `FUN_10046680`'s cooldown is deliberately not consulted -- it applies
+    // only when the owner is the player (`vtable+0xcc`), so a
+    // creature-owned spell is never gated by it, which is the whole reason
+    // the AI can cast on every attack cadence.
+    //
+    // M48: this used to call the spell's `HitTarget()` straight at the
+    // target, which is what made a creature's spell hitscan. It no longer
+    // touches the target at all -- an offensive spell now returns a
+    // projectile for the caller to launch, and a self-targeted one has
+    // already applied itself to the creature by the time this returns.
+    struct CastAttempt {
+        ItemExecutable* spell = nullptr;  // null when the AI had nothing to cast
+        SpellCastResult result;
+    };
+    CastAttempt CastSpellAt(SpellActor* target);
 
     // SetPlaySpellCasting -> `monster+0x2bd`: play sound id 6 on casting.
     // Every shipped script that sets it is a caster.
@@ -620,6 +641,10 @@ private:
     int m_AttackRange = 0x6a4;
     int m_Mob = 0;
     int m_Level = 0;  // M30: SetLevel/GetLevel, read by real spell damage formulas
+    // M48: the stats block's +0x2e / +0x2c. No shipped creature script sets
+    // either, so both stay 0 and every deduction clamps straight back.
+    int m_Magicka = 0;
+    int m_Fatigue = 0;
     // M32: see the AI package block above. Defaults match the real actor
     // constructor (FUN_100815e0): package -1, timers clear.
     int m_AiPackage = kAiAsleep;
