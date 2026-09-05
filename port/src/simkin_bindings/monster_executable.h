@@ -135,8 +135,10 @@ public:
     // from defense, HarmArmor from armor). Clamped at 0 -- the real stat
     // setters are signed shorts, but a negative attack has no meaning in
     // this port's damage roll.
-    int attack() const { return (std::max)(0, m_Attack + statModifier(kStatAttack)); }
-    int defense() const { return (std::max)(0, m_Defense + statModifier(kStatDefense)); }
+    // M58: the effect applier writes these fields through the way the engine
+    // does, so there is nothing left to fold in here -- just the clamp.
+    int attack() const { return (std::max)(0, m_Attack); }
+    int defense() const { return (std::max)(0, m_Defense); }
     // M49: SpellActor's ranged-combat ratings -- see spell_actor.h. A
     // creature's arrow and the player's are resolved by the same code.
     int actorAttackRating() const override { return attack(); }
@@ -146,7 +148,7 @@ public:
     int baseDefense() const { return m_Defense; }
     int damageMin() const { return m_DamageMin; }
     int damageMax() const { return m_DamageMax; }
-    int armorValue() const { return (std::max)(0, m_ArmorValue + statModifier(kStatArmor)); }
+    int armorValue() const { return (std::max)(0, m_ArmorValue); }
     int baseArmorValue() const { return m_ArmorValue; }
     // M31 (decompiled): SetChaseRadius/SetAttackRange do NOT store a
     // linear radius -- the AI compares them against
@@ -281,9 +283,8 @@ public:
     static constexpr int kEffectFlagPoison = ActorStats::kEffectFlagPoison;
     static constexpr int kPeriodicBurn = ActorStats::kPeriodicBurn;
 
-    void ApplyStatModifier(int statIndex, int delta, int durationSeconds) {
-        m_Stats.ApplyStatModifier(statIndex, delta, durationSeconds);
-    }
+    // M58: a `Timed`/`Increment` AddEffect, which is all this ever was.
+    void ApplyStatModifier(int statIndex, int delta, int durationSeconds);
     void ApplyEffectFlag(int flagBit, int dotKind, int durationSeconds) {
         m_Stats.ApplyEffectFlag(flagBit, dotKind, durationSeconds);
     }
@@ -412,6 +413,10 @@ public:
     bool isPlayerActor() const override { return false; }
     bool isMonsterActor() const override { return true; }
     ActorStats& actorStats() override { return m_Stats; }
+    // M58: the creature's half of FUN_1004ad40's field map. Shorter than the
+    // player's only because a creature script never sets an attribute --
+    // the engine's stats block has all of them either way.
+    int* EffectStatSlot(int stat) override;
     int actorLevel() const override { return m_Level; }
     int actorHealth() const override { return m_CurrentHealth; }
     void SetActorHealth(int value) override;

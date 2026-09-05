@@ -243,6 +243,9 @@ public:
     bool isPlayerActor() const override { return true; }
     bool isMonsterActor() const override { return false; }
     ActorStats& actorStats() override { return m_Stats; }
+    // M58: FUN_1004ad40's field map -- see spell_actor.h. The player has
+    // every field the stats block has, which is why this is the long one.
+    int* EffectStatSlot(int stat) override;
     int actorLevel() const override { return m_Level; }
     int actorHealth() const override { return m_Health; }
     void SetActorHealth(int value) override { SetHealth(value); }
@@ -274,12 +277,13 @@ public:
     // armorValue() already give a creature, now that a creature can cast
     // Drain, Weakness, FeebleBlade, Blind, Disease and HarmArmor at the
     // player. Clamped at 0.
-    int attack() const {
-        return (std::max)(0, m_BaseAttack + m_Stats.statModifier(ActorStats::kStatAttack));
-    }
-    int defense() const {
-        return (std::max)(0, m_BaseDefense + m_Stats.statModifier(ActorStats::kStatDefense));
-    }
+    // M58: no longer `base + modifier`. The effect applier writes the field
+    // itself, exactly as the engine's does, so there is one number here and
+    // a script's own GetAttack()/GetDefense() see the same one. Still
+    // clamped at 0 -- the real setters are signed shorts and a debuff can
+    // take either below zero, which the damage roll has no meaning for.
+    int attack() const { return (std::max)(0, m_BaseAttack); }
+    int defense() const { return (std::max)(0, m_BaseDefense); }
     // M49: SpellActor's ranged-combat ratings, which an arrow's impact
     // resolves through -- the same two numbers melee already uses.
     int actorAttackRating() const override { return attack(); }
@@ -424,6 +428,16 @@ private:
     // stored number. Same fixed-placeholder footing as the rest of the
     // block (see the class comment); the *formulas* are recovered.
     int m_Spellcast = 50, m_MagicResistance = 0;
+    // M58: the last four stats-block fields the effect table can reach that
+    // this port had no storage for. `m_ArmorValue` is stats+0x0c, the
+    // player's *own* armour number -- separate from the equipped-item sum
+    // GetArmorRating() walks, and the one AddEffect(ArmorValue, ...) and
+    // every HarmArmor move; armorRating() adds the two. `m_HealthBonus` is
+    // stats+0x12, which only the derived-stat recompute reads.
+    int m_ArmorValue = 0;
+    int m_HealthBonus = 0;
+    int m_DamageMin = 0, m_DamageMax = 0;
+    int m_ExpWorth = 0;
     // M43: the player's own stats block (actor+0x3ac) -- see actor_stats.h.
     ActorStats m_Stats;
 

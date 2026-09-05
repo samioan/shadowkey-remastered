@@ -4622,6 +4622,129 @@ algorithms.
       players as 2x2 markers, on the same footing as every other
       Bluetooth path in this port.
 
+- [x] **M58 -- the effects system.** `AddEffect` was the largest
+  unhandled native in the shipped corpus: 83 real call sites, 63 on
+  `GetOwner()` and 20 on `GetPlayer()`. The machinery it lands in
+  (`ActorStats`) was already there from M43/M48; what was missing was the
+  script-facing entry point and the effect table behind it. Both are now
+  recovered. New `src/simkin_bindings/effects.{h,cpp}`; smoke test
+  `src/tests/m58_effects_smoke.cpp` (55 checks). **`GetOwner()` coverage
+  goes 64% -> 100%**, `GetPlayer()` 87% -> 88%.
+
+    - **The three enumerations are engine constants, and no `.s` file
+      defines them.** A shipped line reads
+      `AddEffect(Timed, ArmorValue, Increment, 5, 120)`, and `Timed`,
+      `ArmorValue` and `Increment` appear in no script anywhere. They are
+      named integer constants the engine pushes into the interpreter at
+      startup, through the same `SIMKIN_MakeIntAtom` +
+      `SIMKIN_MakeStringAtom` + `SIMKIN_RegisterConstant` shape
+      `SIMKIN_BRIDGE.md` first found for `IPT_*`. Recovering them is
+      mechanical: pair each int atom with the string atom that follows
+      and resolve the literal. **59 constants**, from two registration
+      runs -- `GameEngine_FirstTickBootstrap` into the one global
+      interpreter, and `FUN_10073d3c` (the menu base class, which gives
+      every menu object its own interpreter) into that one.
+
+    - **The stat enumeration is the stats block's own field map**, and it
+      confirms M43 from a completely independent direction:
+      `Attack` = 1, `Defense` = 2, `ArmorValue` = 7 are exactly
+      `ActorStats::StatIndex`'s three, which M43 had inferred from three
+      unrelated dispatcher cases.
+
+    - **`Strength` is not the strength field.** `FUN_1004ad40` case 9
+      writes stats+0x10, which `GetStrengthBonus` reads, while
+      `GetStrength` reads stats+0x14. Every other attribute in the table
+      writes the attribute proper. So the six attribute shrines and every
+      "gain 5 Strength" herb move a *bonus* the strength readout never
+      shows.
+
+    - **Three durations, three different mechanisms.** `Permanent` (3)
+      applies the change and returns -- no node, nothing to expire, which
+      is what the shrines use. `Timed` (1) is strongest-wins per stat: a
+      weaker new effect is dropped outright, a stronger one *undoes* the
+      old before applying itself. `Equipped` (2) stacks in a second list.
+      A node is 0x18 bytes and stores the magnitude for an `Increment`
+      but the field's *previous value* for a `Set` or `Decrement`, which
+      is what lets one expiry routine undo either.
+
+    - **This port now writes stats through, as the engine does.** M43
+      modelled a timed effect as a modifier a reader added to a base
+      value; the engine writes the field and remembers how to put it
+      back. Switching to the real model is what makes `Permanent` (which
+      has no node to consult) work at all, and it means a script's own
+      `GetAttack()` and the port's `attack()` are the same number.
+      `statModifier()` survives as bookkeeping.
+
+    - **`FUN_10049698`, the derived-stat recompute**, is new here too:
+      `maxHealth = healthBonus + (strength + endurance) / 2`,
+      `maxFatigue = will + strength + endurance`, `maxMagicka` from
+      intelligence. All three are assignments, so a script's
+      `SetMaxHealth` survives only until the next attribute change -- and
+      the `strength` it reads is the +0x14 one the effect table cannot
+      reach. Six of the eight attributes tail into it; `Strength` and
+      `Speed` do not.
+
+    - **Two shipped potions are broken, and the corpus says so.**
+      `items/shadowseed.s` reads as "+10 to all eight attributes"; its
+      fifth line names `Perception`, which neither registration run
+      defines. An unresolved bare identifier is not zero in this dialect
+      -- it raises `Field Perception not found` and aborts the handler.
+      So four attributes land, three never run, and neither does the
+      `PlaySound` or the `DestroyObject` after them: the seed is not even
+      consumed. `items/thunder_herb.s` has the same bug in its *first*
+      line (`Damage`), so it does nothing whatsoever. Both are pinned in
+      the test, running the real scripts.
+
+    - **`RemoveEffect` is broken in the engine.** The dispatcher case
+      finds the node and calls only the *free* -- neither of the two
+      things the engine's own internal remover (`FUN_1004bd24`) does
+      either side of it: it never unlinks the node from its list, and
+      never undoes the stat change. No shipped script calls it, which is
+      presumably why nobody noticed. Reproduced as "drop the node, leave
+      the stat", with the correct remover kept alongside for the callers
+      that use it.
+
+    - **Three more `mvn`/`and`/`mvn` clears where `bic` was meant.**
+      `AddEffect`'s `Blindness` arm, `SetPoisoned` and `SetDiseased` all
+      write `flags = ~(~flags & BIT)` on their clear path, which turns on
+      every flag *except* that bit -- and, from a state where the bit was
+      already set, every flag including it. `SetBlindness` is the only
+      one of the four written correctly, and it is the only one the
+      corpus calls (`cure_blindness_balm.s`). Reproduced.
+
+    - **`ItemUsed` is a cooldown marker, not a stat.** Two of the stat
+      switch's cases (30 `ItemUsed`, 31 `MonsterAttackBonus`) exist with
+      empty bodies: a node with a name and a timer and no stat behind it.
+      `twi_crystals.s` is the whole idiom and the corpus's only
+      `FindStringEffect` call site -- "if there is no effect named
+      *crystals* on ItemUsed, do the thing and set one for 60 seconds."
+
+    - **What Sanctuary's periodic channel was for.** M48 could only say
+      kind 4 "has no tick behaviour at all -- it is purely a duration."
+      `FUN_10049e78`, the stats block's own DoDamage, opens with
+      `if (stats+0x7c == 4) return` -- total damage immunity. Kind 9
+      (which `snowray_powder.s` arms) skips damage whose source is a
+      creature's melee. Both are now wired; the port's two
+      `ApplyDamage` entry points carry the kind-4 gate.
+
+    - **The `Equipped` duration is a feature that did not ship.** Nothing
+      pushes onto the second list, no shipped script passes `Equipped`,
+      and the pair of functions that would remove such a node
+      (`FUN_1004b3c0`/`FUN_1004b4f0`) have no callers in the image --
+      and disagree with each other anyway, one searching the timed list
+      and the other unlinking from the equipped one.
+
+    - **A correction to three constant families.** `AR_*` and `WR_*` were
+      carried in `game_constants.cpp` as "real identifiers, unconfirmed
+      values" with sequential ordinals. They are **bit flags**:
+      `AR_Light` 2, `AR_Medium` 4, `AR_Heavy` 8; the nine weapon ratings
+      one bit each from `WR_Melee` 4 to `WR_EnchantedBlade` 1024. Two
+      more, `SR_Small` 8 and `SR_Medium` 16, the port never had. And
+      `IPT_Consumable` is registered as **4** globally but as **0** by
+      the per-menu constructor -- where 0 is `IPT_Misc`, so the same
+      comparison means different things in a menu script and an item
+      script. This port takes the global 4.
+
 ## Next milestones (not yet started)
 
 Roughly in priority order for reaching "actually playable," not commitments:
@@ -4630,14 +4753,6 @@ M56's coverage tool
 (`shadowkey/ghidra/scripts/analyze_port_native_coverage.py`) now ranks
 these by real call-site count instead of by guess -- re-run it rather
 than trusting this list to stay current.
-
-- **The effects system.** `AddEffect` is 83 real call sites (20 on
-  `GetPlayer()`, 63 on `GetOwner()`), the single largest remaining
-  unhandled native, plus `RemoveEffect`, `SetSpellEffect` (7),
-  `SetBlindness`, `FindStringEffect`, `RemoveEnchantments`. The
-  `ActorStats` timed-modifier machinery M43/M48 built is the place it
-  lands; what is missing is the script-facing entry point and the effect
-  table behind it.
 
 - **Merchants.** `SetMerchant` (10), `BuyFromMerchant` (9),
   `SellToMerchant` (9), `VisitStore` (5), `GetProductCount` (4),

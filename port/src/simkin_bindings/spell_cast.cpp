@@ -3,6 +3,8 @@
 #include <algorithm>
 #include <cstdint>
 
+#include "simkin_bindings/effects.h"
+
 namespace sk_bindings {
 
 namespace {
@@ -156,7 +158,8 @@ SpellCastResult CastSpell(ItemExecutable& spell, SpellActor& caster) {
             // RaiseStrength: stat 9 (strength -- outside the three the
             // status dispatcher touches, so this port stores it without a
             // consumer), +magnitude*5 for magnitude*10 seconds.
-            stats.ApplyStatModifier(9, magnitude * 5, magnitude * 10);
+            AddEffect(caster, kDurationTimed, kEffectStatStrength, kOpIncrement,
+                      magnitude * 5, magnitude * 10);
             break;
         case 4013: {
             // BodyToMind: pour all remaining fatigue into magicka. The real
@@ -174,8 +177,8 @@ SpellCastResult CastSpell(ItemExecutable& spell, SpellActor& caster) {
             // CureDisease: remove the two modifiers Disease applies (named
             // "DISEASE" and "DISEASE_DEF" in the real call), then clear the
             // disease flag.
-            stats.RemoveStatModifier(ActorStats::kStatAttack);
-            stats.RemoveStatModifier(ActorStats::kStatDefense);
+            RemoveNamedEffect(caster, kEffectStatAttack, kEffectNameDisease);
+            RemoveNamedEffect(caster, kEffectStatDefense, kEffectNameDiseaseDefense);
             stats.ClearEffectFlag(ActorStats::kEffectFlagDisease);
             break;
         case 4015:
@@ -195,19 +198,22 @@ SpellCastResult CastSpell(ItemExecutable& spell, SpellActor& caster) {
             break;
         case 4022:
             // Frenzy: +magnitude attack for magnitude*5 seconds.
-            stats.ApplyStatModifier(ActorStats::kStatAttack, magnitude, magnitude * 5);
+            AddEffect(caster, kDurationTimed, kEffectStatAttack, kOpIncrement, magnitude,
+                      magnitude * 5);
             break;
         case 4026:
             // RemoveEnchantment: strip the debuffs, then clear blindness
             // (FUN_1004ba84(stats, 0, 0)).
-            stats.RemoveNegativeStatModifiers();
+            RemoveEnchantments(caster);
             stats.ClearEffectFlag(ActorStats::kEffectFlagBlind);
             break;
         case 4027:
             // Righteousness: +magnitude to attack *and* armour, both for
             // magnitude+5 seconds. The only branch that applies two.
-            stats.ApplyStatModifier(ActorStats::kStatAttack, magnitude, magnitude + 5);
-            stats.ApplyStatModifier(ActorStats::kStatArmor, magnitude, magnitude + 5);
+            AddEffect(caster, kDurationTimed, kEffectStatAttack, kOpIncrement, magnitude,
+                      magnitude + 5);
+            AddEffect(caster, kDurationTimed, kEffectStatArmorValue, kOpIncrement, magnitude,
+                      magnitude + 5);
             break;
         case 4028:
             // Sanctuary: a bare kind-4 duration, magnitude*5 seconds.
@@ -216,7 +222,8 @@ SpellCastResult CastSpell(ItemExecutable& spell, SpellActor& caster) {
             break;
         case 4029:
             // Shield: +magnitude*2 armour for magnitude*10 seconds.
-            stats.ApplyStatModifier(ActorStats::kStatArmor, magnitude * 2, magnitude * 10);
+            AddEffect(caster, kDurationTimed, kEffectStatArmorValue, kOpIncrement,
+                      magnitude * 2, magnitude * 10);
             break;
         case 4038:
             // AzraWrath: magnitude*4 damage to every creature in the level

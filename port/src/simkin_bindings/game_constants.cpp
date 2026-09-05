@@ -1,5 +1,6 @@
 #include "simkin_bindings/game_constants.h"
 
+#include "simkin_bindings/effects.h"
 #include "skInterpreter.h"
 #include "skRValue.h"
 #include "skString.h"
@@ -11,29 +12,20 @@ void RegisterGameConstants(skInterpreter& interpreter) {
         interpreter.addGlobalVariable(skString(name), skRValue(value));
     };
 
-    add("IPT_Misc", kItemTypeMisc);
-    add("IPT_Weapon", kItemTypeWeapon);
-    add("IPT_Spell", kItemTypeSpell);
-    add("IPT_Armor", kItemTypeArmor);
-    add("IPT_Consumable", kItemTypeConsumable);
-
-    // Armor weight class -- see game_constants.h's header comment: real
-    // identifiers, unconfirmed values (nothing in this port reads them
-    // back, only stores/round-trips whatever a script assigns).
-    add("AR_Light", 0);
-    add("AR_Medium", 1);
-    add("AR_Heavy", 2);
-
-    // Weapon damage/handling category -- same caveat as AR_* above.
-    add("WR_Dagger", 0);
-    add("WR_ShortBlade", 1);
-    add("WR_LongBlade", 2);
-    add("WR_Axe", 3);
-    add("WR_Blunt", 4);
-    add("WR_Melee", 5);
-    add("WR_LightBow", 6);
-    add("WR_MediumBow", 7);
-    add("WR_EnchantedBlade", 8);
+    // M58: every named integer constant the engine registers, recovered from
+    // the two `SIMKIN_MakeIntAtom` + `SIMKIN_MakeStringAtom` +
+    // `SIMKIN_RegisterConstant` runs (GameEngine_FirstTickBootstrap and the
+    // per-menu FUN_10073d3c). The table, and what each family means, is in
+    // effects.cpp.
+    //
+    // This replaces three hand-written blocks. `IPT_*` was already right;
+    // `AR_*` and `WR_*` were placeholders carrying sequential ordinals and
+    // are now the real **bit flags** (AR_Light 2, AR_Medium 4, AR_Heavy 8;
+    // WR_Melee 4 through WR_EnchantedBlade 1024), and `SR_Small`/`SR_Medium`
+    // are two the port never had at all.
+    for (int i = 0; i < kEffectConstantCount; ++i) {
+        add(kEffectConstants[i].name, kEffectConstants[i].value);
+    }
 
     // M18: `null` isn't a language literal in this Simkin dialect (checked
     // the vendored grammar -- no such keyword), but real scripts (e.g.

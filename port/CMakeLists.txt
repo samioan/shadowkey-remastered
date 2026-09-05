@@ -112,6 +112,7 @@ add_library(sk_bindings STATIC
   src/simkin_bindings/combat.cpp
   src/simkin_bindings/combo_box_executable.cpp
   src/simkin_bindings/door_executable.cpp
+  src/simkin_bindings/effects.cpp
   src/simkin_bindings/floating_sprite_executable.cpp
   src/simkin_bindings/floating_text_executable.cpp
   src/simkin_bindings/game_constants.cpp
@@ -437,3 +438,9 @@ target_link_libraries(player_api_smoke PRIVATE sk_bindings sk_world)
 # player arrow. See src/tests/m57_automap_smoke.cpp.
 add_executable(automap_smoke src/tests/m57_automap_smoke.cpp)
 target_link_libraries(automap_smoke PRIVATE sk_world)
+
+# The effects system: the recovered constant table, AddEffect's three
+# durations, the stat field map and the derived-stat recompute. See
+# src/tests/m58_effects_smoke.cpp.
+add_executable(effects_smoke src/tests/m58_effects_smoke.cpp)
+target_link_libraries(effects_smoke PRIVATE sk_bindings sk_world)

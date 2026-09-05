@@ -569,14 +569,20 @@ port. `OpenMenu` was implemented on Item, Menu and Monster, so any
 name-level check reported it as done; `GetPlayer().OpenMenu(...)`, **332
 real call sites across the corpus**, was soft-failing.
 
-Coverage when M56 started, and after it:
+Coverage when M56 started, after it, and after M58's effects system:
 
-| receiver | call sites | handled before | after |
-|---|---|---|---|
-| `Level` | 1318 | 97% | 97% |
-| `GetOpener()` | 124 | 79% | 79% |
-| `GetOwner()` | 195 | 64% | 64% |
-| **`GetPlayer()`** | **2207** | **55%** | **87%** |
+| receiver | call sites | before M56 | after M56 | after M58 |
+|---|---|---|---|---|
+| `Level` | 1318 | 97% | 97% | 97% |
+| `GetOpener()` | 124 | 79% | 79% | 79% |
+| `GetOwner()` | 195 | 64% | 64% | **100%** |
+| **`GetPlayer()`** | **2207** | **55%** | **87%** | **88%** |
+
+M58 finished `GetOwner()` outright. Its whole residual was one feature:
+`AddEffect` (63 sites on this receiver), `SetSpellEffect` (7) and
+`SetBlindness` (1) — see `PORT_ROADMAP.md`'s M58 entry, and the note
+below on why a coverage tool that reads `skString(...)` literals needed
+telling about it.
 
 `GetPlayer()` is both the busiest receiver in the corpus (more call sites
 than every other named receiver combined) and was by a wide margin the
@@ -592,6 +598,15 @@ Two things worth knowing before reading the tool's output:
   is the implicit-self call into the script's own class and can't be
   attributed by syntax alone — `analyze_simkin_script_corpus.py` is the
   tool for that direction.
+- **A shared handler has to be declared to the tool.** It reads each
+  receiver's implemented set out of one or two named source files. M58's
+  eight Character-stats effect bindings live in a single
+  `effects.cpp` handler that *both* `PlayerExecutable` and
+  `MonsterExecutable` call into — deliberately, since both receivers
+  resolve to the same trie (`0x14db0`) and two copies could drift — so
+  the tool's `main()` now unions `effects.cpp`'s literals into both
+  sets. Any future shared handler needs the same one-line addition, or
+  it reads as unimplemented.
 - **`GetOpener()`'s residual is mostly not native at all.** As the
   factory-call section above already established, roughly half of what
   scripts call on an opener (`LockPicked`, `UseKey`, `OpenChest`,

@@ -6,6 +6,7 @@
 #include "assets/sound_archive.h"
 #include "audio/audio_engine.h"
 #include "simkin_bindings/combat.h"
+#include "simkin_bindings/effects.h"
 #include "simkin_bindings/game_constants.h"
 #include "simkin_bindings/item_executable.h"
 #include "simkin_bindings/level_executable.h"
@@ -115,8 +116,47 @@ int PlayerExecutable::armorRating() const {
     // M43: a creature's HarmArmor lands here now (shadow_tentacle.s and
     // tunnel_wight.s both cast it), so the same timed modifier a creature
     // has always carried applies to the player too. Clamped at 0.
-    total += m_Stats.statModifier(ActorStats::kStatArmor);
+    // M58: it is the stats block's own armour field (stats+0x0c) that both
+    // HarmArmor and AddEffect(ArmorValue, ...) write, so this reads the
+    // field rather than re-deriving a modifier from the effect list.
+    total += m_ArmorValue;
     return total < 0 ? 0 : total;
+}
+
+// M58: FUN_1004ad40's field map for the player -- see spell_actor.h and
+// effects.h. The order is the stats block's own, and the four gaps are
+// stats the engine's switch has no case for either (26..29).
+int* PlayerExecutable::EffectStatSlot(int stat) {
+    switch (stat) {
+        case kEffectStatAttack: return &m_BaseAttack;              // +0x00
+        case kEffectStatDefense: return &m_BaseDefense;            // +0x02
+        case kEffectStatSpellcast: return &m_Spellcast;            // +0x04
+        case kEffectStatMagicResistance: return &m_MagicResistance;// +0x06
+        case kEffectStatMinDamage: return &m_DamageMin;            // +0x08
+        case kEffectStatMaxDamage: return &m_DamageMax;            // +0x0a
+        case kEffectStatArmorValue: return &m_ArmorValue;          // +0x0c
+        case kEffectStatExpWorth: return &m_ExpWorth;              // +0x0e
+        case kEffectStatStrength: return &m_StrengthBonus;         // +0x10 (!)
+        case kEffectStatHealthBonus: return &m_HealthBonus;        // +0x12
+        case kEffectStatStrengthProper: return &m_Strength;        // +0x14
+        case kEffectStatIntelligence: return &m_Intelligence;      // +0x16
+        case kEffectStatAgility: return &m_Agility;                // +0x18
+        case kEffectStatWill: return &m_Will;                      // +0x1a
+        case kEffectStatSpeed: return &m_Speed;                    // +0x1c
+        case kEffectStatEndurance: return &m_Endurance;            // +0x1e
+        case kEffectStatPersonality: return &m_Personality;        // +0x20
+        case kEffectStatLuck: return &m_Luck;                      // +0x22
+        case kEffectStatMaxHealth: return &m_MaxHealth;            // +0x24
+        case kEffectStatMaxFatigue: return &m_MaxFatigue;          // +0x26
+        case kEffectStatMaxMagicka: return &m_MaxMagicka;          // +0x28
+        case kEffectStatHealth: return &m_Health;                  // +0x2a
+        case kEffectStatFatigue: return &m_Fatigue;                // +0x2c
+        case kEffectStatMagicka: return &m_Magicka;                // +0x2e
+        case kEffectStatExperience: return &m_Experience;          // +0x30, 32-bit
+        case kEffectStatLevel: return &m_Level;                    // +0x34
+        case kEffectStatGold: return &m_Gold;                      // +0x38, 32-bit
+        default: return nullptr;
+    }
 }
 
 // M43: the stats block's own per-frame tick -- see actor_stats.h. Identical
@@ -128,7 +168,7 @@ void PlayerExecutable::TickStatusEffects(int deltaUnits) {
     // the actor's own level once a second -- kind 6 to fatigue with no
     // clamp at all, kind 7 to health through the clamping setter.
     m_Stats.Tick(
-        deltaUnits, [this](int damage) { ApplyDamage(damage); },
+        *this, deltaUnits, [this](int damage) { ApplyDamage(damage); },
         [this](int kind) {
             if (kind == ActorStats::kPeriodicFatigueRegen) {
                 m_Fatigue += m_Level;  // the real branch has no ceiling here
@@ -154,6 +194,12 @@ bool PlayerExecutable::actorHasSpellCostDiscount() const {
 }
 
 void PlayerExecutable::ApplyDamage(int amount) {
+    // M58: FUN_10049e78's first line -- the stats block's own DoDamage
+    // refuses outright while the second periodic channel's kind is 4. That
+    // is Sanctuary, whose channel M48 could only describe as "purely a
+    // duration"; this is the gate it was for. It sits before every other
+    // check because in the engine it is the whole function's `if`.
+    if (m_Stats.periodicKind() == ActorStats::kPeriodicSanctuaryTimer) return;
     if (amount <= 0) return;
     m_Health -= amount;
     if (m_Health < 0) m_Health = 0;
@@ -659,6 +705,12 @@ bool PlayerExecutable::method(const skString& methodName, skRValueArray& args,
         returnValue = skRValue(armorRating());
         return true;
     }
+    // --- M58: the effects system (effects.h). The busiest unimplemented
+    // native in the corpus was `GetPlayer().AddEffect` (20 sites) and
+    // `GetOwner().AddEffect` (63) -- the same binding on the same class,
+    // which is why both receivers route into one handler here. ---
+    if (HandleEffectNative(*this, methodName, args, returnValue)) return true;
+
     // M37: both were flat stored numbers; both are now the real derived
     // formulas (combat.h), so statsscreen.s shows a value that actually
     // moves with willpower the way the shipped game's does.

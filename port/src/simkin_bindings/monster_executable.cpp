@@ -8,6 +8,7 @@
 #include "assets/string_table.h"
 #include "audio/audio_engine.h"
 #include "simkin_bindings/combat.h"
+#include "simkin_bindings/effects.h"
 #include "simkin_bindings/item_executable.h"
 #include "simkin_bindings/level_executable.h"
 #include "simkin_bindings/menu_stack.h"
@@ -63,6 +64,12 @@ void MonsterExecutable::ApplyDamage(int amount) {
     // even need its own separate check for the common case, though it
     // still skips them too (see main.cpp) so they're never shown as a
     // combat target in the first place.
+    // M58: FUN_10049e78's first line -- the stats block's own DoDamage
+    // refuses outright while the second periodic channel's kind is 4. That
+    // is Sanctuary, whose channel M48 could only describe as "purely a
+    // duration"; this is the gate it was for. It sits before every other
+    // check because in the engine it is the whole function's `if`.
+    if (m_Stats.periodicKind() == ActorStats::kPeriodicSanctuaryTimer) return;
     if (!m_Alive || amount <= 0 || m_Invulnerable) return;
     m_CurrentHealth -= amount;
     if (m_CurrentHealth <= 0) {
@@ -351,7 +358,7 @@ void MonsterExecutable::TickAi(int deltaUnits) {
     // `spells\AzraSustenance.s` is an ordinary spell entity that a script
     // could hand to one with AddSpell.
     m_Stats.Tick(
-        deltaUnits, [this](int damage) { ApplyDamage(damage); },
+        *this, deltaUnits, [this](int damage) { ApplyDamage(damage); },
         [this](int kind) {
             if (kind == ActorStats::kPeriodicFatigueRegen) {
                 m_Fatigue += m_Level;
@@ -359,6 +366,34 @@ void MonsterExecutable::TickAi(int deltaUnits) {
                 SetActorHealth(m_CurrentHealth + m_Level);
             }
         });
+}
+
+// M58: FUN_1004ad40's field map for a creature -- see spell_actor.h. The
+// eight attributes and the three 32-bit tail fields have no storage here,
+// which makes an `AddEffect(..., Luck, ...)` on a creature a no-op; in the
+// engine it writes a field nothing reads, which is the same thing.
+int* MonsterExecutable::EffectStatSlot(int stat) {
+    switch (stat) {
+        case kEffectStatAttack: return &m_Attack;                   // +0x00
+        case kEffectStatDefense: return &m_Defense;                 // +0x02
+        case kEffectStatSpellcast: return &m_Spellcast;             // +0x04
+        case kEffectStatMagicResistance: return &m_MagicResistance; // +0x06
+        case kEffectStatMinDamage: return &m_DamageMin;             // +0x08
+        case kEffectStatMaxDamage: return &m_DamageMax;             // +0x0a
+        case kEffectStatArmorValue: return &m_ArmorValue;           // +0x0c
+        case kEffectStatExpWorth: return &m_ExpWorth;               // +0x0e
+        case kEffectStatWill: return &m_Will;                       // +0x1a
+        case kEffectStatMaxHealth: return &m_MaxHealth;             // +0x24
+        case kEffectStatHealth: return &m_CurrentHealth;            // +0x2a
+        case kEffectStatFatigue: return &m_Fatigue;                 // +0x2c
+        case kEffectStatMagicka: return &m_Magicka;                 // +0x2e
+        case kEffectStatLevel: return &m_Level;                     // +0x34
+        default: return nullptr;
+    }
+}
+
+void MonsterExecutable::ApplyStatModifier(int statIndex, int delta, int durationSeconds) {
+    AddEffect(*this, kDurationTimed, statIndex, kOpIncrement, delta, durationSeconds);
 }
 
 bool MonsterExecutable::ConsumeAttackCadence(int deltaUnits) {
@@ -459,6 +494,11 @@ bool MonsterExecutable::method(const skString& methodName, skRValueArray& args,
         returnValue = skRValue(undead());
         return true;
     }
+    // M58: the same Character-stats effect bindings the player answers --
+    // `GetOwner()` resolves to this class for a creature's own items, and
+    // 63 of the corpus's 83 AddEffect sites are on GetOwner().
+    if (HandleEffectNative(*this, methodName, args, returnValue)) return true;
+
     if (methodName == skString("GetSpellToHit") && args.entries() == 0) {
         returnValue = skRValue(spellToHit());
         return true;

@@ -387,6 +387,29 @@ one is not harmless: a regeneration or drain effect keeps its timer
 (`+0x78`) across a save but loses the kind that made it do anything, so
 it comes back ticking down inert. There is nowhere on the wire to put it.
 
+M58 adds a fourth omission, and this one is not a field: **the two effect
+lists at `+0x58` and `+0x64` are not saved either.** Every timed effect
+in the game -- every potion buff, every creature's Drain, every
+attribute herb's two-minute window -- lives in a heap list hanging off
+those two pointers, and neither pointer appears anywhere in the field
+list above. They are purely runtime: `FUN_1004794c` is the stats block's
+destructor and its whole body is "walk both lists, free every node",
+called from the player's destructor (`player+0x3ac`) and the creature's
+(`monster+0x224`). But the applier
+has already written the *stat fields*, and those are saved. So saving
+while a buff is up and reloading makes that buff **permanent**: the
+raised attack persists with no node left to expire it. Symmetrically, a
+debuff saved while active never lifts. Both are consequences of the
+engine's write-through model (see `effects.h`), and the save record has
+nowhere to record the difference.
+
+M58 also renames one entry in the table above, from the effect side:
+`+0x10` is what the effect table calls **`Strength`**. `FUN_1004ad40`'s
+case 9 writes it, and `GetStrength` (dispatcher index 0x1b) reads
+`+0x14`. So the field this doc names "strength bonus" from
+`GetStrengthBonus` is also the one every attribute shrine and every
+strength herb in the game moves.
+
 ### What the writer does around all this
 
 `FUN_10018e70`'s disk-space estimate (M40, step 2) is now legible: it

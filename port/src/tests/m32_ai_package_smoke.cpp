@@ -287,9 +287,16 @@ int main(int argc, char** argv) {
             makeVulnerable(*v);
             int before = v->attack();
             hit(*spell, *v);
+            // M58: the effect is *written through* the attack field now, the
+            // way the engine's own applier does -- so the check is that the
+            // creature's attack really dropped by 10 and that the node
+            // records where those 10 came from, rather than that a base
+            // stat stayed put behind a modifier this port used to add on
+            // read. Clamped at 0, hence the max.
             Check(spell->statusEffect() == Item::kEffectDrain &&
-                      v->statModifier(Monster::kStatAttack) == -10 && v->baseAttack() == before,
-                  "Drain applies -10 to attack, leaving the base stat untouched");
+                      v->statModifier(Monster::kStatAttack) == -10 &&
+                      v->attack() == (before - 10 < 0 ? 0 : before - 10),
+                  "Drain applies -10 to attack, written through the field itself");
         }
         // Blind: attack -10 AND defense -10 -- and, M43-corrected, the
         // blind *flag* only when the target is not a creature. The real

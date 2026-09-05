@@ -66,9 +66,14 @@ def skstrings(*files):
 
 
 def main():
-    player = skstrings("player_executable.cpp", "player_executable.h")
+    # M58: the Character-stats effect bindings live in one shared handler
+    # (effects.cpp) that both PlayerExecutable and MonsterExecutable call
+    # into, rather than being duplicated in each dispatcher -- so both
+    # receivers' implemented sets have to include it.
+    effects = skstrings("effects.cpp")
+    player = skstrings("player_executable.cpp", "player_executable.h") | effects
     level = skstrings("level_executable.cpp", "level_executable.h")
-    monster = skstrings("monster_executable.cpp", "monster_executable.h")
+    monster = skstrings("monster_executable.cpp", "monster_executable.h") | effects
     every = skstrings(*[f for f in os.listdir(SRC) if f.endswith((".cpp", ".h"))])
 
     # Receiver expression as it is written in a .s file -> (label, the set

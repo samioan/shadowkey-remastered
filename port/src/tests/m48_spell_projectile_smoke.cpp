@@ -33,6 +33,7 @@
 
 #include "assets/string_table.h"
 #include "simkin_bindings/actor_stats.h"
+#include "simkin_bindings/effects.h"
 #include "simkin_bindings/game_constants.h"
 #include "simkin_bindings/item_executable.h"
 #include "simkin_bindings/level_executable.h"
@@ -455,8 +456,14 @@ int main(int argc, char** argv) {
     }
     {
         clearPlayer();
-        player.actorStats().ApplyStatModifier(Stats::kStatAttack, -3, 30);
-        player.actorStats().ApplyStatModifier(Stats::kStatDefense, -3, 30);
+        // M58: the two modifiers the real Disease branch applies carry the
+        // engine's own names, which is what CureDisease removes them by.
+        sk_bindings::AddEffect(player, sk_bindings::kDurationTimed,
+                               sk_bindings::kEffectStatAttack, sk_bindings::kOpIncrement, -3, 30,
+                               sk_bindings::kEffectNameDisease);
+        sk_bindings::AddEffect(player, sk_bindings::kDurationTimed,
+                               sk_bindings::kEffectStatDefense, sk_bindings::kOpIncrement, -3, 30,
+                               sk_bindings::kEffectNameDiseaseDefense);
         auto cure = loadItem("spells/CureDisease.s");
         sk_bindings::CastSpell(*cure, player);
         Check(player.actorStats().statModifier(Stats::kStatAttack) == 0 &&
@@ -465,8 +472,12 @@ int main(int argc, char** argv) {
     }
     {
         clearPlayer();
-        player.actorStats().ApplyStatModifier(Stats::kStatAttack, -10, 30);   // a Drain
-        player.actorStats().ApplyStatModifier(Stats::kStatArmor, 6, 30);      // a Shield
+        sk_bindings::AddEffect(player, sk_bindings::kDurationTimed,
+                               sk_bindings::kEffectStatAttack, sk_bindings::kOpIncrement, -10,
+                               30);  // a Drain
+        sk_bindings::AddEffect(player, sk_bindings::kDurationTimed,
+                               sk_bindings::kEffectStatArmorValue, sk_bindings::kOpIncrement, 6,
+                               30);  // a Shield
         auto remove = loadItem("spells/RemoveEnchantment.s");
         sk_bindings::CastSpell(*remove, player);
         Check(player.actorStats().statModifier(Stats::kStatAttack) == 0 &&

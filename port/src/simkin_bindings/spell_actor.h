@@ -53,6 +53,32 @@ public:
         return const_cast<SpellActor*>(this)->actorStats();
     }
 
+    // M58: FUN_1004ad40's field map, as one accessor instead of a 28-case
+    // switch. The engine's stats block is one struct with every field at a
+    // fixed offset, so the applier can just index it; this port keeps those
+    // fields on the two owners (which is where the rest of the port already
+    // reads them from), so the owner has to hand out the storage.
+    //
+    // Returns null when this actor has no field for that stat -- a creature
+    // has no Personality, and the real engine's answer there is that the
+    // creature's stats block has the field and nothing ever writes it. Null
+    // makes the effect a no-op instead, which is the same observable.
+    //
+    // Health is the one stat this is *not* used to write: FUN_1004ad40's
+    // health arm clamps against max and zero, which is exactly what the
+    // owners' SetActorHealth already does (and only they know how to flip
+    // an alive flag), so the applier reads through the slot and writes
+    // through the setter. See ApplyEffectStat.
+    virtual int* EffectStatSlot(int /*stat*/) { return nullptr; }
+    const int* EffectStatSlot(int stat) const {
+        return const_cast<SpellActor*>(this)->EffectStatSlot(stat);
+    }
+    // Convenience: the field's value, or 0 when this actor has no such field.
+    int EffectStatValue(int stat) const {
+        const int* slot = EffectStatSlot(stat);
+        return slot ? *slot : 0;
+    }
+
     // `stats+0x34`. The magnitude behind every status-effect branch, but
     // only when the caster is the player -- see DoAttackRoll's magnitude
     // rule, which falls back to the spell's own SetLevel otherwise.

@@ -28,9 +28,38 @@
 
 #include <algorithm>
 #include <cstdlib>
+#include <string>
 #include <vector>
 
+class skiExecutable;
+
 namespace sk_bindings {
+
+class SpellActor;
+
+// M58: one entry of the two effect lists the stats block owns -- the 0x18
+// byte node `FUN_1004aa28` news up. See effects.h for the whole system.
+//
+//   +0x00  stat        the effect-table stat index
+//   +0x04  op          Increment / Set / Decrement
+//   +0x08  s16 stored  the magnitude for an Increment, the field's previous
+//                      value for anything else -- what expiry undoes with
+//   +0x0c  expiry      absolute, `now + seconds * 0x100`; a countdown here
+//   +0x10  obj         the object that placed it (only the dead Equipped
+//                      removal path ever reads it)
+//   +0x14  char*       strdup'd name, or null -- FindStringEffect's key
+struct Effect {
+    int stat = 0;
+    int op = 0;
+    int stored = 0;
+    int remaining = 0;  // engine delta units
+    skiExecutable* obj = nullptr;
+    std::string name;
+};
+
+// effects.cpp. Declared here so Tick() can undo an expiring node without
+// actor_stats.h having to see SpellActor's definition.
+void UndoEffectStat(SpellActor& actor, int stat, int op, int stored);
 
 class ActorStats {
 public:
@@ -70,23 +99,34 @@ public:
         kPeriodicBurn = 8,          // health -= (+0x76), and kills at 0
     };
 
-    // FUN_1004aa28 mode 1: apply a timed modifier to one stat, but only if
-    // it is *stronger* than whatever is already on that stat (the real
-    // function compares absolute deltas and returns early otherwise, then
-    // removes the weaker one before adding). Duration is in seconds; the
-    // real code stores an absolute expiry of `now + duration * 0x100`, the
-    // same <<8 convention every other engine timer uses.
-    void ApplyStatModifier(int statIndex, int delta, int durationSeconds) {
-        int durationUnits = durationSeconds * 256;  // the real `duration * 0x100`
-        for (StatModifier& m : m_StatModifiers) {
-            if (m.statIndex != statIndex) continue;
-            if (std::abs(delta) <= std::abs(m.delta)) return;  // weaker -- rejected
-            m.delta = delta;
-            m.remaining = durationUnits;
-            return;
+    // ---- M58: the two effect lists (stats+0x58 and stats+0x64) ----
+    //
+    // M43 modelled the timed half of this as a "modifier" a reader added to
+    // a base value. M58 replaces that with what the engine actually does:
+    // the applier **writes the owner's stat field through** and the node
+    // remembers enough to put it back. Everything that reads a stat
+    // therefore reads one number, the way a script's own `GetAttack()`
+    // does, and `statModifier()` below survives only as bookkeeping.
+    //
+    // The list operations themselves are deliberately thin -- the policy
+    // (strongest-wins, the undo on replacement, the two arms) lives in
+    // effects.cpp next to the function it came out of.
+
+    std::vector<Effect>& timedEffects() { return m_TimedEffects; }
+    const std::vector<Effect>& timedEffects() const { return m_TimedEffects; }
+    std::vector<Effect>& equippedEffects() { return m_EquippedEffects; }
+    const std::vector<Effect>& equippedEffects() const { return m_EquippedEffects; }
+
+    // FUN_1004b458: the first *timed* node on this stat, whatever its name.
+    Effect* FindTimedEffectByStat(int statIndex) {
+        for (Effect& e : m_TimedEffects) {
+            if (e.stat == statIndex) return &e;
         }
-        m_StatModifiers.push_back({statIndex, delta, durationUnits});
+        return nullptr;
     }
+
+    void AddTimedEffect(const Effect& node) { m_TimedEffects.push_back(node); }
+    void AddEquippedEffect(const Effect& node) { m_EquippedEffects.push_back(node); }
 
     // FUN_1004bae8: OR the flag into the bitmask, set the damage-over-time
     // kind, and arm the shared effect timer as `duration << 8`.
@@ -132,34 +172,13 @@ public:
         m_EffectTimer = 0;
     }
 
-    // FUN_1004bd24: remove one timed modifier. The real signature takes a
-    // stat index *and a name* -- CureDisease removes the modifiers named
-    // "DISEASE" and "DISEASE_DEF", the two the Disease branch applies to
-    // attack and defense. This port's modifiers carry no name, and there is
-    // at most one per stat, so the index is the whole key.
-    void RemoveStatModifier(int statIndex) {
-        for (size_t i = 0; i < m_StatModifiers.size(); ++i) {
-            if (m_StatModifiers[i].statIndex != statIndex) continue;
-            m_StatModifiers.erase(m_StatModifiers.begin() + static_cast<long>(i));
-            return;
-        }
-    }
-
-    // FUN_10048140 (`spells\RemoveEnchantment.s`): strip every modifier
-    // whose delta is negative -- and then, separately, every modifier of
-    // kind 3, which this port has no equivalent of (every shipped call site
-    // of FUN_1004aa28 passes kind 1). So: remove the debuffs, keep the
-    // buffs. The real function also sets flag bit 1 and zeroes both the
-    // shared timer and `+0x70`, which the caller follows with
-    // FUN_1004ba84(stats, 0, 0) -- the blindness clear.
-    void RemoveNegativeStatModifiers() {
-        for (size_t i = 0; i < m_StatModifiers.size();) {
-            if (m_StatModifiers[i].delta < 0) {
-                m_StatModifiers.erase(m_StatModifiers.begin() + static_cast<long>(i));
-            } else {
-                ++i;
-            }
-        }
+    // M58: the two removers moved to effects.cpp -- RemoveNamedEffect /
+    // RemoveStatEffect (FUN_1004bd24) and RemoveEnchantments (FUN_10048140).
+    // Both have to undo a stat change now, which needs the owner, so
+    // neither can live on the stats block alone.
+    //
+    // The one piece of FUN_10048140 that is purely the stats block's:
+    void ClearEnchantmentTimers() {
         m_EffectTimer = 0;
         m_EffectFlags |= 2;
     }
@@ -189,13 +208,40 @@ public:
     // both pools); these are the two the cast reads back.
     int effectFlags() const { return m_EffectFlags; }
     int dotAmount() const { return m_DotKind; }
+    // M58: FUN_1004ad40's Blindness arm assigns the whole word and touches
+    // no timer, so it needs the raw write rather than ApplyEffectFlag.
+    void SetEffectFlagsRaw(int flags) { m_EffectFlags = flags; }
+    // M58: SetBlindness/SetPoisoned/SetDiseased (dispatcher cases 8/9/10)
+    // store their duration argument into +0x72 **raw** -- no `<< 8` -- which
+    // is the one place in the engine that timer is not in the usual units.
+    // Reproduced; the sole shipped call site passes 0.
+    void SetEffectTimerRaw(int units) {
+        m_EffectTimer = units;
+        m_DotAccumulator = 0;
+    }
+    // M58: SetSpellEffect (case 6) writes only the periodic channel's kind
+    // (+0x7c) and duration (+0x78) -- unlike ArmPeriodic above, which is the
+    // *spell* side and also touches +0x7a and +0x76.
+    void SetPeriodic(int kind, int durationUnits) {
+        m_BurnKind = kind;
+        m_BurnTimer = static_cast<int16_t>(durationUnits);
+    }
 
-    // Net modifier currently applied to a stat (0 when nothing is active).
+    // M58: bookkeeping only. The stat field itself already carries the
+    // change (the applier writes it through), so nothing adds this to
+    // anything any more -- it answers "how much of the current value came
+    // from a live effect", which is what the M33/M43/M48 tests assert and
+    // what an inspector would want. Only Increment nodes have a meaningful
+    // delta; a Set or Decrement node stores the *previous* value instead.
     int statModifier(int statIndex) const {
-        for (const StatModifier& m : m_StatModifiers) {
-            if (m.statIndex == statIndex) return m.delta;
+        int total = 0;
+        for (const Effect& e : m_TimedEffects) {
+            if (e.stat == statIndex && e.op == 1) total += e.stored;
         }
-        return 0;
+        for (const Effect& e : m_EquippedEffects) {
+            if (e.stat == statIndex && e.op == 1) total += e.stored;
+        }
+        return total;
     }
 
     bool blinded() const { return (m_EffectFlags & kEffectFlagBlind) != 0; }
@@ -213,17 +259,27 @@ public:
     // the owner knows where those live. Called once per elapsed second, the
     // same accumulator shape the burn uses.
     template <class DealDamage, class Regenerate>
-    void Tick(int deltaUnits, DealDamage&& dealDamage, Regenerate&& regenerate) {
+    void Tick(SpellActor& owner, int deltaUnits, DealDamage&& dealDamage,
+              Regenerate&& regenerate) {
         if (m_ParalysisTimer > 0) {
             m_ParalysisTimer -= deltaUnits;
             if (m_ParalysisTimer < 0) m_ParalysisTimer = 0;
         }
 
-        // M33: timed stat modifiers expire independently of each other.
-        for (size_t i = 0; i < m_StatModifiers.size();) {
-            m_StatModifiers[i].remaining -= deltaUnits;
-            if (m_StatModifiers[i].remaining <= 0) {
-                m_StatModifiers.erase(m_StatModifiers.begin() + static_cast<long>(i));
+        // M33: timed effects expire independently of each other. M58: and
+        // each one *undoes its own stat change* on the way out, through the
+        // same FUN_1004b3b4 the engine's own removers use -- which is the
+        // whole reason a node stores what it stores.
+        //
+        // Only the timed list is swept. The equipped list has no expiry in
+        // the engine either: its nodes are meant to be removed by hand when
+        // the item comes off, by a function nothing calls (effects.cpp).
+        for (size_t i = 0; i < m_TimedEffects.size();) {
+            m_TimedEffects[i].remaining -= deltaUnits;
+            if (m_TimedEffects[i].remaining <= 0) {
+                const Effect expired = m_TimedEffects[i];
+                m_TimedEffects.erase(m_TimedEffects.begin() + static_cast<long>(i));
+                UndoEffectStat(owner, expired.stat, expired.op, expired.stored);
             } else {
                 ++i;
             }
@@ -319,19 +375,16 @@ public:
     // regeneration to route (tests, and anything without health/fatigue of
     // its own) do not have to pass an empty lambda.
     template <class DealDamage>
-    void Tick(int deltaUnits, DealDamage&& dealDamage) {
-        Tick(deltaUnits, dealDamage, [](int) {});
+    void Tick(SpellActor& owner, int deltaUnits, DealDamage&& dealDamage) {
+        Tick(owner, deltaUnits, dealDamage, [](int) {});
     }
 
 private:
-    // At most one modifier per stat -- the real FUN_1004aa28 replaces a
-    // weaker one and rejects a weaker new one, so a list is never needed.
-    struct StatModifier {
-        int statIndex = 0;
-        int delta = 0;
-        int remaining = 0;  // engine delta units
-    };
-    std::vector<StatModifier> m_StatModifiers;
+    // M58: the two real lists. Timed is unique-per-stat by policy, not by
+    // construction (FUN_1004aa28 replaces a weaker node and rejects a weaker
+    // new one); equipped stacks freely.
+    std::vector<Effect> m_TimedEffects;     // stats+0x58, count at +0x60
+    std::vector<Effect> m_EquippedEffects;  // stats+0x64, count at +0x6c
     int m_EffectFlags = 0;     // +0x44
     int m_EffectTimer = 0;     // +0x72, `duration << 8`
     int m_DotKind = 0;         // +0x76 -- 3 = poison, 1 = burn (shared, see ApplyBurn)

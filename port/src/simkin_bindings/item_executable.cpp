@@ -7,6 +7,7 @@
 
 #include "assets/string_table.h"
 #include "simkin_bindings/combat.h"
+#include "simkin_bindings/effects.h"
 #include "simkin_bindings/game_constants.h"
 #include "simkin_bindings/level_executable.h"
 #include "simkin_bindings/menu_stack.h"
@@ -582,7 +583,7 @@ bool ItemExecutable::method(const skString& methodName, skRValueArray& args,
                 case kEffectDrain:
                     // `iVar3 = -10; duration = magnitude + 8; stat = 1`
                     // falling into the shared FUN_1004aa28 tail.
-                    targetStats.ApplyStatModifier(ActorStats::kStatAttack, -10, magnitude + 8);
+                    AddEffect(*target, kDurationTimed, kEffectStatAttack, kOpIncrement, -10, magnitude + 8);
                     break;
                 // ---- M43: the dispatcher's last two status branches.
                 // Both fall into the same FUN_1004aa28 tail as Drain, with
@@ -596,15 +597,16 @@ bool ItemExecutable::method(const skString& methodName, skRValueArray& args,
                 // FeebleBlade ones.
                 case kEffectWeakness:
                     // `iVar3 = -10; duration = magnitude + 8; stat = 1`.
-                    targetStats.ApplyStatModifier(ActorStats::kStatAttack, -10, magnitude + 8);
+                    AddEffect(*target, kDurationTimed, kEffectStatAttack, kOpIncrement, -10, magnitude + 8);
                     break;
                 case kEffectFeebleBlade:
                     // `iVar3 = -10; duration = magnitude + 5; stat = 1`.
-                    targetStats.ApplyStatModifier(ActorStats::kStatAttack, -10, magnitude + 5);
+                    AddEffect(*target, kDurationTimed, kEffectStatAttack, kOpIncrement, -10, magnitude + 5);
                     break;
                 case kEffectHarmArmor:
                     // `iVar3 = -magnitude; duration = magnitude + 8; stat = 7`.
-                    targetStats.ApplyStatModifier(ActorStats::kStatArmor, -magnitude, magnitude + 8);
+                    AddEffect(*target, kDurationTimed, kEffectStatArmorValue, kOpIncrement, -magnitude,
+                                magnitude + 8);
                     break;
                 case kEffectBlind: {
                     // Two -10 modifiers (attack and defense) for
@@ -624,8 +626,8 @@ bool ItemExecutable::method(const skString& methodName, skRValueArray& args,
                     // not matter because only creatures could be targets.
                     // Both halves of that are now wrong.
                     int blindDuration = magnitude + 5;
-                    targetStats.ApplyStatModifier(ActorStats::kStatAttack, -10, blindDuration);
-                    targetStats.ApplyStatModifier(ActorStats::kStatDefense, -10, blindDuration);
+                    AddEffect(*target, kDurationTimed, kEffectStatAttack, kOpIncrement, -10, blindDuration);
+                    AddEffect(*target, kDurationTimed, kEffectStatDefense, kOpIncrement, -10, blindDuration);
                     if (!target->isMonsterActor()) {
                         targetStats.ApplyEffectFlag(ActorStats::kEffectFlagBlind, 0, blindDuration);
                     }
@@ -635,9 +637,10 @@ bool ItemExecutable::method(const skString& methodName, skRValueArray& args,
                     // `delta = (magnitude < 7) ? -2 : -3` on attack, a flat
                     // -3 on defense, both for a fixed 0x1e (30) -- the only
                     // effect with a duration that ignores magnitude.
-                    targetStats.ApplyStatModifier(ActorStats::kStatAttack,
-                                                   magnitude < 7 ? -2 : -3, 30);
-                    targetStats.ApplyStatModifier(ActorStats::kStatDefense, -3, 30);
+                    AddEffect(*target, kDurationTimed, kEffectStatAttack, kOpIncrement,
+                              magnitude < 7 ? -2 : -3, 30, kEffectNameDisease);
+                    AddEffect(*target, kDurationTimed, kEffectStatDefense, kOpIncrement, -3, 30,
+                              kEffectNameDiseaseDefense);
                     break;
                 case kEffectPoison:
                     // `FUN_1004bae8(target, 8, magnitude)` -- effect flag 8

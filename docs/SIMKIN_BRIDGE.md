@@ -69,10 +69,43 @@ SIMKIN_RegisterConstant(interp, &name, &val);   // IPT_Armor = 3
 
 `IPT_*` reads as "item property type" — an item-category enum scripts can
 compare against, distinct from (but conceptually similar to)
-`ZONE_FORMAT.md`'s `entities.txt`-derived category enum. Not all 24
-`SIMKIN_MakeIntAtom` callers were checked individually — this pattern
-almost certainly repeats for other constant families elsewhere in the
-engine, not surveyed exhaustively this pass.
+`ZONE_FORMAT.md`'s `entities.txt`-derived category enum.
+
+### The full constant table (M58)
+
+That last paragraph used to end "not all 24 `SIMKIN_MakeIntAtom` callers
+were checked individually — this pattern almost certainly repeats for
+other constant families". It does, and M58 enumerated it, because the
+effects system is unreadable without it: a shipped line says
+`AddEffect(Timed, ArmorValue, Increment, 5, 120)` and **no `.s` file in
+the corpus defines any of those three names**.
+
+Extraction is mechanical — pair each `SIMKIN_MakeIntAtom(value)` with the
+name atom that follows it before the `RegisterConstant`, and resolve the
+literal. Two functions register:
+
+| function | interpreter | registrations |
+|---|---|---|
+| `GameEngine_FirstTickBootstrap` (`0x10023ad0`) | the one global interpreter (`appview+0x3a0`) | 45 |
+| `FUN_10073d3c` | a **per-object** interpreter it constructs at `+0x80` (this is the menu/screen base-class constructor — every menu gets its own) | 60 |
+
+`FUN_10073d3c` additionally registers the `AR_*`/`SR_*`/`WR_*` families
+into the global interpreter as well, with a second `RegisterConstant`
+call per name. The union is **59 distinct names**, and it is transcribed
+verbatim in `port/src/simkin_bindings/effects.cpp`. Three points worth
+carrying here:
+
+- The name-atom construction differs between the two: the bootstrap uses
+  `SIMKIN_MakeStringAtom(&a, DAT_x)` (a NUL-terminated literal), while
+  `FUN_10073d3c` uses `SIMKIN_ord101(&a, DAT_x, length)` (an explicit
+  length). A resolver has to handle both.
+- One of the bootstrap's 45 (`Blindness`) is stored as an **8-bit**
+  literal where every other is UTF-16, which is why a first pass
+  resolved 44 names and one blank.
+- The two runs **disagree**: `IPT_Consumable` is 4 globally and 0 in a
+  menu's own interpreter — and 0 is `IPT_Misc`. `StatLevel` (24) is
+  registered only by `FUN_10073d3c`, which is why the global stat
+  enumeration appears to skip 24.
 
 ## The real name-resolution mechanism: a hand-rolled trie, ~700 entries
 
