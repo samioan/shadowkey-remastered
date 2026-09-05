@@ -2106,3 +2106,144 @@ creature in the column sweep the way it can in the real engine; and the
 monster-side predicate at target vtable `+0x170` that the first-look pass
 rejects on is still unidentified, so "still alive" stands in for it, as it
 does everywhere else here.
+
+## The script timer, and the two "unplaceable" scripts (M53)
+
+The roadmap carried `crypt2/controller.s` and `twilite/steamsound.s`
+together as scripts "this port cannot place", on the theory that neither
+one's placement mechanism was a category the zone-load block resolves.
+That theory is wrong for both, in opposite directions -- and what was
+actually missing is a mechanism neither the roadmap nor this document had
+noticed.
+
+### `Delay(seconds, tag)` -> `DelayReached(tag)`
+
+Every entity carries a one-shot timer. M52 named its three fields from the
+binding side (`Entity+0x10a` armed, `+0x10c` deadline, `+0x110` tag)
+without knowing what fired it. The other half is **`FUN_1006410c`**, run
+once per frame per entity:
+
+```c
+if (obj->armed && obj->deadline <= engine->clock) {
+    obj->armed = 0;                       // cleared BEFORE dispatch
+    /* call the script method named by the wide literal at 0x100b1634 */
+    obj->script->method("DelayReached", (int)obj->tag);
+}
+```
+
+and the arming side is the Entity dispatcher's own `Delay` case:
+
+```c
+obj->armed    = 1;
+obj->deadline = engine->clock + seconds * 0x100;
+obj->tag      = second argument, or 0 when called with one
+```
+
+`StopDelay` clears the armed flag and nothing else.
+
+**The clock is not a wall clock.** It is `engine+0x470 -> +0x460`
+(`FUN_1002f694`), a counter advanced every frame by the same delta the
+animation player uses — 8.8 fixed-point *seconds*, `elapsedMs * 256 /
+1000` clamped to `[4, 64]` — and zeroed on a level load (`FUN_1002fca4`).
+So `seconds * 0x100` is simply "seconds, in 8.8".
+
+Clearing the armed flag *before* the callback is what makes the shipped
+scripts work at all: every chained sequence in the corpus ends each case
+by arming the next one, and a dispatch order that cleared afterwards would
+throw that away.
+
+> **A real bug in the save format, and where the two halves meet.**
+> `Entity`'s save writes `+0x10c` as `value - time(0)` and its loader adds
+> its own `time(0)` back — the same treatment it gives `+0x118`. That is
+> correct for `+0x118`, which really is `time(0) + n` (`FUN_10068480`,
+> M52). It is wrong for `+0x10c`: subtracting and re-adding a wall clock
+> leaves a **game** clock deadline shifted by however many real-world
+> seconds passed between the save and the load, divided by 256. A
+> `Delay(1, ...)` armed just before saving and reloaded a day later comes
+> back as a deadline about five and a half minutes of game time away — and
+> the game clock has been reset by the level load underneath it anyway.
+
+### How much of the game runs on it
+
+**Sixteen shipped scripts define `DelayReached`, across 59 placements**,
+and every one of them is placed — in exactly two `entities.txt`
+categories:
+
+| script | placements | category |
+|---|---|---|
+| `monsters/azra_rat.s` | 35 (azra) | 2 |
+| `crypt2/sarc_entity.s` | 11 (crypt2) | 8 |
+| `crypt1/sarcophagus_*.s` (9 files) | 11 (crypt1) | 8 |
+| `drgnfld/loot1.s`, `loot2.s` | 2 | 8 |
+| `monsters/umbra_keth.s` | 1 (crypt3) | 2 |
+| `ratherb.s` | 1 (azra) | 2 |
+| `crypt2/controller.s` | 1 (crypt2) | 3 |
+
+Categories 2, 3 and 8 are all categories this port already loads, which is
+why the gap was invisible: the scripts were being read and `Init`-ed, and
+then simply never ticked. Three consequences, in rough order of how
+visible they are:
+
+- **`azra_rat.s`** arms `Delay(2, 0)` on the eighth rat kill; its
+  `DelayReached(0)` opens the `rathurrah` menu. That is the completion
+  message for the game's first quest, in the zone this port starts in, and
+  it has never appeared.
+- **`umbra_keth.s`** uses the timer as the final boss's *phase* cycle: it
+  vanishes, opens `umbra_disappear`, and arms `Delay(Random(8, 12), 1)` to
+  come back. Without the timer the fight cannot progress.
+- **The sarcophagi** in crypt1 and crypt2 stagger the creature climbing
+  out of each one over a second.
+
+### `crypt2/controller.s` was always placed
+
+It is `crypt2.ent` record #166: typeId **6023**, which `entities.txt` maps
+to category **3** and the label `!final_tp`, with the placement name
+`"star"` and position `(4480, 7808, 70)`.
+
+Its trigger is `crypt2.s`'s own `AddCrystal()`, on the seventh crystal:
+
+```
+Star = GetEntity("star");
+if (Star != null) { Star.Delay(1, 0); }
+```
+
+and from there the script is a pure sequencer. `DelayReached(s)` for
+`s = 0..6` lights one of the seven crystal alcoves (`Level.LightRect(...,
+64)`), plays sound 83, and arms `Delay(1, s+1)`; `s = 7` calls
+`Level.CreateEntity(274, 4480, 7808, 400)` — **the same spot the
+sequencer itself stands on** — scales it, and mirrors
+`ClientFightUmbra`. It is the Umbra's arrival cutscene, eight seconds
+long.
+
+Two things were missing rather than one. The timer, above; and
+`GetEntity("star")` — pickups (categories 3 and 8) were the one loaded
+category this port never entered into the `Level.GetEntity` registry, so
+the lookup returned null and the trigger died on the first line.
+
+### `twilite/steamsound.s` is cut content
+
+Its whole body is `SetPassable(true); ShowEntity(false); PlaySound(65, 75,
+1, 255);` — an invisible, walk-through ambient emitter, using the
+four-argument `PlaySound` M51 decoded (a quieter, directional, endlessly
+repeating steam hiss).
+
+Nothing loads it. No `.ent` placement in any of the 21 zones names it, no
+`entities.txt` row names it, and no other script mentions it. The steam
+*regions* do exist — `twilite.zon` carries `Steam01`..`Steam05` and
+`twilite.s`'s `EnterZone` opens `MistMenu` for each — but they are a
+different mechanism with a different effect, and none of them reaches this
+script.
+
+And it is not a special case. Sweeping the whole corpus the same way,
+**145 of the 1535 shipped scripts** are named by no placement, no
+`entities.txt` row and no other script. (Some of those are opened by the
+engine directly by name — `SaveConfirm`, `MPDeathMenu` and friends are
+literals in the image — which narrows the set but does not touch
+`steamsound.s`, an entity script with no native path to it.) So the
+correct reading is not "this port cannot place it" but "the shipped game
+cannot either": it is one leftover among many, and the roadmap bullet's
+pairing of the two scripts was the mistake.
+
+Implemented in
+[`port/src/simkin_bindings/script_delay.h`](../port/src/simkin_bindings/script_delay.h);
+smoke test `src/tests/m53_script_delay_smoke.cpp`.

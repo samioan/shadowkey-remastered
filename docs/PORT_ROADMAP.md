@@ -4120,6 +4120,87 @@ algorithms.
       different direction. Implemented as `assets/game_config.h`, loaded
       at startup and written on exit.
 
+- **M53 -- the script timer, and the two "unplaceable" scripts.** The
+  bullet paired `crypt2/controller.s` and `twilite/steamsound.s` on the
+  theory that neither one's placement mechanism was a category the
+  zone-load block resolves. **That was wrong for both, in opposite
+  directions**, and the thing actually missing was a mechanism nothing in
+  this port had. RE writeup in
+  [`docs/WORLD_MODEL.md`](WORLD_MODEL.md) ("The script timer"); smoke test
+  `src/tests/m53_script_delay_smoke.cpp` (34 checks).
+
+    - **`Delay(seconds, tag)` -> `DelayReached(tag)`.** Every entity
+      carries a one-shot timer. M52 named its three fields (`+0x10a`
+      armed, `+0x10c` deadline, `+0x110` tag) from the binding side
+      without knowing what fired them; the other half is `FUN_1006410c`,
+      run once per frame per entity: `if (armed && deadline <= clock) {
+      armed = 0; script->method("DelayReached", tag); }`, with the method
+      name coming from the wide literal at `0x100b1634`. Arming is
+      `deadline = clock + seconds * 0x100`. **The clock is not a wall
+      clock** -- it is `engine+0x470 -> +0x460`, accumulated 8.8
+      fixed-point *seconds* (the same per-frame delta the animation player
+      uses, M52) and zeroed on a level load. Clearing the armed flag
+      *before* dispatch is load-bearing: every chained sequence in the
+      corpus ends each case by arming the next one.
+
+    - **A real bug in the save format**, where M52 and this meet.
+      `Entity`'s save writes `+0x10c` as `value - time(0)` and its loader
+      adds `time(0)` back -- the same treatment it correctly gives
+      `+0x118`, which really is a Unix time. Applied to a *game* clock it
+      leaves the deadline shifted by however many real-world seconds
+      passed between the save and the load, divided by 256; a
+      `Delay(1, ...)` reloaded a day later comes back about five and a
+      half minutes of game time away.
+
+    - **Sixteen shipped scripts define `DelayReached`, across 59
+      placements** -- and every one of them is placed, in categories 2, 3
+      and 8, all of which this port already loads. The scripts were being
+      read and `Init`-ed and then simply never ticked. What that cost:
+      `monsters/azra_rat.s` (**35 placements in azra**, the zone this port
+      starts in) arms `Delay(2, 0)` on the eighth rat kill and its
+      `DelayReached(0)` opens the `rathurrah` menu -- the completion
+      message for the game's first quest, which has never appeared;
+      `monsters/umbra_keth.s` uses the timer as the **final boss's phase
+      cycle**, vanishing and arming `Delay(Random(8, 12), 1)` to return,
+      so without it the fight cannot progress; and crypt1's nine
+      sarcophagi plus `crypt2/sarc_entity.s`'s eleven stagger the creature
+      climbing out of each one.
+
+    - **`crypt2/controller.s` was always placed.** `crypt2.ent` record
+      #166: typeId **6023**, which `entities.txt` maps to category 3 and
+      the label `!final_tp`, placement name `"star"`, at `(4480, 7808,
+      70)`. `crypt2.s`'s `AddCrystal()` starts it on the seventh crystal
+      with `Star = GetEntity("star"); Star.Delay(1, 0);`, and from there
+      the script is a pure sequencer: seven steps that each light one
+      crystal alcove (`Level.LightRect(..., 64)`, which M44 already
+      implemented) and arm the next, then an eighth that spawns the Umbra
+      with `Level.CreateEntity(274, 4480, 7808, 400)` -- **the same spot
+      the sequencer itself stands on**. Eight seconds of cutscene. Two
+      things were missing rather than one: the timer, and the registry --
+      pickups (categories 3 and 8) were the one loaded category never
+      entered into `Level.GetEntity`'s table, so the trigger died on its
+      first line.
+
+    - **`twilite/steamsound.s` is cut content.** Its whole body is
+      `SetPassable(true); ShowEntity(false); PlaySound(65, 75, 1, 255)` --
+      an invisible walk-through ambient emitter using the four-argument
+      `PlaySound` M51 decoded. Nothing loads it: no `.ent` placement in
+      any of the 21 zones, no `entities.txt` row, no other script. The
+      steam *regions* do exist (`twilite.zon` carries `Steam01..Steam05`
+      and `twilite.s`'s `EnterZone` opens `MistMenu` for each) but that is
+      a different mechanism with a different effect. And it is not
+      special: **145 of the 1535 shipped scripts** are named by nothing at
+      all. So the right reading is not "this port cannot place it" but
+      "the shipped game cannot either".
+
+    - **Wired up in the port**: `ScriptDelay`/`GameClock`
+      (`simkin_bindings/script_delay.h`) with the engine's exact
+      arithmetic, `Delay`/`StopDelay` on the two hosts every shipped
+      `DelayReached` script lands in (`ItemExecutable` for categories 3
+      and 8, `MonsterExecutable` for category 2), the per-frame dispatch
+      in the tick loop, the clock reset on zone load, and pickups added to
+      the `GetEntity` registry.
+
 ## Next milestones (not yet started)
 
 Roughly in priority order for reaching "actually playable," not commitments:
@@ -4140,12 +4221,6 @@ Roughly in priority order for reaching "actually playable," not commitments:
   M52 named every other scalar in the save record; these two are zeroed by
   the Entity constructor, carried by the save format, and read by no code
   in the image. Not obviously worth more effort, but they are what is left.
-- **Two scripts this port still cannot place** -- `crypt2/controller.s`
-  and `twilite/steamsound.s`. M51 decoded what their sound calls *mean*
-  (and slot 83 turns out to be `NULL.wav` in every manifest, so
-  controller.s's call is silent anyway), but neither script's own
-  placement mechanism is one of the entity categories the zone-load block
-  resolves, so neither is ever loaded.
 
 ## Verification approach
 

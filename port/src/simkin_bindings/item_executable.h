@@ -25,6 +25,7 @@
 #include <vector>
 
 #include "simkin_bindings/native_stub_executable.h"
+#include "simkin_bindings/script_delay.h"
 #include "simkin_bindings/spell_actor.h"
 #include "skScriptedExecutable.h"
 
@@ -340,7 +341,17 @@ public:
     // is the caster's level; see spellLevel() above.
     int rating() const { return m_Rating; }
 
+    // M53: the entity script timer -- `Delay(seconds, tag)` arms it and
+    // `DelayReached(tag)` is called back when it expires (script_delay.h).
+    // Categories 3 and 8 are half of where the shipped `DelayReached`
+    // scripts live: crypt2/controller.s (the Umbra arrival sequence),
+    // crypt1's nine sarcophagi, crypt2/sarc_entity.s (11 placements) and
+    // drgnfld's two loot chests.
+    ScriptDelay& delay() { return m_Delay; }
+    const ScriptDelay& delay() const { return m_Delay; }
+
 private:
+    ScriptDelay m_Delay;  // M53
     // M38: object-valued script fields -- see setValue() above.
     std::map<std::string, skRValue> m_ObjectFields;
     std::string m_ScriptPath;  // M32: see scriptPath()/statusEffect()

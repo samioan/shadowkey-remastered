@@ -827,6 +827,13 @@ bool ItemExecutable::method(const skString& methodName, skRValueArray& args,
         returnValue = skRValue(static_cast<skiExecutable*>(&m_Stack.player()), false);
         return true;
     }
+    if (TryHandleDelay(m_Delay, m_Stack.gameClock(), methodName, args, returnValue)) {
+        // M53: the entity script timer. crypt2/controller.s chains seven
+        // of these to run the Umbra arrival sequence; crypt1's nine
+        // sarcophagi and crypt2/sarc_entity.s's eleven use one each to
+        // stagger the creature that climbs out. See script_delay.h.
+        return true;
+    }
     if (TryHandleRandom(methodName, args, returnValue)) {
         // M21: loot_gold6-10.s's own Init() calls
         // `Item.SetQuantity(Random(6,10))` -- bare, so resolved as a call

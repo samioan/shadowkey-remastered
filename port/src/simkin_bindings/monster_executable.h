@@ -44,6 +44,7 @@
 #include <vector>
 
 #include "simkin_bindings/actor_stats.h"
+#include "simkin_bindings/script_delay.h"
 #include "simkin_bindings/spell_actor.h"
 #include "simkin_bindings/spell_cast.h"
 #include "skScriptedExecutable.h"
@@ -615,7 +616,16 @@ public:
     // including one call chain it still can't reach).
     void InvokeOnKilled();
 
+    // M53: the entity script timer (script_delay.h). Category 2 is the
+    // other half of where the shipped `DelayReached` scripts live, and
+    // the busier half: monsters/azra_rat.s has 35 placements in azra
+    // alone (its 8-kill quest congratulation is a Delay(2, 0)), and
+    // monsters/umbra_keth.s uses it as the final boss's phase timer.
+    ScriptDelay& delay() { return m_Delay; }
+    const ScriptDelay& delay() const { return m_Delay; }
+
 private:
+    ScriptDelay m_Delay;  // M53
     // M38: object-valued script fields -- see setValue() above.
     std::map<std::string, skRValue> m_ObjectFields;
     // M28: shared by ApplyDamage()/PlayAttackNoise() -- same null-checked

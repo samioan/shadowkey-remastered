@@ -720,6 +720,11 @@ bool MonsterExecutable::method(const skString& methodName, skRValueArray& args,
         returnValue = skRValue(static_cast<skiExecutable*>(&m_Player), false);
         return true;
     }
+    if (TryHandleDelay(m_Delay, m_Stack.gameClock(), methodName, args, returnValue)) {
+        // M53: the entity script timer -- azra_rat.s's `Delay(2, 0)` on
+        // the eighth rat kill, and umbra_keth.s's whole phase cycle.
+        return true;
+    }
     if (TryHandleRandom(methodName, args, returnValue)) {
         // M21: azra_rat.s's own `SetScale(Random(206,306))` -- bare, same
         // real gap native_binding_common.h's TryHandleRandom() comment

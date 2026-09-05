@@ -18,6 +18,7 @@
 #include <string>
 #include <vector>
 
+#include "simkin_bindings/script_delay.h"
 #include "skExecutableContext.h"
 
 class skInterpreter;
@@ -75,6 +76,16 @@ public:
     // to mute on PC.
     bool muteOnCall() const { return m_MuteOnCall; }
     void SetMuteOnCall(bool mute) { m_MuteOnCall = mute; }
+
+    // M53: the engine's script-timer clock (`engine+0x470 -> +0x460`),
+    // 8.8 fixed-point seconds accumulated per frame and zeroed on a level
+    // load. It hangs off the engine in the real game and off the stack
+    // here for the same reason muteOnCall does: every entity script that
+    // arms a `Delay` needs the one shared clock, and the stack is what
+    // every entity executable already holds a reference to. See
+    // script_delay.h.
+    GameClock& gameClock() { return m_GameClock; }
+    const GameClock& gameClock() const { return m_GameClock; }
 
     // M30: a script's own Quit() -- "close this screen". 30+ real scripts
     // call it, most visibly every NPC conversation's own "Goodbye" row
@@ -238,6 +249,7 @@ private:
     sk::SoundArchive* m_Sounds;  // M27: see sounds()/audio()'s own comment above
     sk::AudioEngine* m_Audio;
     bool m_MuteOnCall = false;  // M28: see muteOnCall() above
+    GameClock m_GameClock;      // M53: see gameClock() above
     bool m_CloseMenuRequested = false;  // M30: see closeMenuRequested() above
     std::map<std::string, std::unique_ptr<MenuExecutable>> m_Menus;
     std::unique_ptr<PlayerExecutable> m_Player;

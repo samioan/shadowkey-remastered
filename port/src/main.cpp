@@ -11,6 +11,7 @@
 // collision, M8 placed-entity rendering -- see docs/PORT_ROADMAP.md.
 #include <algorithm>
 #include <cctype>
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <fstream>
@@ -1545,6 +1546,12 @@ int main(int argc, char** argv) {
                 // below, so Level.GetEntity() can never return a dangling
                 // pointer into a destroyed zone's objects.
                 stack.level().ClearEntities();
+                // M53: and the script-timer clock restarts with the level,
+                // exactly as the engine's does (FUN_1002fca4 zeroes it).
+                // Every entity carrying a pending deadline is destroyed
+                // right here anyway, so there is nothing left holding a
+                // stale one.
+                stack.gameClock().Reset();
                 // M35: which script a placement actually runs.
                 //
                 // The .ent record carries its own script path (see
@@ -1656,6 +1663,14 @@ int main(int argc, char** argv) {
                             inst.z = static_cast<float>(e.z);
                             inst.modelArchiveIndex = desc->modelArchiveIndex;
                             inst.script = std::move(item);
+                            // M53: pickups were the one loaded category not
+                            // in GetEntity()'s registry, so a zone script
+                            // could not reach one by name. crypt2.s needs
+                            // exactly that -- `Star = GetEntity("star");
+                            // Star.Delay(1, 0);` on the seventh crystal is
+                            // what starts the Umbra arrival sequence, and
+                            // "star" is a category-3 placement.
+                            stack.level().RegisterEntity(e.name, inst.script.get());
                             gamePickups.push_back(std::move(inst));
                         } catch (skParseException& ex) {
                             std::printf("shadowkey-port: PARSE ERROR loading pickup %s: %s\n",
@@ -1850,6 +1865,50 @@ int main(int argc, char** argv) {
         }
 
         if (inGame && gameZone) {
+            // M53: the engine's script timer. `FUN_1006410c` runs once per
+            // frame per entity: if the entity's deadline has passed against
+            // the engine's own clock, it clears the armed flag and calls
+            // the script's `DelayReached(tag)`. Reproduced here over the
+            // two hosts every shipped `DelayReached` script lands in --
+            // monsters (category 2) and items/containers (categories 3 and
+            // 8) -- so azra_rat.s's eighth-kill congratulation, crypt1's
+            // and crypt2's sarcophagi, drgnfld's loot chests,
+            // crypt2/controller.s's seven-step Umbra arrival, and
+            // umbra_keth.s's whole phase cycle all run. See
+            // simkin_bindings/script_delay.h.
+            //
+            // The armed flag is cleared before the callback, so a handler
+            // that re-arms (which is exactly how the chained sequences
+            // work) is not re-fired on the same tick.
+            stack.gameClock().Advance(
+                std::chrono::duration<float>(sk::GameClock::kTickInterval).count());
+            {
+                auto fireDelay = [&](sk_bindings::ScriptDelay& delay,
+                                     skScriptedExecutable& script, const char* what) {
+                    int tag = 0;
+                    if (!delay.Fire(stack.gameClock(), &tag)) return;
+                    skRValueArray args;
+                    args.append(skRValue(tag));
+                    skRValue ret;
+                    skExecutableContext ctxt(&interpreter);
+                    try {
+                        script.method(skString(sk_bindings::kDelayReachedMethod), args, ret, ctxt);
+                    } catch (skParseException& ex) {
+                        std::printf("shadowkey-port: PARSE ERROR in %s DelayReached: %s\n",
+                                    what, ex.toString().ptr());
+                    } catch (skRuntimeException& ex) {
+                        std::printf("shadowkey-port: RUNTIME ERROR in %s DelayReached: %s\n",
+                                    what, ex.toString().ptr());
+                    }
+                };
+                for (MonsterInstance& m : gameMonsters) {
+                    if (m.script) fireDelay(m.script->delay(), *m.script, "monster");
+                }
+                for (PickupInstance& p : gamePickups) {
+                    if (p.script) fireDelay(p.script->delay(), *p.script, "pickup");
+                }
+            }
+
             // M47: how far the player actually moves this tick, which is
             // what drives the weapon viewmodel's walk bob (FUN_1001f230
             // takes the movement speed as its second argument, and a

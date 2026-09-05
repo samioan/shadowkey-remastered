@@ -132,6 +132,7 @@ add_library(sk_bindings STATIC
   src/simkin_bindings/spell_cast.cpp
   src/simkin_bindings/spell_projectile.cpp
   src/simkin_bindings/row_owner_ref.cpp
+  src/simkin_bindings/script_delay.cpp
   src/simkin_bindings/table_executable.cpp
   src/simkin_bindings/test_armor_executable.cpp
   src/simkin_bindings/text_area_executable.cpp
@@ -408,3 +409,9 @@ target_link_libraries(audio_mixing_smoke PRIVATE sk_bindings)
 # src/tests/m52_save_fields_smoke.cpp.
 add_executable(save_fields_smoke src/tests/m52_save_fields_smoke.cpp)
 target_link_libraries(save_fields_smoke PRIVATE sk_save sk_world)
+
+# Delay/DelayReached -- the entity script timer -- and what it says about
+# the two scripts the roadmap called unplaceable. See
+# src/tests/m53_script_delay_smoke.cpp.
+add_executable(script_delay_smoke src/tests/m53_script_delay_smoke.cpp)
+target_link_libraries(script_delay_smoke PRIVATE sk_bindings sk_world)
