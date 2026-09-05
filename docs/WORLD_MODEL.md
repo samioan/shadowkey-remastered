@@ -247,11 +247,12 @@ pointer) rather than every function that sets it. This is how
 ## Open follow-ups
 
 - ~~What `FUN_1002b430`'s tile-height-difference scan actually
-  produces~~ — still genuinely unconfirmed (automap vs. something else),
-  but now better-contextualized: it's clearly **not** the first-person
-  visibility system, since that's `TileGrid_RaycastVisibility` (resolved
-  above) — a 150-178-ray fan out to 25-172 tiles, structurally nothing
-  like `FUN_1002b430`'s 65×65 full-window scan.
+  produces~~ — **resolved in M57: it is the map.** See "`FUN_1002b430` is
+  the map, and here is all of it" below for the whole feature. The
+  earlier reasoning held up — it is clearly not the first-person
+  visibility system, since that is `TileGrid_RaycastVisibility`, a
+  150-178-ray fan structurally nothing like this 65×65 window — and the
+  window turns out to be 64×64 tiles drawn 2×2 pixels each.
 - ~~The actual first-person rasterizer/raycaster still not located~~ —
   **resolved**, see "Per-frame tile-visibility raycasting" above and
   `RENDERER_3D.md`'s tile-grid wall/surface-face renderer section.
@@ -2413,3 +2414,164 @@ doors, 5 fence rails, ...), and 141 of those are large enough that the
 original bakes them into the tile grid.
 
 Smoke test `src/tests/m55_model_collision_smoke.cpp`.
+
+## `FUN_1002b430` is the map, and here is all of it (M57)
+
+The hypothesis this doc has carried since the `Map_GetTileAt` pass —
+"probably the automap, left un-renamed pending more evidence" — is
+confirmed, and the whole feature is now recovered end to end. It is
+**not a screen**: no screen mode, no `.s` script, no menu entry. It is a
+HUD overlay drawn straight over the 3D view.
+
+### The switch
+
+One boolean on the player, `player+0x3a4`, and one three-line function
+that flips it:
+
+```c
+void FUN_1001ee50(int player) {
+    *(bool *)(player + 0x3a4) = *(char *)(player + 0x3a4) != '\x01';
+}
+```
+
+`FUN_1001ee50` has exactly one caller — the player's per-frame input
+poll `FUN_1001c9c0` — and it is edge-triggered on **logical action 9**:
+
+```c
+if (GetBoundButton(input, 9) && !GetBoundButtonPrev(input, 9))
+    FUN_1001ee50(player);
+```
+
+Action 9 is `"Map Toggle"` (string `0xd04`), default key **Key 9** — see
+[`INPUT_HANDLING.md`](INPUT_HANDLING.md), whose default-scheme table now
+carries the real action-index column this milestone recovered from
+`FUN_1001a220`.
+
+The draw side is gated on the same flag, inside the in-game HUD pass of
+`FUN_100149b8`, after the compass/vitals/hand-icon draws:
+
+```c
+if (*(char *)(*(int *)(engine + 0x618) + 0x3a4) != '\0') FUN_1002b430(controller);
+```
+
+Nothing pauses. The map is an overlay and the game keeps running under
+it.
+
+### The picture
+
+- An optional full-screen backdrop from sprite slot **20**
+  (`engine+0x44b0`; the slot array's base is `engine+0x4460`, pinned in
+  M54 via slots 205/206, so `(0x44b0 - 0x4460)/4 = 20`). Every zone's
+  `<zone>_sprites.txt` requests it.
+- The **zone display name**, centred at y=10, white, with a one-pixel tan
+  shadow. `FUN_100290a8` is the engine's own internal-name → display-string
+  lookup, i.e. the same table M26 recovered for the loading screen.
+- A **64×64-tile window centred on the player's tile**, drawn at 2×2
+  pixels per tile from screen (24, 40) — so 128×128 pixels.
+  **Larger world Y is up**: the tile loop counts world Y *down* from
+  `py + 32` while the screen row counts up.
+- Then the player marker.
+
+The per-tile colour, with the `+ 5` every in-bounds arm adds folded in:
+
+| condition | colour |
+|---|---|
+| off the grid, or never seen | `0x0ca5` |
+| seen, and `cell.u16 & 0x2402` | `0x0868` |
+| seen, open, no floor-height change | `0x0db5` |
+| seen, open, floor height changes | `0x0a85` |
+| the player marker | `0x0fff` |
+
+Out-of-bounds and unexplored are deliberately the *same* colour — the
+default is `0xca5` outright and the unexplored arm is `0xca0 + 5` — so
+the edge of the world and the edge of your knowledge are indistinguishable
+by design.
+
+The height compared is the `.zcp` entry's signed 16-bit at byte 2 (this
+port's `ZcpEntry::floorBandThreshold`), and it is compared against the
+tile **diagonally ahead**, `(x+1, y+1)`, not a cardinal neighbour. The
+engine bounds-checks the first lookup and not the second.
+
+**These colour literals settle
+[`GRAPHICS_FORMAT.md`](GRAPHICS_FORMAT.md)'s long-open question about the
+exact 16-bit pixel format.** They are written *straight into the
+framebuffer*, and they only read as sensible map colours in 0x0RGB
+4-bit-per-channel (Symbian `EColor4K`); as RGB565 `0x0ca5` would be a dark
+green. `FUN_1008f97c` confirms it independently by unpacking its own
+colour argument as `R = ((c>>8)&0xf)<<4`, `G = ((c>>4)&0xf)<<4`,
+`B = (c&0xf)<<4`.
+
+### The blocking mask, and a bit it turned up
+
+`0x2402` is the only occurrence of that literal in the image, and it is
+applied to the cell's **first two bytes as one u16** — so bit 1 is
+`ZmpCell::flags` bit 1 (wall) and bits 10 and 13 are `blockFlags` bits 2
+and 5. Both of the latter are richly authored on disk, which a first
+draft of this work assumed they were not:
+
+- **bit 2** — 40,517 cells across all 21 zones, 36,332 of them *not*
+  walls. The same bit M44 found `LockZone` assigning and M55 found the
+  entity tile-stamp ORing, so authored blocking, a locked gate and a prop
+  too wide for its own tile all converge on one flag.
+- **bit 5** — 13,064 cells across exactly six zones (fearfrst 9859,
+  erthcave 1681, broken2 588, lothcav 433, delfhide 324, ffarena 179),
+  in compact regions, and **never once on a wall cell**. Its only other
+  reader is `FUN_100001ac`, which tests it during movement and, when the
+  actor's own Z is at or below that cell's floor height, makes a virtual
+  call — a surface you sink into rather than geometry you collide with.
+  Water or a hazard pool is the natural reading and the distribution fits
+  (fearfrst is 60% of its grid); naming it properly is left open. What is
+  certain is that the map paints it solid.
+
+### The player marker
+
+Three white lines, all from (0x58, 0x68) — the centre of the drawn area,
+which is where the player's own tile lands — via the DDA line drawer
+`FUN_1005e310` (8.8 fixed point, `max(|dx|,|dy|)` whole-pixel steps,
+stride 0xb0 = 176, clipping only the bottom edge).
+
+The angles come from a **2048-entry sine table at `0x100f4954` whose
+every entry is exactly `round(256 · sin(2πi/2048))`** — checked against
+all 2048, zero deviation. With `a = -0x8000 - heading` (the engine's
+0x10000-per-turn unit, `Entity+0xb6`), indexed `a >> 5`:
+
+- one leg at `a`, radius `sin >> 5` → 8 pixels;
+- two legs at `a ± 45°`, radius `sin >> 6` → 4 pixels.
+
+The decompile looks asymmetric because one subexpression is shared:
+`sin(a+45)` is the first short leg's X *and* the second's Y. And the two
+short legs are not exact mirrors — an arithmetic `>> 6` rounds a negative
+away from zero and a positive toward it, so at heading 0 they land at
+(91, 107) and (86, 107) around a long leg ending at (88, 112).
+
+A second, multiplayer-only block draws up to two other players as 2×2
+blocks, gated on `engine+0x5c0`.
+
+### The explored bitmap: what makes it a map
+
+`registry+0x45c`, allocated `width * height / 8` bytes and zeroed by
+`FUN_1002f890`, indexed exactly:
+
+```c
+bitmap[(width >> 3) * y + (x >> 3)] & (1 << (x & 7))
+```
+
+**`TileGrid_RaycastVisibility` is what fills it in** — the same per-frame
+fan of rays that decides which tile faces to draw ORs a bit in for every
+tile a ray passes through, every frame, whether or not the map is open.
+So the map shows precisely the set of tiles that have at some point been
+rendered. That is the reveal-as-you-go mechanic this doc guessed at, now
+confirmed from both ends.
+
+Two details of the original worth recording:
+
+- It is allocated **once** (`if (registry+0x45c == 0)`) and never
+  resized, so a later, larger zone would index past a buffer sized for
+  the first. This port sizes it per zone instead — the one deliberate
+  departure.
+- It is **saved and restored** (`FUN_1002fa5c` / `FUN_1002f934`): map
+  width, map height, then `w*h/8` raw bytes — and immediately after them,
+  in the same record, the u16 at `registry+0x468` and the u16 at
+  `registry+0x478`. Those are M56's key-item flag word and its frozen-key
+  counter, which is an independent confirmation of that milestone's
+  reading, including the counter's width.

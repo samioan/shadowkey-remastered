@@ -24,6 +24,23 @@ framebuffer pointer)'s read sites.
   — matches `ScreenModeController_ctor`'s palette setup in
   `RENDER_LOOP.md`.
 
+  > **M57: "RGB444-ish" is now just RGB444.** Two independent
+  > confirmations, both from the map (`WORLD_MODEL.md`):
+  >
+  > 1. `FUN_1002b430` writes its tile colours **straight into the
+  >    framebuffer** — `0xca5`, `0x868`, `0xdb5`, `0xa85`. Those are
+  >    coherent map tans and greys as `0x0RGB`; read as RGB565 the first
+  >    would be a dark green.
+  > 2. `FUN_1008f97c` unpacks its own 12-bit colour argument explicitly:
+  >    `R = ((c >> 8) & 0xf) << 4`, `G = ((c >> 4) & 0xf) << 4`,
+  >    `B = (c & 0xf) << 4`.
+  >
+  > So the buffer is 16 bits per pixel carrying 12 bits of colour, the
+  > top nibble unused — Symbian's `EColor4K`. Note the engine expands a
+  > nibble as `n << 4`; this port uses `n * 17` (`sprite_archive.cpp`'s
+  > `Rgb444ToRgb565`), a one-LSB-per-channel difference kept for
+  > consistency with every other asset path here.
+
 ## Sprite/image format (paletted, segment/RLE-encoded)
 
 `Blit_RLESprite` (renamed from `FUN_1006a488`, 0x1006a488) is the core

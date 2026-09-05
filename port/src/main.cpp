@@ -67,6 +67,7 @@
 #include "skRuntimeException.h"
 #include "world/entity_types.h"
 #include "world/model_archive.h"
+#include "world/automap.h"
 #include "world/model_collision.h"
 #include "world/zone.h"
 
@@ -829,6 +830,40 @@ void RenderMenu(sk::Backbuffer& backbuffer, sk_bindings::MenuExecutable& menu,
 // (5,5)/(139,5) -- flanking the compass banner in the same top HUD
 // row. Ties directly into this port's own PlayerExecutable::leftItem()/
 // rightItem() (the real hand-equip system decompiled two sessions ago).
+// M57: the map overlay -- see world/automap.h for the whole recovery.
+// Drawn in the original's own order: backdrop sprite (slot 20), the zone
+// caption, then the 64x64-tile grid and the player arrow. It sits after
+// the HUD in the frame because it is drawn later in the real HUD pass
+// too, and it covers the compass band while open.
+void RenderAutomapOverlay(sk::Backbuffer& backbuffer, const sk::Zone& zone,
+                           const sk::ExploredTiles& explored, const sk::Camera& camera,
+                           sk::SpriteArchive& sprites, const sk::StringTable& strings,
+                           const std::string& zoneName) {
+    if (const sk::Sprite* backdrop = sprites.GetSprite(sk::kAutomapBackdropSlot)) {
+        backbuffer.Blit(0, 0, *backdrop);
+    }
+    // `FUN_100290a8` is the engine's own internal-zone-name -> display-
+    // string lookup, which this port already has as
+    // assets/zone_display_names.h (M26 found it from the loading screen).
+    int nameId = sk::ZoneDisplayNameStringId(zoneName);
+    if (nameId >= 0) {
+        std::string caption = strings.Get(nameId);
+        int textW = sk::BitmapFont::TextWidth(caption);
+        sk::BitmapFont::DrawString(backbuffer, (sk::Backbuffer::kWidth - textW) / 2,
+                                    sk::kAutomapCaptionY, caption, kStaticTextColor);
+    }
+    // The engine's angle unit is 0x10000 per turn; this port's camera
+    // carries radians, and yaw runs the opposite way round (see the
+    // turn handling in the tick loop).
+    constexpr float kTwoPi = 6.28318530718f;
+    float turns = -camera.yaw / kTwoPi;
+    turns -= std::floor(turns);
+    int headingUnits = static_cast<int>(turns * 65536.0f) & 0xffff;
+    sk::RenderAutomap(backbuffer, zone, explored,
+                       static_cast<int>(camera.x) >> 8, static_cast<int>(camera.y) >> 8,
+                       headingUnits);
+}
+
 void RenderHud(sk::Backbuffer& backbuffer, const sk_bindings::PlayerExecutable& player,
                 sk::SpriteArchive& sprites, float cameraYaw) {
     const sk::Sprite* compassTape = sprites.GetSprite(0);
@@ -1254,6 +1289,12 @@ int main(int argc, char** argv) {
     // every zone load, beside the model/sprite/sound manifests it sits in
     // the same file as.
     sk::ModelCollisionTable gameModelCollision;
+    // M57: the map overlay -- see world/automap.h. `gameExplored` is the
+    // reveal-as-you-go bitmap the renderer's own visibility raycast fills
+    // in; `gameMapOpen` is `player+0x3a4`, the one boolean the whole
+    // feature hangs off.
+    sk::ExploredTiles gameExplored;
+    bool gameMapOpen = false;
     // Combat vertical-slice: live monsters, pulled out of gameEntities'
     // static-prop list at zone load (see below) -- see MonsterInstance's
     // comment.
@@ -1590,6 +1631,11 @@ int main(int argc, char** argv) {
                 // which `Entity::Init` copies onto every placement of it.
                 gameModelCollision.Load(scriptRoot, stack.requestedZone());
                 gameZone = std::move(zone);
+                // M57: the original allocates its explored bitmap once
+                // and never resizes it (see ExploredTiles::Reset) -- this
+                // port sizes it per zone, the one deliberate departure.
+                gameExplored.Reset(gameZone->width(), gameZone->height());
+                gameMapOpen = false;
                 // M44: LockZone/UnlockZone write straight into the cell
                 // grid, so the Level global needs the live zone. Repointed
                 // on every zone load.
@@ -2020,6 +2066,24 @@ int main(int argc, char** argv) {
             // inferred from the keys, so a move blocked by a wall correctly
             // counts as standing still.
             float playerPrevX = gameCamera.x, playerPrevY = gameCamera.y;
+            // M57: `FUN_1001c9c0`'s own map branch -- an edge-triggered
+            // poll of action 9 calling the three-line toggle
+            // `FUN_1001ee50`. It sits with the other movement-tick input,
+            // not with the menu keys, because that is where the original
+            // reads it, and it does not pause anything: the map is an
+            // overlay and the game keeps running underneath it.
+            if (input.ConsumeBoundJustPressed(sk::Action::MapToggle)) {
+                gameMapOpen = !gameMapOpen;
+            }
+            // M57: the reveal. `TileGrid_RaycastVisibility` ORs a bit into
+            // the explored bitmap for every tile a ray passes through, and
+            // it does that every frame whether or not the map is open --
+            // so this runs unconditionally, off the same call the renderer
+            // uses to pick faces.
+            if (gameZone) {
+                gameExplored.MarkVisible(
+                    gameZone->RaycastVisibleTiles(gameCamera.x, gameCamera.y, gameCamera.yaw));
+            }
             // M10: the real default control scheme's own CharacterManager
             // action (docs/INPUT_HANDLING.md, KeyHash by default) opens
             // the real charactermanager.s screen chain, pausing the 3D
@@ -3698,6 +3762,12 @@ int main(int argc, char** argv) {
                 zoneRenderer.Render(backbuffer, *gameZone, gameCamera, frameEntities, &modelArchive);
                 RenderHud(backbuffer, stack.player(), spriteArchive, gameCamera.yaw);
                 RenderWeaponViewmodel(backbuffer, gameWeaponViewmodel, spriteArchive);
+                // M57: last, over everything -- the map is an overlay, and
+                // the game underneath it keeps running.
+                if (gameMapOpen) {
+                    RenderAutomapOverlay(backbuffer, *gameZone, gameExplored, gameCamera,
+                                          spriteArchive, strings, stack.currentLevelName());
+                }
                 // Minimal combat/interact feedback -- name + HP of
                 // whatever *aggressive* monster is currently in the
                 // player's actual attack range/facing cone, else the

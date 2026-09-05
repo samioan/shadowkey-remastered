@@ -1321,6 +1321,35 @@ port. It is what `LockZone`/`UnlockZone` write, bit 2 (`0x04`) being
 "locked". The runtime cell is 8 bytes (`engine+0x6908`, indexed
 `(width*y + x) * 8`), with the same first six.
 
+> **M57: the byte is authored on disk, and it has a second known bit.**
+> Found by reading the map (`WORLD_MODEL.md`), whose "draw this tile
+> solid" test is `cellU16 & 0x2402` — one mask over the first *two*
+> bytes, so `flags` bit 1 (wall) plus `blockFlags` bits 2 and 5. Counted
+> across all 21 shipped zones:
+>
+> | bit | cells on disk | zones | on a wall cell |
+> |---|---|---|---|
+> | `0x04` (bit 2) | 40,517 | all 21 | 4,185 of them |
+> | `0x20` (bit 5) | 13,064 | 6 | **never** |
+>
+> So bit 2 is not only a runtime `LockZone` flag: it is authored
+> blocking, and 36,332 of its cells are not walls. It is also the bit
+> M55's entity tile-stamp ORs in, so authored blocking, a locked gate and
+> an oversized prop all land on one flag.
+>
+> Bit 5 appears only in fearfrst (9859), erthcave (1681), broken2 (588),
+> lothcav (433), delfhide (324) and ffarena (179), in compact regions and
+> never on a wall. Its only other reader is `FUN_100001ac`, which tests
+> it during movement and makes a virtual call when the actor's Z is at or
+> below that cell's floor height — a surface you sink into, not geometry
+> you collide with. Water or a hazard pool fits both the code and the
+> distribution; not named here on that evidence alone.
+>
+> Note `LockZone`'s `cellByte1 = 4` **assignment** (see the asymmetry
+> table below) therefore destroys any authored bit 5 inside a locked
+> rectangle — whether that ever happens in the shipped content was not
+> checked.
+
 ### Inclusive containment, half-open iteration
 
 The two disagree in the shipped engine, and the port reproduces both.

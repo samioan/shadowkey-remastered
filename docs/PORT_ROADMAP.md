@@ -4527,6 +4527,101 @@ algorithms.
       world pickup). Each is listed with its call count in the tool's
       output.
 
+- [x] **M57 -- the map.** `FUN_1002b430`, carried as "probably the
+  automap, left un-renamed pending more evidence" since the
+  `Map_GetTileAt` pass, is the in-game map, and the whole feature is now
+  recovered and implemented. Full RE writeup in
+  [`docs/WORLD_MODEL.md`](WORLD_MODEL.md) ("`FUN_1002b430` is the map");
+  smoke test `src/tests/m57_automap_smoke.cpp` (34 checks).
+
+    - **It is not a screen.** No screen mode, no `.s` script, no menu
+      entry -- which is why nothing turned it up from the script side. It
+      is a HUD overlay hanging off one boolean, `player+0x3a4`, flipped
+      by a three-line function (`FUN_1001ee50`) with exactly one caller:
+      the player's per-frame input poll, edge-triggered on logical action
+      **9**. Nothing pauses; the game keeps running underneath it.
+
+    - **A correction to `INPUT_HANDLING.md` that this needed first.**
+      That doc's default-scheme table lists the 16 actions in the order
+      `FUN_1001a220` binds them, and this port's `Action` enum had copied
+      that row order as the action *indices*. The indices are the second
+      argument of each `FUN_1001a784(input, action, key, nameResId)` call
+      and are a different permutation. The (action, key) pairs the doc
+      recorded were all right; the numbers were not, and it matters the
+      moment something is read out of the binary by index -- action 9 is
+      `"Map Toggle"` (Key 9), not "Side Step Right". Cross-checked
+      against every branch of the same input poll. The enum is now the
+      engine's own numbering.
+
+    - **The picture**: optional backdrop from sprite slot 20, the zone
+      display name centred at y=10, then a 64x64-tile window centred on
+      the player drawn 2x2 pixels per tile at (24, 40) -- 128x128 on a
+      176x208 screen. Larger world Y is *up*: the tile loop counts world
+      Y down while the screen row counts up. Four tile colours, with the
+      `+ 5` every in-bounds arm adds folded in: `0x0ca5` unknown,
+      `0x0868` blocked, `0x0db5` flat, `0x0a85` stepped. Out-of-bounds
+      and unexplored are deliberately the same colour, so the edge of the
+      world and the edge of your knowledge look identical.
+
+    - **This settles `GRAPHICS_FORMAT.md`'s open pixel-format question.**
+      Those colour literals go **straight into the framebuffer**, and
+      they only read as map tans and greys in `0x0RGB` 4-bit-per-channel
+      (Symbian `EColor4K`); as RGB565, `0x0ca5` is a dark green.
+      `FUN_1008f97c` confirms it independently by unpacking its own
+      colour argument nibble by nibble. So: 16bpp carrying 12 bits of
+      colour, top nibble unused.
+
+    - **The explored bitmap is what makes it a map rather than a
+      minimap.** `registry+0x45c`, one bit per tile, and
+      `TileGrid_RaycastVisibility` -- the same per-frame ray fan that
+      picks which faces to draw -- ORs a bit in for every tile a ray
+      passes through, every frame, open or not. So the map shows exactly
+      the set of tiles that have ever been rendered. This port feeds it
+      from `Zone::RaycastVisibleTiles`, its own reimplementation of that
+      very function.
+
+    - **A confirmation of M56 fell out of it.** The bitmap is saved and
+      restored (`FUN_1002fa5c`/`FUN_1002f934`) as width, height, `w*h/8`
+      bytes -- and then, in the same record, the u16 at `registry+0x468`
+      and the u16 at `registry+0x478`. Those are M56's key-item flag word
+      and frozen-key counter, independently confirming that reading
+      including the counter's width.
+
+    - **The blocking mask turned up an undocumented cell bit.** The "draw
+      solid" test is `cellU16 & 0x2402`, the literal's only occurrence in
+      the image, spanning the cell's first *two* bytes: `flags` bit 1
+      (wall) plus `blockFlags` bits 2 and 5. A first draft assumed both
+      extra bits were runtime-only; the smoke test disproved it. Bit 2 is
+      authored on **40,517 cells across all 21 zones**, 36,332 of them
+      not walls -- so authored blocking, M44's `LockZone` and M55's
+      entity tile-stamp all share one flag. Bit 5 is authored on
+      **13,064 cells across exactly six zones** and **never once on a
+      wall**; its only other reader (`FUN_100001ac`) tests it during
+      movement and fires a virtual call when the actor's Z is at or below
+      that cell's floor height -- a surface you sink into. Water or a
+      hazard pool fits, but it is recorded rather than named. In azra
+      this is the difference between 725 wall cells and 4,715 tiles the
+      map draws solid.
+
+    - **The player arrow** is three white lines from the map centre,
+      angled off a 2048-entry sine table at `0x100f4954` whose every
+      entry is exactly `round(256 * sin(2*pi*i/2048))` -- checked against
+      all 2048, zero deviation. One leg at the facing (radius 8px), two
+      at +/-45 degrees (4px). The two short legs are not exact mirrors:
+      an arithmetic `>> 6` rounds a negative away from zero and a
+      positive toward it, so at heading 0 they land at (91, 107) and
+      (86, 107) either side of a long leg ending at (88, 112). Pinned in
+      the test rather than tidied.
+
+    - **One deliberate departure**: the original allocates the explored
+      bitmap once and never resizes it, so a later, larger zone would
+      index past a buffer sized for the first. This port sizes it per
+      zone.
+
+    - Not carried over: the multiplayer block that draws up to two other
+      players as 2x2 markers, on the same footing as every other
+      Bluetooth path in this port.
+
 ## Next milestones (not yet started)
 
 Roughly in priority order for reaching "actually playable," not commitments:

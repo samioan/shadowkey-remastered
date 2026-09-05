@@ -232,6 +232,45 @@ actions, each *also* tagged with its own resource ID
 | Cycle Left Queue | Key * |
 | Character Manager | Key # |
 
+**M57 addendum: the action *index* is not the row order above.** That
+table lists the actions in the order `FUN_1001a220` calls the binder,
+which is (almost) resource-id order; the integer each action actually
+*is* comes from that same call's second argument:
+
+```c
+FUN_1001a784(input, actionIndex, keySlot, nameResourceId);
+```
+
+The (action, default key) pairs above are all correct. The indices are:
+
+| index | action | resource | default key |
+|---|---|---|---|
+| 0 | Move Forward | `0xced` | Up |
+| 1 | Move Backward | `0xcee` | Down |
+| 2 | Turn Left | `0xcef` | Left |
+| 3 | Turn Right | `0xcf0` | Right |
+| 4 | Look Up | `0xcf1` | Key 2 |
+| 5 | Look Down | `0xcf4` | Key 8 |
+| 6 | Side Step Left | `0xcf2` | Key 4 |
+| 7 | Side Step Right | `0xcf3` | Key 6 |
+| 8 | Jump | `0xcf6` | Key 1 |
+| **9** | **Map Toggle** | `0xd04` | **Key 9** |
+| 10 | Cycle Right Queue | `0xcfd` | Key 0 |
+| 11 | Cycle Left Queue | `0xcfe` | Key * |
+| 12 | Character Manager | `0xcff` | Key # |
+| 13 | Use | `0xd01` | Key 3 |
+| 14 | Use Left Action | `0xd02` | Key 7 |
+| 15 | Use Right Action | `0xd03` | Key 5 |
+
+This matters as soon as something has to be read out of the binary *by
+index*: `FUN_1001c9c0`, the player's per-frame input poll, toggles the
+map on literal action `9`, which under the row-order numbering would read
+as "Side Step Right". Cross-checked against every branch of that same
+poll — 0/1 and 6/7 are the four translation moves, 2/3 the two turns
+sharing one release call, 4/5 the two looks sharing another, and 8..15
+the edge-triggered actions, each landing on exactly the handler its name
+predicts.
+
 This is a complete, sensible first-person-RPG control scheme for the
 N-Gage's numeric-keypad-primary layout — D-pad for movement/turning, and
 the 0-9/*/# keys for combat, item-queue cycling (quick-swap spell/weapon

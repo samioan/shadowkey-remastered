@@ -31,11 +31,39 @@ enum class ButtonSlot : int {
 // documented default -- the 17th slot's role wasn't pinned down there
 // either, left unbound here to match that same open item honestly rather
 // than guessing.
+// M57: **these are now the engine's own action indices.** They used to be
+// this port's own numbering, taken from the order
+// docs/INPUT_HANDLING.md's table lists the actions in -- which is the
+// order of their name resource ids, not the order the engine assigns.
+// `FUN_1001a220` gives the real assignment directly, one call per action:
+//
+//     FUN_1001a784(input, actionIndex, keySlot, nameResourceId)
+//
+// The (action, default key) *pairs* the doc records were all correct; what
+// was wrong was which integer each action is. It mattered as soon as
+// something had to be read out of the binary by index -- the map toggle is
+// polled as literal action 9 in `FUN_1001c9c0`, which under the old
+// numbering read as "Side Step Right". Cross-checked against every branch
+// of that same input poll: 0/1 and 6/7 are the four translation moves,
+// 2/3 the two turns sharing a release call, 4/5 the two looks sharing
+// another, and 8..15 the edge-triggered actions.
 enum class Action : int {
-    MoveForward = 0, MoveBackward = 1, TurnLeft = 2, TurnRight = 3,
-    Jump = 4, LookUp = 5, Use = 6, SideStepLeft = 7,
-    UseRightAction = 8, SideStepRight = 9, UseLeftAction = 10, LookDown = 11,
-    MapToggle = 12, CycleRightQueue = 13, CycleLeftQueue = 14, CharacterManager = 15,
+    MoveForward = 0,      // 0xced, Up
+    MoveBackward = 1,     // 0xcee, Down
+    TurnLeft = 2,         // 0xcef, Left
+    TurnRight = 3,        // 0xcf0, Right
+    LookUp = 4,           // 0xcf1, Key 2
+    LookDown = 5,         // 0xcf4, Key 8
+    SideStepLeft = 6,     // 0xcf2, Key 4
+    SideStepRight = 7,    // 0xcf3, Key 6
+    Jump = 8,             // 0xcf6, Key 1
+    MapToggle = 9,        // 0xd04, Key 9
+    CycleRightQueue = 10, // 0xcfd, Key 0
+    CycleLeftQueue = 11,  // 0xcfe, Key *
+    CharacterManager = 12,// 0xcff, Key #
+    Use = 13,             // 0xd01, Key 3
+    UseLeftAction = 14,   // 0xd02, Key 7
+    UseRightAction = 15,  // 0xd03, Key 5
     kCount = 17,  // matches the real 17-entry bindingOffset table
 };
 

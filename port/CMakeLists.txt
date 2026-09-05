@@ -155,6 +155,7 @@ endif()
 # src/render3d/.
 add_library(sk_world STATIC
   src/assets/zone_file.cpp
+  src/world/automap.cpp
   src/world/model_archive.cpp
   src/world/model_collision.cpp
   src/world/zone.cpp
@@ -431,3 +432,8 @@ target_link_libraries(model_collision_smoke PRIVATE sk_world)
 # in the corpus. See src/tests/m56_player_api_smoke.cpp.
 add_executable(player_api_smoke src/tests/m56_player_api_smoke.cpp)
 target_link_libraries(player_api_smoke PRIVATE sk_bindings sk_world)
+
+# The in-game map: the explored bitmap, the tile classification and the
+# player arrow. See src/tests/m57_automap_smoke.cpp.
+add_executable(automap_smoke src/tests/m57_automap_smoke.cpp)
+target_link_libraries(automap_smoke PRIVATE sk_world)
