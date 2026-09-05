@@ -879,6 +879,26 @@ bool PlayerExecutable::method(const skString& methodName, skRValueArray& args,
         m_Stack->ReopenMenu("buysell");
         return true;
     }
+    if (methodName == skString("SetCameraStart") && args.entries() == 6) {
+        // M61: Player binding 0x39 -- the scripted spawn override. The
+        // real case reads exactly six arguments and leaves (with the
+        // interpreter's own "wrong argument count" error) on the first one
+        // missing, so this deliberately matches on 6 and nothing else.
+        //
+        // Argument order is (x, y, z, pitch, yaw, roll) and is NOT the
+        // order the six values are stored in -- MenuStack::CameraStart's
+        // comment has the whole explanation, and it is the interesting
+        // half of this binding.
+        //
+        // Every one of the 49 shipped calls passes 0 for pitch and 0 for
+        // roll, and a signed 65536-per-turn angle for yaw: a spawn point
+        // and a facing, nothing more. The two dead channels are carried
+        // anyway because the engine carries them.
+        if (!m_Stack) return SoftFailNativeCall("Player", methodName, args, returnValue);
+        m_Stack->ArmCameraStart(args[0].intValue(), args[1].intValue(), args[2].intValue(),
+                                 args[3].intValue(), args[4].intValue(), args[5].intValue());
+        return true;
+    }
 
     // --- M58: the effects system (effects.h). The busiest unimplemented
     // native in the corpus was `GetPlayer().AddEffect` (20 sites) and

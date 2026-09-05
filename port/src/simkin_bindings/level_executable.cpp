@@ -150,7 +150,9 @@ bool LevelExecutable::method(const skString& methodName, skRValueArray& args,
         returnValue = skRValue(static_cast<skiExecutable*>(&m_Stack.player()), false);
         return true;
     }
-    if (methodName == skString("LoadLevel") && args.entries() == 1) {
+    if ((methodName == skString("LoadLevel") || methodName == skString("ForceLoadLevel") ||
+         methodName == skString("ActuallyLoadLevel")) &&
+        args.entries() >= 1) {
         // M26: a real script's own zone-transition request (e.g.
         // cheatmenu.s's `Level.LoadLevel("azra")`) -- see MenuStack::
         // RequestZoneChange()'s own comment for why this reuses
@@ -159,7 +161,56 @@ bool LevelExecutable::method(const skString& methodName, skRValueArray& args,
         // actually consumes them (a real per-zone display-name banner +
         // the real loading-progress bar, docs/PORT_ROADMAP.md's M26
         // entry).
-        m_Stack.RequestZoneChange(ToStdString(args[0].str()));
+        //
+        // M61: all three take `(name, x, y)` with the two coordinates
+        // optional and defaulting to -1, and all three record the pending
+        // level the same way (MenuStack::SetPendingLevel). Where they
+        // differ is *when* the load happens, and that is a difference this
+        // port does not currently have to make:
+        //
+        //   ForceLoadLevel (0x16) / ActuallyLoadLevel (0x18) load right
+        //     now, straight through the app object's own loader.
+        //   LoadLevel (0x17) does NOT load. It records the destination and
+        //     opens `levelconfirm.s` -- the "Travel to: <name> / Go /
+        //     Don't Go" prompt -- and it is `Go` that calls
+        //     `ActuallyLoadLevel(GetNextLevel(), GetNextLevelX(),
+        //     GetNextLevelY())`.
+        //
+        // Raising that prompt needs a menu screen wired through main.cpp's
+        // mode machinery plus the menu-side `GetNextLevelName()`, so it is
+        // deliberately left out of this milestone and noted in
+        // docs/PORT_ROADMAP.md. Every one of the three still defers by one
+        // tick here, which is what the shipped scripts' arm-then-load
+        // ordering needs (they call SetCameraStart on the line *after*
+        // LoadLevel).
+        std::string name = ToStdString(args[0].str());
+        int nextX = args.entries() >= 2 ? args[1].intValue() : -1;
+        int nextY = args.entries() >= 3 ? args[2].intValue() : -1;
+        m_Stack.SetPendingLevel(name, nextX, nextY);
+        m_Stack.RequestZoneChange(std::move(name));
+        return true;
+    }
+    if (methodName == skString("GetNextLevel") && args.entries() == 0) {
+        // `app+0x28`'s current-name slot, which LoadLevel has already
+        // overwritten with the destination -- see SetPendingLevel().
+        returnValue = skRValue(skString(m_Stack.currentLevelName().c_str()));
+        return true;
+    }
+    if (methodName == skString("GetNextLevelX") && args.entries() == 0) {
+        returnValue = skRValue(m_Stack.pendingLevelX());
+        return true;
+    }
+    if (methodName == skString("GetNextLevelY") && args.entries() == 0) {
+        returnValue = skRValue(m_Stack.pendingLevelY());
+        return true;
+    }
+    if (methodName == skString("RestoreSaveLevel") && args.entries() == 0) {
+        // Level binding 0x15, and the reason SetCameraStart can safely be
+        // armed before its level exists. `levelconfirm.s`'s Don't Go calls
+        // it: it copies the previous level name back over the pending one
+        // and clears `engine+0x14a20`, so a declined trip cannot leave a
+        // spawn override armed to fire at whatever loads next.
+        m_Stack.RestorePendingLevel();
         return true;
     }
     if (methodName == skString("PlayAmbient") && args.entries() >= 1) {

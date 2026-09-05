@@ -146,6 +146,19 @@ public:
     int32_t playerStartX = 0;
     int32_t playerStartY = 0;
     int32_t playerStartZ = 0;
+    // M61: the player-start record's own three orientation channels, raw
+    // 16-bit angles (65536 == one full turn), same units and fields as
+    // EntPlacement::yawRaw below. `GameEngine_InitLevel`'s `typeId == 1`
+    // branch writes all three onto the player exactly the way the
+    // generic-entity branch writes them onto a placed object -- pitch from
+    // record offset 0x10, yaw from 0x14, roll from 0x0c
+    // (docs/ZONE_FORMAT.md's verified destination table: `+0xa8`, `+0xb6`,
+    // `+0xb2`). This port read the position and dropped the angles, so
+    // every zone entry faced due +x regardless of where the level designer
+    // pointed the arrival.
+    uint16_t playerStartPitchRaw = 0;
+    uint16_t playerStartYawRaw = 0;
+    uint16_t playerStartRollRaw = 0;
 
     // One non-player-start .ent record (docs/ZONE_FORMAT.md's
     // EntPlacement, typeId > 1) -- resolving typeId to an actual model

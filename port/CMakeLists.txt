@@ -457,3 +457,7 @@ target_link_libraries(merchant_smoke PRIVATE sk_bindings sk_world)
 # See src/tests/m60_store_screen_smoke.cpp.
 add_executable(store_screen_smoke src/tests/m60_store_screen_smoke.cpp)
 target_link_libraries(store_screen_smoke PRIVATE sk_bindings sk_world)
+
+# See src/tests/m61_camera_start_smoke.cpp.
+add_executable(camera_start_smoke src/tests/m61_camera_start_smoke.cpp)
+target_link_libraries(camera_start_smoke PRIVATE sk_bindings sk_world)

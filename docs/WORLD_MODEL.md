@@ -2390,6 +2390,21 @@ there.
 - **`FUN_1001c0f4` is an empty function**, so whatever the original
   wanted to do alongside stamping an entity into the grid was compiled
   out of this build.
+- **Which way a heading points (M61).** `FUN_100063f0` is "walk forward":
+  it reads `+0xb6`, and against the 2048-entry sine table adds
+
+  ```c
+  entity->dx /* +0x98 */ += speed * sin(heading + 0x4000);   /* == +cos(heading) */
+  entity->dy /* +0xa0 */ += speed * sin(heading + 0x8000);   /* == -sin(heading) */
+  ```
+
+  so the forward vector is `(+cos h, -sin h)` and a heading advances
+  **clockwise** in world XY. `FUN_10006480` is the same function with both
+  signs flipped — walk backward. This settles a direction the port had
+  only fitted by eye: its camera moves by `(cos yaw, sin yaw)`, so
+  `yaw = -heading` exactly, and the automap marker's own
+  `-0x8000 - heading` (below) composes with that rather than compensating
+  for it.
 
 ### In the port
 

@@ -13,6 +13,7 @@
 // which belong to any one menu instance.
 
 #include <array>
+#include <cstdint>
 #include <map>
 #include <memory>
 #include <string>
@@ -279,6 +280,103 @@ public:
         m_RequestedZone = std::move(zoneName);
     }
 
+    // ---- M61: the scripted spawn override (`engine+0x14a20`) ----------
+    //
+    // `GetPlayer().SetCameraStart(x, y, z, pitch, yaw, roll)` -- Player
+    // binding 0x39, 49 call sites, and the state behind them. This mirrors
+    // the engine's own seven fields byte for byte, **in the engine's own
+    // memory order**, because that order is the whole explanation for the
+    // native's odd-looking argument mapping:
+    //
+    //     engine+0x14a20  armed      <- set to 1 by SetCameraStart
+    //     engine+0x14a24  x          <- argument 1
+    //     engine+0x14a28  y          <- argument 2
+    //     engine+0x14a2c  z          <- argument 3
+    //     engine+0x14a30  roll       <- argument 6   (!)
+    //     engine+0x14a34  pitch      <- argument 4
+    //     engine+0x14a38  yaw        <- argument 5
+    //
+    // The last three look shuffled only if you expect the struct to follow
+    // the signature. It doesn't: it is a verbatim copy of the first six
+    // 32-bit fields of a `.ent` **placement record** (docs/ZONE_FORMAT.md)
+    // -- `x, y, z, rotOrScale[0..1], rotOrScale[2..3], unkA` -- whose three
+    // orientation channels land on the object at `+0xb2` (roll), `+0xa8`
+    // (pitch) and `+0xb6` (yaw), in that file order. The *script* signature
+    // is the human one, `(x, y, z, pitch, yaw, roll)`. Nothing is out of
+    // order; the storage mirrors the file and the signature mirrors the
+    // reader, and `GameEngine_InitLevel` is where the two meet.
+    //
+    // Lifecycle, all three ends decompiled:
+    //   arm      `SetCameraStart` (Player 0x39), called by a script right
+    //            after a `Level.LoadLevel(...)` that has not happened yet.
+    //   consume  `GameEngine_InitLevel`'s `.ent` loop, at the `typeId == 1`
+    //            player-start record: when armed it writes these six values
+    //            onto the player instead of the record's own, and does so
+    //            **unconditionally** -- the record path is gated on
+    //            InitLevel's `param_3`, the override is not.
+    //   disarm   the same function, right after the entity pass; and
+    //            `Level.RestoreSaveLevel()` (Level 0x15), which is what
+    //            `levelconfirm.s` calls when the player declines the trip.
+    struct CameraStart {
+        bool armed = false;
+        int32_t x = 0;
+        int32_t y = 0;
+        int32_t z = 0;
+        int32_t roll = 0;
+        int32_t pitch = 0;
+        int32_t yaw = 0;
+    };
+    // Argument order, not field order -- see CameraStart's comment.
+    void ArmCameraStart(int32_t x, int32_t y, int32_t z, int32_t pitch, int32_t yaw,
+                        int32_t roll) {
+        m_CameraStart.armed = true;
+        m_CameraStart.x = x;
+        m_CameraStart.y = y;
+        m_CameraStart.z = z;
+        m_CameraStart.pitch = pitch;
+        m_CameraStart.yaw = yaw;
+        m_CameraStart.roll = roll;
+    }
+    const CameraStart& cameraStart() const { return m_CameraStart; }
+    // Only the flag is cleared, exactly as `GameEngine_InitLevel` and
+    // `RestoreSaveLevel` do -- the six values stay behind. Nothing reads
+    // them while disarmed, so this is invisible, but keeping the real
+    // shape means a future save-record pass (`FUN_1003cc5c` ships all
+    // seven fields in a 0x20-byte multiplayer packet, flag included) has
+    // the same state to serialise the engine has.
+    void ClearCameraStart() { m_CameraStart.armed = false; }
+
+    // ---- M61: the pending level (`app+0x28`'s own name slots) ---------
+    //
+    // `Level.LoadLevel(name, x, y)` does not load anything. It pushes the
+    // current level name to the "previous" slot (`+0x50`), writes the
+    // destination into the current slot (`+0x28`) and the two optional
+    // coordinates to `+0x48`/`+0x4c`, and then opens `levelconfirm.s` --
+    // the "Travel to: <name> / Go / Don't Go" prompt. `Go` calls
+    // `Level.ActuallyLoadLevel(Level.GetNextLevel(), GetNextLevelX(),
+    // GetNextLevelY())`; `Don't Go` calls `Level.RestoreSaveLevel()`,
+    // which copies the previous name back and disarms the camera start.
+    //
+    // That is why arming the spawn override before the load is safe, and
+    // why disarming it is a named script binding at all.
+    //
+    // This port keeps the state and the three getters, but `LoadLevel`
+    // still requests the transition directly rather than raising the
+    // confirm prompt -- see LevelExecutable's own comment.
+    void SetPendingLevel(std::string name, int nextX, int nextY) {
+        m_PreviousLevel = m_CurrentLevel;
+        m_CurrentLevel = std::move(name);
+        m_PendingLevelX = nextX;
+        m_PendingLevelY = nextY;
+    }
+    int pendingLevelX() const { return m_PendingLevelX; }
+    int pendingLevelY() const { return m_PendingLevelY; }
+    // `Level.RestoreSaveLevel()` -- Level binding 0x15.
+    void RestorePendingLevel() {
+        ClearCameraStart();
+        m_CurrentLevel = m_PreviousLevel;
+    }
+
     // Native-only "screen" (ShowCredits() has no script-side handler
     // anywhere in the corpus -- see credits.txt right next to the .s
     // files) -- main.cpp checks creditsActive() before rendering the
@@ -312,6 +410,11 @@ private:
     std::array<SaveSlot, kSaveSlotCount> m_SaveSlots;
     std::string m_SaveDir = ".";
     std::string m_CurrentLevel;
+    // M61: see SetPendingLevel()/ArmCameraStart() above.
+    std::string m_PreviousLevel;
+    int m_PendingLevelX = -1;  // the real "no coordinate given" default
+    int m_PendingLevelY = -1;
+    CameraStart m_CameraStart;
     sk::ProductDatabase m_Products;  // M59: see products() above
     // M60: 0 Inventory / 1 Buy / 2 Sell -- see SetPendingScreenMode().
     // Defaults to Inventory so every screen that is not the store gets

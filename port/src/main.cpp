@@ -158,6 +158,40 @@ float PlacementYawRadians(uint16_t yawRaw) {
     return static_cast<float>(yawRaw) / 65536.0f * kTwoPi - sk::kModelForwardYawOffset;
 }
 
+// M61: a raw engine *camera* angle (the player object's own `+0xb6` /
+// `+0xa8` channels, 65536 == one full turn, signed) as this port's camera
+// radians. Distinct from PlacementYawRadians() above, which carries a
+// model's forward-axis correction this does not want.
+//
+// The negation is the interesting part, and it is now derived rather than
+// fitted. The engine's own "walk forward" (`FUN_100063f0`) advances the
+// entity by
+//
+//     dx += speed * sin(heading + 0x4000)   ==  +speed * cos(heading)
+//     dy += speed * sin(heading + 0x8000)   ==  -speed * sin(heading)
+//
+// against this port's own `dx = cos(yaw), dy = sin(yaw)` in the tick loop
+// -- so a raw heading and this camera's yaw run opposite ways round, and
+// `yaw = -heading` is exact, not a guess. RenderAutomapOverlay() and
+// RenderHud() already assumed that relation in the other direction (M57's
+// automap marker, whose comment called the direction unverified); this is
+// the evidence they were missing, and all three now agree by construction.
+float CameraAngleRadians(int32_t rawAngle) {
+    constexpr float kTwoPi = 6.28318530718f;
+    return -static_cast<float>(static_cast<int16_t>(rawAngle & 0xffff)) / 65536.0f * kTwoPi;
+}
+
+// The inverse: this port's camera yaw as the engine's own `player+0xb6`
+// heading, [0, 65536). Everything that consumes a real decompiled heading
+// formula -- the compass tape and the automap marker -- goes through this
+// so they cannot drift apart.
+int CameraHeadingUnits(float cameraYaw) {
+    constexpr float kTwoPi = 6.28318530718f;
+    float turns = -cameraYaw / kTwoPi;
+    turns -= std::floor(turns);  // wrap to [0,1)
+    return static_cast<int>(turns * 65536.0f) & 0xffff;
+}
+
 // M30: the entities.txt categories that are *item-shaped* -- a placement
 // the player walks up to and uses, whose script is an ordinary item
 // script (docs/ZONE_FORMAT.md's category table):
@@ -802,11 +836,12 @@ void RenderMenu(sk::Backbuffer& backbuffer, sk_bindings::MenuExecutable& menu,
 // reads the *high byte* of a 16-bit heading field at player+0xb6 (an
 // 8-bit angle, 0-255 across a full turn) as a signed value, wrapped into
 // [0,255] and capped at 254. This port has no equivalent 16-bit fixed-
-// point heading field (Camera::yaw is a float radian, see camera.h) and
-// no real screenshot to confirm which turn direction should scroll the
-// tape which way -- HeadingToCompassOffset() below is a best-effort,
-// unverified-direction mapping from yaw to that same [0,254] range, not
-// a decompiled formula.
+// point heading field (Camera::yaw is a float radian, see camera.h), but
+// M61 settled the conversion between the two from the engine's own
+// forward-motion code (CameraHeadingUnits() above), so RenderHud() now
+// runs the real formula on a real heading rather than approximating it --
+// and scrolls the tape the same way round the automap marker turns, which
+// it previously did not.
 //
 // **Vitals bar cluster** (`FUN_1002ae88`, decompiled in full,
 // corrected post-M14): this -- not `FUN_1002c010` below -- is the real
@@ -875,12 +910,10 @@ void RenderAutomapOverlay(sk::Backbuffer& backbuffer, const sk::Zone& zone,
                                     sk::kAutomapCaptionY, caption, kStaticTextColor);
     }
     // The engine's angle unit is 0x10000 per turn; this port's camera
-    // carries radians, and yaw runs the opposite way round (see the
-    // turn handling in the tick loop).
-    constexpr float kTwoPi = 6.28318530718f;
-    float turns = -camera.yaw / kTwoPi;
-    turns -= std::floor(turns);
-    int headingUnits = static_cast<int>(turns * 65536.0f) & 0xffff;
+    // carries radians, and yaw runs the opposite way round -- M61 derived
+    // that from the engine's own forward-motion code rather than fitting
+    // it, see CameraHeadingUnits().
+    int headingUnits = CameraHeadingUnits(camera.yaw);
     sk::RenderAutomap(backbuffer, zone, explored,
                        static_cast<int>(camera.x) >> 8, static_cast<int>(camera.y) >> 8,
                        headingUnits);
@@ -891,11 +924,14 @@ void RenderHud(sk::Backbuffer& backbuffer, const sk_bindings::PlayerExecutable& 
     const sk::Sprite* compassTape = sprites.GetSprite(0);
     const sk::Sprite* compassFrame = sprites.GetSprite(1);
     if (compassTape && compassFrame) {
-        constexpr float kTwoPi = 6.28318530718f;
-        float turns = cameraYaw / kTwoPi;
-        turns -= std::floor(turns);  // wrap to [0,1)
-        int offset = static_cast<int>(turns * 255.0f);
-        offset = (std::max)(0, (std::min)(253, offset));
+        // M61: the real formula, now that the heading direction is settled
+        // (CameraHeadingUnits' own comment). The engine takes the *high
+        // byte* of `player+0xb6` as a signed value, wraps it into [0,255]
+        // and caps at 254 -- which is exactly `(heading >> 8) & 0xff`
+        // capped. This used to scroll the tape by `+yaw`, i.e. the wrong
+        // way round and against the automap marker, which had already
+        // taken `-yaw` on the same field.
+        int offset = (std::min)((CameraHeadingUnits(cameraYaw) >> 8) & 0xff, 254);
         backbuffer.BlitRegion(52, 5, *compassTape, offset, 68);
         backbuffer.Blit(0, 0, *compassFrame);
     }
@@ -1667,11 +1703,53 @@ int main(int argc, char** argv) {
                 // player spawns -- which is what azra's "start"/"help1"
                 // regions are for.
                 gameRegionsOccupied.clear();
-                gameCamera.x = static_cast<float>(gameZone->playerStartX);
-                gameCamera.y = static_cast<float>(gameZone->playerStartY);
-                gameCamera.z = static_cast<float>(gameZone->playerStartZ) + sk::kEyeHeightOffset;
-                gameCamera.yaw = 0.0f;
-                gameCamera.pitch = 0.0f;
+                // M61: `GameEngine_InitLevel`'s `typeId == 1` branch, both
+                // halves of it. The zone's own player-start record is the
+                // default; a script that armed `SetCameraStart` before
+                // asking for this zone replaces all six values with its
+                // own (MenuStack::CameraStart has the field mapping and
+                // the lifecycle).
+                //
+                // This is the same order the engine uses -- the override is
+                // consumed during the entity pass, which runs *before* the
+                // zone's own script is loaded, so a zone script's Init()
+                // cannot arm a spawn for its own arrival. The scripts
+                // agree: all 49 sites sit in EnterZone/menu handlers of the
+                // zone the player is *leaving*.
+                const sk_bindings::MenuStack::CameraStart& cameraStart = stack.cameraStart();
+                if (cameraStart.armed) {
+                    gameCamera.x = static_cast<float>(cameraStart.x);
+                    gameCamera.y = static_cast<float>(cameraStart.y);
+                    // The engine truncates the stored 32-bit z to 16 bits
+                    // on the way onto the player (`+0xa4` is a halfword),
+                    // which is what makes broken1.s's `0 + 512` and
+                    // erthcave's -7686 behave; kept literal.
+                    gameCamera.z = static_cast<float>(static_cast<int16_t>(cameraStart.z & 0xffff));
+                    gameCamera.yaw = CameraAngleRadians(cameraStart.yaw);
+                    gameCamera.pitch = CameraAngleRadians(cameraStart.pitch);
+                } else {
+                    gameCamera.x = static_cast<float>(gameZone->playerStartX);
+                    gameCamera.y = static_cast<float>(gameZone->playerStartY);
+                    gameCamera.z = static_cast<float>(gameZone->playerStartZ);
+                    gameCamera.yaw = CameraAngleRadians(gameZone->playerStartYawRaw);
+                    gameCamera.pitch = CameraAngleRadians(gameZone->playerStartPitchRaw);
+                }
+                // **Deliberate departure.** The real engine adds its
+                // eye-height constant (`CMap+0x1a`) only on the
+                // record-based path: the override branch writes `+0xa4`
+                // and never recomputes `+0x224`, so a scripted arrival
+                // inherits the previous zone's eye height. Reproducing
+                // that would only be meaningful if this port's own offset
+                // were the real constant, and it is not -- camera.h
+                // documents kEyeHeightOffset as a calibrated stand-in for
+                // a value the binary never appears to write at all. So it
+                // is applied to both paths here, and the asymmetry is
+                // recorded in docs/ZONE_FORMAT.md instead of imitated.
+                gameCamera.z += sk::kEyeHeightOffset;
+                // Consumed. `GameEngine_InitLevel` clears the flag right
+                // after its entity pass for exactly this reason: the
+                // override is for one arrival, not for every load after it.
+                stack.ClearCameraStart();
                 gameCamera.fovY = 1.2f;
                 gameVelZ = 0.0f;
                 onGround = true;

@@ -806,6 +806,81 @@ seven names found this way (`AddProduct`, `ClearProducts`, `ReducePrices`,
 class would have been missed entirely — its methods look like they belong
 to `Player`, which has same-named bindings that take different arguments.
 
+## `SetCameraStart` and the level-transition bindings (M61)
+
+`GetPlayer().SetCameraStart(x, y, z, pitch, yaw, roll)` — Player binding
+**0x39** (trie `0x14dbc`, dispatcher `FUN_1003f130`), 49 shipped call
+sites, the largest single unhandled native left before this pass. It sets
+a flag and six values on the engine object:
+
+| field | argument | destination on the player |
+|---|---|---|
+| `engine+0x14a20` | — (set to 1) | the armed flag |
+| `engine+0x14a24` | 1 | `player+0x94`, x |
+| `engine+0x14a28` | 2 | `player+0x9c`, y |
+| `engine+0x14a2c` | 3 | `player+0xa4`, z (truncated to a halfword) |
+| `engine+0x14a30` | **6** | `player+0xb2`, roll |
+| `engine+0x14a34` | **4** | `player+0xa8`, pitch |
+| `engine+0x14a38` | **5** | `player+0xb6`, yaw |
+
+**The last three are not shuffled.** The struct is a verbatim copy of the
+first six 32-bit fields of a `.ent` **placement record** — `x, y, z,
+rotOrScale[0..1], rotOrScale[2..3], unkA` — whose three orientation
+channels land at `+0xb2`, `+0xa8`, `+0xb6` in exactly that file order
+(`ZONE_FORMAT.md`'s verified destination table). The *script signature* is
+the human one, `(x, y, z, pitch, yaw, roll)`. The storage mirrors the file
+and the signature mirrors the reader; `GameEngine_InitLevel` is where the
+two meet, and it reads the fields back in struct order.
+
+Shipped data agrees on which slot is which: across all 49 sites, pitch and
+roll are **0 every time** and yaw is a signed 65536-per-turn angle at 45 of
+them. These calls are a spawn point and a facing.
+
+### The transition is a three-step conversation, and that is why the
+### override needs a disarm
+
+`Level.LoadLevel(name, x, y)` (binding **0x17**) does **not** load
+anything. It pushes the current level name from `app+0x28`'s `+0x28` slot
+to its `+0x50` slot, writes the destination into `+0x28` and the two
+optional coordinates into `+0x48`/`+0x4c`, and raises `levelconfirm.s` —
+the "Travel to: / Go / Don't Go" prompt. That script's two rows are the
+other half of the mechanism:
+
+- `Go` → `Level.ActuallyLoadLevel(Level.GetNextLevel(),
+  Level.GetNextLevelX(), Level.GetNextLevelY())` (bindings 0x18, 0x19,
+  0x1a, 0x1b) — loads immediately, reading back exactly the three fields
+  `LoadLevel` wrote.
+- `Don't Go` → `Level.RestoreSaveLevel()` (binding **0x15**), whose entire
+  body is `engine+0x14a20 = 0` followed by `strcpy(current, previous)`.
+
+So **clearing the spawn override is half of what "Don't Go" does**, and
+that is the evidence that the arm-then-load ordering in every shipped
+script is intentional rather than sloppy: the script arms an override for
+a level that has not loaded and might never load, and the decline path is
+responsible for taking it back.
+
+`ForceLoadLevel` (0x16) is `ActuallyLoadLevel` without the multiplayer
+branch — it skips straight to the app object's loader.
+
+> **String 3950 belongs to this prompt.** `levelconfirm.s`'s `Init` is
+> `AddStaticItem(3950,false); AddStaticItem(GetNextLevelName(),false)`, so
+> `"Travel to: "` is the confirm dialog's own header. M26 used it as the
+> loading-screen banner instead. Not corrected here — the port's loading
+> screen has to say something and no other candidate string was found —
+> but the shipped use site is this one.
+
+### Two smaller things in the same code
+
+- `SetCameraStart`'s override branch in `GameEngine_InitLevel` is **not
+  gated on `param_3`**, while the `.ent`-record branch beside it is. A
+  scripted spawn therefore places the player even in the mode where an
+  ordinary level entry would leave them where they were.
+- `FUN_1003cc5c` serialises all seven fields (flag included) into a
+  0x20-byte packet tagged `0x2e`, and `FUN_1003b038` applies an incoming
+  one as an override alongside a level-name copy. The spawn override is
+  part of the Bluetooth/Arena multiplayer level-sync protocol, not just
+  local state.
+
 ## Labels applied / tools
 
 No new Ghidra renames this pass (the 28 registration/dispatcher

@@ -4984,6 +4984,128 @@ algorithms.
       wearer by scanning equipped armour, since this port has no
       `player+0xf8c` per-slot array. Same answers, different bookkeeping.
 
+- [x] **M61 -- the scripted spawn override, `SetCameraStart`.** 49 call
+  sites and the largest unhandled native left. It is armed by the zone the
+  player is *leaving*, consumed by the zone they arrive in, and disarmed if
+  they change their mind -- all three ends decompiled this pass, along with
+  the level-transition bindings that make the middle step a conversation.
+  New smoke test `src/tests/m61_camera_start_smoke.cpp` (31 checks). Suite
+  54/54.
+
+    - **The six values are stored in `.ent` record order, not signature
+      order.** `engine+0x14a24..+0x14a38` receive arguments 1, 2, 3, **6**,
+      **4**, **5** -- which reads as a bug until you notice the struct is a
+      verbatim copy of the first six 32-bit fields of a `.ent` **placement
+      record** (`x, y, z, rotOrScale[0..1], rotOrScale[2..3], unkA`), whose
+      three orientation channels land at `+0xb2` (roll), `+0xa8` (pitch)
+      and `+0xb6` (yaw) in exactly that file order. The script signature is
+      the human one, `(x, y, z, pitch, yaw, roll)`. The storage mirrors the
+      file, the signature mirrors the reader, and `GameEngine_InitLevel` is
+      where the two meet. **This independently re-derives
+      `ZONE_FORMAT.md`'s destination table** -- which had itself been
+      corrected once, from raw disassembly, after an earlier pass read it
+      off the decompiler's variable naming -- from an unrelated function.
+
+    - **The shipped data agrees on which slot is which.** Across all 49
+      sites, pitch and roll are 0 *every time* and yaw is a signed
+      65536-per-turn angle at 45 of them. A spawn point and a facing,
+      nothing else. The smoke test parses all 49 out of the shipped
+      scripts and asserts exactly that, because it is the check a wrong
+      slot mapping could not survive.
+
+    - **`Level.LoadLevel(name, x, y)` does not load anything.** It pushes
+      the current level name to a "previous" slot, writes the destination
+      and the two optional coordinates, and raises **`levelconfirm.s`** --
+      the "Travel to: / Go / Don't Go" prompt. `Go` calls
+      `ActuallyLoadLevel(GetNextLevel(), GetNextLevelX(), GetNextLevelY())`,
+      reading back the three fields `LoadLevel` wrote. `Don't Go` calls
+      `RestoreSaveLevel()`, whose entire body is `engine+0x14a20 = 0`
+      followed by `strcpy(current, previous)`.
+
+      So **disarming the spawn override is half of what "Don't Go" does**
+      -- which is the evidence that every shipped script's arm-*after*-load
+      ordering is deliberate rather than sloppy. The script arms an
+      override for a level that has not loaded and might never load, and
+      the decline path is responsible for taking it back. Implemented:
+      `ForceLoadLevel`, `ActuallyLoadLevel`, `GetNextLevel`,
+      `GetNextLevelX`, `GetNextLevelY`, `RestoreSaveLevel`, and the pending
+      /previous level pair behind them.
+
+    - **The roadmap bullet this milestone came from had the timing
+      backwards.** It said main.cpp needed to consume the override *after*
+      the zone script's `Init()`. `GameEngine_InitLevel` consumes it during
+      the entity pass, which runs **before** the level's script is loaded
+      at all -- so a zone script cannot arm a spawn for its own arrival,
+      only for the next one. The corpus agrees: all 49 sites sit in
+      `EnterZone` or menu handlers of the zone being left. Consumed at
+      camera-placement time here, matching.
+
+    - **Which way a heading points, finally derived instead of fitted.**
+      `FUN_100063f0` ("walk forward") advances an entity by
+      `dx += speed*sin(h + 0x4000)` (`== +cos h`) and
+      `dy += speed*sin(h + 0x8000)` (`== -sin h`), against this port's own
+      `dx = cos(yaw), dy = sin(yaw)` -- so `yaw = -heading`, exactly. M57's
+      automap marker had assumed that relation and its own comment called
+      the direction unverified; the compass tape had assumed the
+      *opposite*, so the two disagreed. Both now go through one helper, and
+      `RenderHud` runs the real decompiled formula (the high byte of
+      `player+0xb6`, capped at 254) on a real heading.
+
+    - **A correction to `RENDERER_3D.md`.** Its note on the camera rotation
+      matrix pairs `camera+0xa8/0xb2/0xb6` with "pitch/yaw/roll", listing
+      the call's *argument* order against the read's *field* order --
+      and the call shuffles them. Working the matrix out from
+      `FUN_10073760`'s body gives `+0xa8` = pitch, `+0xb2` = **roll**,
+      `+0xb6` = **yaw**, which is what the compass, the automap marker and
+      `SetCameraStart`'s shipped data all already said.
+
+    - **Two asymmetries between the override branch and the record branch**
+      of `GameEngine_InitLevel`, both real: the record branch recomputes
+      the eye height (`player+0x224 = player+0xa4 + CMap+0x1a`) and the
+      override branch does not, so a scripted arrival inherits the previous
+      level's eye height; and the record branch is gated on InitLevel's
+      `param_3` while the override branch is not, so a scripted spawn
+      places the player even in the mode where an ordinary entry would
+      leave them alone. Recorded in `ZONE_FORMAT.md`.
+
+    - **The `.ent` player-start record's own heading was being dropped.**
+      This port read the position out of the `typeId == 1` record and left
+      the camera at yaw 0, so every zone entry faced due +x regardless of
+      where the level was authored to start. Real azra starts at heading
+      25600 (~140 degrees). Now read, from the same three offsets the
+      generic-entity branch uses.
+
+    - **Six of the 49 sites are in dead scripts**, which is why nobody ever
+      noticed that they call `ForceLoadLevel` (immediate) *before*
+      `SetCameraStart` and would therefore arm the override one transition
+      late. `broken1/to_bw2.s`, `broken2/to_bw1.s` and the four
+      `snowline/*menu.s` are unreachable -- the `OpenMenu` that would raise
+      them is commented out in the shipped parent script, or absent. The
+      smoke test checks the commented-out line rather than trusting the
+      observation.
+
+    - **String 3950 belongs to the confirm prompt.** `levelconfirm.s`'s
+      `Init` is `AddStaticItem(3950,false); AddStaticItem(
+      GetNextLevelName(),false)`, so `"Travel to: "` is that dialog's
+      header. M26 used it as the loading-screen banner. Left as is -- the
+      loading screen has to say something and no better candidate turned up
+      -- but the shipped use site is now on record.
+
+    - **The spawn override is part of the multiplayer protocol.**
+      `FUN_1003cc5c` serialises all seven fields, flag included, into a
+      0x20-byte packet tagged `0x2e`; `FUN_1003b038` applies an incoming
+      one as an override alongside a level-name copy. Out of scope, noted.
+
+    - **Not carried over**: the eye-height asymmetry above (this port's
+      `kEyeHeightOffset` is a documented calibrated stand-in, not the real
+      `CMap+0x1a`, so reproducing an omission built on it would only put
+      scripted arrivals at floor level), and the confirm prompt itself --
+      `LoadLevel` still requests the transition directly rather than
+      raising `levelconfirm.s`, which needs a menu screen wired through
+      main.cpp's mode machinery plus the menu-side `GetNextLevelName()`.
+      Both are one-line departures with the real behaviour written down
+      beside them.
+
 ## Next milestones (not yet started)
 
 Roughly in priority order for reaching "actually playable," not commitments:
@@ -5002,15 +5124,21 @@ invisible to it. M60 implemented nineteen natives and moved none of the
 four percentages. The suite's soft-fail count is the measure that moved
 (**81 -> 62**), and for menu work it is the better one.
 
-- **`SetCameraStart(x, y, z, a, b, c)`** -- 49 sites, all in zone-root
-  scripts, and now the single largest unhandled native left. Case `0x39`
-  arms a flag at `engine+0x14a20` and writes the six arguments, in order,
-  to `+0x14a24`, `+0x14a28`, `+0x14a2c`, `+0x14a34`, `+0x14a38`,
-  `+0x14a30` -- the last three genuinely out of order (M59 decompiled it
-  in passing). Shipped data has arguments 4 and 6 always 0 and argument 5
-  a signed angle, so this is a scripted spawn position and heading
-  override. Needs main.cpp to consume it after the zone script's `Init()`
-  rather than before.
+M61, by contrast, was all explicit-receiver work and the tool showed it:
+`GetPlayer()` **90% -> 92%**, and `Level`'s unhandled-name list lost four
+entries while its percentage stayed at 97%. Use whichever measure matches
+the kind of native being implemented.
+
+- **`GetPlayer().SetPosition(x, y[, z])`** -- Entity binding `0x30` on
+  class `0x14d08` (the base every actor inherits), the sibling of M61's
+  `SetCameraStart`: a teleport *within* a level rather than into one, used
+  by `snowline.s`'s "Tubes" branch among others. The case is short --
+  vtable `+0x14` to set the position, zero the motion deltas at `+0x98`/
+  `+0xa0`, then, when a virtual predicate at vtable `+0xc8` allows and the
+  tile grid exists, snap to the floor via `FUN_100686e0` and add `0x80` to
+  z. Only that last step needs work: `FUN_100686e0` resolves a new z out
+  of the tile's own geometry starting from `z + 0x180`, through
+  `FUN_1001beac`, which is not yet decompiled.
 
 - **`Level.CreateEffect(...)`** -- 13 sites and 24 of the suite's
   remaining soft-fail lines, all ten-argument calls from `crypt1.s` and

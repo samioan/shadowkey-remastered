@@ -312,6 +312,33 @@ For each record:
   entity, but **only if `GameEngine_InitLevel`'s `param_3` is non-zero**
   (`if (param_3 != 0) { ...write position... }`, otherwise this whole block
   is skipped and the player keeps whatever position they already had).
+
+  > **The record is not the only source (M61).** That whole branch is the
+  > `else` half of a test on `engine+0x14a20`. When a script has armed
+  > `GetPlayer().SetCameraStart(...)` (Player binding 0x39, 49 shipped call
+  > sites — see `SIMKIN_NATIVE_API.md`), the six values at
+  > `engine+0x14a24..+0x14a38` are written onto the player *instead of* the
+  > record's, and the engine's own struct is laid out in this record's
+  > field order — `x, y, z, roll, pitch, yaw` at `+0x14a24`, `+0x14a28`,
+  > `+0x14a2c`, `+0x14a30`, `+0x14a34`, `+0x14a38` — which is an
+  > independent confirmation of the destination table above, arrived at
+  > from a completely different function.
+  >
+  > Two asymmetries between the two branches are real and worth recording:
+  >
+  > * the record branch computes the eye height,
+  >   `player+0x224 = player+0xa4 + CMap+0x1a`, and **the override branch
+  >   does not**. A scripted arrival keeps whatever eye height the previous
+  >   level left behind. (If `CMap+0x1a` really is 0 — the standing
+  >   hypothesis, see `RENDERER_3D.md` — the two agree by accident and the
+  >   omission is invisible.)
+  > * the record branch is gated on `param_3`; **the override branch is
+  >   not**. A scripted spawn places the player even in the mode where an
+  >   ordinary entry would leave them alone.
+  >
+  > The flag is cleared later in the same function (twice, on the two paths
+  > out of the entity pass) and by `Level.RestoreSaveLevel()`, so an
+  > override applies to exactly one arrival.
 - **`typeId > 1`**: looks up a **type descriptor** for `typeId` in a binary
   search tree rooted at `engine+0xbe34` via `EntityTypeDescriptor_Lookup`
   (`FUN_1008c1cc`, 0x1008c1cc — a plain BST: node = `{..,key@+8,

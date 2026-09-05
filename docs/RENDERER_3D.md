@@ -324,7 +324,28 @@ from any room-specific field -- which is then combined via
 `ComposeTransform3x4(dst, matA, engine+0x5d8)` with the camera's own
 per-frame rotation matrix (built earlier in `Render3DScene` from
 `camera+0xa8/0xb2/0xb6`'s negated pitch/yaw/roll via `FUN_10073760`,
-confirmed by the caller). `ComposeTransform3x4`'s translation-column output
+confirmed by the caller).
+
+> **Correction (M61): that last phrase pairs the fields with the wrong
+> names.** It lists the *argument* order of the call against the *field*
+> order of the read, and the call shuffles them:
+> `FUN_10073760(mat, -cam[0xb2], -cam[0xa8], -cam[0xb6])`. Working the
+> matrix out from the function body (`param_1[8..10]` is the depth axis,
+> `= (-cos(p3)sin(p4), sin(p3), cos(p3)cos(p4))`) fixes each parameter to
+> an axis: `p3` is the elevation and `p4` the horizontal rotation, so
+>
+> | field | channel |
+> |---|---|
+> | `+0xa8` | **pitch** |
+> | `+0xb2` | **roll** |
+> | `+0xb6` | **yaw** (heading) |
+>
+> `+0xb6 = yaw` is what the compass, the automap marker
+> (`WORLD_MODEL.md`) and `SetCameraStart`'s shipped data
+> (`SIMKIN_NATIVE_API.md`) already independently said; the swap here was
+> only ever in this sentence, not in any code that used it.
+
+`ComposeTransform3x4`'s translation-column output
 (despite this doc's summary above describing it as rotation-only) turns out
 to be `matA`'s translation vector rotated through `matB`'s rotation -- i.e.
 the room's final per-vertex offset is exactly that fixed `(0,270,0)`

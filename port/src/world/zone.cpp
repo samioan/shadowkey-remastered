@@ -200,6 +200,11 @@ bool Zone::Load(const std::string& scriptRoot, const std::string& zoneName) {
             playerStartX = x;
             playerStartY = y;
             playerStartZ = z;
+            // M61: the same three orientation channels a placed entity
+            // gets, in the same record order -- see playerStartYawRaw.
+            playerStartRollRaw = ReadU16(p + 0x0c);
+            playerStartPitchRaw = ReadU16(p + 0x10);
+            playerStartYawRaw = ReadU16(p + 0x14);
             foundStart = true;
         } else if (typeId > 1) {
             // M35: the record tail is TWO NUL-terminated strings, not one
