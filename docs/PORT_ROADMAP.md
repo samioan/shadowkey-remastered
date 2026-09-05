@@ -4310,14 +4310,109 @@ algorithms.
       it, "End Game -> save first" left the player on the save screen with
       the session still running.
 
+- [x] **M55 -- the two unnamed entity scalars are the collision system.**
+  The last open item from M52, and much bigger than the bullet implied:
+  `Entity+0x8c` and `+0x92` are not leftovers, they are the front end of
+  the engine's entity collision, which this port did not have. RE writeup
+  in [`docs/WORLD_MODEL.md`](WORLD_MODEL.md) ("Entity collision"); smoke
+  test `src/tests/m55_model_collision_smoke.cpp` (31 checks).
+
+    - **Why M52 saw nothing, and the method lesson.** M52's join
+      deliberately discards offsets that appear inside a
+      `(**(code **)(vt + 0xNN))` group, because those are slot indices,
+      not fields. That filter is right and it has a blind spot: a field
+      can be reachable *only* through a vtable, when the compiler emits
+      an inline accessor as a three-instruction thunk in a slot. Both
+      fields are exactly that -- `LDRB r0,[r0,#0x8c]; BX lr` at
+      `0x100a151c` and five siblings, none of which Ghidra marked as a
+      function, so they appear in no call graph and no offset search.
+      **All 31 Entity-derived vtables carry the identical six accessors**,
+      no subclass overriding any, so a call through one of those slots is
+      unambiguous. Two of the six are already-known bindings
+      (`SetRadius`/`SetRadius2`, slots `+0x50`/`+0x54`), which is what
+      made the neighbouring pair worth reading together.
+
+    - **`Entity+0x8c` is "this entity is solid", and it comes from the
+      model.** `Entity::Init` (`FUN_100610e4`) looks up the placement's
+      `entities.txt` descriptor and copies three fields off a per-model
+      table at `engine+0x6f38` -- which `ZoneModelList_Load` fills from
+      columns 2, 3 and 4 of `<zone>_models.txt`. **Those are not the "3
+      flags" `ZONE_FORMAT.md` had**: they are a solid flag and two box
+      half-extents in 8.8 world units. The shipped data says so plainly:
+      `bottle 2 64 64`, `door 2 64 256` (thin one way, wide the other),
+      `rail 2 64 512` (a fence run), `table 2 256 256`,
+      `roof 0 1500 1500` (huge, and deliberately not solid),
+      `dagger 0 0 0`. Column 2 is **only ever 0 or 2 across all 21
+      zones** -- never 1 -- which is also why this one-byte field is
+      written through the save stream's **i32** overload, the only place
+      in the whole image that happens: the member is an enum, not a
+      `TBool`.
+
+    - **Five readers, and they are the whole of non-wall collision**:
+      `FUN_100017c8` (movement -- walks the tile's own entity list at
+      `engine+0x6904`, requires `solid && extentX && extentY &&
+      !passable`, and resolves an overlap by backing the move out and
+      re-applying one axis at a time), `FUN_10001fd0` (does a stance
+      change still fit -- and it sets the actor's own half-extent to
+      `0x80`, so **the player's box is 128, exactly half a tile**),
+      `FUN_10000ab8` (is this tile occupied), and the tile-stamp pair
+      `FUN_10066204`/`FUN_1006640c`. The overlap predicate is
+      `FUN_1001c48c`, `<=` on all four edges.
+
+    - **`Entity+0x92` is "wider than the tile it stands on".**
+      `GameEngine_InitLevel` sets it on exactly
+      `halfExtentX > 128 || halfExtentY > 128`, and the engine then walks
+      the box *rotated by the entity's heading* and ORs bit 2 into the
+      flags byte of every tile cell it covers. So entity collision is
+      split two ways: small things are tested per-entity from the tile
+      list, big things are **baked into the tile grid** and block like
+      walls. The save loader recomputes the flag from the extents, which
+      is why it round-trips; and `FUN_10005d60` refuses to clear a
+      stamped entity's box on deactivation, because that grid bit would
+      be left behind.
+
+    - **Two smaller things fell out**: `+0x98`, `+0xa0` and `+0xa6` are
+      the per-tick movement delta for x, y and z -- the partners of
+      `+0x94`/`+0x9c`/`+0xa4` the constructor zeroes right beside them,
+      closing the three gaps in the position block. And `FUN_1001c0f4`,
+      the function called alongside stamping an entity into the grid, is
+      **empty** in this build.
+
+    - **Wired up in the port**: `world/model_collision.h` holds the
+      table, the two predicates and the decompiled box overlap;
+      `main.cpp` loads it per zone beside the other manifests and tests
+      the player's move against every solid door, creature and prop. That
+      replaces two invented body radii (a door was 90, a monster 40) and
+      adds the case that was simply missing -- **static props, which had
+      no collision at all**: every barrel, table, rock, tree and fence in
+      the game was walk-through. In azra, **266 of 280 placements are
+      solid** (104 pine trees, 36 rats, 25 barrels, 16 chairs, 8 crates,
+      8 rocks, 7 tables, 7 doors, 5 fence rails), and 141 of those are
+      large enough that the original bakes them into the grid.
+
+    - **One knock-on correction.** `kMeleeRange`, this port's invented
+      reach for bare fists, was 110 -- shorter than the 256 units the
+      recovered collision now holds an actor off a creature, so
+      bare-handed combat would have become impossible. It is now
+      `2 * kActorHalfExtent`. Still invented (no shipped script sets a
+      range for bare hands) but no longer free: a real weapon's own
+      `range()` is 384 and a monster's default `attackRange()` is 660, so
+      only the fists needed it.
+
+    - **Two documented departures**: this port walks the live instance
+      lists rather than a per-tile list plus a stamped grid (the same set
+      of blockers, reached differently), and it uses the axis-aligned box
+      everywhere, where the original's stamp uses the box rotated by the
+      entity's heading -- so a rotated fence blocks a slightly different
+      footprint here.
+
 ## Next milestones (not yet started)
 
 Roughly in priority order for reaching "actually playable," not commitments:
 
-- **Two fields in an entity that nothing names** -- `+0x8c` and `+0x92`.
-  M52 named every other scalar in the save record; these two are zeroed by
-  the Entity constructor, carried by the save format, and read by no code
-  in the image. Not obviously worth more effort, but they are what is left.
+- Nothing is currently queued. The last three standing RE questions
+  (the save record's unnamed scalars, the two "unplaceable" scripts, and
+  `FUN_1002c010`'s mode `0x1f`) closed in M52-M55.
 
 ## Verification approach
 

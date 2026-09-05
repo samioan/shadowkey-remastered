@@ -439,6 +439,14 @@ merely suggestive, and both had to be built in:
 - **Vtable-call offsets are not fields.** `(**(code **)(vt + 0x8c))(...)`
   is a slot index. Unfiltered, `Entity+0x8c` "means" `SetUseText` purely
   because `SetUseText` makes a virtual call through slot `+0x8c`.
+  > **M55 found this filter's own blind spot.** Discarding vtable-call
+  > offsets is right, but a field can also be reachable *only* through a
+  > vtable — an inline accessor the compiler emitted as a
+  > three-instruction thunk in a slot. That is exactly what
+  > `Entity+0x8c` and `+0x92` are, which is why the join reported them as
+  > touched by nothing. The fix is not to relax the filter but to add a
+  > second pass over the tiny accessor thunks: see
+  > [`WORLD_MODEL.md`](WORLD_MODEL.md)'s "Entity collision".
 - **The chain is a tree, not a line.** Sibling branches reuse offsets for
   different fields: `Stackable+0x1bc` is an item's weight while
   `InventoryHolder+0x1bc` is a step toward a move target, and both
@@ -462,10 +470,10 @@ values.
 | `+0x60` | flag word (default 2) | bit 0 cleared on deactivate; bit 4 set on a linked entity |
 | `+0x6c`..`+0x80` | **the animation player** | see below |
 | `+0x86` | render flags | the two renderers test bits 1 and 2 |
-| `+0x8c` | *unnamed* | zeroed by the ctor, read by nothing |
-| `+0x8e` | **collision radius** | `FUN_100017c8` walks `x±r`, `y±r` against `Map_GetTileAt` |
-| `+0x90` | **collision height** | zeroed together with the radius by `SetActive(false)` |
-| `+0x92` | *unnamed* | zeroed by the ctor, read by nothing |
+| `+0x8c` | **solid** (M55) | `<zone>_models.txt` col 2, via `Entity::Init`; the gate on all five collision paths |
+| `+0x8e` | **collision half-extent X** | col 3, `SetRadius`; `FUN_100017c8` walks `x±X` against `Map_GetTileAt` |
+| `+0x90` | **collision half-extent Y** | col 4, `SetRadius2`; zeroed with X by `SetActive(false)` |
+| `+0x92` | **tile-stamped** (M55) | set iff either extent > 128; the entity is baked into the tile grid |
 | `+0x93` | `PutInReverse` flag | binding unused by any script |
 | `+0x94`/`+0x9c`/`+0xa4` | x / y / z | `GetPositionX`/`Y`/`Z` |
 | `+0xa8`/`+0xb2`/`+0xb6` | pitch / **roll** / yaw | `SetRotationPitch`/`Roll`/`Turn`; `.ent` supplies all three |

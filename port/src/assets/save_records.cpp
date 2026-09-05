@@ -110,7 +110,7 @@ void SavedStats::Read(SaveStream& s) {
 void SavedEntityBase::Write(SaveStream& s) const {
     s.WriteU16(entityId);
     s.WriteI16(renderFlags);
-    s.WriteI32(f8c);
+    s.WriteI32(collisionSolid);
     s.WriteI16(collisionRadius);
     s.WriteI16(collisionHeight);
     s.WriteString8(artName);
@@ -124,7 +124,7 @@ void SavedEntityBase::Write(SaveStream& s) const {
     s.WriteI16(yaw);
     s.WriteString8(objectId);
     s.WriteU8(skin);
-    s.WriteU8(f92);
+    s.WriteU8(tileStamped);
     s.WriteU8(passable);
     s.WriteU8(usable);
     s.WriteU8(hasCustomName);
@@ -157,7 +157,7 @@ void SavedEntityBase::Write(SaveStream& s) const {
 void SavedEntityBase::Read(SaveStream& s) {
     entityId = s.ReadU16();
     renderFlags = s.ReadI16();
-    f8c = s.ReadI32();
+    collisionSolid = s.ReadI32();
     collisionRadius = s.ReadI16();
     collisionHeight = s.ReadI16();
     artName = s.ReadString8();
@@ -171,7 +171,7 @@ void SavedEntityBase::Read(SaveStream& s) {
     yaw = s.ReadI16();
     objectId = s.ReadString8();
     skin = s.ReadU8();
-    f92 = s.ReadU8();
+    tileStamped = s.ReadU8();
     passable = s.ReadU8();
     usable = s.ReadU8();
     hasCustomName = s.ReadU8();

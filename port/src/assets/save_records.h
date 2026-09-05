@@ -165,14 +165,27 @@ struct SavedEntityBase {  // FUN_10066614 / FUN_10066cc4
     // +0x86. Render flags: the two renderers test bit 1 (skip transform)
     // and bit 2, and bit 4 is set/cleared around a kill and an equip.
     int16_t renderFlags = 0;
-    // +0x8c. A byte in memory, widened to a word on the wire. The only
-    // field on this layer M52 could not name -- the Entity constructor
-    // zeroes it and nothing in the chain reads it back.
-    int32_t f8c = 0;
-    // +0x8e / +0x90. The collision cylinder, in 8.8 world units (256 per
-    // tile). FUN_100017c8 walks x+-radius and y+-radius against
-    // Map_GetTileAt and pushes back to the tile boundary; deactivating an
-    // entity (FUN_10005d60) zeroes both and sets `passable`.
+    // +0x8c. **M55**: "this entity is solid". A byte in memory, widened
+    // to a word on the wire -- the only place in the whole image a
+    // one-byte field goes through the stream's i32 overload, because the
+    // member is an enum rather than a `TBool` (the shipped data's only
+    // non-zero value is 2, never 1).
+    //
+    // M52 could not name it because it is never touched by a direct field
+    // access: `Entity::Init` writes it through vtable slot `+0x4c` and
+    // the five collision functions read it through `+0x40`, and all 31
+    // Entity-derived vtables carry the identical pair. Its value comes
+    // from column 2 of `<zone>_models.txt` -- see
+    // world/model_collision.h, which has the full writeup.
+    int32_t collisionSolid = 0;
+    // +0x8e / +0x90. The collision box's half-extents in **X and Y**, in
+    // 8.8 world units (256 per tile) -- columns 3 and 4 of the same
+    // manifest row, and what the `SetRadius`/`SetRadius2` script bindings
+    // write (vtable slots `+0x50`/`+0x54`). FUN_100017c8 walks x+-X and
+    // y+-Y against Map_GetTileAt and pushes back to the tile boundary,
+    // then does the same box test against every entity in the tile;
+    // deactivating an entity (FUN_10005d60) zeroes both and sets
+    // `passable`, but only when `tileStamped` is clear.
     int16_t collisionRadius = 0;
     int16_t collisionHeight = 0;
     // +0xe2. The `.ent` placement name, second copy; the loader sprintf()s
@@ -195,8 +208,15 @@ struct SavedEntityBase {  // FUN_10066614 / FUN_10066cc4
     // Also where the `.ent` placement name's *first* copy lands.
     std::string objectId;
     uint8_t skin = 0;             // +0xca  SetSkin(n), 0..12 in the corpus
-    // +0x92. Second unnamed field: zeroed by the constructor, never read.
-    uint8_t f92 = 0;
+    // +0x92. **M55**: "this entity is wider than the tile it stands on".
+    // Set by GameEngine_InitLevel (and again by the save loader,
+    // FUN_100188dc) on exactly `halfExtentX > 128 || halfExtentY > 128`;
+    // the engine then calls FUN_10066204, which walks the box rotated by
+    // the entity's heading and ORs bit 2 into the flags byte of every
+    // tile cell it covers, so a big static object blocks like a wall
+    // rather than being re-tested per entity. Reached only through vtable
+    // slots +0xac/+0xb0, which is why M52's offset search saw nothing.
+    uint8_t tileStamped = 0;
     uint8_t passable = 0;         // +0xd5  SetPassable(bool)
     uint8_t usable = 0;           // +0xd8  SetUsable(bool)
     // +0xd9 / +0xdc. "This entity has a name of its own" and that name's

@@ -54,8 +54,10 @@ void Check(bool ok, const std::string& what) {
     if (!ok) ++g_failures;
 }
 
-// Reads one `<zone>_models.txt` row: "<index> <skins> <w> <h> <name>".
-// This is the file that names each archive slot -- see docs/ZONE_FORMAT.md.
+// Reads one `<zone>_models.txt` row. M55 corrected the columns: the row is
+// "<index> <solid> <halfExtentX> <halfExtentY> <name>", the model's own
+// collision box, not the "<skins> <w> <h>" guessed here -- see
+// world/model_collision.h. Only the name is used below.
 std::string ModelNameAt(const std::string& path, int index) {
     std::ifstream in(path);
     std::string line;

@@ -156,6 +156,7 @@ endif()
 add_library(sk_world STATIC
   src/assets/zone_file.cpp
   src/world/model_archive.cpp
+  src/world/model_collision.cpp
   src/world/zone.cpp
 )
 target_include_directories(sk_world PUBLIC src)
@@ -420,3 +421,8 @@ target_link_libraries(script_delay_smoke PRIVATE sk_bindings sk_world)
 # table it completes. See src/tests/m54_quit_to_menu_smoke.cpp.
 add_executable(quit_to_menu_smoke src/tests/m54_quit_to_menu_smoke.cpp)
 target_link_libraries(quit_to_menu_smoke PRIVATE sk_bindings sk_world)
+
+# The two unnamed entity scalars turn out to be the per-model collision
+# box. See src/tests/m55_model_collision_smoke.cpp.
+add_executable(model_collision_smoke src/tests/m55_model_collision_smoke.cpp)
+target_link_libraries(model_collision_smoke PRIVATE sk_world)

@@ -67,6 +67,7 @@
 #include "skRuntimeException.h"
 #include "world/entity_types.h"
 #include "world/model_archive.h"
+#include "world/model_collision.h"
 #include "world/zone.h"
 
 namespace {
@@ -1248,6 +1249,11 @@ int main(int argc, char** argv) {
     // matches gameZone/gameDoors/etc.'s own lifetime.
     std::unique_ptr<sk_bindings::ZoneScriptExecutable> gameZoneScript;
     std::vector<sk::PlacedEntity> gameEntities;
+    // M55: the real per-model collision boxes for this zone, straight out
+    // of `<zone>_models.txt` -- see world/model_collision.h. Reloaded on
+    // every zone load, beside the model/sprite/sound manifests it sits in
+    // the same file as.
+    sk::ModelCollisionTable gameModelCollision;
     // Combat vertical-slice: live monsters, pulled out of gameEntities'
     // static-prop list at zone load (see below) -- see MonsterInstance's
     // comment.
@@ -1579,6 +1585,10 @@ int main(int argc, char** argv) {
                 // Level.PlayAmbient(id, volume) call (e.g. azra.s) needs
                 // it already in place.
                 soundArchive.LoadCategory(scriptRoot, stack.requestedZone());
+                // M55: same file the model manifest above comes from --
+                // columns 2-4 of every row are the model's collision box,
+                // which `Entity::Init` copies onto every placement of it.
+                gameModelCollision.Load(scriptRoot, stack.requestedZone());
                 gameZone = std::move(zone);
                 // M44: LockZone/UnlockZone write straight into the cell
                 // grid, so the Level global needs the live zone. Repointed
@@ -2063,48 +2073,98 @@ int main(int argc, char** argv) {
                 // actor radius (docs/WORLD_MODEL.md), so this reuses the
                 // same bounding-circle constants the rest of this port's
                 // collision already uses.
-                constexpr float kMonsterBodyRadius = 40.0f;
                 constexpr float kBlockHeightDelta = sk::kEyeHeightOffset * 2.0f;
-                // M30: a closed door is solid. door.s starts every door
-                // closed (`saved_Open [0]`) and only calls SetPassable(true)
-                // from OnUse(); the port stored that flag but never acted on
-                // it, so every door in the level was walk-through -- which,
-                // together with them being drawn at the wrong heading, is
-                // why they all read as permanently open.
-                constexpr float kDoorBodyRadius = 90.0f;  // a door leaf spans most of its tile
-                auto blockedByDoor = [&](float wx, float wy) {
-                    for (const DoorInstance& d : gameDoors) {
-                        if (d.script->passable()) continue;
-                        float dx = wx - d.x, dy = wy - d.y;
-                        float r = kPlayerRadius + kDoorBodyRadius;
-                        if (dx * dx + dy * dy < r * r) return true;
-                    }
-                    return false;
+                // M55: real per-model collision boxes, replacing the two
+                // guessed body radii this block used to carry (a door was
+                // 90, a monster 40) and adding the case that was simply
+                // missing -- **static props**. Every barrel, table, rock,
+                // tree and fence in the game was walk-through here, and in
+                // the real engine they are the bulk of what blocks you:
+                // 499 of the 5192 manifest rows across the 21 zones are
+                // solid, and most of them are scenery.
+                //
+                // The box comes from `<zone>_models.txt` columns 2-4 via
+                // `Entity::Init`, and the test below is `FUN_100017c8`'s
+                // own: the mover gets one half-extent on both axes
+                // (`kActorHalfExtent`, the `0x80` the real stance code
+                // writes), the thing being tested against gets its
+                // separate X and Y, and a candidate must be solid with
+                // both extents non-zero and not `SetPassable(true)`.
+                //
+                // Two documented departures. The real engine only walks
+                // the entities linked into the tile the mover stands on
+                // (`engine+0x6904`), having baked anything wider than half
+                // a tile into the tile grid instead (`Entity+0x92`, see
+                // ModelCollision::tileStamped) -- this walks the live
+                // lists directly, which reaches the same set without the
+                // grid. And the tile stamp uses the box *rotated* by the
+                // entity's heading, while the per-entity test is
+                // axis-aligned; this port uses the axis-aligned test for
+                // everything, so a rotated fence blocks a slightly
+                // different footprint than the original's.
+                auto boxOf = [&](float wx, float wy, int modelIndex) {
+                    const sk::ModelCollision& c = gameModelCollision.At(modelIndex);
+                    return sk::MakeBox(wx, wy, static_cast<float>(c.halfExtentX),
+                                        static_cast<float>(c.halfExtentY));
                 };
-                auto blockedByMonster = [&](float wx, float wy) {
+                auto solidAt = [&](int modelIndex) {
+                    return gameModelCollision.At(modelIndex).blocks();
+                };
+                auto blockedByEntity = [&](float wx, float wy) {
+                    sk::CollisionBox mover =
+                        sk::MakeBox(wx, wy, sk::kActorHalfExtent, sk::kActorHalfExtent);
+                    // A closed door is solid; door.s starts every door
+                    // closed (`saved_Open [0]`) and only calls
+                    // SetPassable(true) from OnUse(). That is the same
+                    // `Entity+0xd5` the real walk checks.
+                    for (const DoorInstance& d : gameDoors) {
+                        if (d.script->passable() || !solidAt(d.modelArchiveIndex)) continue;
+                        if (sk::BoxesOverlap(mover, boxOf(d.x, d.y, d.modelArchiveIndex))) {
+                            return true;
+                        }
+                    }
                     for (const MonsterInstance& m : gameMonsters) {
                         if (!m.script->alive() || m.script->destroyed()) continue;
+                        if (!solidAt(m.modelArchiveIndex)) continue;
+                        // Vertical separation, so a creature on another
+                        // floor of the same tile column doesn't block.
+                        // This port's own addition -- the real walk is
+                        // purely 2D, because its tile lists are.
                         if (std::fabs(gameCamera.z - (m.z + sk::kEyeHeightOffset)) >
                             kBlockHeightDelta) {
                             continue;
                         }
-                        float dx = wx - m.x, dy = wy - m.y;
-                        float r = kPlayerRadius + kMonsterBodyRadius;
-                        if (dx * dx + dy * dy < r * r) return true;
+                        if (sk::BoxesOverlap(mover, boxOf(m.x, m.y, m.modelArchiveIndex))) {
+                            return true;
+                        }
                     }
+                    for (const sk::PlacedEntity& e : gameEntities) {
+                        if (!solidAt(e.modelArchiveIndex)) continue;
+                        if (sk::BoxesOverlap(mover, boxOf(e.x, e.y, e.modelArchiveIndex))) {
+                            return true;
+                        }
+                    }
+                    // Pickups are deliberately not tested: every loot and
+                    // world-item model in the shipped manifests is
+                    // `0 0 0`, so `blocks()` is false for all of them
+                    // anyway, and walking over a dropped bag to collect it
+                    // is what the corpus expects.
                     return false;
                 };
+                // Axis-separated, exactly as `FUN_100017c8` resolves an
+                // entity overlap: back the move out, re-apply X alone, and
+                // if that still collides drop X and try Y alone -- which
+                // is what lets you slide along a table instead of sticking
+                // to it.
                 auto tryMove = [&](float mx, float my) {
                     float nx = gameCamera.x + mx;
                     if (!gameZone->CircleHitsWall(nx, gameCamera.y, kPlayerRadius) &&
-                        !blockedByMonster(nx, gameCamera.y) &&
-                        !blockedByDoor(nx, gameCamera.y)) {
+                        !blockedByEntity(nx, gameCamera.y)) {
                         gameCamera.x = nx;
                     }
                     float ny = gameCamera.y + my;
                     if (!gameZone->CircleHitsWall(gameCamera.x, ny, kPlayerRadius) &&
-                        !blockedByMonster(gameCamera.x, ny) &&
-                        !blockedByDoor(gameCamera.x, ny)) {
+                        !blockedByEntity(gameCamera.x, ny)) {
                         gameCamera.y = ny;
                     }
                 };
@@ -2415,7 +2475,19 @@ int main(int argc, char** argv) {
                 // kMeleeRange survives only as the reach for the *player's*
                 // bare fists (tryAttack below) -- monsters use their own
                 // real attackRange().
-                constexpr float kMeleeRange = 110.0f;      // world units
+                //
+                // M55: still an invented constant (no shipped script sets a
+                // range for bare hands), but no longer a free one. Entity
+                // collision now holds an actor off a creature by the sum of
+                // their boxes, and every creature model in the shipped
+                // manifests is 128 -- so anything shorter than
+                // `2 * kActorHalfExtent` cannot be reached at all. The
+                // previous 110 would have made bare-handed combat
+                // impossible. A real weapon's own `range()` (384 for every
+                // melee weapon in the corpus, M20) already clears this
+                // comfortably, and a monster's default `attackRange()` is
+                // 660, so only the fists needed the correction.
+                constexpr float kMeleeRange = sk::kActorHalfExtent * 2.0f;  // world units
                 // M22: no real spell script ever calls SetRange() (only
                 // weapon scripts do -- M20's own corpus-verified bimodal
                 // 384/16384 split), so there's no real value to read for

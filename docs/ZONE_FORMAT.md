@@ -112,6 +112,24 @@ sentinel):
 - stores `flag1` (1 byte), `flag2`, `flag3` (each `u16`) into a parallel
   8-byte-stride array at `engine+0x6f38[archiveIndex]`.
 
+> **M55: those three are not flags — they are the model's collision box.**
+> `Entity::Init` (`FUN_100610e4`) looks the placement's descriptor up and
+> copies all three onto the entity through vtable slots `+0x4c`, `+0x50`
+> and `+0x54`:
+>
+> | column | table field | entity field | meaning |
+> |---|---|---|---|
+> | 2 | `+0` (u8) | `Entity+0x8c` | **solid** — 0 or 2, never 1 |
+> | 3 | `+2` (u16) | `Entity+0x8e` | **half-extent X**, 8.8 units (`SetRadius`) |
+> | 4 | `+4` (u16) | `Entity+0x90` | **half-extent Y** (`SetRadius2`) |
+>
+> Real rows read exactly as that: `bottle 2 64 64`, `door 2 64 256`
+> (thin one way, wide the other), `rail 2 64 512` (a fence run),
+> `table 2 256 256`, `roof 0 1500 1500` (huge, deliberately not solid),
+> `dagger 0 0 0`. Columns 3 and 4 are also written for a `NULL.bin` row —
+> the name check gates only the model load, not the table write. Full
+> writeup in [`WORLD_MODEL.md`](WORLD_MODEL.md) ("Entity collision").
+
 `archiveIndex` is used **directly and unchanged** as both the zone-local
 cache slot and the `models.idx` index — the two are the same number. So
 `<zone>_models.txt` isn't a name→ID lookup table at all; it's simply "load

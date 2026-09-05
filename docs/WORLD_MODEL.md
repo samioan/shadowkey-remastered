@@ -2247,3 +2247,169 @@ pairing of the two scripts was the mistake.
 Implemented in
 [`port/src/simkin_bindings/script_delay.h`](../port/src/simkin_bindings/script_delay.h);
 smoke test `src/tests/m53_script_delay_smoke.cpp`.
+
+## Entity collision, and the two scalars nothing named (M55)
+
+M52 named every scalar in the save record but two: `Entity+0x8c` and
+`Entity+0x92`. Both looked genuinely dead — zeroed by the constructor,
+carried by the save format, and matched by no direct field access
+anywhere in the image.
+
+The direct-access part was true and the conclusion drawn from it was
+wrong. **Both are reached only through vtable accessors**, four
+three-instruction thunks Ghidra never marked as functions:
+
+| slot | thunk | instruction |
+|---|---|---|
+| `+0x40` | `0x100a151c` | `LDRB r0, [r0, #0x8c]` |
+| `+0x4c` | `0x100a212c` | `STRB r1, [r0, #0x8c]` |
+| `+0x50` | `0x100a2180` | `STRH r1, [r0, #0x8e]` |
+| `+0x54` | `0x100a2178` | `STRH r1, [r0, #0x90]` |
+| `+0xac` | `0x100a2678` | `LDRB r0, [r0, #0x92]` |
+| `+0xb0` | `0x100a2648` | `STRB r1, [r0, #0x92]` |
+
+All **31 Entity-derived vtables carry the identical six**, with no
+subclass overriding any of them, so a call through one of those slots on
+an Entity is unambiguous. `+0x50` and `+0x54` are already known — they
+are what the `SetRadius` and `SetRadius2` script bindings call — which is
+what makes the neighbouring pair worth reading as part of the same thing.
+
+### `Entity+0x8c` is "this entity is solid"
+
+The value comes from the model, not the placement. `Entity::Init`
+(`FUN_100610e4`) looks the placement's `entities.txt` descriptor up and
+copies three fields off a per-model table at `engine+0x6f38`:
+
+```c
+setSolid  (this, *(u8  *)(engine + 0x6f38 + descriptor->modelIndex*8 + 0));  /* +0x4c -> 0x8c */
+setRadius (this, *(u16 *)(engine + 0x6f38 + descriptor->modelIndex*8 + 2));  /* +0x50 -> 0x8e */
+setRadius2(this, *(u16 *)(engine + 0x6f38 + descriptor->modelIndex*8 + 4));  /* +0x54 -> 0x90 */
+```
+
+and that table is filled by `ZoneModelList_Load` from columns 2, 3 and 4
+of `<zone>_models.txt` — the three fields `ZONE_FORMAT.md` had as
+"flag1/flag2/flag3". They are a **collision box**: a solid flag and two
+half-extents in the usual 8.8 world units, 256 to a tile.
+
+The shipped data reads unmistakably:
+
+```
+4  2   64   64 bottle.bin      a quarter-tile prop
+5  2  128  128 sbarrel.bin
+6  2  160  160 pinetree.bin
+7  2   64  256 door.bin        thin one way, wide the other
+8  2  256  256 table.bin
+9  0 1500 1500 roof.bin        huge extents, deliberately NOT solid
+12 2   64  512 rail.bin        a fence run
+18 2  128  128 rat.bin         a creature has one too
+25 0    0    0 dagger.bin      a pickup blocks nothing
+```
+
+Across all 21 zones column 2 is **only ever 0 or 2** — never 1 — and
+every reader tests it for non-zero only. That is also why the save writes
+this one-byte field through the stream's **i32** overload (write slot
+`0x18`, `SAVE_FORMAT.md`): it is the only place in the entire image a
+one-byte field does that, which means the member's declared type is
+neither `TBool` nor `TUint8` nor `char` (each of which has its own
+overload) but something that promotes to `TInt` — an enum whose second
+constant is 2.
+
+### The five readers are the whole of entity collision
+
+Every non-wall collision path in the engine is gated on it:
+
+- **`FUN_100017c8`** — movement. After pushing the mover out of wall
+  tiles, it walks the entity list of the tile it stands on
+  (`engine+0x6904`, linked through `Entity+0x40`) and for each candidate
+  requires `solid && halfExtentX && halfExtentY && !passable`. The mover's
+  own box uses `+0x8e` on **both** axes; only the candidate gets a
+  separate X and Y.
+- **`FUN_10001fd0`** — does a stance change still fit. Sets the actor's
+  own `+0x8e` to `0x80` for every stance it accepts, then runs the same
+  box test and reverts the stance on a hit. (So the player's half-extent
+  is 128 — exactly half a tile.)
+- **`FUN_10000ab8`** — is this tile occupied by something solid.
+- **`FUN_10066204` / `FUN_1006640c`** — the tile stamp and its inverse,
+  below.
+
+The overlap predicate is `FUN_1001c48c`, `<=` on all four edges (so two
+boxes that merely touch count), and the box slides with
+`FUN_1001c458`. The resolution in `FUN_100017c8` is axis-separated:
+
+```c
+if (Overlap(mover, other)) {
+    y -= dy;  x -= dx;  MoveBox(mover, -dx, -dy);   // back the whole move out
+    x += dx;            MoveBox(mover,  dx, 0);      // X alone
+    if (Overlap(mover, other)) { x -= dx; MoveBox(mover, -dx, 0); dx = 0; }
+    y += dy;            MoveBox(mover, 0,  dy);      // then Y alone
+    if (Overlap(mover, other)) { y -= dy; MoveBox(mover, 0, -dy); dy = 0; }
+}
+```
+
+— which is what lets you slide along a table instead of sticking to it,
+and is the same shape this port already used for walls.
+
+### `Entity+0x92` is "wider than the tile it stands on"
+
+`GameEngine_InitLevel`, once the level's entities exist:
+
+```c
+if (getSolid(e) && (getRadius(e) > 128 || getRadius2(e) > 128)) {
+    setStamped(e, 1);
+    FUN_1001c0f4(engine, e);        /* an empty function in this build */
+}
+if (getStamped(e)) FUN_10066204(e, 4, 0);
+```
+
+`FUN_10066204` walks the box *rotated by the entity's heading*
+(`+0xb6`, through the same fixed-point trig table the renderer uses),
+converts each step to tile coordinates and ORs bit 2 into the flags byte
+of every tile cell it covers (`engine+0x6908`, byte `+1`).
+`FUN_1006640c` is the same walk in reverse. So the engine splits its
+entity collision two ways: anything up to half a tile is tested
+per-entity from the tile's own list, and anything bigger is **baked into
+the tile grid** and blocks like a wall. `+0x92` is the record of which
+side of that split an entity fell on — and the save loader
+(`FUN_100188dc`) recomputes it from the extents when it re-creates a
+saved entity, which is why it round-trips.
+
+It is also read defensively: `FUN_10005d60`, which deactivates an entity,
+zeroes its whole motion and orientation set and its box and sets
+`passable` — but **only when `+0x92` is clear**, because a stamped
+entity's bit is already in the grid and clearing its box would strand it
+there.
+
+### Two smaller things that fell out
+
+- **`+0x98`, `+0xa0` and `+0xa6` are the per-tick movement delta** for x,
+  y and z — the partners of `+0x94`/`+0x9c`/`+0xa4`, which the
+  constructor zeroes right beside them and which `FUN_100017c8` subtracts
+  and re-adds one axis at a time. That closes the three gaps in the
+  position block.
+- **`FUN_1001c0f4` is an empty function**, so whatever the original
+  wanted to do alongside stamping an entity into the grid was compiled
+  out of this build.
+
+### In the port
+
+`port/src/world/model_collision.h` holds the table, the two predicates
+(`blocks()` and `tileStamped()`) and the decompiled box overlap;
+`main.cpp` loads it per zone beside the other manifests and tests the
+player's move against every solid door, creature and prop.
+
+Two departures, both deliberate. This port walks the live instance lists
+rather than a per-tile list plus a stamped grid — the same set of
+blockers, reached differently — and it uses the axis-aligned box for
+everything, where the original's stamp uses the box rotated by the
+entity's heading, so a rotated fence blocks a slightly different
+footprint here.
+
+What this changed in practice: doors and creatures previously used two
+invented body radii (90 and 40), and **static props had no collision at
+all** — every barrel, table, rock, tree and fence in the game was
+walk-through. In azra alone, 266 of 280 placements are solid (104 pine
+trees, 36 rats, 25 barrels, 16 chairs, 8 crates, 8 rocks, 7 tables, 7
+doors, 5 fence rails, ...), and 141 of those are large enough that the
+original bakes them into the tile grid.
+
+Smoke test `src/tests/m55_model_collision_smoke.cpp`.
