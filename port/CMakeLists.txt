@@ -426,3 +426,8 @@ target_link_libraries(quit_to_menu_smoke PRIVATE sk_bindings sk_world)
 # box. See src/tests/m55_model_collision_smoke.cpp.
 add_executable(model_collision_smoke src/tests/m55_model_collision_smoke.cpp)
 target_link_libraries(model_collision_smoke PRIVATE sk_world)
+
+# The Player object's inventory/menu natives, the worst-covered receiver
+# in the corpus. See src/tests/m56_player_api_smoke.cpp.
+add_executable(player_api_smoke src/tests/m56_player_api_smoke.cpp)
+target_link_libraries(player_api_smoke PRIVATE sk_bindings sk_world)

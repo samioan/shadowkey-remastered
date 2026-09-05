@@ -8,6 +8,7 @@
 #include "simkin_bindings/combat.h"
 #include "simkin_bindings/game_constants.h"
 #include "simkin_bindings/item_executable.h"
+#include "simkin_bindings/level_executable.h"
 #include "simkin_bindings/menu_stack.h"
 #include "simkin_bindings/native_binding_common.h"
 #include "skInterpreter.h"
@@ -75,7 +76,20 @@ void PlayerExecutable::RemoveItem(ItemExecutable* item) {
 }
 
 void PlayerExecutable::AddItem(std::unique_ptr<ItemExecutable> item) {
+    // M56: `FUN_1003d8e0` -- the real add-to-inventory path tests the
+    // incoming item's template id against four specific ids and sets the
+    // matching global flag bit. Doing it here rather than in each caller
+    // is what the original does too: GiveItem(), a world pickup and a
+    // loot bag all funnel through this one vtable slot.
+    if (item) m_KeyItemFlags.OnItemAcquired(item->templateId());
     m_Inventory.push_back(std::move(item));
+}
+
+ItemExecutable* PlayerExecutable::FindInventoryById(const std::string& id) const {
+    for (const std::unique_ptr<ItemExecutable>& item : m_Inventory) {
+        if (item && !item->markedForRemoval() && item->id() == id) return item.get();
+    }
+    return nullptr;
 }
 
 void PlayerExecutable::PurgeRemovedItems() {
@@ -282,7 +296,24 @@ bool PlayerExecutable::method(const skString& methodName, skRValueArray& args,
         // ShowCharacterClass.s reads this back via GetTemp() -- see the
         // ChooseRace() comment above for why the same field is shared.
         m_Temp = args[0].intValue();
+        // M56: the real handler (case 0x2e) does *not* store the raw
+        // argument. It stores `FUN_100207ec(arg)`, a nine-arm switch that
+        // maps 0..8 to themselves and everything else to 0 -- an explicit
+        // "unknown class becomes class 0" clamp, which matters because
+        // `GetCharacter()` below is what charactermanager.s branches its
+        // whole per-class table on. (It also writes `arg * 2 + 0x1f` to a
+        // second field, which is a sprite slot, not modelled here.)
+        int chosen = args[0].intValue();
+        m_CharacterClass = (chosen >= 0 && chosen <= 8) ? chosen : 0;
         m_HasCreatedCharacter = true;
+        return true;
+    }
+    if (methodName == skString("GetCharacter") && args.entries() == 0) {
+        // M56: case 0x31, a bare read of the field ChooseCharacter() sets.
+        // 57 real call sites, all of the shape
+        // `if (GetPlayer().GetCharacter() = 3)`, so this had been
+        // soft-failing to null and every such branch was dead.
+        returnValue = skRValue(m_CharacterClass);
         return true;
     }
     if (methodName == skString("HasCreatedCharacter") && args.entries() == 0) {
@@ -383,6 +414,115 @@ bool PlayerExecutable::method(const skString& methodName, skRValueArray& args,
             }
         }
         returnValue = skRValue(count);
+        return true;
+    }
+    // --- M56: the rest of the inventory API, all of which was
+    // soft-failing. See docs/SIMKIN_NATIVE_API.md's coverage table for how
+    // these were found and player_executable.h/amulet_flags.h for what
+    // each real handler does. ---
+    if (methodName == skString("HasItem") && args.entries() == 1) {
+        // Actor dispatcher case 0x1b, not a Player binding at all -- the
+        // player object composites the Actor class, which is why a real
+        // script can call it on GetPlayer(). The real handler walks the
+        // inventory chain (`actor+0x200`, linked through `+0x160`)
+        // comparing each entry's id string at `item+0xcb`; first match
+        // wins and the walk stops.
+        returnValue = skRValue(FindInventoryById(ToStdString(args[0].str())) != nullptr);
+        return true;
+    }
+    if (methodName == skString("FindInventory") && args.entries() == 1) {
+        // Case 0x3f. Two arms, and the first one is easy to miss: before
+        // searching anything, the real handler compares the argument
+        // against the literal "frozen_key" and, if that key's global flag
+        // bit is set, returns the bare integer 0x325 (the key's own
+        // entities.txt template id) instead of an object. Callers only
+        // ever null-check the result and hand it straight to RemoveItem(),
+        // both of which work on an integer -- see amulet_flags.h.
+        const std::string wanted = ToStdString(args[0].str());
+        if (wanted == "frozen_key" && m_KeyItemFlags.test(kFlagFrozenKey)) {
+            returnValue = skRValue(kFrozenKeyStandIn);
+            return true;
+        }
+        ItemExecutable* found = FindInventoryById(wanted);
+        if (found) {
+            returnValue = skRValue(static_cast<skiExecutable*>(found), false);
+        } else {
+            // The real miss path leaves the return atom untouched, which
+            // is what makes the corpus's `if (Key != null)` work.
+            returnValue = skRValue();
+        }
+        return true;
+    }
+    if (methodName == skString("RemoveItem") && (args.entries() == 1 || args.entries() == 2)) {
+        // Case 0x4a, whose whole shape is a type switch on the first
+        // argument: an *object* atom is unwrapped to the item it names,
+        // while an *integer* atom takes the frozen-key arm -- decrement
+        // the key counter (see amulet_flags.h for the deliberate
+        // off-by-one), then look the template up in the inventory and
+        // remove whatever it finds, returning silently if it finds
+        // nothing. The second argument is a replication flag in the
+        // original (it only gates a multiplayer notify call), so it is
+        // accepted and ignored here for the same reason DoorOpened() is.
+        ItemExecutable* target = nullptr;
+        if (args[0].type() == skRValue::T_Object) {
+            target = dynamic_cast<ItemExecutable*>(args[0].obj());
+        } else {
+            int templateId = args[0].intValue();
+            if (templateId == kTemplateFrozenKey) m_KeyItemFlags.OnFrozenKeyRemoved();
+            for (const std::unique_ptr<ItemExecutable>& item : m_Inventory) {
+                if (item && !item->markedForRemoval() && item->templateId() == templateId) {
+                    target = item.get();
+                    break;
+                }
+            }
+            if (!target) return true;  // the real handler's early return
+        }
+        RemoveItem(target);
+        return true;
+    }
+    if (methodName == skString("GiveItem") && args.entries() == 1) {
+        // Case 0x2d: build the entity for this entities.txt template id
+        // and push it through the same add-to-inventory path a real world
+        // pickup takes (the player vtable's `+0x164`). Reuses
+        // LevelExecutable's existing item factory rather than a second
+        // one -- it already applies the category filter and runs the
+        // script's Init().
+        int typeId = args[0].intValue();
+        if (!m_Stack) {
+            return SoftFailNativeCall("Player", methodName, args, returnValue);
+        }
+        std::unique_ptr<ItemExecutable> item = m_Stack->level().CreateItem(typeId);
+        if (!item) {
+            std::printf("  Player: GiveItem(%d) -- no item-shaped entities.txt row\n", typeId);
+            return true;
+        }
+        // CreateItem() already stamps the template id, which AddItem()
+        // below needs in order to notice a key item going in.
+        AddItem(std::move(item));
+        return true;
+    }
+    if (methodName == skString("HasAmulet") && args.entries() == 1) {
+        // Case 0x3e -- a read of the global flag word, *not* an inventory
+        // search. See amulet_flags.h.
+        returnValue = skRValue(m_KeyItemFlags.HasAmulet(ToStdString(args[0].str())));
+        return true;
+    }
+    if (methodName == skString("OpenMenu") && args.entries() == 1) {
+        // 332 real call sites, the single largest unhandled native in the
+        // corpus. The Player class registers OpenMenu at index 3 and its
+        // dispatcher's recovered switch has no case 3, so the shape came
+        // from the Object/Entity class's own OpenMenu (case 0x22), which
+        // is `FUN_100779b8(menuManager, name, 1, self)` -- open by name,
+        // with the caller as the new menu's opener.
+        //
+        // ReopenMenu(), not OpenMenu(), for the M17 reason every other
+        // class's OpenMenu already uses it: the target menu's own Init()
+        // is where the quest-state branching lives, and it has to re-run
+        // on each visit rather than once.
+        if (!m_Stack) {
+            return SoftFailNativeCall("Player", methodName, args, returnValue);
+        }
+        m_Stack->ReopenMenu(ToStdString(args[0].str()), static_cast<skiExecutable*>(this));
         return true;
     }
     if (methodName == skString("PickupItem") && args.entries() == 1) {

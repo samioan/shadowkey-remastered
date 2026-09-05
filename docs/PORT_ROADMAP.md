@@ -4406,13 +4406,178 @@ algorithms.
       entity's heading -- so a rotated fence blocks a slightly different
       footprint here.
 
+- [x] **M56 -- the Player object's script API, and the audit that found
+  it.** Asked "is anything still soft-failing", built a tool to answer it
+  properly, and closed the biggest thing it found. Coverage writeup in
+  [`docs/SIMKIN_NATIVE_API.md`](SIMKIN_NATIVE_API.md) ("Port coverage, by
+  receiver"); smoke test `src/tests/m56_player_api_smoke.cpp` (36 checks).
+
+    - **The audit, and why it had to be per-receiver.** New tool
+      `shadowkey/ghidra/scripts/analyze_port_native_coverage.py` (plain
+      Python, no Ghidra) reads the port's implemented set out of each
+      binding class's own `skString("Name")` literals and counts real
+      `Receiver.Method(` call sites across all 1,535 shipped `.s` files.
+      SimKin dispatches on the object -- 28 independent tries, 43 names
+      reused across two or more -- so a flat "is this name implemented
+      anywhere in `port/src`" check is not merely imprecise but
+      *optimistically wrong*, and that is exactly what had hidden the
+      largest gap in the port. `OpenMenu` existed on Item, Menu and
+      Monster, so any name-level check called it done;
+      `GetPlayer().OpenMenu(...)`, **332 real call sites**, was
+      soft-failing.
+
+    - **`GetPlayer()` was both the busiest receiver and the worst
+      covered**: 2207 call sites, more than every other named receiver
+      combined, and only 55% of them landing on something. (`Level` was
+      already 97%, `GetOwner()` 64%, `GetOpener()` 79% -- and most of
+      *that* residual is not native at all, it is SimKin-to-SimKin
+      dispatch into the opened object's own script, as the API doc's
+      factory-call section already established.) This milestone closes
+      the inventory-and-menu half: **715 call sites that previously
+      reached nothing**, taking `GetPlayer()` to 87%.
+
+    - **`OpenMenu(name)` -- 332 sites.** The Player class registers it at
+      trie index 3 and its dispatcher's recovered switch has no `case 3`,
+      so the shape came from the Object/Entity class's own `OpenMenu`
+      (`FUN_10061a60` case `0x22`): `FUN_100779b8(menuManager, name, 1,
+      self)`, i.e. open by name with the caller as the new menu's opener.
+      Routed through `ReopenMenu()` for the same M17 reason every other
+      class's `OpenMenu` already is -- the target menu's `Init()` is where
+      the quest-state branching lives and has to re-run per visit.
+
+    - **`FindInventory(id)` -- 198 sites -- has a special case in front of
+      the search.** Before looking at anything, case `0x3f` compares the
+      argument against the literal `"frozen_key"` and, if that key's
+      global flag bit is set, returns the bare *integer* `0x325` instead
+      of an item object. Which means that from the moment the key is
+      acquired the function never returns the object at all -- and that is
+      why `RemoveItem` has an integer arm.
+
+    - **`HasAmulet(name)` -- 10 sites -- never looks at the inventory.**
+      It, the special case above, and `RemoveItem`'s integer arm are all
+      built on one 16-bit word at `registry+0x468`
+      (`FUN_1002f914`/`FUN_1002f8fc`/`FUN_1002f8e0`), fed from the other
+      end by `FUN_1003d8e0` -- the add-to-inventory path the player
+      vtable's `+0x164` names, which tests the incoming item's template id
+      and sets the matching bit. Four ids, verified against the shipped
+      `entities.txt`, each of whose scripts sets the *same* string as its
+      own `SetID()`: 717 `RedAmulet` -> `redam` -> bit 2, 719
+      `GoldAmulet` -> `goldam` -> bit 4, 718 `BlueAmulet` -> `blueam` ->
+      bit 8, 805 `frozen_key` -> bit `0x10`. The bit order deliberately
+      does not follow the template order. Full table in the API doc.
+
+    - **`RemoveItem`'s off-by-one is reproduced, not fixed.** The
+      frozen-key arm reads `if (count == 0) clear_bit(0x10); count--;` --
+      the test precedes the decrement, so one acquired key survives its
+      first removal with the flag still set and only the second clears it
+      (the counter going negative). That is observable behaviour, not an
+      internal detail: it is what decides how many of glcrcrwl's five
+      gates a single key opens. Left exactly as the original has it, with
+      the reasoning in `simkin_bindings/amulet_flags.h`.
+
+    - **`GetCharacter()` -- 57 sites -- is clamped.** Case `0x2e`
+      (`ChooseCharacter`) does not store its raw argument; it stores
+      `FUN_100207ec(arg)`, a nine-arm switch mapping 0..8 to themselves
+      and everything else to 0. It writes a *different* field
+      (`player+0xf38`) from the one `ChooseRace` uses (`+0xf3c`), so this
+      port's shared `m_Temp` scratch field would have been the wrong
+      backing store. Every real call site is
+      `if (GetPlayer().GetCharacter() = N)`, so all 57 branches were dead.
+
+    - **`GiveItem(typeId)` -- 29 sites** -- builds the entity through
+      `LevelExecutable`'s existing `entities.txt` item factory and pushes
+      it through `AddItem()`, which is also where the key-item bits get
+      set, exactly as the original funnels every acquisition through one
+      vtable slot. **`HasItem(id)` -- 18 sites** -- is an Actor binding
+      (`FUN_10003810` case `0x1b`) reached through the player's composite,
+      a walk of the inventory chain comparing `item+0xcb`.
+
+    - **A structural change this needed**: `PlayerExecutable` held no
+      reference back to the `MenuStack` that owns it (its own header said
+      so). `OpenMenu` and `GiveItem` cannot be answered from player state
+      alone, so `MenuStack`'s constructor now calls `AttachStack(*this)`.
+      A `PlayerExecutable` built standalone leaves it null and those two
+      handlers soft-fail as before rather than pretending.
+
+    - **A crash the milestone created and then fixed.** Making 332 script
+      bodies reachable immediately found one that aborts the process:
+      `glcrcrwl/gate1.s` opens with `Gate = Level.GetEntity("box1"); if
+      (Gate.saved_Gate = 0)`, and with that entity absent the interpreter
+      raises "Cannot get field saved_Gate from a non-object" out of
+      `extractValue()` -- a *runtime* exception, where `MenuStack` only
+      ever contained *parse* ones. Both `Init()` and `OnDisplay()` are now
+      contained where the "file not found" path already decides what a
+      failed open does: log, discard the half-built screen, stay on the
+      current menu. Covered by a check that runs that exact real script.
+
+    - **Suite soft-fail lines: 162 -> 97.** Two of those came from
+      elsewhere: `Menu: OnDisplay()` was going through the logging path
+      although it is an optional hook most menu scripts don't define (it
+      now uses the same base-class call `TryInvoke` already did, for the
+      reason written there), which was 70 of the remaining lines.
+
+    - **Deliberately not attempted**, and what is left on `GetPlayer()`:
+      the effects system (`AddEffect`, 83 sites counting `GetOwner()`'s
+      63 -- its own milestone), the merchant cluster
+      (`SetMerchant`/`BuyFromMerchant`/`SellToMerchant`/`VisitStore`/
+      `BuyItem`/`SellItem`, ~40), `SetCameraStart` (49, a six-argument
+      spawn-position-and-heading override needing host integration),
+      `DoDamage` (19), the attribute setters `levelup.s` uses (~25), the
+      `TestX` skill rolls (~17), and `DropGold` (9, which spawns a real
+      world pickup). Each is listed with its call count in the tool's
+      output.
+
 ## Next milestones (not yet started)
 
 Roughly in priority order for reaching "actually playable," not commitments:
 
-- Nothing is currently queued. The last three standing RE questions
-  (the save record's unnamed scalars, the two "unplaceable" scripts, and
-  `FUN_1002c010`'s mode `0x1f`) closed in M52-M55.
+M56's coverage tool
+(`shadowkey/ghidra/scripts/analyze_port_native_coverage.py`) now ranks
+these by real call-site count instead of by guess -- re-run it rather
+than trusting this list to stay current.
+
+- **The effects system.** `AddEffect` is 83 real call sites (20 on
+  `GetPlayer()`, 63 on `GetOwner()`), the single largest remaining
+  unhandled native, plus `RemoveEffect`, `SetSpellEffect` (7),
+  `SetBlindness`, `FindStringEffect`, `RemoveEnchantments`. The
+  `ActorStats` timed-modifier machinery M43/M48 built is the place it
+  lands; what is missing is the script-facing entry point and the effect
+  table behind it.
+
+- **Merchants.** `SetMerchant` (10), `BuyFromMerchant` (9),
+  `SellToMerchant` (9), `VisitStore` (5), `GetProductCount` (4),
+  `BuyItem`/`SellItem`/`SellAllItems`/`GetDefaultStore`, plus the
+  `Monster: AddProduct(...)`/`ClearProducts()` pair that is ~35 of the
+  suite's remaining soft-fail lines (a merchant's whole stock list). One
+  coherent feature: `buysell.s` and the `dstar_e`/`dstar_w` shop
+  conversations are all currently dead ends.
+
+- **`SetCameraStart(x, y, z, a, b, c)`** -- 49 sites, all in zone-root
+  scripts. Case `0x39` arms a flag at `engine+0x14a20` and writes six
+  fields at `+0x14a24..+0x14a38` (note the argument-to-offset order is
+  not sequential); shipped data has arguments 4 and 6 always 0 and
+  argument 5 a signed angle, so this is a scripted spawn position and
+  heading override. Needs main.cpp to consume it after the zone script's
+  `Init()` rather than before.
+
+- **`Level.CreateEffect(...)`** -- 13 sites and 24 of the suite's
+  remaining soft-fail lines, all ten-argument calls from `crypt1.s` and
+  `twilite.s` with a position, a radius and a duration. Reads as a
+  particle/light emitter.
+
+- **The `levelup.s` cluster**: `DecreaseLevelUpPoints` (8),
+  `GetLevelUpPoints`, `LevelUp`, `UpdateAttributes` (3) and the eight
+  attribute setters (~25 sites between them), which together are the
+  whole level-up screen.
+
+- **The `TestX` skill rolls** -- `TestStrength` (5), `TestSpeed`,
+  `TestEndurance`, `TestAgility` (3 each) -- Character-stats cases
+  `0x0b..0x12`, used by `crypt1.s`'s trap and obstacle checks.
+
+- **The pre-existing `ZoneRenderer::Render` crash** at
+  `port/src/render3d/zone_renderer.cpp:731`, still unchased. It is why
+  M50-M56 are all verified against real data and unit tests rather than
+  by playing.
 
 ## Verification approach
 

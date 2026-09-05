@@ -25,6 +25,7 @@
 
 #include "assets/save_records.h"
 #include "simkin_bindings/actor_stats.h"
+#include "simkin_bindings/amulet_flags.h"
 #include "simkin_bindings/native_stub_executable.h"
 #include "simkin_bindings/spell_actor.h"
 #include "skRValue.h"
@@ -54,6 +55,18 @@ public:
     // owns it and holds no reference back to it).
     explicit PlayerExecutable(const sk::StringTable* strings, sk::SoundArchive* sounds = nullptr,
                                sk::AudioEngine* audio = nullptr);
+
+    // M56: the back-pointer the comment above says this class never had.
+    // Three of the Player natives that audit found missing genuinely need
+    // the rest of the game -- `OpenMenu()` needs the menu stack and
+    // `GiveItem()` needs LevelExecutable's entities.txt-driven item
+    // factory -- and there is no way to answer either from player state
+    // alone. MenuStack, which owns this object, calls this from its own
+    // constructor body; a PlayerExecutable built standalone (every test
+    // that doesn't want a whole game) leaves it null and those two
+    // handlers soft-fail exactly as they did before, rather than
+    // pretending to work.
+    void AttachStack(MenuStack& stack) { m_Stack = &stack; }
 
     bool method(const skString& methodName, skRValueArray& args, skRValue& returnValue,
                 skExecutableContext& context) override;
@@ -122,6 +135,19 @@ public:
     // DaedricWeapon branch is guarded on it, so casting it twice does not
     // hand out two swords.
     bool HasItemOfTemplate(int typeId) const;
+
+    // M56: `FindInventory(id)`/`HasItem(id)`/`CountInventory(id)` all match
+    // on the item script's own `SetID()` tag, not its display name -- the
+    // real Actor handler walks the inventory chain comparing `item+0xcb`.
+    // Returns the first live match, or null.
+    ItemExecutable* FindInventoryById(const std::string& id) const;
+
+    // M56: the four-bit key-item word (see amulet_flags.h). Public because
+    // the save layer and the smoke test both need to see it; maintained
+    // by AddItem()/RemoveItem() rather than by any caller.
+    const KeyItemFlags& keyItemFlags() const { return m_KeyItemFlags; }
+    KeyItemFlags& keyItemFlags() { return m_KeyItemFlags; }
+
     // Erases every inventory entry marked for removal (and clears
     // m_LeftItem/m_RightItem if either pointed at one of them) -- call
     // once per tick, after any in-flight script call chain for that tick
@@ -361,6 +387,10 @@ private:
     int m_PortraitId = 0;
     int m_Gold = 0;
     int m_Temp = 0;
+    // M56: player+0xf38, the field GetCharacter() reads -- a separate
+    // field from m_Temp in the real engine, which is why sharing the
+    // scratch field would have been wrong here.
+    int m_CharacterClass = 0;
     bool m_HasCreatedCharacter = false;
 
     // Vitals (M10) -- fixed baseline defaults, see class comment.
@@ -398,6 +428,10 @@ private:
     ActorStats m_Stats;
 
     std::vector<std::unique_ptr<ItemExecutable>> m_Inventory;
+    // M56: registry+0x468/+0x478 -- see amulet_flags.h.
+    KeyItemFlags m_KeyItemFlags;
+    // M56: see AttachStack(). Null in every standalone construction.
+    MenuStack* m_Stack = nullptr;
     ItemExecutable* m_LeftItem = nullptr;
     ItemExecutable* m_RightItem = nullptr;
     // M19: see TakePendingPickupItem()'s comment.

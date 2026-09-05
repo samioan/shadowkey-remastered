@@ -15,6 +15,7 @@
 #include "simkin_bindings/player_executable.h"
 #include "skInterpreter.h"
 #include "skRValue.h"
+#include "skRuntimeException.h"
 #include "skString.h"
 
 namespace sk_bindings {
@@ -60,6 +61,10 @@ MenuStack::MenuStack(std::string scriptRoot, skInterpreter& interpreter,
       m_Audio(audio),
       m_Player(new PlayerExecutable(strings, sounds, audio)),
       m_Level(new LevelExecutable(*this)) {
+    // M56: see PlayerExecutable::AttachStack(). Done here rather than in
+    // the initialiser list because `*this` is only usable once the members
+    // above are built.
+    m_Player->AttachStack(*this);
     RegisterGameConstants(interpreter);
     // M18: `Level` is a bare global every real script can reach (docs/
     // SIMKIN_NATIVE_API.md's Zone/Level+Zone effects), never obtained via
@@ -95,7 +100,25 @@ MenuExecutable* MenuStack::GetOrCreateMenu(const std::string& simkinPath, skiExe
     MenuExecutable* raw = menu.get();
     if (opener) raw->SetOpener(opener);
     m_Menus[key] = std::move(menu);
-    raw->RunInit();
+    // M56: a menu script's Init() can raise a *runtime* exception, not
+    // just a parse one, and until now that exception escaped all the way
+    // into the host and aborted the process. Real example, found the
+    // moment GetPlayer().OpenMenu() started working: glcrcrwl/gate1.s
+    // opens with `Gate = Level.GetEntity("box1"); if (Gate.saved_Gate =
+    // 0)`, and when that entity isn't in the level the interpreter throws
+    // "Cannot get field saved_Gate from a non-object" out of
+    // extractValue(). Contained here, where the "file not found" path
+    // above already decides what a failed open does: log it, discard the
+    // half-built screen so a later attempt rebuilds it cleanly, and let
+    // OpenMenu() stay on the current menu.
+    try {
+        raw->RunInit();
+    } catch (skRuntimeException& e) {
+        std::printf("  [MenuStack] CreateMenu(\"%s\") -- Init() failed: %s\n", simkinPath.c_str(),
+                    e.toString().ptr());
+        m_Menus.erase(key);
+        return nullptr;
+    }
     return raw;
 }
 
@@ -121,7 +144,15 @@ void MenuStack::OpenMenu(const std::string& simkinPath, skiExecutable* opener) {
     // opener should still apply to a subsequent GetOpener() call).
     if (opener) menu->SetOpener(opener);
     m_Current = menu;
-    menu->RunOnDisplay();
+    // M56: same containment as Init() above -- OnDisplay() is script too.
+    // The screen is already current and already drew its rows in Init(),
+    // so a failure here logs and leaves it up rather than unwinding.
+    try {
+        menu->RunOnDisplay();
+    } catch (skRuntimeException& e) {
+        std::printf("  [MenuStack] OpenMenu(\"%s\") -- OnDisplay() failed: %s\n",
+                    simkinPath.c_str(), e.toString().ptr());
+    }
 }
 
 void MenuStack::ReopenMenu(const std::string& simkinPath, skiExecutable* opener) {

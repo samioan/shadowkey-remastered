@@ -545,6 +545,96 @@ confirmed.
   wouldn't naturally trigger), or real but unused in this particular
   shipped content — can't distinguish those two from the binary alone.
 
+## Port coverage, by receiver (M56)
+
+The table above answers "how much of each class's surface do the shipped
+scripts use". The complementary question — **how much of what the shipped
+scripts actually call does this port implement** — had never been asked
+systematically, and the answer turned out to be worth a milestone.
+
+Tool:
+[`../shadowkey/ghidra/scripts/analyze_port_native_coverage.py`](../shadowkey/ghidra/scripts/analyze_port_native_coverage.py)
+(plain Python, no Ghidra; re-runnable any time either side changes). It
+reads the port's implemented set out of each binding class's own
+`skString("Name")` literals — that is literally how every handler in
+`port/src/simkin_bindings` matches a method name — and counts real
+`Receiver.Method(` call sites across all 1,535 `.s` files.
+
+**The measurement has to be per-receiver**, and that is the whole point.
+SimKin dispatches on the object: 28 independent tries, 43 names reused
+across two or more of them. A flat "is this name implemented anywhere in
+`port/src`" check is therefore not just imprecise, it is *optimistically*
+wrong — and it is exactly what had hidden the largest single gap in the
+port. `OpenMenu` was implemented on Item, Menu and Monster, so any
+name-level check reported it as done; `GetPlayer().OpenMenu(...)`, **332
+real call sites across the corpus**, was soft-failing.
+
+Coverage when M56 started, and after it:
+
+| receiver | call sites | handled before | after |
+|---|---|---|---|
+| `Level` | 1318 | 97% | 97% |
+| `GetOpener()` | 124 | 79% | 79% |
+| `GetOwner()` | 195 | 64% | 64% |
+| **`GetPlayer()`** | **2207** | **55%** | **87%** |
+
+`GetPlayer()` is both the busiest receiver in the corpus (more call sites
+than every other named receiver combined) and was by a wide margin the
+worst covered. M56 closed its inventory-and-menu half: `OpenMenu` (332),
+`FindInventory` (198), `RemoveItem` (71), `GetCharacter` (57),
+`GiveItem` (29), `HasItem` (18), `HasAmulet` (10) — 715 call sites that
+previously reached nothing. See `PORT_ROADMAP.md`'s M56 entry for what
+each one turned out to do.
+
+Two things worth knowing before reading the tool's output:
+
+- It only analyses receivers a script **names**. A bare `SetName(1234)`
+  is the implicit-self call into the script's own class and can't be
+  attributed by syntax alone — `analyze_simkin_script_corpus.py` is the
+  tool for that direction.
+- **`GetOpener()`'s residual is mostly not native at all.** As the
+  factory-call section above already established, roughly half of what
+  scripts call on an opener (`LockPicked`, `UseKey`, `OpenChest`,
+  `MagicDamage`, `GetLoot`, ...) are handler names declared in that
+  placed object's own `.s` file. Those appearing in the "unhandled"
+  column are expected, not gaps, and its 79% is closer to ~95% real.
+
+### `HasAmulet` is not an inventory search
+
+One finding from implementing the above is worth recording here rather
+than only in the port, because it is a fact about the native API. Three
+bindings are built on a single 16-bit word at `registry+0x468`, read by
+`FUN_1002f914(registry, mask)` and written by its OR/AND-NOT siblings
+`FUN_1002f8fc`/`FUN_1002f8e0`:
+
+- **`HasAmulet(name)`** (Player case `0x3e`) is a four-way `wcscmp`
+  chain — `"blueam"`, `"redam"`, `"goldam"`, `"frozen_key"` — each paired
+  with one bit of that word. It never looks at the inventory, and any
+  other name returns false.
+- **`FindInventory("frozen_key")`** (case `0x3f`) checks bit `0x10`
+  *before* searching anything, and if it is set returns the bare integer
+  `0x325` in place of an item object.
+- **`RemoveItem(x)`** (case `0x4a`) is a type switch on `x`: an object
+  atom is unwrapped normally, an integer atom takes a frozen-key arm that
+  maintains a counter at `registry+0x478`.
+
+The word is fed from the other end by `FUN_1003d8e0`, the engine's
+add-to-inventory path (the player vtable's `+0x164`, which `GiveItem`
+also calls): it tests the incoming item's `entities.txt` template id and
+sets the matching bit. The four ids are verified against the shipped
+`entities.txt`, and each one's script sets the *same* string as its
+`SetID()`, which is the corroboration that this is a key-item cache and
+not four unrelated flags:
+
+| template | entities.txt row | `SetID()` | bit |
+|---|---|---|---|
+| 717 (`0x2cd`) | `raiders\RedAmulet.s` | `redam` | `0x02` |
+| 719 (`0x2cf`) | `raiders\GoldAmulet.s` | `goldam` | `0x04` |
+| 718 (`0x2ce`) | `raiders\BlueAmulet.s` | `blueam` | `0x08` |
+| 805 (`0x325`) | `items\frozen_key.s` | `frozen_key` | `0x10` |
+
+Note the bit order does not follow the template order.
+
 ## Labels applied / tools
 
 No new Ghidra renames this pass (the 28 registration/dispatcher
@@ -554,3 +644,5 @@ any of them are confirmed).
 
 - `pyghidra_enumerate_simkin_bindings.py` — the extraction script
   described above; writes `shadowkey/simkin_native_bindings.json`.
+- `analyze_port_native_coverage.py` — M56's per-receiver port
+  coverage report described above. Plain Python, no Ghidra.

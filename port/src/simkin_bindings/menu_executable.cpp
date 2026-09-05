@@ -85,10 +85,13 @@ void MenuExecutable::RunInit() {
 }
 
 void MenuExecutable::RunOnDisplay() {
-    skRValueArray args;
-    skRValue ret;
-    skExecutableContext ctxt(&m_Stack.interpreter());
-    method(skString("OnDisplay"), args, ret, ctxt);
+    // M56: OnDisplay() is an optional hook -- most shipped menu scripts
+    // don't define one -- so it goes through TryInvoke()'s base-class path
+    // for exactly the reason spelled out there, rather than through
+    // this->method() and its unresolved-native log. It had been the
+    // loudest line in the suite's soft-fail output for a call that is
+    // supposed to be absent.
+    TryInvoke("OnDisplay");
 }
 
 MenuExecutable::MenuRow& MenuExecutable::AddRow(RowKind kind, int textId,
