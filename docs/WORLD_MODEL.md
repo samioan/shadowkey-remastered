@@ -2016,6 +2016,53 @@ floor / ceiling heights"**, in collision as in drawing. The second cell
 byte's bit 1 is new here: it marks a two-storey tile, whose ceiling
 becomes the collision floor for anything already above it.
 
+> **How much each branch is actually worth (M62).** Measured across all
+> 21 shipped zones (331,776 tiles), comparing a plain bilinear blend of
+> the four corners against the real `CollisionHeight` above:
+>
+> * **The flat-vs-corners branch changes nothing, anywhere.** 241,174
+>   tiles have `flags & 0x04` clear, and on every one of them the four
+>   stored corners already equal `ZcpEntry+2`. The bit is a storage and
+>   authoring distinction — "this tile is sloped" — not a behavioural one,
+>   and a renderer or a physics step that ignores it gets the same answer.
+> * **The two-storey branch is entirely real and entirely local.** Exactly
+>   **1,921** tiles carry it, and only two zones have any: `dstar_w`
+>   (1,723, of which 1,644 have a standable ceiling surface) and
+>   `glaciercrawl` (198/118). On 1,532 of them an actor above the ceiling
+>   resolves to a ground up to **2,112 raw units** — eight tile-widths —
+>   above what the corner blend returns. That is the difference between
+>   standing on Dragonstar West's upper level and falling through it.
+>
+> So of the two things this function does that a naive floor lookup does
+> not, one is free and the other is the whole of two zones' verticality.
+
+### `SetPosition`'s floor snap is this same function (M62)
+
+`FUN_100686e0` — the snap step of Entity binding `0x30` — is a one-line
+wrapper around it:
+
+```c
+void SnapToSurface(Entity* e) {                       // FUN_100686e0
+    e->z = CollisionHeight(&e->engine->zcp[e->tile->zcpIndex], e->tile,
+                           e->x, e->y, e->engine,
+                           (int16_t)e->z + 0x180);
+}
+```
+
+and its one caller adds `0x80` afterwards. So a teleported actor ends up
+at `CollisionHeight(x, y, requestedZ + 0x180) + 0x80`: the argument `z` is
+**raised by 384 and used as the upper-vs-lower-storey probe**, then thrown
+away, and the resolved surface is lifted by 128 so the actor stands on it
+rather than in it. On an ordinary tile the requested z has no effect at
+all; on one of those 1,921 two-storey tiles it is what chooses the floor.
+
+The snap is gated on `vtable[0xc8]`, the predicate for membership of the
+engine's **actor list** at `engine+0x640` (the list `SetZone`'s
+experience-budget loop walks, narrowing it further with the "is a monster"
+predicate at `vtable[0xe4]`). A player and a monster are in it; a door, an
+item and a prop are not — which is what lets `gate.s`'s portcullis rise
+1200 units and stay there. See `SIMKIN_NATIVE_API.md`.
+
 The consequence is worth stating plainly. **An arrow is stopped by
 geometry taller than the arrow, not by anything flagged as a wall.**
 Checked against real azra data: all **725** of the zone's wall-flagged

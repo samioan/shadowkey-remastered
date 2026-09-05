@@ -881,6 +881,69 @@ branch — it skips straight to the app object's loader.
   part of the Bluetooth/Arena multiplayer level-sync protocol, not just
   local state.
 
+## The Object/Entity position bindings (M62)
+
+Class `0x14d08` (dispatcher `FUN_10061a60`) is the **Object/Entity base** a
+player, a monster, a door, an item and a prop all derive from. Five of its
+bindings are one small feature, and they are worth taking together:
+
+| index | name |
+|---|---|
+| `0x30` | `SetPosition(x, y[, z])` |
+| `0x31` | `SetPositionMirror(x, y[, z])` — the replicated twin |
+| `0x34` | `GetPositionX()` |
+| `0x35` | `GetPositionY()` |
+| `0x36` | `GetPositionZ()` |
+
+Case `0x30` in full:
+
+```c
+entity->vtable[0x14](x, y, argc == 3 ? z : 0);   // the plain move
+entity->dx /* +0x98 */ = 0;                      // a teleport stops it dead
+entity->dy /* +0xa0 */ = 0;
+if (entity->vtable[0xc8]() && engine->tileGrid /* +0x6908 */ &&
+    Map_GetTileAt(engine, entity->x, entity->y)) {
+    SnapToSurface(entity);                       // FUN_100686e0
+    entity->z += 0x80;
+}
+```
+
+Three things fall out of it.
+
+**`z` is optional.** The case branches on `argc == 3` and passes a literal
+0 otherwise. Two shipped calls use the two-argument form (`lakvan.s`'s
+`To_4A`/`To_4B` zone transitions); the other 61 pass three.
+
+**The snap only happens for actors.** `vtable[0xc8]` is the predicate for
+membership of the engine's actor list at `engine+0x640`. A player and a
+monster are in it; a door, an item and a prop are not. That is not a
+detail: **`gate.s` is a portcullis**, and its whole open/close mechanism is
+
+```
+x=GetPositionX(); y=GetPositionY(); z=GetPositionZ() + 1200;
+SetPosition(x,y,z);
+```
+
+A snapped door would drop straight back to the floor and never open.
+`glcrcrwl/icegate.s` is the same script with the ice gate's own sounds —
+and with a small authoring slip: it subtracts 128 from x and y on *both*
+the raise and the lower, so an open/close cycle walks the gate 256 units
+diagonally rather than returning it.
+
+**The snap itself is the arrow-collision function.** `FUN_100686e0` wraps
+`FUN_1001beac`, already decompiled for arrow collision — see
+`WORLD_MODEL.md`, which now also carries the two constants (`+0x180`
+probe, `+0x80` lift) and a measurement of what the two-storey branch is
+worth across the shipped zones.
+
+**Receivers in the corpus**: 63 `SetPosition` sites — `GetPlayer().` (25),
+a local `Player` assigned from `GetPlayer()` (19, all in `broken2.s` and
+`dstar_e/pit_boss_battle.s`; `Player` is *not* a global, each use is
+preceded by its own `Player = GetPlayer();`), bare calls inside an
+entity's own script (17, an entity moving itself — this is all of
+`SummonMe`), and named entity locals (`Trthgar`, `mon01`..`mon05`, `who`,
+`Herbs`).
+
 ## Labels applied / tools
 
 No new Ghidra renames this pass (the 28 registration/dispatcher

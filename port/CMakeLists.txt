@@ -135,6 +135,7 @@ add_library(sk_bindings STATIC
   src/simkin_bindings/store.cpp
   src/assets/product_database.cpp
   src/simkin_bindings/row_owner_ref.cpp
+  src/simkin_bindings/entity_position_ref.cpp
   src/simkin_bindings/script_delay.cpp
   src/simkin_bindings/table_executable.cpp
   src/simkin_bindings/test_armor_executable.cpp
@@ -461,3 +462,7 @@ target_link_libraries(store_screen_smoke PRIVATE sk_bindings sk_world)
 # See src/tests/m61_camera_start_smoke.cpp.
 add_executable(camera_start_smoke src/tests/m61_camera_start_smoke.cpp)
 target_link_libraries(camera_start_smoke PRIVATE sk_bindings sk_world)
+
+# See src/tests/m62_set_position_smoke.cpp.
+add_executable(set_position_smoke src/tests/m62_set_position_smoke.cpp)
+target_link_libraries(set_position_smoke PRIVATE sk_bindings sk_world)

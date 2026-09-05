@@ -860,15 +860,15 @@ bool MonsterExecutable::method(const skString& methodName, skRValueArray& args,
     // SetPositionMirror is the network-replicated twin (same
     // DoorOpened()/DestroyObjectMirror() pattern -- no multiplayer here),
     // and azra_rat.s's own OnKilled uses it to move Trothgar.
-    if ((methodName == skString("SetPosition") ||
-         methodName == skString("SetPositionMirror")) &&
-        args.entries() >= 3) {
-        m_PositionX = args[0].intValue();
-        m_PositionY = args[1].intValue();
-        m_PositionZ = args[2].intValue();
-        m_PositionDirty = true;
-        return true;
-    }
+    //
+    // M62: this handler moved to the shared EntityPositionRef -- the engine
+    // has one implementation, on the Object/Entity base class every placed
+    // thing derives from, and so does this port now. Two real corrections
+    // came with the move: `z` is optional (the real case branches on
+    // `argc == 3` and passes 0 otherwise, so this used to reject the
+    // two-argument form outright), and the three matching getters
+    // `GetPositionX/Y/Z` exist and were missing here.
+    if (HandleEntityPositionNative(methodName, args, returnValue)) return true;
     if (methodName == skString("DestroyObjectMirror")) {
         // M23: see destroyed()'s comment -- azra.s's own
         // `M1.DestroyObjectMirror(M1)` (self-passed, network/replication

@@ -26,6 +26,7 @@
 #include "assets/save_records.h"
 #include "simkin_bindings/actor_stats.h"
 #include "simkin_bindings/amulet_flags.h"
+#include "simkin_bindings/entity_position_ref.h"
 #include "simkin_bindings/store.h"
 #include "simkin_bindings/native_stub_executable.h"
 #include "simkin_bindings/spell_actor.h"
@@ -44,7 +45,8 @@ namespace sk_bindings {
 class ItemExecutable;
 class MenuStack;
 
-class PlayerExecutable : public NativeStubExecutable, public SpellActor {
+class PlayerExecutable : public NativeStubExecutable, public SpellActor,
+                          public EntityPositionRef {
 public:
     // M27: `sounds`/`audio` may be null (every test constructs a
     // PlayerExecutable without them, via MenuStack's own matching
@@ -207,6 +209,11 @@ public:
     // read with (ProductRecord::enabledForClass) -- both the store
     // table's name tint and the cell's own IsItemEnabledFor() use it.
     int characterClass() const { return m_CharacterClass; }
+
+    // M62: the player is an actor, so a scripted `SetPosition` snaps them
+    // to the surface of the tile they land on. See
+    // EntityPositionRef's header for the `vtable[0xc8]` predicate this is.
+    bool isActorForPositioning() const override { return true; }
 
     ItemExecutable* leftItem() const { return m_LeftItem; }
     ItemExecutable* rightItem() const { return m_RightItem; }

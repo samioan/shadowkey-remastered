@@ -44,6 +44,7 @@
 
 #include <string>
 
+#include "simkin_bindings/entity_position_ref.h"
 #include "skScriptedExecutable.h"
 
 class skInterpreter;
@@ -52,7 +53,7 @@ namespace sk_bindings {
 
 class PlayerExecutable;
 
-class DoorExecutable : public skScriptedExecutable {
+class DoorExecutable : public skScriptedExecutable, public EntityPositionRef {
 public:
     DoorExecutable(const skString& filename, skExecutableContext& ctxt, PlayerExecutable& player);
 

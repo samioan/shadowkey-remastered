@@ -879,6 +879,14 @@ bool PlayerExecutable::method(const skString& methodName, skRValueArray& args,
         m_Stack->ReopenMenu("buysell");
         return true;
     }
+    // M62: Entity bindings 0x30/0x31/0x34/0x35/0x36, the base class every
+    // placed thing inherits (entity_position_ref.h). 44 of the corpus's 63
+    // call sites are on the player -- `GetPlayer().SetPosition(...)` and
+    // the bare-global `Player.SetPosition(...)` -- and they are how
+    // `cheatmenu.s` teleports, how `broken2.s` moves the player between its
+    // wings, and how `dstar_e/pit_boss_battle.s` places both fighters
+    // before each round. All of them soft-failed until now.
+    if (HandleEntityPositionNative(methodName, args, returnValue)) return true;
     if (methodName == skString("SetCameraStart") && args.entries() == 6) {
         // M61: Player binding 0x39 -- the scripted spawn override. The
         // real case reads exactly six arguments and leaves (with the

@@ -44,6 +44,7 @@
 #include <vector>
 
 #include "simkin_bindings/actor_stats.h"
+#include "simkin_bindings/entity_position_ref.h"
 #include "simkin_bindings/store.h"
 #include "simkin_bindings/script_delay.h"
 #include "simkin_bindings/spell_actor.h"
@@ -93,7 +94,8 @@ class MenuStack;
 class PlayerExecutable;
 class ItemExecutable;
 
-class MonsterExecutable : public skScriptedExecutable, public SpellActor {
+class MonsterExecutable : public skScriptedExecutable, public SpellActor,
+                           public EntityPositionRef {
 public:
     // `strings` may be null, same fallback convention as ItemExecutable.
     MonsterExecutable(const skString& filename, skExecutableContext& ctxt,
@@ -242,19 +244,15 @@ public:
     void SetExpWorth(int value) { m_ExpWorth = value; }
     int expWorth() const { return m_ExpWorth; }
 
-    // M39: a script-driven teleport (SummonMe()'s whole implementation --
-    // see the SetPosition handler). Host-side: main.cpp drains this once
-    // per tick and moves the live MonsterInstance, the same
-    // defer-to-a-safe-point shape PickupItem()/markedForRemoval() already
-    // use. Returns false when nothing has changed.
-    bool TakePendingPosition(float& x, float& y, float& z) {
-        if (!m_PositionDirty) return false;
-        m_PositionDirty = false;
-        x = static_cast<float>(m_PositionX);
-        y = static_cast<float>(m_PositionY);
-        z = static_cast<float>(m_PositionZ);
-        return true;
-    }
+    // M39: a script-driven teleport (SummonMe()'s whole implementation).
+    // M62: the storage, the setter and the three getters moved to the
+    // shared EntityPositionRef, which is where the engine keeps them -- one
+    // implementation on the Object/Entity base class, not one per
+    // subclass. `TakePendingPosition` is inherited unchanged, and main.cpp
+    // drains it exactly as before; what is new is that a monster teleport
+    // now floor-snaps like the engine's does, because a monster is an
+    // actor.
+    bool isActorForPositioning() const override { return true; }
     int skin() const { return m_Skin; }
     // SetScale()'s 8.8 fixed-point value as a plain multiplier (256 -> 1).
     float scale() const { return m_Scale > 0 ? static_cast<float>(m_Scale) / 256.0f : 1.0f; }
@@ -667,10 +665,9 @@ private:
     int m_MagicResistance = 0;
     int m_Will = 0;  // M37: stats+0x1a -- see spellResistance()
     int m_CreatureKind = kCreatureNormal;  // M37: monster+0x2d0
-    // M39: see countsForZoneExperience() / TakePendingPosition().
+    // M39: see countsForZoneExperience(). M62: the position members that
+    // used to sit here moved to EntityPositionRef.
     bool m_CountsForZoneExperience = false;
-    int m_PositionX = 0, m_PositionY = 0, m_PositionZ = 0;
-    bool m_PositionDirty = false;
     int m_DamageMin = 0;
     int m_DamageMax = 0;
     int m_ArmorValue = 0;

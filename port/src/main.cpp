@@ -1862,6 +1862,12 @@ int main(int argc, char** argv) {
                         try {
                             auto door = std::make_unique<sk_bindings::DoorExecutable>(
                                 skString(fullPath.c_str()), loadCtxt, stack.player());
+                            // M62: the engine sets a placement's position
+                            // (vtable +0x18) *before* calling its Init()
+                            // (vtable +0x10) -- see ZONE_FORMAT.md's step
+                            // list -- so a script whose Init() reads
+                            // GetPositionX/Y/Z sees where it actually is.
+                            door->SetWorldPosition(e.x, e.y, e.z);
                             skRValueArray args;
                             args.append(skRValue(0));  // placeholder for Init's "(s)" parameter
                             skRValue ret;
@@ -1900,6 +1906,12 @@ int main(int argc, char** argv) {
                         try {
                             auto item = std::make_unique<sk_bindings::ItemExecutable>(
                                 skString(fullPath.c_str()), loadCtxt, stack);
+                            // M62: the engine sets a placement's position
+                            // (vtable +0x18) *before* calling its Init()
+                            // (vtable +0x10) -- see ZONE_FORMAT.md's step
+                            // list -- so a script whose Init() reads
+                            // GetPositionX/Y/Z sees where it actually is.
+                            item->SetWorldPosition(e.x, e.y, e.z);
                             skRValueArray args;
                             args.append(skRValue(0));  // placeholder for Init's "(s)" parameter
                             skRValue ret;
@@ -1946,6 +1958,12 @@ int main(int argc, char** argv) {
                         try {
                             auto monster = std::make_unique<sk_bindings::MonsterExecutable>(
                                 skString(fullPath.c_str()), loadCtxt, &strings, stack.player(), stack);
+                            // M62: the engine sets a placement's position
+                            // (vtable +0x18) *before* calling its Init()
+                            // (vtable +0x10) -- see ZONE_FORMAT.md's step
+                            // list -- so a script whose Init() reads
+                            // GetPositionX/Y/Z sees where it actually is.
+                            monster->SetWorldPosition(e.x, e.y, e.z);
                             skRValueArray args;
                             args.append(skRValue(0));  // placeholder for Init's "(s)" parameter
                             skRValue ret;
@@ -2348,12 +2366,54 @@ int main(int argc, char** argv) {
                 // move has to be mirrored onto the live instance -- drained
                 // here rather than inside the script call, same
                 // defer-to-a-safe-point convention as PickupItem().
-                for (MonsterInstance& m : gameMonsters) {
+                //
+                // M62: the same drain now covers every placed entity class,
+                // because `SetPosition` is one binding on the Object/Entity
+                // base they all inherit (simkin_bindings/
+                // entity_position_ref.h), and it applies the real snap
+                // rule: an **actor** lands on the surface of the tile it
+                // arrives in, anything else lands exactly where it was put.
+                auto applyTeleport = [&](sk_bindings::EntityPositionRef& script, float& x,
+                                          float& y, float& z) {
                     float nx = 0, ny = 0, nz = 0;
-                    if (m.script && m.script->TakePendingPosition(nx, ny, nz)) {
-                        m.x = nx;
-                        m.y = ny;
-                        m.z = nz;
+                    if (!script.TakePendingPosition(nx, ny, nz)) return false;
+                    x = nx;
+                    y = ny;
+                    z = nz;
+                    // `Map_GetTileAt(engine, x, y) != 0` in the real case --
+                    // a destination outside the grid skips the snap rather
+                    // than clamping.
+                    if (script.isActorForPositioning() && gameZone &&
+                        gameZone->InBounds(static_cast<int>(std::floor(nx / sk::kTileScale)),
+                                            static_cast<int>(std::floor(ny / sk::kTileScale)))) {
+                        z = gameZone->SnapActorToGround(nx, ny, nz);
+                    }
+                    return true;
+                };
+                for (MonsterInstance& m : gameMonsters) {
+                    if (m.script) applyTeleport(*m.script, m.x, m.y, m.z);
+                }
+                for (DoorInstance& d : gameDoors) {
+                    if (d.script) applyTeleport(*d.script, d.x, d.y, d.z);
+                }
+                for (PickupInstance& p : gamePickups) {
+                    if (p.script) applyTeleport(*p.script, p.x, p.y, p.z);
+                }
+                {
+                    // The player's own teleport -- 44 of the corpus's 63
+                    // `SetPosition` call sites. The camera *is* the player
+                    // here, so the resolved ground height gets the same
+                    // eye offset the zone-load path applies, and the fall
+                    // velocity is zeroed because the real case zeroes the
+                    // entity's motion deltas (`+0x98`/`+0xa0`) on every
+                    // teleport.
+                    float px = gameCamera.x, py = gameCamera.y, pz = 0.0f;
+                    if (applyTeleport(stack.player(), px, py, pz)) {
+                        gameCamera.x = px;
+                        gameCamera.y = py;
+                        gameCamera.z = pz + sk::kEyeHeightOffset;
+                        gameVelZ = 0.0f;
+                        onGround = true;
                     }
                 }
 
@@ -2595,7 +2655,24 @@ int main(int argc, char** argv) {
                 if (gameVelZ < -kMaxFallSpeed) gameVelZ = -kMaxFallSpeed;
                 gameCamera.z += gameVelZ;
 
-                float floorEyeZ = gameZone->FloorHeightAt(gameCamera.x, gameCamera.y) +
+                // M62: the real ground function, not the raw corner blend.
+                // `Zone::CollisionFloorHeightAt` is `FUN_1001beac` and has
+                // been in this port since M28 -- but only an arrow ever
+                // called it; the player's own footing used
+                // `FloorHeightAt`, which always bilinears the four corners
+                // and never consults the cell's flags. Two differences,
+                // both visible: a tile whose `flags & 0x04` is clear is
+                // authored **flat**, at `ZcpEntry+2`, and that is not the
+                // same as the corner average (it matches `min(corners)` for
+                // only 8% of azra's entries); and a two-storey tile lets an
+                // actor already above its ceiling stand on it, which is
+                // what an upper floor or a bridge is made of. Standing on
+                // one was previously impossible -- the player fell through
+                // to the storey below. Passing `gameCamera.z` is what makes
+                // that branch reachable, and it is the argument
+                // `FloorHeightAt` had no way to take.
+                float floorEyeZ = gameZone->CollisionFloorHeightAt(gameCamera.x, gameCamera.y,
+                                                                    gameCamera.z) +
                                    sk::kEyeHeightOffset;
                 if (gameVelZ <= 0.0f && gameCamera.z <= floorEyeZ) {
                     gameCamera.z = floorEyeZ;

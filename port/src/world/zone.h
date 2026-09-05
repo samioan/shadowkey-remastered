@@ -581,6 +581,31 @@ public:
     //     geometry taller than the arrow.
     float CollisionFloorHeightAt(float worldX, float worldY, float worldZ) const;
 
+    // M62: where an *actor* ends up after being teleported to (x, y, z) --
+    // `FUN_100686e0` plus its one caller's trailing lift, which together
+    // are the whole of `SetPosition`'s snap step:
+    //
+    //     entity->z = resolveSurface(x, y, entity->z + 0x180);   // FUN_100686e0
+    //     entity->z += 0x80;                                      // case 0x30
+    //
+    // `resolveSurface` is CollisionFloorHeightAt above (`FUN_1001beac`), so
+    // the two constants are the only new information: the requested z is
+    // raised by **0x180** before being used as the upper-vs-lower-storey
+    // probe, and the resolved surface is then lifted by **0x80** so the
+    // actor stands on it rather than in it. Both are raw world units
+    // (256 = one tile width).
+    //
+    // The probe is why a shipped `SetPosition` still passes a meaningful z
+    // even though the result is snapped: on a two-storey tile the argument
+    // is what chooses which storey. On an ordinary tile it is discarded.
+    //
+    // Only actors are snapped -- see EntityPositionRef's header for the
+    // `vtable[0xc8]` predicate that decides, and for the portcullis in
+    // `gate.s` that depends on doors being exempt.
+    float SnapActorToGround(float worldX, float worldY, float worldZ) const {
+        return CollisionFloorHeightAt(worldX, worldY, worldZ + 384.0f) + 128.0f;
+    }
+
     // M41: the real per-frame visible-tile set --
     // `TileGrid_RaycastVisibility` (`FUN_1000f694`), transcribed. This
     // replaces the renderer's fixed-radius square scan, which was M6's

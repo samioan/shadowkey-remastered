@@ -24,6 +24,7 @@
 #include <string>
 #include <vector>
 
+#include "simkin_bindings/entity_position_ref.h"
 #include "simkin_bindings/native_stub_executable.h"
 #include "simkin_bindings/script_delay.h"
 #include "simkin_bindings/spell_actor.h"
@@ -39,7 +40,7 @@ namespace sk_bindings {
 
 class MenuStack;
 
-class ItemExecutable : public skScriptedExecutable {
+class ItemExecutable : public skScriptedExecutable, public EntityPositionRef {
 public:
     // M21: `stack` -- replaces M19's separate `strings`/`PlayerExecutable&`
     // parameters (a real script now also needs `GetPlayer()` *and*

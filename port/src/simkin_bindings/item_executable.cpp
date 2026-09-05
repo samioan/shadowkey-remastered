@@ -959,6 +959,11 @@ bool ItemExecutable::method(const skString& methodName, skRValueArray& args,
         m_MarkedForRemoval = true;
         return true;
     }
+    // M62: Entity bindings 0x30/0x31/0x34/0x35/0x36 (entity_position_ref.h).
+    // A world pickup is a placed entity like any other -- `dstar_e`'s
+    // `Herbs.SetPosition(...)` moves one. Like a door and unlike an actor,
+    // it is not floor-snapped.
+    if (HandleEntityPositionNative(methodName, args, returnValue)) return true;
     if (skScriptedExecutable::method(methodName, args, returnValue, context)) {
         return true;
     }

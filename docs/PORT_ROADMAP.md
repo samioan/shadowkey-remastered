@@ -5106,6 +5106,97 @@ algorithms.
       Both are one-line departures with the real behaviour written down
       beside them.
 
+- [x] **M62 -- `SetPosition` and the Object/Entity position bindings.**
+  The sibling of M61's `SetCameraStart`: a teleport *within* a level. Five
+  bindings on class `0x14d08`, the base a player, a monster, a door, an
+  item and a prop all derive from -- `SetPosition`, `SetPositionMirror`,
+  `GetPositionX/Y/Z` -- and 63 call sites on four receivers, of which only
+  the monster had any implementation. New smoke test
+  `src/tests/m62_set_position_smoke.cpp` (30 checks). Suite 55/55.
+
+    - **The bullet this came from was stale in both halves.** It said
+      `FUN_1001beac` was "not yet decompiled". It was decompiled in M49
+      (for arrow collision, `WORLD_MODEL.md`) *and* already implemented in
+      this port as `Zone::CollisionFloorHeightAt`. The only genuinely new
+      pieces were the two constants around it and the predicate that
+      decides whether it applies at all.
+
+    - **The snap is `resolveSurface(x, y, z + 0x180) + 0x80`.**
+      `FUN_100686e0` is a one-line wrapper on the collision-height
+      function; its caller adds the lift. So the requested `z` is **raised
+      by 384 and used as a probe**, then discarded, and the resolved
+      surface is lifted by 128 so the actor stands on it rather than in it.
+      On an ordinary tile the argument has no effect whatsoever; on a
+      two-storey tile it is what chooses the floor. `Zone::
+      SnapActorToGround()`.
+
+    - **Only actors are snapped, and that is what makes `gate.s` work.**
+      `vtable[0xc8]` is the predicate for membership of the engine's actor
+      list at `engine+0x640` -- the list `SetZone`'s experience-budget loop
+      walks, narrowing it further with the "is a monster" predicate at
+      `vtable[0xe4]`. A player and a monster are in it; a door, an item and
+      a prop are not.
+
+      `gate.s` is a **portcullis**, and its entire open/close mechanism is
+      `z = GetPositionZ() +/- 1200; SetPosition(x, y, z)`. A snapped door
+      would drop straight back to the floor and never open. The smoke test
+      drives the real script twice and checks the gate goes up 1200 and
+      comes back to exactly where it started.
+
+    - **What the two functions the player's physics could call are worth,
+      measured.** The per-tick ground used `FloorHeightAt` (always bilinear
+      over the four corners) rather than `CollisionFloorHeightAt`
+      (`FUN_1001beac`), which has two extra branches. Across all 21 zones,
+      331,776 tiles:
+
+        - the **flat-vs-corners** branch changes nothing, anywhere: on all
+          241,174 tiles with `flags & 0x04` clear, the four stored corners
+          already equal `ZcpEntry+2`. It is an authoring distinction, not a
+          behavioural one.
+        - the **two-storey** branch is entirely real and entirely local:
+          **1,921** tiles carry it and only two zones have any -- `dstar_w`
+          (1,723, 1,644 with a standable ceiling) and `glaciercrawl`
+          (198/118). On 1,532 of them an actor above the ceiling resolves
+          up to **2,112 raw units** higher than the corner blend returns.
+
+      That is the difference between standing on Dragonstar West's upper
+      level and falling through it, and the player could not do it before.
+      Now fixed -- passing `gameCamera.z` is what makes the branch
+      reachable, and it is the argument `FloorHeightAt` had no way to take.
+      Guessing would have got this backwards: the branch that *sounds*
+      significant is free, and the one that sounds like an edge case is two
+      zones' verticality.
+
+    - **`z` is optional.** The real case branches on `argc == 3` and passes
+      a literal 0 otherwise. `lakvan.s`'s `To_4A`/`To_4B` transitions are
+      the two shipped two-argument calls, and the port's monster-only
+      handler rejected them outright (`args.entries() >= 3`).
+
+    - **One implementation, on the base class.** The same consolidation M60
+      did for the widget class: `simkin_bindings/entity_position_ref.h`
+      holds the storage, the setter, the three getters and the actor
+      predicate, and Player/Monster/Door/Item mix it in. The three getters
+      existed nowhere before, so `gate.s` would have computed `(0, 0,
+      1200)` and teleported itself to the world origin even if the setter
+      had worked. Placements are seeded from their `.ent` record **before**
+      `Init()` runs, which is the order the engine uses.
+
+    - **`Player` is not a global.** All 19 `Player.SetPosition(...)` sites
+      are preceded by their own `Player = GetPlayer();` -- an undeclared
+      identifier, so SimKin makes it a stack local holding a real object.
+      Checked in the smoke test rather than assumed, since a *declared*
+      field would have hit M38's object-field bug instead.
+
+    - A shipped authoring slip, recorded not fixed: `glcrcrwl/icegate.s`
+      subtracts 128 from x and y on **both** its raise and its lower, so an
+      open/close cycle walks the gate 256 units diagonally instead of
+      returning it.
+
+    - The coverage tool did not move, for the third documented reason:
+      `SetPosition` already counted as "implemented on another receiver"
+      because the monster had it, and the bare and local-receiver calls --
+      36 of the 63 -- are invisible to it entirely.
+
 ## Next milestones (not yet started)
 
 Roughly in priority order for reaching "actually playable," not commitments:
@@ -5129,16 +5220,12 @@ M61, by contrast, was all explicit-receiver work and the tool showed it:
 entries while its percentage stayed at 97%. Use whichever measure matches
 the kind of native being implemented.
 
-- **`GetPlayer().SetPosition(x, y[, z])`** -- Entity binding `0x30` on
-  class `0x14d08` (the base every actor inherits), the sibling of M61's
-  `SetCameraStart`: a teleport *within* a level rather than into one, used
-  by `snowline.s`'s "Tubes" branch among others. The case is short --
-  vtable `+0x14` to set the position, zero the motion deltas at `+0x98`/
-  `+0xa0`, then, when a virtual predicate at vtable `+0xc8` allows and the
-  tile grid exists, snap to the floor via `FUN_100686e0` and add `0x80` to
-  z. Only that last step needs work: `FUN_100686e0` resolves a new z out
-  of the tile's own geometry starting from `z + 0x180`, through
-  `FUN_1001beac`, which is not yet decompiled.
+M62 found a third way to be invisible to it: `SetPosition` was already
+counted as handled because *one* receiver (the monster) implemented it,
+even though the player -- 44 of its 63 call sites -- did not. A name that
+appears anywhere is a name the tool stops asking about, so
+"[implemented on another receiver]" in its output is a claim to check, not
+a result.
 
 - **`Level.CreateEffect(...)`** -- 13 sites and 24 of the suite's
   remaining soft-fail lines, all ten-argument calls from `crypt1.s` and

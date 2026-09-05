@@ -62,6 +62,23 @@ bool DoorExecutable::method(const skString& methodName, skRValueArray& args, skR
         m_RotationRaw += args[0].intValue();
         return true;
     }
+    // M62: Entity bindings 0x30/0x34/0x35/0x36 (entity_position_ref.h).
+    // A door is not only a thing that swings: `gate.s` is a **portcullis**,
+    // and its entire open/close mechanism is
+    //
+    //     x = GetPositionX(); y = GetPositionY(); z = GetPositionZ() + 1200;
+    //     SetPosition(x, y, z);
+    //
+    // -- it lifts straight up and drops back down, 1200 raw units (a little
+    // under five tile-widths). `glcrcrwl/icegate.s` is the same script with
+    // the ice-gate's own sounds. Neither could work before: the getters
+    // soft-failed to 0, so the script would have computed (0, 0, 1200) and
+    // teleported the gate to the world origin if the setter had existed.
+    //
+    // Crucially a door is **not** an actor (`vtable[0xc8]` is false for
+    // it), so its teleport is exempt from the floor snap. A snapped
+    // portcullis would drop straight back down and never open.
+    if (HandleEntityPositionNative(methodName, args, returnValue)) return true;
     if (methodName == skString("OpenDoor")) {
         // M38: a trapped door's trigger callback opens the door itself --
         // crypt1.s's `OnOpenDoor[ (trigger, who) ]` does
