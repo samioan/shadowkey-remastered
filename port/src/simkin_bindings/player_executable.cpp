@@ -869,13 +869,13 @@ bool PlayerExecutable::method(const skString& methodName, skRValueArray& args,
     }
     if ((methodName == skString("BuyFromMerchant") || methodName == skString("SellToMerchant")) &&
         args.entries() == 0) {
-        // The real pair fetch screen mode 5 -- the store screen -- from the
-        // controller and set its buy flag, which is the flag `buysell.s`
-        // reads back with IsBuyMode(). This port has no screen-mode table,
-        // so the flag lives on the stack and the screen is opened the way
-        // every other one is.
+        // The real pair fetch screen mode 5 -- the store screen -- from
+        // the controller and call FUN_10034f38(screen, buying), which
+        // writes `mode = buying ? 1 : 2`. This port has no screen-mode
+        // table, so the mode is parked on the stack and stamped onto the
+        // screen as it opens (MenuStack::OpenMenu).
         if (!m_Stack) return SoftFailNativeCall("Player", methodName, args, returnValue);
-        m_Stack->SetStoreBuyMode(methodName == skString("BuyFromMerchant"));
+        m_Stack->SetPendingScreenMode(methodName == skString("BuyFromMerchant") ? 1 : 2);
         m_Stack->ReopenMenu("buysell");
         return true;
     }

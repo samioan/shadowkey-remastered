@@ -346,7 +346,10 @@ int main(int argc, char** argv) {
         std::printf("\n-- BuyFromMerchant / SellToMerchant --\n");
         skRValueArray none;
         call(&player, "SellToMerchant", none);
-        Check(!stack.storeBuyMode() && stack.currentMenu() != nullptr,
+        // M60: the flag became the real three-state mode field, read off
+        // the screen it is stamped onto rather than off the stack.
+        Check(stack.currentMenu() != nullptr &&
+                  stack.currentMenu()->screenMode() == sk_b::MenuExecutable::ScreenMode::Sell,
               "SellToMerchant opens buysell.s with the buy flag clear");
         skRValue isBuy;
         skExecutableContext ctxt(&interpreter);
@@ -354,7 +357,9 @@ int main(int argc, char** argv) {
         stack.currentMenu()->method(skString("IsBuyMode"), noArgs, isBuy, ctxt);
         Check(!isBuy.boolValue(), "...and the script's own IsBuyMode() reads it back as false");
         call(&player, "BuyFromMerchant", none);
-        Check(stack.storeBuyMode(), "BuyFromMerchant sets it");
+        Check(stack.currentMenu() != nullptr &&
+                  stack.currentMenu()->screenMode() == sk_b::MenuExecutable::ScreenMode::Buy,
+              "BuyFromMerchant sets it");
     }
 
     std::printf("\nm59_merchant_smoke: %s (%d checks)\n",

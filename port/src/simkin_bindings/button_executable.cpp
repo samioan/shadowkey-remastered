@@ -12,20 +12,15 @@ bool ButtonExecutable::method(const skString& methodName, skRValueArray& args,
         m_Active = args[0].boolValue();
         return true;
     }
-    if (methodName == skString("SetEnabled") && args.entries() == 1) {
-        m_Enabled = args[0].boolValue();
-        return true;
-    }
     if (methodName == skString("IsActive") && args.entries() == 0) {
         returnValue = skRValue(m_Active);
         return true;
     }
-    if (methodName == skString("SetSelectable") && args.entries() == 1) {
-        SetRowSelectable(args[0].boolValue());
-        return true;
-    }
-    if (methodName == skString("SetItemText") && args.entries() == 1) {
-        SetRowLiteralText(ToStdString(args[0].str()));
+    // M60: SetSelectable/SetVisible/SetEnabled/SetItemText/GetItemText/
+    // SetLocalizedText/SetX/SetY/GetX/GetY all come from the engine's one
+    // shared widget class (row_owner_ref.h) -- a button is not special.
+    if (HandleSharedWidgetNative(methodName, args, returnValue)) {
+        if (methodName == skString("SetEnabled")) m_Enabled = args[0].boolValue();
         return true;
     }
     if (methodName == skString("SetWidth") && args.entries() == 1) {
@@ -44,8 +39,12 @@ bool ButtonExecutable::method(const skString& methodName, skRValueArray& args,
         SetRowShowBorder(args[0].boolValue());
         return true;
     }
-    if (methodName == skString("SetHAdjust") || methodName == skString("SetInvokeMethodOnFocus")) {
-        return true;  // cosmetic, see button_executable.h
+    if (methodName == skString("SetHAdjust") || methodName == skString("SetXAdjust") ||
+        methodName == skString("SetActiveSprite") || methodName == skString("SetDormantSprite")) {
+        // The remaining five of button class 0x14d2c's own eight bindings
+        // (SetActive/SetWidth/SetHeight/ShowBorder above are the others);
+        // cosmetic in this port, see button_executable.h.
+        return true;
     }
     return SoftFailNativeCall("Button", methodName, args, returnValue);
 }

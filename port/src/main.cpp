@@ -514,6 +514,11 @@ void RenderMenu(sk::Backbuffer& backbuffer, sk_bindings::MenuExecutable& menu,
 
     for (size_t rowIndex = 0; rowIndex < menu.rows().size(); ++rowIndex) {
         const auto& row = menu.rows()[rowIndex];
+        // M60: the shared widget class's SetVisible byte (widget+0x5d).
+        // The store screen hides the category button of every category
+        // its merchant does not stock and slides the survivors left, so a
+        // hidden row must draw nothing at all rather than leaving a gap.
+        if (!row.visible) continue;
         // menu.selectedItem() is a 1-based index into ALL rows (see
         // MenuExecutable::IsRowSelected() -- it's the number
         // AddMenuItem()/AddStaticItem() hand back to scripts). The old code
@@ -658,8 +663,25 @@ void RenderMenu(sk::Backbuffer& backbuffer, sk_bindings::MenuExecutable& menu,
                 for (int r = start; r < end; ++r) {
                     std::string line = table->CellText(r, 0);
                     for (int c = 1; c < table->columnCount(); ++c) {
+                        // M60: the store table's last two columns hold a
+                        // single space and draw global.spr 24/25 instead
+                        // -- "this is better/worse than what you have in
+                        // that hand". No sprite is reachable from this
+                        // text-cell path, so they render as the same
+                        // three-way marker in ASCII.
+                        using Compare = sk_bindings::TableExecutable::CellCompare;
+                        const Compare compare = table->CompareCell(r, c);
+                        if (compare != Compare::None) {
+                            line += compare == Compare::Better  ? " +"
+                                    : compare == Compare::Worse ? " -"
+                                                                : " =";
+                            continue;
+                        }
                         std::string cell = table->CellText(r, c);
-                        if (!cell.empty()) line += "  " + cell;
+                        // " " is what the engine writes into a cell whose
+                        // content is drawn rather than typeset -- nothing
+                        // to add to the line.
+                        if (!cell.empty() && cell != " ") line += "  " + cell;
                     }
                     uint16_t rowColor = (isSelected && r == selected) ? kSelectedTextColor
                                                                        : kTextColor;

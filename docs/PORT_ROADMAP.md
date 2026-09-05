@@ -4847,7 +4847,7 @@ algorithms.
       (`SetGoldText`, `SetLocalizedText`, `Button::SetX/SetVisible`,
       `PopupMenu::UpdatePopupItem`, `Table::SetInset`). The data model
       underneath them is complete; what is missing is the table
-      population. That is the natural follow-up.
+      population. That is the natural follow-up. **Done in M60 below.**
 
     - Also decompiled in passing, for whoever takes the next entry:
       **`SetCameraStart(a, b, c, d, e, f)`** is Player case `0x39`. It
@@ -4855,6 +4855,134 @@ algorithms.
       `+0x14a24`, `+0x14a28`, `+0x14a2c`, **`+0x14a34`**, **`+0x14a38`**,
       **`+0x14a30`** -- the last three out of order, exactly as the
       roadmap's own entry suspected.
+
+- [x] **M60 -- the store screen.** M59 left `buysell.s` loading, running,
+  and drawing an empty table. The screen now works end to end: the
+  merchant's shelves are listed, priced, compared against what the player
+  is holding, bought from and sold to. Nine store-menu bindings, the one
+  function behind all of them, the engine's shared widget class and the
+  table's own cell class were decompiled for this. New smoke test
+  `src/tests/m60_store_screen_smoke.cpp` (53 checks). The suite's
+  soft-fail count drops **81 -> 62**, and the store screen contributes
+  none of the remainder.
+
+    - **`FUN_10032f78` is the store screen.** All five `Display*Page`
+      natives, `RedrawPage`, and the tab buttons' focus wiring funnel into
+      one function that takes a category and a clear flag and fills the
+      table `SetInventoryList()` remembered. The five categories the
+      `Display*` natives pass **are the `IPT_*` constants M58 recovered**
+      -- Weapon 1, Spell 2, Armor 3, Misc 0, Consumable 4 -- which
+      independently confirms that table from an unrelated function.
+
+    - **The screen mode is not a bool.** `menu+0xd0` has three values, and
+      `FUN_10032f78` branches three ways on it: **1** lists the merchant's
+      shelves, **2** lists the player's items with prices, **0** lists them
+      with their derived stat line instead. `IsBuyMode()` is exactly
+      `mode == 1`, so the sell page and the plain inventory page both
+      answer false and are still completely different pages. It is written
+      from one place, `FUN_10034f38(menu, buying) { mode = buying ? 1 : 2;
+      }`, on every visit rather than at construction -- one screen object
+      serves both sides of the counter. This port had it as a bool on the
+      menu stack; it is now the real field, stamped onto the screen as it
+      opens.
+
+    - **The two columns `buysell.s` calls "rating" are not a rating.**
+      `productTable.AddColumn(10); //rating left` and `//rating right` are
+      10px wide and hold a single space each. `FUN_100a0cec` draws into
+      them: it compares the shelf line's rating against **whatever the
+      player has in that hand** -- left for one column, right for the
+      other, or, for armour, whatever is worn in that row's own
+      `products.dat` armour slot -- and blits global.spr sprite **24** if
+      the shelf is better or **25** if it is worse. Those are the two ids
+      `buysell.s` assigns to `image_item_active`/`image_item_dormant` on
+      the first two lines of its `OnDisplay()` and then never uses, because
+      the native renderer is what picks between them. A Consumable is
+      never compared (the renderer returns early on category 4), which is
+      why the potions page shows two blank columns. Reproduced, including
+      the early-outs for an empty hand and for a mismatched category.
+
+    - **The cost column, and a shipped cosmetic artefact.** It is built
+      from two *stringtable ids*, not literals: 3039 and 3040, formatted
+      with `"%s: %d %s: %d"`. String 3039 ships as `"GP "` -- with a
+      trailing space -- so the line the shipped game renders really does
+      read `GP : 111 Qty: 3`, space before the colon and all. The sell
+      page uses the same format for a Consumable and `"%s: %d"` for
+      everything else, because only a Consumable has a stack to count.
+
+    - **A fourth hand-added native, and a whole hand-added class.** M59
+      found three natives dispatched by a `wcscmp` chain above the trie and
+      left "are there others?" open. There are. `FUN_10034588` is the same
+      layer over the store menu and carries **`SetGoldText`** (and a
+      second, redundant copy of `IsBuyMode` that shadows the trie's own).
+      And the table's **cell object is an entire class with no trie at
+      all** -- eight methods in a flat `wcscmp` chain in `FUN_100a4ce4`
+      (`GetItemType`, `IsInventoryEquipped`, `IsItemEnabledFor`,
+      `GetItemDescription`, `DropItem`, `GetAssociatedObject`,
+      `GetArmorText`, `GetItemText`). See
+      [`SIMKIN_NATIVE_API.md`](SIMKIN_NATIVE_API.md)'s new subsection.
+      `GetItemDescription` carries a real type confusion: an out-of-range
+      description id makes it return a boolean `true` where the caller
+      concatenates a string.
+
+    - **`SetGoldText` throws the "gp" away.** Its whole body is
+      `sprintf(buf, "%d", player->gold)` into the widget's item text -- a
+      bare `%d`. `buysell.s` creates that widget as
+      `AddFloatingText("0 gp", ...)`, so the placeholder's "gp" disappears
+      the moment the screen finishes loading and the player sees a bare
+      number. Reproduced.
+
+    - **The widget class is one class.** This port had grown five widget
+      binding classes, each re-declaring the setters it happened to need.
+      The engine has exactly one (trie `0x14d20`, `FUN_1007e954`, fourteen
+      methods) that a button, a floating text, a text area and a table all
+      inherit -- which is why `buysell.s` mixes `SetVisible`/`SetX` on
+      buttons with `SetLocalizedText`/`SetItemText` on floating text
+      without distinguishing them. Consolidated into one shared handler
+      (`row_owner_ref.h`), which is what made `Button::SetX`,
+      `Button::SetVisible` and `MenuItem::SetLocalizedText` work at once.
+      Two real details kept: `SetVisible` writes only the visible byte
+      while `SetEnabled` writes visible *and* selectable, and
+      `SetItemText`/`SetLocalizedText` write the same slot so the later
+      call wins.
+
+    - **`UpdatePopupItem` takes three arguments, not two.** The third is a
+      **callback name**, applied only when the argument count exceeds two.
+      That is how one popup serves both sides of the counter:
+      `popup.UpdatePopupItem(0, 3787, "BuyInv")` on the buy page and
+      `(0, 3789, "SellItem")` on the sell page. Without it the confirm row
+      kept whatever `AddItem()` first gave it and pointed at the wrong
+      handler on one of the two pages.
+
+    - **The table callback takes the selected cell.** `SetCallback
+      ("SelectedItem")`'s handler is declared `SelectedItem[ (cell)`, and
+      this port was invoking it with no arguments -- so `buysell.s`'s
+      `selectedItem=cell` assigned an unset variable and every later
+      `BuyInv()`/`SellItem()` had nothing to name. The round trip that
+      makes the screen work is small and complete: column 0's text is the
+      `products.dat` name, `cell.GetItemText()` hands it back, and
+      `BuyItem(itemText, n)` resolves it against the shelves.
+
+    - **`RedrawPage(false)`'s argument is the *clear* flag**, and
+      `buysell.s` passes false. The repopulation therefore overwrites the
+      existing cells rather than destroying them first, and the row count
+      (`table+0xe4`) is what hides the leftovers -- rows from a longer page
+      stay allocated with their old contents. The table now models the
+      allocated row count and the used row count separately, because that
+      distinction is observable.
+
+    - Smaller findings: `SetInset(15)` is `table+0xe2`, a scroll-arrow
+      layout number; the buy branch grows the table to the merchant's
+      **whole** stock count and then sets the used count to just this
+      category's; and `FUN_10032f78` opens with a `sprintf` of `"Pre load
+      merchandise create rows(%d)"` into a stack buffer that nothing ever
+      reads -- a leftover debug line still shipping in the retail binary.
+
+    - **Not carried over**: the comparison columns render as ASCII
+      `+`/`-`/`=` rather than sprites 24/25, because the text-cell render
+      path has no sprite reachable from it; and the armour-slot lookup
+      resolves a template's slot through `products.dat` and finds the
+      wearer by scanning equipped armour, since this port has no
+      `player+0xf8c` per-slot array. Same answers, different bookkeeping.
 
 ## Next milestones (not yet started)
 
@@ -4865,15 +4993,14 @@ M56's coverage tool
 these by real call-site count instead of by guess -- re-run it rather
 than trusting this list to stay current.
 
-- **The store screen.** M59 built the whole shop data model but not the
-  screen that shows it: the six store-menu bindings that populate the
-  product table (`DisplayWeaponsPage`, `DisplayArmorMenu`,
-  `DisplayConsumablesMenu`, `DisplaySpellsPage`, `DisplayMiscItemsMenu`,
-  `SetInventoryList`, trie `0x14de0`, dispatcher `FUN_10033660`) plus the
-  widget natives `buysell.s` calls around them -- `SetGoldText`,
-  `MenuItem::SetLocalizedText`, `Button::SetX`/`SetVisible`,
-  `PopupMenu::UpdatePopupItem`, `Table::SetInset`. `buysell.s` loads and
-  runs today; it just draws nothing.
+One blind spot in it, worth knowing before reading its percentages as
+progress: it only counts calls written with an explicit receiver
+(`GetPlayer().X`, `Level.X`, `GetOwner().X`, ...). A menu script's *bare*
+calls -- `DisplayWeaponsPage(...)`, `SetGoldText(...)`, `RedrawPage(...)`,
+every widget setter chained onto an `AddButton()` return value -- are
+invisible to it. M60 implemented nineteen natives and moved none of the
+four percentages. The suite's soft-fail count is the measure that moved
+(**81 -> 62**), and for menu work it is the better one.
 
 - **`SetCameraStart(x, y, z, a, b, c)`** -- 49 sites, all in zone-root
   scripts, and now the single largest unhandled native left. Case `0x39`

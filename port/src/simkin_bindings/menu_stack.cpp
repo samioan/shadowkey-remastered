@@ -79,10 +79,17 @@ MenuStack::MenuStack(std::string scriptRoot, skInterpreter& interpreter,
 
 MenuStack::~MenuStack() = default;
 
-MenuExecutable* MenuStack::GetOrCreateMenu(const std::string& simkinPath, skiExecutable* opener) {
+MenuExecutable* MenuStack::GetOrCreateMenu(const std::string& simkinPath, skiExecutable* opener,
+                                           int screenMode) {
     std::string key = NormalizeKey(simkinPath);
     auto it = m_Menus.find(key);
-    if (it != m_Menus.end()) return it->second.get();
+    if (it != m_Menus.end()) {
+        // M60: the mode is written onto the screen object on every visit,
+        // not once at construction -- the same store screen serves the
+        // buy page and the sell page.
+        it->second->SetScreenMode(static_cast<MenuExecutable::ScreenMode>(screenMode));
+        return it->second.get();
+    }
 
     std::string filePath = ResolveScriptPath(m_ScriptRoot, simkinPath);
     if (!FileExists(filePath)) {
@@ -102,6 +109,7 @@ MenuExecutable* MenuStack::GetOrCreateMenu(const std::string& simkinPath, skiExe
     }
     MenuExecutable* raw = menu.get();
     if (opener) raw->SetOpener(opener);
+    raw->SetScreenMode(static_cast<MenuExecutable::ScreenMode>(screenMode));
     m_Menus[key] = std::move(menu);
     // M56: a menu script's Init() can raise a *runtime* exception, not
     // just a parse one, and until now that exception escaped all the way
@@ -136,7 +144,14 @@ MenuExecutable* MenuStack::CreateRootMenu(const std::string& key, const std::str
 }
 
 void MenuStack::OpenMenu(const std::string& simkinPath, skiExecutable* opener) {
-    MenuExecutable* menu = GetOrCreateMenu(simkinPath, opener);
+    // M60: stamp the pending screen mode before Init()/OnDisplay() runs,
+    // since `buysell.s`'s OnDisplay() reads it back on its very first line
+    // (`bBuyMode=IsBuyMode()`) and populates its whole page off it. The
+    // pending value is consumed here and reset to Inventory, matching the
+    // real setter's one-shot "set it, then hand the screen over" shape.
+    const int pendingMode = m_PendingScreenMode;
+    m_PendingScreenMode = 0;
+    MenuExecutable* menu = GetOrCreateMenu(simkinPath, opener, pendingMode);
     if (!menu) {
         std::printf("  [MenuStack] OpenMenu(\"%s\") -- could not resolve, staying on current menu\n",
                     simkinPath.c_str());

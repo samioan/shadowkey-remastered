@@ -203,6 +203,10 @@ public:
     // `player+0x3e4` -- the stats block's Gold at +0x38. Every purchase and
     // sale moves this one field.
     int gold() const { return m_Gold; }
+    // M60: player+0xf38, the index the products.dat class-flag array is
+    // read with (ProductRecord::enabledForClass) -- both the store
+    // table's name tint and the cell's own IsItemEnabledFor() use it.
+    int characterClass() const { return m_CharacterClass; }
 
     ItemExecutable* leftItem() const { return m_LeftItem; }
     ItemExecutable* rightItem() const { return m_RightItem; }

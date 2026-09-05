@@ -451,3 +451,9 @@ target_link_libraries(effects_smoke PRIVATE sk_bindings sk_world)
 # See src/tests/m59_merchant_smoke.cpp.
 add_executable(merchant_smoke src/tests/m59_merchant_smoke.cpp)
 target_link_libraries(merchant_smoke PRIVATE sk_bindings sk_world)
+
+# The store screen: the store-menu bindings, the page builder behind them,
+# the shared widget class and the table's cell class.
+# See src/tests/m60_store_screen_smoke.cpp.
+add_executable(store_screen_smoke src/tests/m60_store_screen_smoke.cpp)
+target_link_libraries(store_screen_smoke PRIVATE sk_bindings sk_world)

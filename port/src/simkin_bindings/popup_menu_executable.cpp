@@ -27,11 +27,29 @@ bool PopupMenuExecutable::method(const skString& methodName, skRValueArray& args
         m_Items.push_back(std::move(item));
         return true;
     }
-    if (methodName == skString("UpdatePopupItem") && args.entries() == 2) {
+    if (methodName == skString("UpdatePopupItem") && args.entries() >= 2) {
         // M10: inventory.s's real per-action-slot text refresh (e.g.
         // toggling "Equip"/"UnEquip" based on the selected item's current
         // state) -- see Item::blanked's comment for the ""-hides-this-
         // item convention.
+        //
+        // M60: the real binding (popup class 0x14cfc, index 6) takes an
+        // optional **third** argument, and it is a callback name --
+        // `FUN_10087a60` walks to item `index`, sets its text, and then,
+        // only if the argument count is greater than two, sets its
+        // method too. That is how `buysell.s` turns one popup into both
+        // sides of the counter without rebuilding it:
+        //
+        //     popup.UpdatePopupItem(0, 3787, "BuyInv");   // "Buy"
+        //     popup.UpdatePopupItem(0, 3789, "SellItem"); // "Sell"
+        //
+        // Without it the popup kept whatever AddItem() first gave it, so
+        // the store's confirm row pointed at the wrong handler on one of
+        // the two pages.
+        //
+        // Note also what the real function does *not* do: an index past
+        // the end matches nothing, and it then skips the callback
+        // argument as well rather than appending an item.
         size_t index = static_cast<size_t>(args[0].intValue());
         if (index < m_Items.size()) {
             Item& item = m_Items[index];
@@ -45,6 +63,7 @@ bool PopupMenuExecutable::method(const skString& methodName, skRValueArray& args
                 item.textId = args[1].intValue();
                 item.literalText.clear();
             }
+            if (args.entries() >= 3) item.callback = ToStdString(args[2].str());
         }
         return true;
     }

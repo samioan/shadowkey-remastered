@@ -38,6 +38,21 @@ constexpr int kItemTypeSpell = 2;
 constexpr int kItemTypeArmor = 3;
 constexpr int kItemTypeConsumable = 4;
 
+// M60: the two labels the store/sell table's cost column is built from.
+// They are stringtable ids in the engine's own code (`stringTable[0x2f7c/4]`
+// and `[0x2f80/4]`), not literals -- and 3039 ships as "GP " with a
+// trailing space, so the shipped line really reads "GP : 111 Qty: 3".
+constexpr int kStoreGoldLabelStringId = 3039;
+constexpr int kStoreQuantityLabelStringId = 3040;
+
+// M60: global.spr slots the store table's comparison columns draw --
+// "better than what you have" and "worse". They are the two ids
+// `buysell.s` assigns to image_item_active/image_item_dormant at the top
+// of OnDisplay and then never uses itself, because the native renderer
+// (FUN_100a0cec) is what picks between them.
+constexpr int kStoreBetterArrowSprite = 24;
+constexpr int kStoreWorseArrowSprite = 25;
+
 // Registers every bare-identifier constant this port's curated starting-
 // inventory scripts (see PlayerExecutable::LoadStartingInventory) are known
 // to reference. Idempotent -- safe to call once per skInterpreter instance,

@@ -8,18 +8,13 @@ namespace sk_bindings {
 
 bool TextAreaExecutable::method(const skString& methodName, skRValueArray& args,
                                  skRValue& returnValue, skExecutableContext& context) {
-    if (methodName == skString("SetLocalizedText") && args.entries() == 1) {
-        SetRowTextId(args[0].intValue());
-        return true;
-    }
     if (methodName == skString("SetTextWidth") && args.entries() == 1) {
         m_TextWidth = args[0].intValue();
         return true;
     }
-    if (methodName == skString("SetSelectable") && args.entries() == 1) {
-        SetRowSelectable(args[0].boolValue());
-        return true;
-    }
+    // M60: SetLocalizedText/SetSelectable and the rest are the shared
+    // widget class -- see row_owner_ref.h.
+    if (HandleSharedWidgetNative(methodName, args, returnValue)) return true;
     return SoftFailNativeCall("TextArea", methodName, args, returnValue);
 }
 

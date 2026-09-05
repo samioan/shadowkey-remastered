@@ -36,6 +36,20 @@ bool TitleHandle::method(const skString& methodName, skRValueArray& args, skRVal
 
 namespace {
 
+// M60: the store table's two cost-column formats, verbatim from the
+// image -- "%s: %d %s: %d" at 0x100aea88 and "%s: %d" at 0x100aea9c.
+std::string FormatTwoLabels(const std::string& a, int av, const std::string& b, int bv) {
+    char buf[128];
+    std::snprintf(buf, sizeof(buf), "%s: %d %s: %d", a.c_str(), av, b.c_str(), bv);
+    return buf;
+}
+
+std::string FormatOneLabel(const std::string& a, int av) {
+    char buf[128];
+    std::snprintf(buf, sizeof(buf), "%s: %d", a.c_str(), av);
+    return buf;
+}
+
 // AddButton()/AddFloatingText()'s first argument is dynamically typed in
 // the real scripts -- see menu_executable.h's class comment.
 void SetRowTextFromArg(MenuExecutable::MenuRow& row, const skRValue& arg) {
@@ -133,10 +147,183 @@ void MenuExecutable::SetRowShowBorder(size_t rowIndex, bool showBorder) {
     if (rowIndex < m_Rows.size()) m_Rows[rowIndex].showBorder = showBorder;
 }
 
+void MenuExecutable::SetRowX(size_t rowIndex, int x) {
+    if (rowIndex < m_Rows.size()) m_Rows[rowIndex].x = x;
+}
+
+void MenuExecutable::SetRowY(size_t rowIndex, int y) {
+    if (rowIndex < m_Rows.size()) m_Rows[rowIndex].y = y;
+}
+
+void MenuExecutable::SetRowVisible(size_t rowIndex, bool visible) {
+    if (rowIndex < m_Rows.size()) m_Rows[rowIndex].visible = visible;
+}
+
+std::string MenuExecutable::ResolveText(int textId) const {
+    const sk::StringTable* strings = m_Stack.strings();
+    return strings ? strings->Get(textId) : std::string("?");
+}
+
+int MenuExecutable::PlayerCharacterClass() const {
+    return m_Stack.player().characterClass();
+}
+
+PlayerExecutable& MenuExecutable::stackPlayer() const { return m_Stack.player(); }
+
+int MenuExecutable::ArmorSlotOfTemplate(int templateId) const {
+    const sk::ProductRecord* record = m_Stack.products().Find(templateId);
+    return record ? record->armorSlot : -1;
+}
+
+ItemExecutable* MenuExecutable::EquippedArmorInSlot(int slot) const {
+    if (slot < 0) return nullptr;
+    for (const std::unique_ptr<ItemExecutable>& held : m_Stack.player().inventory()) {
+        if (!held || held->markedForRemoval() || !held->equipped()) continue;
+        if (held->itemType() != kItemTypeArmor) continue;
+        if (ArmorSlotOfTemplate(held->templateId()) == slot) return held.get();
+    }
+    return nullptr;
+}
+
+bool MenuExecutable::PlayerOwnsTemplate(int templateId) const {
+    for (const std::unique_ptr<ItemExecutable>& held : m_Stack.player().inventory()) {
+        if (held && !held->markedForRemoval() && held->templateId() == templateId) return true;
+    }
+    return false;
+}
+
+// FUN_10032f78. The whole store/inventory table, three modes deep.
+//
+// The two label strings are the engine's own: id 3039 is "GP " (with the
+// trailing space already in the shipped data, so the rendered line really
+// does read "GP : 111") and 3040 is "Qty". The formats are literally
+// "%s: %d %s: %d" and "%s: %d".
+void MenuExecutable::PopulatePage(int category, bool clear) {
+    m_CurrentPage = category;  // menu+0xcc, before anything can fail
+    TableExecutable* table = m_InventoryListTarget;
+    if (!table) return;  // the real function panics; nothing else to do here
+    if (clear) table->ClearCells();
+
+    const sk::StringTable* strings = m_Stack.strings();
+    const std::string gpLabel = strings ? strings->Get(kStoreGoldLabelStringId) : "GP ";
+    const std::string qtyLabel = strings ? strings->Get(kStoreQuantityLabelStringId) : "Qty";
+    PlayerExecutable& player = m_Stack.player();
+
+    int used = 0;
+    if (m_ScreenMode == ScreenMode::Buy) {
+        Store* merchant = player.merchant();
+        if (!merchant) {
+            // The real branch is guarded on the merchant pointer too, and
+            // simply leaves the table alone when there is none.
+            return;
+        }
+        const std::vector<Store::StockEntry>& stock = merchant->stock();
+        // The real growth step asks for the *whole* stock count, not the
+        // filtered one -- so the allocation is sized by everything the
+        // merchant sells and the used-row count by this category alone.
+        const int total = static_cast<int>(stock.size());
+        if (table->allocatedRows() < total) table->AddRows(total - table->allocatedRows());
+        for (const Store::StockEntry& entry : stock) {
+            if (!entry.record || entry.record->category != category) continue;
+            const size_t row = static_cast<size_t>(used);
+
+            TableCell& name = table->CellAt(row, 0);
+            name.text = strings ? strings->Get(entry.record->nameStringId) : std::string();
+            name.product = entry.record;
+            name.item = nullptr;
+            // classTinted stays at its constructor default (true) -- the
+            // name column is the one the class-restriction tint applies
+            // to, and the real code sets the flag on nothing.
+
+            TableCell& cost = table->CellAt(row, 1);
+            cost.text = FormatTwoLabels(gpLabel, entry.price, qtyLabel, entry.quantity);
+            cost.product = entry.record;
+            cost.classTinted = false;
+
+            // The two 10px columns buysell.s calls "rating left"/"rating
+            // right": comparison arrows, left hand first.
+            TableCell& left = table->CellAt(row, 2);
+            left.text = " ";
+            left.product = entry.record;
+            left.comparison = true;
+            left.compareLeftHand = true;
+            left.classTinted = false;
+
+            TableCell& right = table->CellAt(row, 3);
+            right.text = " ";
+            right.product = entry.record;
+            right.comparison = true;
+            right.compareLeftHand = false;
+            right.classTinted = false;
+
+            ++used;
+        }
+        table->SetUsedRows(used);
+        return;
+    }
+
+    // Sell and plain Inventory both walk the player's own item list.
+    for (const std::unique_ptr<ItemExecutable>& held : player.inventory()) {
+        ItemExecutable* item = held.get();
+        if (!item || item->markedForRemoval() || item->itemType() != category) continue;
+        const size_t row = static_cast<size_t>(used);
+        if (table->allocatedRows() <= used) table->AddRows(1);
+
+        TableCell& name = table->CellAt(row, 0);
+        name.text = item->name();
+        name.item = item;
+        name.classTinted = false;
+
+        if (m_ScreenMode == ScreenMode::Inventory) {
+            // The real inventory page's second column is the derived stat
+            // line (FUN_100a0cec: a weapon's damage range, armour's AV, a
+            // spell's magicka cost) -- and it is skipped entirely for
+            // category 0, which is why the Misc page is a bare name list.
+            if (category != kItemTypeMisc) {
+                TableCell& stat = table->CellAt(row, 1);
+                stat.text = " ";
+                stat.item = item;
+                stat.statLine = true;
+                stat.classTinted = false;
+            }
+        } else {
+            TableCell& cost = table->CellAt(row, 1);
+            // Only the Consumable page shows a count -- everything else
+            // is one line per object, so there is nothing to count.
+            cost.text = category == kItemTypeConsumable
+                            ? FormatTwoLabels(gpLabel, item->marketValue(), qtyLabel,
+                                              item->quantity())
+                            : FormatOneLabel(gpLabel, item->marketValue());
+            cost.item = item;
+            cost.classTinted = false;
+
+            TableCell& left = table->CellAt(row, 2);
+            left.text = " ";
+            left.item = item;
+            left.comparison = true;
+            left.compareLeftHand = true;
+            left.classTinted = false;
+
+            TableCell& right = table->CellAt(row, 3);
+            right.text = " ";
+            right.item = item;
+            right.comparison = true;
+            right.compareLeftHand = false;
+            right.classTinted = false;
+        }
+        ++used;
+    }
+    table->SetUsedRows(used);
+}
+
 void MenuExecutable::MoveSelection(int delta) {
     std::vector<size_t> selectableIndices;
     for (size_t i = 0; i < m_Rows.size(); ++i) {
-        if (m_Rows[i].selectable) selectableIndices.push_back(i);
+        // M60: a hidden row is unreachable. SetVisible() does not clear
+        // the selectable byte in the engine -- it is the focus-wiring
+        // pass (FUN_10033c88) that skips invisible widgets -- so the
+        // two fields stay separate here and navigation tests both.
+        if (m_Rows[i].selectable && m_Rows[i].visible) selectableIndices.push_back(i);
     }
     if (selectableIndices.empty()) return;
 
@@ -201,7 +388,7 @@ bool MenuExecutable::NavigateDirectional(int dx, int dy) {
     };
     std::vector<Positioned> placed;
     for (size_t i = 0; i < m_Rows.size(); ++i) {
-        if (!m_Rows[i].selectable || m_Rows[i].y < 0) continue;
+        if (!m_Rows[i].selectable || !m_Rows[i].visible || m_Rows[i].y < 0) continue;
         placed.push_back({i, m_Rows[i].x, m_Rows[i].y});
     }
     if (placed.size() < 2) return false;
@@ -269,11 +456,12 @@ bool MenuExecutable::NavigateDirectional(int dx, int dy) {
 
 void MenuExecutable::EnsureValidSelection() {
     if (m_SelectedItem >= 1 && static_cast<size_t>(m_SelectedItem) <= m_Rows.size() &&
-        m_Rows[static_cast<size_t>(m_SelectedItem - 1)].selectable) {
+        m_Rows[static_cast<size_t>(m_SelectedItem - 1)].selectable &&
+        m_Rows[static_cast<size_t>(m_SelectedItem - 1)].visible) {
         return;
     }
     for (size_t i = 0; i < m_Rows.size(); ++i) {
-        if (m_Rows[i].selectable) {
+        if (m_Rows[i].selectable && m_Rows[i].visible) {
             m_SelectedItem = static_cast<int>(i) + 1;
             return;
         }
@@ -367,6 +555,17 @@ bool MenuExecutable::TryInvoke(const std::string& handlerName) {
     return skScriptedExecutable::method(skString(handlerName.c_str()), args, ret, ctxt);
 }
 
+bool MenuExecutable::TryInvokeWithArg(const std::string& handlerName, const skRValue& arg) {
+    if (handlerName.empty()) return false;
+    skRValueArray args;
+    args.append(arg);
+    skRValue ret;
+    skExecutableContext ctxt(&m_Stack.interpreter());
+    // Same quiet path as TryInvoke, with the one argument the real
+    // table/row callbacks take ("SelectedItem[ (cell) ...").
+    return skScriptedExecutable::method(skString(handlerName.c_str()), args, ret, ctxt);
+}
+
 bool MenuExecutable::GoBack() {
     // The real back/cancel softkey, in the order the evidence supports.
     //
@@ -418,7 +617,9 @@ bool MenuExecutable::method(const skString& methodName, skRValueArray& args,
         // script serving both sides of the counter and this is the only
         // thing that tells them apart -- it picks the popup rows ("Buy"/
         // "Buy 5" against "Sell") and the header text.
-        returnValue = skRValue(m_Stack.storeBuyMode());
+        // M60: `mode == 1`, exactly. The sell page and the plain
+        // inventory page both answer false and are still different pages.
+        returnValue = skRValue(m_ScreenMode == ScreenMode::Buy);
         return true;
     }
     if (methodName == skString("MenuBackground") && args.entries() == 1) {
@@ -914,29 +1115,59 @@ bool MenuExecutable::method(const skString& methodName, skRValueArray& args,
          methodName == skString("DisplayMiscItemsMenu") ||
          methodName == skString("DisplaySpellsPage")) &&
         args.entries() == 1) {
-        int itemType = methodName == skString("DisplayWeaponsPage")   ? kItemTypeWeapon
-                        : methodName == skString("DisplayArmorMenu")   ? kItemTypeArmor
-                        : methodName == skString("DisplayConsumablesMenu") ? kItemTypeConsumable
-                        : methodName == skString("DisplaySpellsPage")  ? kItemTypeSpell
-                                                                        : kItemTypeMisc;
-        // Marks the passed-in category button active and every other
-        // known button on this screen inactive (matches inventory.s's own
-        // "activeButton=weaponsButton"-style single-active-tab pattern),
-        // then repopulates SetInventoryList()'s remembered target table
-        // with the real inventory items of this category -- see
-        // table_executable.h's PopulateFromInventory().
+        // M60: store-menu bindings 4..8 (trie 0x14de0). All five collapse
+        // to `PopulatePage(category, clear = true)` in the real
+        // dispatcher, and the categories they pass are the IPT_*
+        // constants themselves -- Weapons 1, Spells 2, Armor 3, Misc 0,
+        // Consumables 4, matching M58's recovered constant table exactly.
+        const int category = methodName == skString("DisplayWeaponsPage") ? kItemTypeWeapon
+                             : methodName == skString("DisplayArmorMenu") ? kItemTypeArmor
+                             : methodName == skString("DisplayConsumablesMenu")
+                                 ? kItemTypeConsumable
+                             : methodName == skString("DisplaySpellsPage") ? kItemTypeSpell
+                                                                           : kItemTypeMisc;
+        PopulatePage(category, /*clear=*/true);
+        // The argument is the category button that was pressed, and the
+        // real tail (FUN_10033c88) uses it to rewire focus: every *other*
+        // visible tab button is deselected, this one is selected, and the
+        // table is linked above/below the tab row. Hidden buttons are
+        // skipped -- which is why hiding a category's button is all
+        // `buysell.s` has to do to take it out of the navigation.
         auto* active = dynamic_cast<ButtonExecutable*>(args[0].obj());
         for (auto& r : m_Rows) {
             if (auto* btn = dynamic_cast<ButtonExecutable*>(r.widget.get())) {
-                btn->SetActive(btn == active);
+                btn->SetActive(btn == active && r.visible);
             }
         }
-        if (m_InventoryListTarget) {
-            std::vector<ItemExecutable*> filtered;
-            for (const auto& item : m_Stack.player().inventory()) {
-                if (item->itemType() == itemType) filtered.push_back(item.get());
-            }
-            m_InventoryListTarget->PopulateFromInventory(filtered);
+        return true;
+    }
+    if (methodName == skString("RedrawPage")) {
+        // Store-menu binding 2. Takes an optional bool that is the
+        // *clear* flag, and `buysell.s` passes **false** -- so the
+        // repopulation overwrites the existing cells in place instead of
+        // destroying them first. That is visible: if the new page is
+        // shorter than the old one, the leftover rows keep their old
+        // contents and are merely hidden by the row count, so a later
+        // AddRows or a direct SetText can surface stale text. Reproduced.
+        const bool clear = args.entries() >= 1 ? args[0].boolValue() : true;
+        PopulatePage(m_CurrentPage, clear);
+        return true;
+    }
+    if (methodName == skString("SetGoldText") && args.entries() == 1) {
+        // M60: not a trie binding at all. `FUN_10034588` is a wcscmp
+        // layer above the store-menu dispatcher that tests exactly two
+        // names, "SetGoldText" and (redundantly) "IsBuyMode", and
+        // tail-calls the trie for everything else -- the fourth such
+        // hand-added native found, after the three merchant ones (M59).
+        //
+        // The body is one line: sprintf("%d", player.gold) into the
+        // widget's item text. Note the format is bare "%d" -- the "gp"
+        // in `AddFloatingText("0 gp", ...)`'s placeholder is gone the
+        // moment this runs.
+        char buf[32];
+        std::snprintf(buf, sizeof(buf), "%d", m_Stack.player().gold());
+        if (auto* widget = dynamic_cast<RowOwnerRef*>(args[0].obj())) {
+            widget->SetTextFromHost(buf);
         }
         return true;
     }

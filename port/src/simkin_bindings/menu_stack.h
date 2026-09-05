@@ -110,7 +110,8 @@ public:
     // OpenMenu()'s own two-step "create, then configure" shape would
     // otherwise do it. Ignored on an already-cached menu (Init() doesn't
     // rerun then anyway).
-    MenuExecutable* GetOrCreateMenu(const std::string& simkinPath, skiExecutable* opener = nullptr);
+    MenuExecutable* GetOrCreateMenu(const std::string& simkinPath, skiExecutable* opener = nullptr,
+                                    int screenMode = 0);
 
     // Switches the "current" menu, creating it first if necessary, and
     // runs its OnDisplay(). Logs and no-ops if that fails.
@@ -161,14 +162,17 @@ public:
     // AddProduct a no-op with a logged miss) if the file is absent.
     const sk::ProductDatabase& products() const { return m_Products; }
 
-    // M59: which side of the counter `buysell.s` is showing. In the real
-    // engine this is a flag on screen mode 5 that `BuyFromMerchant()` and
-    // `SellToMerchant()` set before handing the screen over, and that the
-    // script reads back with `IsBuyMode()`. There is no screen-mode table
-    // here, so it lives beside muteOnCall for the same reason: the screen
-    // is rebuilt on every visit and the setter is a different object.
-    void SetStoreBuyMode(bool buying) { m_StoreBuyMode = buying; }
-    bool storeBuyMode() const { return m_StoreBuyMode; }
+    // M59/M60: which side of the counter `buysell.s` is showing. In the
+    // real engine `BuyFromMerchant()` and `SellToMerchant()` both call
+    // `FUN_10034f38(storeScreen, buying)`, which writes `mode = buying ?
+    // 1 : 2` onto the screen object before handing it over. There is no
+    // screen-mode table here, so the pending mode is parked on the stack
+    // and stamped onto whichever menu opens next -- see
+    // MenuStack::OpenMenu(). M60 widened it from a bool to the real
+    // three-state field, because mode 0 (the plain inventory screen) is a
+    // genuinely different page and not just "not buying".
+    void SetPendingScreenMode(int mode) { m_PendingScreenMode = mode; }
+    int pendingScreenMode() const { return m_PendingScreenMode; }
 
     // M50: the save system writes real files.
     //
@@ -309,7 +313,10 @@ private:
     std::string m_SaveDir = ".";
     std::string m_CurrentLevel;
     sk::ProductDatabase m_Products;  // M59: see products() above
-    bool m_StoreBuyMode = true;      // M59: see storeBuyMode() above
+    // M60: 0 Inventory / 1 Buy / 2 Sell -- see SetPendingScreenMode().
+    // Defaults to Inventory so every screen that is not the store gets
+    // the mode its own constructor would have given it.
+    int m_PendingScreenMode = 0;
     bool m_QuitRequested = false;
     bool m_QuitToMenuRequested = false;  // M54: see quitToMenuRequested() above
     bool m_QuitAfterSave = false;        // M54: see quitAfterSave() above

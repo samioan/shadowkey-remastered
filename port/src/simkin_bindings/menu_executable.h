@@ -182,6 +182,24 @@ public:
     // an optional hook, not an unresolved native call. Returns whether the
     // script actually had it.
     bool TryInvoke(const std::string& handlerName);
+    // M60: the same, with one argument -- the real table/row callbacks
+    // take the selected cell ("SelectedItem[ (cell) ...").
+    bool TryInvokeWithArg(const std::string& handlerName, const skRValue& arg);
+
+    // M60: reachbacks the table's cell class needs (FUN_100a4ce4 reads
+    // both straight off the player).
+    int PlayerCharacterClass() const;
+    bool PlayerOwnsTemplate(int templateId) const;
+    class PlayerExecutable& stackPlayer() const;
+    // M60: `player+0xf8c + slot*4`, the eight worn-armour slots the store
+    // table's comparison columns look up for an Armor row. This port has
+    // no per-slot array, so the slot is resolved through products.dat --
+    // the only place the game records which slot a template occupies --
+    // and the wearer is found by scanning the player's own equipped
+    // armour. Same answer, different bookkeeping; noted rather than
+    // pretended otherwise.
+    int ArmorSlotOfTemplate(int templateId) const;
+    class ItemExecutable* EquippedArmorInSlot(int slot) const;
 
     // The back/cancel softkey for this screen -- the screen's own handler
     // if it defines one, else its real SetPrevMenu() target. See the .cpp
@@ -253,6 +271,14 @@ public:
         // has no x/y of its own and so used to land in the middle of the
         // vertical flow, on top of whatever was there.
         bool isQuitButton = false;
+        // M60: widget class 0x14d20's SetVisible/SetEnabled byte
+        // (widget+0x5d). A hidden row draws nothing and cannot be
+        // selected. `buysell.s` hides the category button of every
+        // category the merchant does not stock; the shipped focus-wiring
+        // pass (FUN_10033c88) skips hidden buttons for exactly that
+        // reason, which this port gets for free by excluding them from
+        // navigation.
+        bool visible = true;
     };
     const std::vector<MenuRow>& rows() const { return m_Rows; }
     int backgroundId() const { return m_BackgroundId; }
@@ -280,9 +306,43 @@ public:
     void SetRowWidth(size_t rowIndex, int w);
     void SetRowHeight(size_t rowIndex, int h);
     void SetRowShowBorder(size_t rowIndex, bool showBorder);
+    // M60: widget class 0x14d20's SetX/SetY/SetVisible.
+    void SetRowX(size_t rowIndex, int x);
+    void SetRowY(size_t rowIndex, int y);
+    void SetRowVisible(size_t rowIndex, bool visible);
     // M10: TitleHandle's .SetLocalizedText(id) -- AddTitle()'s return
     // value, see inventory.s's WeaponsMenu()/ArmorMenu()/etc.
     void SetTitleTextId(int textId) { m_TitleTextId = textId; }
+    // Resolves a stringtable id through this menu's stack. "?" when the
+    // table is missing or the id is out of range.
+    std::string ResolveText(int textId) const;
+
+    // M60: the store/inventory screen's mode, `menu+0xd0`. The shipped
+    // engine writes it from exactly one place --
+    //
+    //     FUN_10034f38(menu, buying) { menu->mode = buying ? 1 : 2; }
+    //
+    // which `GetPlayer().BuyFromMerchant()` and `SellToMerchant()` call
+    // before handing the screen over, and the store screen's own
+    // constructor seeds it to 2 (Sell) while the inventory screen's seeds
+    // it to 0. `IsBuyMode()` is `mode == 1`, which is why the sell page
+    // and the plain inventory page both report false and still behave
+    // completely differently: the table population (FUN_10032f78)
+    // branches three ways on this field, not two.
+    enum class ScreenMode { Inventory = 0, Buy = 1, Sell = 2 };
+    ScreenMode screenMode() const { return m_ScreenMode; }
+    void SetScreenMode(ScreenMode mode) { m_ScreenMode = mode; }
+
+    // FUN_10032f78 -- the one function behind all five Display*Page
+    // natives, RedrawPage, and the store screen's whole reason to exist.
+    // Fills SetInventoryList()'s remembered table with every product (Buy)
+    // or item (Sell/Inventory) of `category`, in the real four-column
+    // shape `buysell.s` and `inventory.s` lay out. `clear` is the second
+    // argument the real function takes: true wipes the table's cells
+    // first, false overwrites them in place -- see the .cpp for why that
+    // distinction is visible.
+    void PopulatePage(int category, bool clear);
+    int currentPage() const { return m_CurrentPage; }
 
     // M10: Up/Down/Enter routed into the currently-selected row's Table
     // widget (see table_executable.h) instead of this menu's own outer
@@ -344,6 +404,12 @@ private:
     // ... DisplayWeaponsPage(weaponsButton);" call order. Non-owning, same
     // convention as m_KnownPopups.
     TableExecutable* m_InventoryListTarget = nullptr;
+
+    // M60: menu+0xd0 and menu+0xcc -- the screen mode and the category
+    // currently on show. RedrawPage() takes no category argument; it
+    // re-runs the last one, which is what m_CurrentPage remembers.
+    ScreenMode m_ScreenMode = ScreenMode::Inventory;
+    int m_CurrentPage = 0;
 };
 
 }  // namespace sk_bindings

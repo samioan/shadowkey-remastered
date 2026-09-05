@@ -389,7 +389,36 @@ immediately dotted with that class's own distinctive members):**
   most distinctive member, `SetFontNum`, appears in 59 files project-wide,
   consistent with it being the base class of every individual UI text/
   label object a menu script creates (same role established for `funtext`
-  in the first pass).
+  in the first pass). **Confirmed and fully decoded in M60**
+  (`FUN_1007e954`); every field it touches:
+
+  | # | Name | Field |
+  | --- | --- | --- |
+  | 0 | `SetFontNum` | `+0x3c` |
+  | 1 | `GetAssociatedObject` | `+0x90` (biased: `-0x10` means null, else `+0x14`) |
+  | 2 | `SetSelectable` | `+0x5c` |
+  | 3 | `SetVisible` | `+0x5d` |
+  | 4 | `IsVisible` | `+0x5d` |
+  | 5 | `SetInvokeMethodOnFocus` | `+0x5f` |
+  | 6 | `SetEnabled` | `+0x5d` **and** `+0x5c` |
+  | 7 | `GetItemText` | `+0x48` |
+  | 8 | `SetItemText` | `+0x40` |
+  | 9 | `SetLocalizedText` | `+0x40` = `stringtable[id]` |
+  | 10/11 | `GetX` / `GetY` | `+0x78` / `+0x7c` |
+  | 12/13 | `SetX` / `SetY` | `+0x78` / `+0x7c` |
+
+  Two things a reader would otherwise get wrong. `SetVisible` writes only
+  the visible byte while `SetEnabled` writes visible **and** selectable —
+  they are not synonyms, and a script that wants a widget gone but still
+  focusable can have it. And `SetItemText` and `SetLocalizedText` write
+  the *same* slot, so a literal string and a stringtable id are one field
+  and the later call wins; there is no layering.
+
+  This is one class, not a family: a button, a floating text label, a
+  text area and a table all inherit these fourteen, which is why
+  `buysell.s` calls `SetVisible`/`SetX` on buttons and
+  `SetLocalizedText`/`SetItemText` on `AddFloatingText` rows without
+  distinguishing them.
 
 **Weaker but real leads (some corpus signal, not conclusive):**
 
@@ -418,6 +447,37 @@ immediately dotted with that class's own distinctive members):**
   `inventory.s` (2 files) — thin (it's a rare screen), but every hit is
   its own distinctive member (`DisplayArmorMenu`, `DisplayWeaponsPage`,
   `IsBuyMode`, ...), directionally consistent, not contradicted.
+  **Confirmed and fully decoded in M60.** `FUN_10033660`'s nine cases,
+  with what each one actually does:
+
+  | # | Name | Body |
+  | --- | --- | --- |
+  | 0 | `IsBuyMode` | `menu+0xd0 == 1` |
+  | 1 | `UpdateEquipStatus` | the real equip/unequip, hands and queues |
+  | 2 | `RedrawPage` | `PopulatePage(menu+0xcc, clear = arg)` |
+  | 3 | `SetInventoryList` | remembers the table at `menu+0xd8` |
+  | 4 | `DisplayWeaponsPage` | `PopulatePage(1, true)` |
+  | 5 | `DisplaySpellsPage` | `PopulatePage(2, true)` |
+  | 6 | `DisplayArmorMenu` | `PopulatePage(3, true)` |
+  | 7 | `DisplayMiscItemsMenu` | `PopulatePage(0, true)` |
+  | 8 | `DisplayConsumablesMenu` | `PopulatePage(4, true)` |
+
+  The five page ordinals **are the `IPT_*` constants** M58 recovered —
+  Weapon 1, Spell 2, Armor 3, Misc 0, Consumable 4 — which is an
+  independent confirmation of that table from a completely different
+  function. Each `Display*` also runs `FUN_10033c88`, which deselects
+  every *visible* tab button, selects the one it was passed, and relinks
+  the focus graph so up/down moves between the tab row and the table; a
+  button hidden with `SetVisible(false)` is skipped, which is the entire
+  mechanism by which a merchant's missing categories drop out of
+  navigation.
+
+  `menu+0xd0` is not a bool. It is written from one place —
+  `FUN_10034f38(menu, buying) { menu->mode = buying ? 1 : 2; }` — and read
+  three ways by `FUN_10032f78`, the single function all nine bindings
+  funnel into: mode 1 lists the merchant's shelves, mode 2 lists the
+  player's items with prices, mode 0 lists them with derived stats. The
+  inventory screen's constructor seeds 0 and the store screen's seeds 2.
 
 **Genuinely no corpus signal found** (checked, not just unexamined):
 **Camera/player-feedback (`0x14d5c`)** — its two most combat-shaped
@@ -693,6 +753,58 @@ Two consequences worth carrying:
   classes have their own such layer was not surveyed — the three found
   here were reached from the other end, by asking what a shipped script
   calls that nothing implements.
+
+### It was not one layer, it was a pattern (M60)
+
+The survey M59 left undone got done by the next milestone walking into it
+twice. The `wcscmp` layer is not a one-off for merchants; it is how this
+codebase adds a name to a class it did not want to re-register.
+
+**A second layer, over the store menu.** `FUN_10034588` sits above the
+store-screen trie dispatcher `FUN_10033660` exactly the way `FUN_1008607c`
+sits above the creature's, and tests two literals:
+
+```c
+if (name == L"SetGoldText")  { sprintf(buf, "%d", player->gold);
+                               Widget_SetItemText(args[0], buf); }
+else if (name == L"IsBuyMode") MakeBool(ret, menu->mode == 1);
+else                           return FUN_10033660(menu, ...);
+```
+
+`SetGoldText` is at `0x100aeb20`, referenced once. Note the second name:
+**`IsBuyMode` is handled twice**, here and as trie index 0 of `0x14de0`,
+with identical bodies — the wcscmp copy shadows the trie one and the trie
+entry is dead. Somebody added the name in both places.
+
+**A whole class with no trie at all.** The table's cell object — what
+`SelectedItem[ (cell) ...` receives, and what every `cell.GetItemText()`
+in `buysell.s` and `inventory.s` dispatches on — has **eight** methods and
+not one of them is in a trie. `FUN_100a4ce4` is a flat `wcscmp` chain
+falling through to the base `skExecutable` (`SIMKIN_ord192`, "method not
+found"):
+
+| Name | What it reads |
+| --- | --- |
+| `GetItemType` | the product row's category, or the item's own type |
+| `IsInventoryEquipped` | equipped — or, with no item, "do you already own one?" |
+| `IsItemEnabledFor` | `products.dat`'s nine class flags at `record+0x18`, indexed by `player+0xf38` |
+| `GetItemDescription` | `record+0x0e`'s string — but see below |
+| `DropItem` | the real drop, stack-aware |
+| `GetAssociatedObject` | `cell+0x3c`, the item; null on the buy page |
+| `GetArmorText` | returns a **bool**, not text; nothing in the corpus calls it |
+| `GetItemText` | `cell+0x28`, the cell's own text |
+
+`GetItemDescription` has a real type confusion in it: the guard is
+`descriptionStringId > 0xff1` (4081, the last shipped string id), and on
+the failing side it writes a boolean `true` into the return atom rather
+than a string. `buysell.s` concatenates the result straight into a popup.
+
+So the standing advice stands and gets sharper: **before concluding a name
+is a script-level handler, grep the image's string data.** Four of the
+seven names found this way (`AddProduct`, `ClearProducts`, `ReducePrices`,
+`SetGoldText`) would have been misread as script handlers, and the cell
+class would have been missed entirely — its methods look like they belong
+to `Player`, which has same-named bindings that take different arguments.
 
 ## Labels applied / tools
 
