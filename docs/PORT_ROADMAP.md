@@ -3621,8 +3621,11 @@ algorithms.
       `+0x134` is 2 for blaze/Blind/DoomHammer and 5 for the other twelve,
       and it is *not* a `models.txt` index (2 is `lantern.bin`, 5 is
       `sbarrel.bin`), so it selects from something unidentified -- the port
-      simulates the projectile without drawing it. Also left: the blaze
-      impact effect (no `Level.CreateEffect` here), the multiplayer mirror,
+      simulates the projectile without drawing it. **M63 identified it: it
+      is a `global.spr` slot** (both are real 32x32 sprites), though the
+      port still does not draw it, for want of a billboard pass. Also
+      left: the blaze impact effect (M63 implemented `Level.CreateEffect`,
+      but nothing raises it from the cast path yet), the multiplayer mirror,
       HealWound's extra term for a player of class 7 (an undecompiled
       stats-block vtable slot), and the monster-only predicate at target
       vtable `+0x170` the impact sweep rejects on (the port uses "still
@@ -5197,6 +5200,114 @@ algorithms.
       because the monster had it, and the bare and local-receiver calls --
       36 of the 63 -- are invisible to it entirely.
 
+- [x] **M63 -- `Level.CreateEffect` and the animated-sprite entity.**
+  Zone/Level dispatcher case `0x23`, an inlined copy of the engine's own
+  `FUN_10073528`. Thirteen shipped call sites, all ten-argument, eight in
+  `crypt1.s` and five in `twilite.s`, plus a fourteenth commented out in
+  `blaze.s` -- and every one of the thirteen sits in its zone script's own
+  `Init()`, so this is the game's **static scenery animation** primitive,
+  not a combat effect. `simkin_bindings/effect_entity.h`/`.cpp`, a
+  `CreateEffect` handler on `LevelExecutable` that owns the live list, and
+  a per-tick drain in main.cpp beside the status effects. Smoke test
+  `src/tests/m63_create_effect_smoke.cpp`, 49 checks. Suite 56/56,
+  soft-fails **62 -> 39**, `Level` coverage 97% -> 98%.
+
+    - **The art is `global.spr` -- M48's open question, answered.** M48
+      recorded the spell projectile's `+0x134` as "not a `models.txt`
+      index (2 is `lantern.bin` and 5 is `sbarrel.bin`), so it selects
+      from something else that has not been identified". It selects from
+      the **384-slot `global.spr` cache the menus and HUD already draw
+      from**: the sprite entity's draw (`FUN_1008b25c`) does
+      `sprite = *(u16 **)(engine + 0x4460 + entity->0x134 * 4)`, so
+      `engine+0x4460` is the loaded-slot pointer table and `+0x134`
+      indexes it directly. This world has two art sources, not one, and
+      nothing had noticed the second.
+
+      Confirmed past the pointer arithmetic by decoding the real archive:
+      slots **181-192** are twelve consecutive 16x64 frames averaging RGB
+      (204, 159, 102) -- a tall narrow flickering orange column, i.e.
+      **fire**, which is what `crypt1.s` spawns; **193-204** are twelve
+      more 16x64 frames averaging (120, 121, 117), the same shape in grey
+      -- **steam**, in the one zone that also ships a `steamsound.s`;
+      **12-19** are eight 32x32 orange frames whose opaque pixel count
+      falls from 337 to 59, a **dissipating blast**, which is `blaze.s`'s
+      impact; **71** is 32x32 averaging (133, 4, 7), the **blood** spurt
+      `FUN_10081e5c` throws with random velocity under gravity; and
+      M48's own **2** and **5** are real 32x32 sprites, 2 a gold-orange
+      fireball. Both twelve-frame runs are bounded by slots of other
+      sizes (180 is 57x46, 205 is 79x9), so each is a whole animation
+      rather than a window into a longer sequence.
+
+    - **Every shipped effect is permanent, and that is a real branch.**
+      `lifetime * 15` seeds the countdown, but `lifetime == 0` sets the
+      "no lifetime" flag at `+0x152` instead and skips it -- and all
+      thirteen shipped calls pass 0. The same flag gates the scale ramp,
+      so a scripted effect also draws at the constructor's flat 0x80,
+      half scale, for its whole life. Only `blaze.s`'s commented-out line
+      passes a real lifetime, and it is the one that shows the units:
+      16 -> 240 units -> **24 ticks, 0.94 s**, because the multiplier is
+      15 and not 16. Its eight frames need 28 ticks at the shipped rate,
+      so that impact would have died on frame 18 of 19 -- it never showed
+      its last frame.
+
+    - **`if (argc < 10) return 1` is the first instruction of the case.**
+      A short call is *accepted* and does nothing; the nine per-argument
+      `Leave` guards that follow are dead code. So unlike M62's
+      `SetPosition` there is no shorter form, and soft-failing a
+      nine-argument call would report a missing native that is not
+      missing. Reproduced, including the acceptance.
+
+    - **The bullet's guess was wrong about two of the ten arguments.** It
+      read them as "a position, a radius and a duration". The duration is
+      argument 8; arguments 9 and 10 are two independent size scalars,
+      and they are not world units -- the draw multiplies each by its
+      axis of the sprite's *own pixel size*, twice:
+
+      ```c
+      entity->0x5a = (i16)(sizeX * spriteWidth);
+      halfWidth    = ((i16)entity->0x5a * spriteWidth) >> 8;
+      ```
+
+      which is why the scalars run inversely to the sprite (512 against a
+      16-pixel-wide flame, 40 against a 64-pixel-tall one). The quad is
+      laid out in camera space (`+0xbc`/`+0xbe`/`+0xc0`, filled by
+      `FUN_1001610c` from the camera matrix) and runs *upward* from the
+      entity's own height, so a billboard is **bottom-anchored** at its z
+      -- the same anchoring M62's floor snap assumes.
+
+    - **Recorded as unverified, not asserted:** taken literally that
+      formula makes crypt1's first flame 1024 x 1280 world units, four
+      tiles by five. The doubled multiply is in the disassembly rather
+      than a decompiler artefact and is reproduced as-is, but nothing in
+      this port draws a billboard, so the magnitudes have not been seen.
+      The mapping is exact; the scale is a claim nobody has checked.
+
+    - **Simulated, not drawn** -- the same position M48's spell
+      projectile is in and for the same reason: `render3d/zone_renderer.h`
+      draws `models.idx` meshes and has no billboard pass, so adding one
+      is its own milestone. Everything such a pass needs is here and is
+      real: the current slot every tick, the world position, the
+      camera-space half-extents, and the scale. main.cpp already loads the
+      active zone's `<zone>_sprites.txt`, so the art is in memory whenever
+      a zone's effects exist.
+
+    - **A manifest shape that had no reason before.** `azra_sprites.txt`,
+      `ghstpass_sprites.txt` and `snowline_sprites.txt` are 191 entries
+      and every other zone's is 215; the extra 24 are exactly 181-204,
+      the two effect runs. Weak evidence on its own -- the 22 shipped
+      manifests are only three distinct files, so they are boilerplate
+      rather than per-zone-tailored -- but it points the same way as the
+      geometry.
+
+    - **Not reproduced:** the multiplayer mirror (`FUN_1003c124` replays
+      a remote `CreateEffect` from a packet with one field per argument,
+      which is what pinned the argument *types*), and the two
+      engine-internal spawners -- the blood spurt and `FUN_10067f84`'s
+      attached effect -- which are separate call paths rather than
+      script-visible bindings. The struct covers both; nothing raises
+      them yet.
+
+
 ## Next milestones (not yet started)
 
 Roughly in priority order for reaching "actually playable," not commitments:
@@ -5227,10 +5338,10 @@ appears anywhere is a name the tool stops asking about, so
 "[implemented on another receiver]" in its output is a claim to check, not
 a result.
 
-- **`Level.CreateEffect(...)`** -- 13 sites and 24 of the suite's
-  remaining soft-fail lines, all ten-argument calls from `crypt1.s` and
-  `twilite.s` with a position, a radius and a duration. Reads as a
-  particle/light emitter.
+M63 moved both measures at once, which is unusual: soft-fails **62 -> 39**
+(the thirteen ten-argument calls were 24 lines between them) *and*
+`Level` 97% -> 98%, its unhandled-name list down to five. An
+explicit-receiver native with a lot of arguments shows up in both.
 
 - **The `levelup.s` cluster**: `DecreaseLevelUpPoints` (8),
   `GetLevelUpPoints`, `LevelUp`, `UpdateAttributes` (3) and the eight

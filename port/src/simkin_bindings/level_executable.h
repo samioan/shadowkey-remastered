@@ -72,7 +72,9 @@
 #include <map>
 #include <memory>
 #include <string>
+#include <vector>
 
+#include "simkin_bindings/effect_entity.h"
 #include "simkin_bindings/native_stub_executable.h"
 
 namespace sk {
@@ -238,6 +240,24 @@ public:
     // and the real FUN_10044e08 does no category check at all.
     std::unique_ptr<ItemExecutable> CreateItem(int typeId, bool requireItemCategory = true);
 
+    // ---- M63: `CreateEffect(...)` ----
+    //
+    // The animated sprites a zone script places in its own Init()
+    // (simkin_bindings/effect_entity.h has the whole writeup). They live
+    // here rather than in main.cpp because nothing outside this port's
+    // renderer needs them and the real ones are owned by the engine's own
+    // entity list, which this class already stands in for; main.cpp ticks
+    // and (eventually) draws them, and clears them on a zone change the
+    // same way it clears the GetEntity() registry.
+    const std::vector<EffectEntity>& effects() const { return m_Effects; }
+    std::vector<EffectEntity>& effects() { return m_Effects; }
+    void ClearEffects() { m_Effects.clear(); }
+    // Runs every live effect's tick and drops the ones that expired. A
+    // scripted effect is immortal, so in practice nothing is dropped --
+    // the pruning is here for the engine-spawned forms the same struct
+    // covers.
+    void TickEffects(int frameDelta, int gravityUnits = 0);
+
 private:
     MenuStack& m_Stack;
     std::map<std::string, skiExecutable*> m_Entities;
@@ -249,6 +269,7 @@ private:
     PendingCreature m_PendingCreature;
     std::unique_ptr<MonsterExecutable> m_PendingCreatureScript;
     bool m_PendingCreaturePending = false;
+    std::vector<EffectEntity> m_Effects;  // M63
 };
 
 }  // namespace sk_bindings

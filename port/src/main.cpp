@@ -1573,6 +1573,7 @@ int main(int argc, char** argv) {
             gameArrows.clear();
             gameEntities.clear();
             stack.level().ClearEntities();
+            stack.level().ClearEffects();  // M63
             gameRegionsOccupied.clear();
             gameZoneRegions.SetZone(nullptr);
             gameZone.reset();
@@ -1796,6 +1797,10 @@ int main(int argc, char** argv) {
                 // below, so Level.GetEntity() can never return a dangling
                 // pointer into a destroyed zone's objects.
                 stack.level().ClearEntities();
+                // M63: and the same for the zone's scripted sprite
+                // effects, which the incoming zone's own Init()
+                // repopulates from scratch.
+                stack.level().ClearEffects();
                 // M53: and the script-timer clock restarts with the level,
                 // exactly as the engine's does (FUN_1002fca4 zeroes it).
                 // Every entity carrying a pending deadline is destroyed
@@ -2820,6 +2825,13 @@ int main(int argc, char** argv) {
                 // actually do something to the player rather than land and
                 // vanish.
                 stack.player().TickStatusEffects(sk_bindings::kAiFrameDeltaUnits);
+
+                // M63: the scripted sprite effects a zone placed in its
+                // own Init() -- frame advance, lifetime and scale
+                // ramp (simkin_bindings/effect_entity.h). The gravity term
+                // is left at zero because no scripted effect sets the flag
+                // that reads it.
+                stack.level().TickEffects(sk_bindings::kAiFrameDeltaUnits);
 
                 // M48: the engine's own 1/256s clock (`level+0x460`), which
                 // the cast cooldown is compared against.

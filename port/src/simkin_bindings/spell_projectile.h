@@ -43,14 +43,22 @@
 //
 // ---- What this port does not reproduce ----
 //
-// The art. `+0x134` is 2 for blaze/Blind/DoomHammer and 5 for every other
-// projectile spell, and it seeds a one-frame animation range as well as
-// being stored directly. It is not a models.txt index (2 is lantern.bin and
-// 5 is sbarrel.bin), so it selects from something else that has not been
-// identified, and this port carries the number without drawing anything.
-// The projectile is simulated, not visible. Also not reproduced: the
-// blaze-only impact effect above (this port has no `Level.CreateEffect`),
-// and the multiplayer mirror of the spawn.
+// The art -- **identified in M63, still not drawn.** `+0x134` is 2 for
+// blaze/Blind/DoomHammer and 5 for every other projectile spell, and it
+// seeds a one-frame animation range as well as being stored directly. It
+// is not a models.txt index (2 is lantern.bin and 5 is sbarrel.bin); it is
+// a **`global.spr` slot**, indexed straight into the engine's loaded-
+// sprite table at `engine+0x4460` by the sprite entity's own draw
+// (`FUN_1008b25c`). Both slots are real 32x32 sprites -- slot 2 is a
+// gold-orange fireball. See simkin_bindings/effect_entity.h, which shares
+// this entity class and has the whole writeup. This port still carries the
+// number without drawing anything (`render3d/zone_renderer.h` has no
+// billboard pass), so the projectile is simulated, not visible.
+//
+// Also not reproduced: the multiplayer mirror of the spawn. The blaze-only
+// impact effect above is `Level.CreateEffect`, which M63 implemented --
+// the cast path does not yet raise it, since the engine's version is
+// spawned from the projectile's own tick rather than from a script.
 
 #include <functional>
 #include <vector>

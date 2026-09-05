@@ -336,7 +336,34 @@ bool LevelExecutable::method(const skString& methodName, skRValueArray& args,
         returnValue = skRValue();  // "not found" -- see GetEntity()'s miss case
         return true;
     }
+    if (methodName == skString("CreateEffect")) {
+        // M63: the real case's very first test is `if (argc < 10) return
+        // 1` -- it accepts the call and does nothing rather than raising,
+        // so a shorter form is silently ignored rather than being a
+        // different overload. Reproduced exactly, including the acceptance:
+        // soft-failing a nine-argument call would report a missing native
+        // that is not missing.
+        if (args.entries() < 10) {
+            std::printf("Level: CreateEffect with %d arguments -- the real case needs 10, ignored\n",
+                        static_cast<int>(args.entries()));
+            return true;
+        }
+        m_Effects.push_back(MakeEffect(args[0].intValue(), args[1].intValue(), args[2].intValue(),
+                                       args[3].intValue(), args[4].intValue(), args[5].intValue(),
+                                       args[6].intValue(), args[7].intValue(), args[8].intValue(),
+                                       args[9].intValue()));
+        const EffectEntity& e = m_Effects.back();
+        std::printf("  [effect] slots %d-%d at (%d, %d, %d), %s, size %dx%d\n", e.firstSprite,
+                    e.lastSprite, e.x, e.y, e.z, e.immortal ? "permanent" : "timed", e.sizeX,
+                    e.sizeY);
+        return true;
+    }
     return SoftFailNativeCall("Level", methodName, args, returnValue);
+}
+
+void LevelExecutable::TickEffects(int frameDelta, int gravityUnits) {
+    for (EffectEntity& effect : m_Effects) TickEffect(effect, frameDelta, gravityUnits);
+    PruneEffects(m_Effects);
 }
 
 }  // namespace sk_bindings

@@ -136,6 +136,7 @@ add_library(sk_bindings STATIC
   src/assets/product_database.cpp
   src/simkin_bindings/row_owner_ref.cpp
   src/simkin_bindings/entity_position_ref.cpp
+  src/simkin_bindings/effect_entity.cpp
   src/simkin_bindings/script_delay.cpp
   src/simkin_bindings/table_executable.cpp
   src/simkin_bindings/test_armor_executable.cpp
@@ -243,6 +244,14 @@ target_link_libraries(combat_smoke PRIVATE sk_bindings sk_world)
 # Sprite archive (global.spr) smoke test -- see src/tests/m13_sprite_smoke.cpp.
 add_executable(sprite_smoke src/tests/m13_sprite_smoke.cpp src/assets/sprite_archive.cpp)
 target_include_directories(sprite_smoke PRIVATE src)
+
+# M63: Level.CreateEffect + the animated-sprite entity -- see
+# src/tests/m63_create_effect_smoke.cpp. Compiles sprite_archive.cpp
+# directly (as sprite_smoke does) because part 4 checks the real
+# global.spr geometry the art indices name.
+add_executable(create_effect_smoke src/tests/m63_create_effect_smoke.cpp
+                                   src/assets/sprite_archive.cpp)
+target_link_libraries(create_effect_smoke PRIVATE sk_bindings)
 
 # Real N-Gage system font (.gdr) smoke test -- see src/tests/m15_font_smoke.cpp.
 add_executable(font_smoke src/tests/m15_font_smoke.cpp src/assets/gdr_font.cpp)

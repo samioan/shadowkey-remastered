@@ -220,6 +220,49 @@ Same manifest convention already existed for `<zone>_models.txt`/
 just the third leg of the same per-zone-asset-list pattern, previously
 unnoticed because nothing had gone looking for a `_sprites.txt` yet.
 
+### `global.spr` is also the *world's* sprite source, not just the UI (M63)
+
+Everything above is about menus and the HUD, and until M63 that looked
+like the whole of it. It is not: the same 384 slots are what the 3D view
+draws **animated billboard entities** out of. The engine keeps the loaded
+slot pointers in a table at `engine+0x4460`, and the sprite entity's draw
+(`FUN_1008b25c`) indexes it with the entity's own `+0x134`:
+
+```c
+sprite = *(u16 **)(engine + 0x4460 + entity->0x134 * 4);
+if (!sprite) return;
+w = sprite[0]; h = sprite[1];            // the same ushort w, ushort h header
+```
+
+— the same RLE blob layout this document already decoded, blitted scaled
+into camera space rather than to a fixed screen rectangle.
+
+That answers a question M48 left open (the spell projectile's "art"
+selector, `+0x134` = 2 or 5) and identifies the art for `Level.CreateEffect`
+(`SIMKIN_NATIVE_API.md`'s M63 section has the binding). The world-facing
+slots found so far, all confirmed by decoding the real archive:
+
+| Slots | Size | Mean RGB | What |
+| --- | --- | --- | --- |
+| 2, 5 | 32×32 | (182, 131, 72) / (173, 106, 46) | spell projectiles — 2 is blaze/Blind/DoomHammer, 5 is the other twelve |
+| 12-19 | 32×32 | (123, 57, 13) | `blaze`'s impact blast, thinning from 337 to 59 opaque pixels |
+| 71 | 32×32 | (133, 4, 7) | the blood spurt `FUN_10081e5c` throws with random velocity |
+| 181-192 | 16×64 | (204, 159, 102) | fire — a twelve-frame flickering column, `crypt1.s` |
+| 193-204 | 16×64 | (120, 121, 117) | steam — the same shape in grey, `twilite.s` |
+
+Both twelve-frame runs are bounded by slots of other sizes (180 is 57×46,
+205 is 79×9), so each is a whole animation and not a window into a longer
+sequence.
+
+This also explains a shape in the manifests that had no reason before:
+`azra_sprites.txt`, `ghstpass_sprites.txt` and `snowline_sprites.txt` are
+191 entries and every other zone's is 215 — the extra 24 are exactly
+181-204, the two effect runs. The manifests are boilerplate rather than
+per-zone-tailored (the 22 shipped files are only **three** distinct
+contents: the 215-entry list shared by eighteen zones, the 191-entry list
+shared by those three, and `menu_sprites.txt`), so this is a much weaker
+signal than the geometry — but it points the same way.
+
 **Not chased further**: whether/how a *category* string other than
 plain zone-name or `"menu"` is used (`FUN_10024c8c`'s `param_2` is
 `strcmp`'d against a single-character string `"m"` for something not

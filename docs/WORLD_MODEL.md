@@ -1796,16 +1796,18 @@ native projectile had taken it over.
 
 ### Not reproduced
 
-**The art.** `+0x134` is 2 for blaze/Blind/DoomHammer and 5 for the other
-twelve projectile spells, and it seeds a one-frame animation range
-(`+0x140`/`+0x144`/`+0x14c` all `art << 8`) as well as being stored
-directly. It is *not* a `models.txt` index — 2 is `lantern.bin` and 5 is
-`sbarrel.bin` — so it selects from something else that has not been
-identified. The port carries the number and simulates the projectile
-without drawing it.
+**The art — identified in M63, see below; still not drawn.** `+0x134` is 2
+for blaze/Blind/DoomHammer and 5 for the other twelve projectile spells,
+and it seeds a one-frame animation range (`+0x140`/`+0x144`/`+0x14c` all
+`art << 8`) as well as being stored directly. It is *not* a `models.txt`
+index — 2 is `lantern.bin` and 5 is `sbarrel.bin`. It is a **`global.spr`
+slot**, indexed into the engine's loaded-sprite table at `engine+0x4460`
+by `FUN_1008b25c`; both slots are real 32×32 sprites (2 averages
+RGB (182, 131, 72), a gold-orange fireball; 5 averages (173, 106, 46)).
+The port still carries the number and simulates the projectile without
+drawing it, because nothing here draws a billboard yet.
 
-Also not reproduced: the blaze impact effect above (this port has no
-`Level.CreateEffect`), the multiplayer mirror of the spawn and the impact,
+Also not reproduced: the multiplayer mirror of the spawn and the impact,
 HealWound's extra term for a player whose class (`player+0xf3c`) is 7 (read
 through an undecompiled stats-block vtable slot), and the monster-only
 predicate at target vtable `+0x170` that the impact sweep rejects on.
@@ -2637,3 +2639,52 @@ Two details of the original worth recording:
   `registry+0x478`. Those are M56's key-item flag word and its frozen-key
   counter, which is an independent confirmation of that milestone's
   reading, including the counter's width.
+
+## The animated-sprite entity, and the world's second art source (M63)
+
+`Level.CreateEffect(...)` builds one of these; so do the spell
+projectile's tick (the blaze impact), `FUN_10081e5c` (the blood spurt) and
+`FUN_10067f84` (the effect a live entity carries around). It is the
+engine's **billboard**: a 0x160-byte actor that draws a `global.spr`
+sprite rather than a `models.idx` mesh, and that registers through the
+same `FUN_1001c080` and appears in the same entity lists as everything
+else in a zone.
+
+That is the thing worth recording here beyond the binding itself: this
+world has **two** art sources, not one. Every entity this document has
+described so far is a 3D model — a creature, a door, a prop. A billboard
+entity is the other kind, and its selector (`+0x134`) is a plain index
+into the loaded-slot pointer table at `engine+0x4460`, i.e. into the same
+384-slot `global.spr` cache the menus draw from (`GRAPHICS_FORMAT.md` has
+the table of world-facing slots).
+
+**The layout** (constructor `FUN_10060744` over the sprite base
+`FUN_1008b420`):
+
+| Field | Meaning |
+| --- | --- |
+| `+0x134` | the `global.spr` slot drawn this frame |
+| `+0x140` / `+0x144` | first / last slot, 8.8, inclusive |
+| `+0x148` / `+0x14c` | animation rate / cursor, 8.8 |
+| `+0x150` | gravity flag |
+| `+0x151` | loop flag (constructor sets it; nothing clears it) |
+| `+0x152` | "no lifetime" |
+| `+0x13c` / `+0x15c` | lifetime remaining / initial |
+| `+0x138` | scale, ramped `+0x154` → `+0x158` over the lifetime |
+| `+0x12c` / `+0x130` | the two size scalars, multiplied by the sprite's own pixel dimensions |
+
+**The tick** is `FUN_1005ef94`: count the lifetime down by the engine's
+per-frame delta and destroy at zero (unless `+0x152`), advance the frame
+(`FUN_100606d0`, which loops or destroys at the end of the range),
+integrate `x`/`y`/`z` by `+0x98`/`+0xa0`/`+0xa6` with an optional gravity
+term on `+0xa6`, then interpolate the scale. Everything else in the class
+is inherited actor state.
+
+**The draw** is `FUN_1008b25c`, and it is the first thing in this document
+that reads the camera-space triple `+0xbc`/`+0xbe`/`+0xc0` for something
+other than culling. `FUN_1001610c` fills those by rotating the entity's
+offset from the player through the camera matrix at `engine+0x5d8..0x600`
+and shifting down 8. The billboard spans `±halfWidth` horizontally about
+`+0xbc` and runs *upward* from `+0xbe` by `2 * halfHeight`, so it is
+**bottom-anchored** at the entity's own z — the same anchoring M62's floor
+snap assumes for an actor.

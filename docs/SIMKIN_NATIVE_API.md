@@ -944,6 +944,120 @@ entity's own script (17, an entity moving itself — this is all of
 `SummonMe`), and named entity locals (`Trthgar`, `mon01`..`mon05`, `who`,
 `Herbs`).
 
+## `CreateEffect` and the animated-sprite entity (M63)
+
+Zone/Level (`0x14d38`, dispatcher `FUN_1006dbec`) case **`0x23`**. Thirteen
+shipped call sites, all ten-argument, eight in `crypt1.s` and five in
+`twilite.s`, plus a fourteenth commented out in `blaze.s` — and every one
+of the thirteen sits in its zone script's own `Init()`, so this is the
+game's static-scenery animation primitive rather than a combat effect.
+
+```
+Level.CreateEffect(firstSprite, lastSprite, drawFlags,
+                   x, y, z, animRate, lifetime, sizeX, sizeY)
+```
+
+The case body is an **inlined copy of `FUN_10073528`**, the engine's own
+spawner, which the spell projectile's tick (`FUN_1005f928`) also calls with
+the twelve arguments `blaze.s` commented out. The multiplayer mirror
+`FUN_1003c124` replays a remote one from a packet with one field per
+argument, confirming their types (`firstSprite`/`lastSprite` u16,
+`drawFlags` u8, `animRate` i16, the rest 32-bit).
+
+**The first test is `if (argc < 10) return 1`** — the call is *accepted*
+and does nothing. The nine per-argument `Leave` guards that follow it are
+therefore dead code, and there is no shorter form, unlike M62's
+`SetPosition`.
+
+### `+0x134` is a `global.spr` slot — M48's open question, answered
+
+M48 recorded the spell projectile's art selector as "not a `models.txt`
+index (2 is `lantern.bin` and 5 is `sbarrel.bin`), so it selects from
+something else that has not been identified". It selects from
+**`global.spr`**, the same 384-slot image cache the menus and HUD draw
+from (`GRAPHICS_FORMAT.md`). The sprite entity's own draw, `FUN_1008b25c`:
+
+```c
+sprite = *(u16 **)(engine + 0x4460 + entity->0x134 * 4);
+if (!sprite) return;
+```
+
+so `engine+0x4460` is the loaded-slot pointer table and `+0x134` indexes it
+directly. Checked against the real archive, which settles it past the
+pointer arithmetic: slots **181-192** are twelve consecutive 16x64 frames
+averaging RGB (204, 159, 102) — a tall narrow flickering orange column,
+i.e. **fire**, which is what `crypt1.s` spawns; **193-204** are twelve more
+16x64 frames averaging (120, 121, 117), the same shape in grey — **steam**,
+in the one zone that also ships a `steamsound.s`; **12-19** are eight 32x32
+orange frames whose opaque pixel count falls from 337 to 59 — a
+**dissipating blast**, `blaze.s`'s impact; and **71**, the one
+`FUN_10081e5c` spawns with random velocity under gravity, is 32x32
+averaging (133, 4, 7) — **blood**. Both runs are bounded by slots of other
+sizes (180 is 57x46, 205 is 79x9), so they are whole animations rather than
+arbitrary windows.
+
+### The entity, and where the rest of it lives
+
+A 0x160-byte actor built by `FUN_10060744` over the sprite-entity base
+`FUN_1008b420`, registered through the same `FUN_1001c080` every other
+entity is (which is also where M62's actor predicate at vtable `+0xc8` and
+the `engine+0x640` list come from). Its fields:
+
+| Field | Meaning |
+| --- | --- |
+| `+0x134` | current `global.spr` slot, what the draw indexes with |
+| `+0x140` / `+0x144` | first / last slot, 8.8, inclusive |
+| `+0x148` | animation rate — `animRate * 15` |
+| `+0x14c` | animation cursor, 8.8 |
+| `+0x150` | gravity flag (only the engine's blood spurt sets it) |
+| `+0x151` | loop flag — the constructor sets it and nothing clears it |
+| `+0x152` | "no lifetime", set when `lifetime == 0` |
+| `+0x13c` / `+0x15c` | lifetime remaining / initial — `lifetime * 15` |
+| `+0x138` | scale, ramped from `+0x154` to `+0x158` over the lifetime |
+| `+0x12c` / `+0x130` | the two size scalars |
+
+`FUN_100606d0` advances the cursor and either loops or destroys;
+`FUN_1005ef94` is the tick around it (lifetime, then the three position
+integrations, then the scale ramp). At the port's own frame delta the rate
+works out to `animRate * 15 / 256` frames a second — every shipped call
+passes 128, i.e. **7.5 fps**, a twelve-frame flame looping in 1.64 s.
+
+**All thirteen pass lifetime 0**, so every scripted effect is permanent and
+the scale ramp (which `+0x152` also gates) never runs — a scripted effect
+draws at the constructor's flat 0x80, half scale. Only `blaze.s`'s
+commented-out line passes a real lifetime, 16, which is 240 units and 24
+ticks: 0.94 s rather than a second, because the multiplier is 15 and not
+16. Its eight frames need 28 ticks at that rate, so the impact would have
+died on frame 18 of 19 — it never showed its last frame.
+
+### `sizeX`/`sizeY` are not a radius
+
+`PORT_ROADMAP.md`'s bullet read the ten arguments as "a position, a radius
+and a duration". The duration is argument 8; arguments 9 and 10 are two
+independent size scalars, and the draw multiplies each by its axis of the
+sprite's *own pixel size*, twice:
+
+```c
+entity->0x5a = (i16)(sizeX * spriteWidth);          // FUN_1008b25c
+halfWidth    = ((i16)entity->0x5a * spriteWidth) >> 8;
+```
+
+The quad is laid out in camera space (`+0xbc`/`+0xbe`/`+0xc0`, which
+`FUN_1001610c` fills by rotating the entity's offset from the player
+through the camera matrix and shifting down 8), spanning `±halfWidth`
+horizontally and from the entity's own height *upward* by `2 *
+halfHeight` — so a billboard is **bottom-anchored** at the effect's z.
+Because the sprite dimension enters twice, the scalars run inversely to the
+sprite: crypt1's flames pass 512 against a 16-pixel-wide sprite and 40
+against a 64-pixel-tall one.
+
+Taken literally the formula makes crypt1's first flame 1024 x 1280 world
+units, four tiles by five. The doubled multiply is in the disassembly, not
+a decompiler artefact, but nothing draws a billboard yet in this port or in
+any tooling here, so the *magnitudes* are unverified even though the
+mapping is exact.
+
+
 ## Labels applied / tools
 
 No new Ghidra renames this pass (the 28 registration/dispatcher
