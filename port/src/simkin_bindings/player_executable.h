@@ -26,6 +26,7 @@
 #include "assets/save_records.h"
 #include "simkin_bindings/actor_stats.h"
 #include "simkin_bindings/amulet_flags.h"
+#include "simkin_bindings/store.h"
 #include "simkin_bindings/native_stub_executable.h"
 #include "simkin_bindings/spell_actor.h"
 #include "skRValue.h"
@@ -174,6 +175,34 @@ public:
     // script branches on: 0 = ok, 3 = not equippable (silently closes the
     // action popup).
     int UpdateEquipStatus(ItemExecutable* item, bool equipping);
+
+    // ---- M59: the merchant the player is currently trading with ----
+    //
+    // `player+0xf84`, and it is a pointer straight into a creature
+    // (`SetMerchant(self)` stores `monster+0x330`), not a copy. Null
+    // outside a shop, and every buy/sell native answers with nothing at
+    // all while it is -- not zero, *nothing*: the real handlers
+    // `return 1` without writing a return value, so the script's variable
+    // keeps whatever it already held. Reproduced.
+    void SetMerchant(Store* store) { m_Merchant = store; }
+    Store* merchant() const { return m_Merchant; }
+
+    // FUN_1003e030. Returns the code buysell.s branches on:
+    //   0 not enough gold (or no store / no such product / stock gone)
+    //   1 bought
+    //   2 the merchant does not have that many
+    //   3 no room in the inventory (the cap is 100 items)
+    int BuyProduct(const std::string& productName, int count);
+    // FUN_1003f130 case 0x3b. Returns the number sold, 0 if the merchant
+    // will not take it.
+    int SellItemToMerchant(ItemExecutable* item, int count);
+    // Case 0x3c: the same, for every copy of that item the player owns.
+    int SellAllOfItem(ItemExecutable* item);
+    // How many items the inventory holds, against FUN_1003e030's cap.
+    int inventoryCount() const { return static_cast<int>(m_Inventory.size()); }
+    // `player+0x3e4` -- the stats block's Gold at +0x38. Every purchase and
+    // sale moves this one field.
+    int gold() const { return m_Gold; }
 
     ItemExecutable* leftItem() const { return m_LeftItem; }
     ItemExecutable* rightItem() const { return m_RightItem; }
@@ -444,6 +473,8 @@ private:
     std::vector<std::unique_ptr<ItemExecutable>> m_Inventory;
     // M56: registry+0x468/+0x478 -- see amulet_flags.h.
     KeyItemFlags m_KeyItemFlags;
+    // M59: player+0xf84 -- see SetMerchant() above.
+    Store* m_Merchant = nullptr;
     // M56: see AttachStack(). Null in every standalone construction.
     MenuStack* m_Stack = nullptr;
     ItemExecutable* m_LeftItem = nullptr;

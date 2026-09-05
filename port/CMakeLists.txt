@@ -132,6 +132,8 @@ add_library(sk_bindings STATIC
   src/simkin_bindings/arrow_projectile.cpp
   src/simkin_bindings/spell_cast.cpp
   src/simkin_bindings/spell_projectile.cpp
+  src/simkin_bindings/store.cpp
+  src/assets/product_database.cpp
   src/simkin_bindings/row_owner_ref.cpp
   src/simkin_bindings/script_delay.cpp
   src/simkin_bindings/table_executable.cpp
@@ -444,3 +446,8 @@ target_link_libraries(automap_smoke PRIVATE sk_world)
 # src/tests/m58_effects_smoke.cpp.
 add_executable(effects_smoke src/tests/m58_effects_smoke.cpp)
 target_link_libraries(effects_smoke PRIVATE sk_bindings sk_world)
+
+# Merchants: products.dat, the store object and the buy/sell natives.
+# See src/tests/m59_merchant_smoke.cpp.
+add_executable(merchant_smoke src/tests/m59_merchant_smoke.cpp)
+target_link_libraries(merchant_smoke PRIVATE sk_bindings sk_world)

@@ -413,6 +413,14 @@ bool MenuExecutable::GoBack() {
 
 bool MenuExecutable::method(const skString& methodName, skRValueArray& args,
                              skRValue& returnValue, skExecutableContext& context) {
+    if (methodName == skString("IsBuyMode") && args.entries() == 0) {
+        // M59: store-screen binding 0 (trie 0x14de0). `buysell.s` is one
+        // script serving both sides of the counter and this is the only
+        // thing that tells them apart -- it picks the popup rows ("Buy"/
+        // "Buy 5" against "Sell") and the header text.
+        returnValue = skRValue(m_Stack.storeBuyMode());
+        return true;
+    }
     if (methodName == skString("MenuBackground") && args.entries() == 1) {
         m_BackgroundId = args[0].intValue();
         return true;

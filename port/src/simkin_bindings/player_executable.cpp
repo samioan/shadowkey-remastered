@@ -4,6 +4,7 @@
 #include <cstdio>
 
 #include "assets/sound_archive.h"
+#include "assets/string_table.h"
 #include "audio/audio_engine.h"
 #include "simkin_bindings/combat.h"
 #include "simkin_bindings/effects.h"
@@ -11,6 +12,7 @@
 #include "simkin_bindings/item_executable.h"
 #include "simkin_bindings/level_executable.h"
 #include "simkin_bindings/menu_stack.h"
+#include "simkin_bindings/monster_executable.h"
 #include "simkin_bindings/native_binding_common.h"
 #include "skInterpreter.h"
 #include "skParseException.h"
@@ -121,6 +123,87 @@ int PlayerExecutable::armorRating() const {
     // field rather than re-deriving a modifier from the effect list.
     total += m_ArmorValue;
     return total < 0 ? 0 : total;
+}
+
+// ---- M59: the three trading verbs (store.h) ----
+
+// FUN_1003e030. The order of its five failure tests matters, because a
+// script shows a different message for each: stock before room, room
+// before gold.
+int PlayerExecutable::BuyProduct(const std::string& productName, int count) {
+    if (!m_Merchant) return 0;
+    const Store::StockEntry* entry = m_Merchant->FindByName(productName);
+    if (!entry || !entry->record) return 0;
+    if (entry->quantity < count) return 2;
+    // The real cap is a flat 100 items, tested twice -- once on the count
+    // as it stands and once on the count plus the purchase -- so a player
+    // already at 100 is refused even for a purchase of zero.
+    if (inventoryCount() > 100 || inventoryCount() + count > 100) return 3;
+    const int total = count * entry->price;
+    if (total > m_Gold) return 0;
+
+    const sk::ProductRecord* record = entry->record;
+    m_Gold -= total;
+    if (!m_Merchant->TakeStock(record, count)) return 0;
+
+    // A Consumable the player already carries stacks onto the existing
+    // one rather than making `count` more objects. Everything else is
+    // created one at a time and given the product's own rating.
+    if (record->category == kItemTypeConsumable) {
+        for (const std::unique_ptr<ItemExecutable>& held : m_Inventory) {
+            if (held && !held->markedForRemoval() && held->templateId() == record->templateId) {
+                held->SetQuantity(held->quantity() + count);
+                return 1;
+            }
+        }
+    }
+    if (!m_Stack) return 1;  // nothing to build items with; the gold is spent
+    for (int i = 0; i < count; ++i) {
+        std::unique_ptr<ItemExecutable> item = m_Stack->level().CreateItem(record->templateId);
+        if (!item) break;
+        item->SetRating(record->rating);
+        AddItem(std::move(item));
+    }
+    return 1;
+}
+
+int PlayerExecutable::SellItemToMerchant(ItemExecutable* item, int count) {
+    if (!m_Merchant || !item) return 0;
+    if (!m_Merchant->AcceptItem(item->templateId(), item->itemType(), count)) return 0;
+    // FUN_1002edfc. The real value is the item's market value plus a
+    // mercantile percentage derived from the player's own class row and
+    // stats, capped at 50%. This port has neither the class table nor that
+    // formula, so it pays the flat market value and the bonus is left out
+    // rather than invented -- the same call this port's HealWound branch
+    // already declines to guess at (spell_cast.cpp).
+    m_Gold += count * item->marketValue();
+    if (count == 1) {
+        RemoveItem(item);
+    } else {
+        // The real loop removes by *template id* until nothing matches --
+        // so selling five of something removes every copy the player has,
+        // not five of them. Reproduced.
+        const int templateId = item->templateId();
+        for (std::unique_ptr<ItemExecutable>& held : m_Inventory) {
+            if (held && !held->markedForRemoval() && held->templateId() == templateId) {
+                held->MarkForRemoval();
+            }
+        }
+    }
+    return count;
+}
+
+int PlayerExecutable::SellAllOfItem(ItemExecutable* item) {
+    if (!item) return 0;
+    const int templateId = item->templateId();
+    int count = 0;
+    for (const std::unique_ptr<ItemExecutable>& held : m_Inventory) {
+        if (!held || held->markedForRemoval() || held->templateId() != templateId) continue;
+        // A Consumable contributes its whole stack; anything else one each.
+        count += held->itemType() == kItemTypeConsumable ? held->quantity() : 1;
+    }
+    if (count == 0) return 0;
+    return SellItemToMerchant(item, count);
 }
 
 // M58: FUN_1004ad40's field map for the player -- see spell_actor.h and
@@ -705,6 +788,98 @@ bool PlayerExecutable::method(const skString& methodName, skRValueArray& args,
         returnValue = skRValue(armorRating());
         return true;
     }
+    // ---- M59: the merchant natives (store.h) ----
+    //
+    // Every one of them is a no-op while `player+0xf84` is null, and the
+    // engine's own guard is `return 1` *without a return value* -- so a
+    // script that reads one outside a shop keeps whatever its variable
+    // already held rather than seeing a 0. Reproduced by returning true
+    // and leaving `returnValue` alone.
+    if (methodName == skString("SetMerchant") && args.entries() == 1) {
+        m_Merchant = nullptr;
+        if (args[0].type() == skRValue::T_Object) {
+            if (auto* monster = dynamic_cast<MonsterExecutable*>(args[0].obj())) {
+                m_Merchant = &monster->store();
+            }
+        }
+        return true;
+    }
+    if (methodName == skString("GetDefaultStore") && args.entries() == 0) {
+        if (!m_Merchant) return true;
+        returnValue = skRValue(m_Merchant->defaultCategory());
+        return true;
+    }
+    if (methodName == skString("GetProductCount") && args.entries() == 1) {
+        if (!m_Merchant) return true;
+        returnValue = skRValue(m_Merchant->productCount(args[0].intValue()));
+        return true;
+    }
+    if ((methodName == skString("GetProduct") || methodName == skString("GetItemDescription")) &&
+        args.entries() == 1) {
+        // Both return the product's *description* string -- the "Long
+        // blade, damage 4 - 12" line, not its name. GetItemDescription
+        // additionally falls back to the player's own inventory when the
+        // name is not on the shelves, which is what makes the same popup
+        // work on the sell page; GetProduct has no such fallback.
+        const std::string wanted = ToStdString(args[0].str());
+        const sk::StringTable* strings = m_Stack ? m_Stack->strings() : m_Strings;
+        if (m_Merchant) {
+            const Store::StockEntry* entry = m_Merchant->FindByName(wanted);
+            if (entry && entry->record && strings) {
+                returnValue =
+                    skRValue(skString(strings->Get(entry->record->descriptionStringId).c_str()));
+                return true;
+            }
+        }
+        if (methodName == skString("GetItemDescription")) {
+            for (const std::unique_ptr<ItemExecutable>& held : m_Inventory) {
+                if (!held || held->markedForRemoval() || held->name() != wanted) continue;
+                skRValueArray none;
+                skRValue description;
+                held->method(skString("GetItemDescription"), none, description, context);
+                returnValue = description;
+                return true;
+            }
+        }
+        return true;
+    }
+    if (methodName == skString("BuyItem") && args.entries() >= 1) {
+        const int count = args.entries() > 1 ? args[1].intValue() : 1;
+        returnValue = skRValue(BuyProduct(ToStdString(args[0].str()), count));
+        return true;
+    }
+    if (methodName == skString("SellItem") && args.entries() >= 1) {
+        if (!m_Merchant) {
+            returnValue = skRValue(0);
+            return true;
+        }
+        const int count = args.entries() > 1 ? args[1].intValue() : 1;
+        ItemExecutable* item = args[0].type() == skRValue::T_Object
+                                   ? dynamic_cast<ItemExecutable*>(args[0].obj())
+                                   : nullptr;
+        returnValue = skRValue(SellItemToMerchant(item, count));
+        return true;
+    }
+    if (methodName == skString("SellAllItems") && args.entries() == 1) {
+        ItemExecutable* item = args[0].type() == skRValue::T_Object
+                                   ? dynamic_cast<ItemExecutable*>(args[0].obj())
+                                   : nullptr;
+        returnValue = skRValue(SellAllOfItem(item));
+        return true;
+    }
+    if ((methodName == skString("BuyFromMerchant") || methodName == skString("SellToMerchant")) &&
+        args.entries() == 0) {
+        // The real pair fetch screen mode 5 -- the store screen -- from the
+        // controller and set its buy flag, which is the flag `buysell.s`
+        // reads back with IsBuyMode(). This port has no screen-mode table,
+        // so the flag lives on the stack and the screen is opened the way
+        // every other one is.
+        if (!m_Stack) return SoftFailNativeCall("Player", methodName, args, returnValue);
+        m_Stack->SetStoreBuyMode(methodName == skString("BuyFromMerchant"));
+        m_Stack->ReopenMenu("buysell");
+        return true;
+    }
+
     // --- M58: the effects system (effects.h). The busiest unimplemented
     // native in the corpus was `GetPlayer().AddEffect` (20 sites) and
     // `GetOwner().AddEffect` (63) -- the same binding on the same class,

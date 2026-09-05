@@ -18,6 +18,7 @@
 #include <string>
 #include <vector>
 
+#include "assets/product_database.h"
 #include "simkin_bindings/script_delay.h"
 #include "skExecutableContext.h"
 
@@ -151,6 +152,23 @@ public:
     // (charactermanager.s's GetHealthText() etc.), not just relying on a
     // row's own textId -- may be null, same caveat as the constructor.
     const sk::StringTable* strings() const { return m_Strings; }
+
+    // M59: `products.dat`, the merchant product database
+    // (assets/product_database.h). It hangs off the stack for the same
+    // reason the string table does -- every merchant creature needs the
+    // one shared catalogue, and the stack is what every entity executable
+    // already holds. Loaded once by the constructor; empty (and every
+    // AddProduct a no-op with a logged miss) if the file is absent.
+    const sk::ProductDatabase& products() const { return m_Products; }
+
+    // M59: which side of the counter `buysell.s` is showing. In the real
+    // engine this is a flag on screen mode 5 that `BuyFromMerchant()` and
+    // `SellToMerchant()` set before handing the screen over, and that the
+    // script reads back with `IsBuyMode()`. There is no screen-mode table
+    // here, so it lives beside muteOnCall for the same reason: the screen
+    // is rebuilt on every visit and the setter is a different object.
+    void SetStoreBuyMode(bool buying) { m_StoreBuyMode = buying; }
+    bool storeBuyMode() const { return m_StoreBuyMode; }
 
     // M50: the save system writes real files.
     //
@@ -290,6 +308,8 @@ private:
     std::array<SaveSlot, kSaveSlotCount> m_SaveSlots;
     std::string m_SaveDir = ".";
     std::string m_CurrentLevel;
+    sk::ProductDatabase m_Products;  // M59: see products() above
+    bool m_StoreBuyMode = true;      // M59: see storeBuyMode() above
     bool m_QuitRequested = false;
     bool m_QuitToMenuRequested = false;  // M54: see quitToMenuRequested() above
     bool m_QuitAfterSave = false;        // M54: see quitAfterSave() above

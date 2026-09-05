@@ -44,6 +44,7 @@
 #include <vector>
 
 #include "simkin_bindings/actor_stats.h"
+#include "simkin_bindings/store.h"
 #include "simkin_bindings/script_delay.h"
 #include "simkin_bindings/spell_actor.h"
 #include "simkin_bindings/spell_cast.h"
@@ -412,6 +413,14 @@ public:
     // resolution, and its stats block is the one at actor+0x224.
     bool isPlayerActor() const override { return false; }
     bool isMonsterActor() const override { return true; }
+    // M59: the merchant's shop -- `monster+0x330`. Every creature has one
+    // in the real engine (the field is on the class, not on a subclass);
+    // only the ~10 scripts that call AddProduct ever put anything in it.
+    // See store.h, including the note on the extra `wcscmp` dispatcher
+    // layer that reaches the three natives feeding it.
+    Store& store() { return m_Store; }
+    const Store& store() const { return m_Store; }
+
     ActorStats& actorStats() override { return m_Stats; }
     // M58: the creature's half of FUN_1004ad40's field map. Shorter than the
     // player's only because a creature script never sets an attribute --
@@ -689,6 +698,7 @@ private:
     // stat modifiers, the effect flags and both periodic channels, plus the
     // paralysis lockout.
     ActorStats m_Stats;
+    Store m_Store;  // M59: monster+0x330 -- see store()
     // M43: the creature's own spells. It *owns* them -- the real AddSpell
     // adds the spell entity to the monster's object collection
     // (`FUN_1006cf38(monster+0x1f8, spell)`) and sets itself as its owner

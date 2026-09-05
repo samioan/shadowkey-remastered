@@ -29,7 +29,12 @@ MonsterExecutable::MonsterExecutable(const skString& filename, skExecutableConte
       m_Strings(strings),
       m_Player(player),
       m_Stack(stack),
-      m_Interpreter(ctxt.getInterpreter()) {}
+      m_Interpreter(ctxt.getInterpreter()) {
+    // M59: every creature carries a shop (monster+0x330); only the ones
+    // whose script calls AddProduct ever fill it. See store.h.
+    m_Store.SetDatabase(&m_Stack.products());
+    m_Store.SetStrings(strings);
+}
 
 MonsterExecutable::~MonsterExecutable() = default;
 
@@ -494,6 +499,32 @@ bool MonsterExecutable::method(const skString& methodName, skRValueArray& args,
         returnValue = skRValue(undead());
         return true;
     }
+    // ---- M59: the three merchant natives ----
+    //
+    // These are the ones that are *not* in the native trie: FUN_1008607c
+    // tests them by name with a wcscmp chain and tail-calls the creature's
+    // real dispatcher for everything else, which is why the 703-binding
+    // enumeration never saw them (store.h).
+    if (methodName == skString("AddProduct") && args.entries() >= 2) {
+        // Five arguments in every shipped call, and the handler reads two
+        // of them: the template id, and the quantity -- from args[3] when
+        // there are four or more, args[1] otherwise. The name, price and
+        // category arguments are ignored outright; products.dat is where
+        // those come from, and it disagrees with the scripts.
+        const int templateId = args[0].intValue();
+        const int quantity = args.entries() >= 4 ? args[3].intValue() : args[1].intValue();
+        m_Store.Add(templateId, quantity);
+        return true;
+    }
+    if (methodName == skString("ClearProducts") && args.entries() == 0) {
+        m_Store.Clear();
+        return true;
+    }
+    if (methodName == skString("ReducePrices") && args.entries() == 1) {
+        m_Store.ReducePrices(args[0].intValue());
+        return true;
+    }
+
     // M58: the same Character-stats effect bindings the player answers --
     // `GetOwner()` resolves to this class for a creature's own items, and
     // 63 of the corpus's 83 AddEffect sites are on GetOwner().

@@ -65,6 +65,9 @@ MenuStack::MenuStack(std::string scriptRoot, skInterpreter& interpreter,
     // the initialiser list because `*this` is only usable once the members
     // above are built.
     m_Player->AttachStack(*this);
+    // M59: the merchant product database. Every merchant creature stocks
+    // itself out of this one catalogue -- see store.h.
+    m_Products.Load(m_ScriptRoot);
     RegisterGameConstants(interpreter);
     // M18: `Level` is a bare global every real script can reach (docs/
     // SIMKIN_NATIVE_API.md's Zone/Level+Zone effects), never obtained via

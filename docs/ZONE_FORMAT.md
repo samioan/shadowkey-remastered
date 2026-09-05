@@ -1408,3 +1408,78 @@ slot + 0x40 : char name[64]
 
 and registers it in the by-name map with `FUN_10073210(levelObj, name,
 slot)`.
+
+## `products.dat`: the merchant product database (M59)
+
+Not zone data, but it lives here for the same reason `entities.txt` does:
+this doc is where the shipped **flat data files** are decoded, and this is
+the last one the port had never opened.
+
+`FUN_10035634` reads it with plain `fopen`/`fread` from
+`e:\system\apps\6R51\products.dat`, and it is built lazily — the first
+`AddProduct` call in the session triggers it, and the catalogue is then
+shared by every merchant in the game.
+
+```
+u16 version                (36 in the shipped file)
+u16 count                  (279)
+count x {
+    u16 templateId          -> record +0x00
+    u16 category            -> +0x14   (the IPT_* enum)
+    u32 price               -> +0x04, and copied to +0x08 as the base
+    u16 rating              -> +0x0c
+    u16 descriptionStringId -> +0x0e
+    u8  armorSlot           -> +0x12
+    u16 nameStringId        -> +0x10
+    u16 classFlagCount      (9 in every shipped row)
+    u8  classFlags[count]   -> +0x18..
+}
+```
+
+Two things about that layout are worth stating, because a reader who
+guesses will get both wrong:
+
+- **The read order is not the offset order.** The one-byte armour slot at
+  `+0x12` is read *before* the name string id at `+0x10`. A "fields in
+  offset order" parse desynchronises on the first record; this one
+  consumes the shipped file's 7258 bytes exactly, 279 records with nothing
+  left over.
+- **The version field is the record stride.** The guard is
+  `if (version < 0x24) reject`, with the message *"This product database
+  file is obsolete- version #%d"*, and `0x24` is 36 — the size of one
+  record. So "version 36" means "records are 36 bytes".
+
+### Why the file matters: the shop scripts lie
+
+A merchant stocks itself from its own `.s`:
+
+```
+ClearProducts();
+AddProduct(662, "Shadow Band", 4444, 3, IPT_Armor);
+AddProduct(678, "Steel Pauldron", 111, 10, IPT_Armor);
+```
+
+and the handler reads **the first argument and the fourth**. The name,
+the price and the category are looked up in `products.dat` instead — and
+the two disagree. Across the corpus's **363** `AddProduct` calls in ten
+merchant scripts, every template id resolves in the file, and **65 of them
+quote a price the file contradicts**: a Steel Pauldron is 1111, not 111; a
+Vicar Herb 45, not 30. The literals in the scripts are stale
+documentation, and this file is what the game charges.
+
+### Every field is named from a real reader
+
+| field | named by |
+|---|---|
+| `templateId` | matched against `AddProduct`'s first argument; handed to the entity factory by `BuyItem` |
+| `category` | indexes the store's per-category counters, which are what `GetProductCount(IPT_Weapon)` answers |
+| `price` / base | `BuyItem` charges `count * price`; `ReducePrices(pct)` recomputes price from the base |
+| `rating` | passed to the bought item's own `SetRating`; `buysell.s`'s table has two "rating" columns |
+| `nameStringId` | the **lookup key** — the store's find-by-name compares it against the selected row's text, which is how `BuyItem(itemText, n)` resolves at all |
+| `descriptionStringId` | what `GetProduct` and `GetItemDescription` return ("Long blade, damage 4 - 12") |
+| `armorSlot` | 0 on everything that is not armour; on the 99 armour rows it partitions them exactly as their descriptions read |
+| `classFlags` | nine booleans, one per character class — the same 0..8 `ChooseCharacter` clamps into; `buysell.s` asks before a purchase and offers "Buy Anyway" |
+
+The armour slot's partition is clean enough to be self-verifying: 19 body,
+9 legs, 12 feet, 15 head, 11 hands, 14 shield, 9 worn, and the remaining
+10 armour rows on slot 0 are exactly the arm pieces.

@@ -224,6 +224,9 @@ public:
     // the same way it already reads DoorExecutable/MonsterExecutable's.
     int useTextId() const { return m_UseTextId; }
     int cost() const { return m_Cost; }
+    // M59: SetMarketValue()'s stored number (item+0x1b8), which is what a
+    // merchant pays for the item -- see PlayerExecutable::SellItem.
+    int marketValue() const { return m_MarketValue; }
     int armorValue() const { return m_ArmorValue; }
     int damageMin() const { return m_DamageMin; }
     int damageMax() const { return m_DamageMax; }
@@ -340,6 +343,10 @@ public:
     // u_*_lvlN.s variants -- an ordinal, not a power. The real magnitude
     // is the caster's level; see spellLevel() above.
     int rating() const { return m_Rating; }
+    // M59: a bought item takes its rating from the products.dat row rather
+    // than from its own script -- FUN_1003e030 calls the same setter the
+    // SetRating binding does on every item it creates.
+    void SetRating(int rating) { m_Rating = rating; }
 
     // M53: the entity script timer -- `Delay(seconds, tag)` arms it and
     // `DelayReached(tag)` is called back when it expires (script_delay.h).

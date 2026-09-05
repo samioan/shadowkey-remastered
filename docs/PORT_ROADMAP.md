@@ -4745,6 +4745,117 @@ algorithms.
       comparison means different things in a menu script and an item
       script. This port takes the global 4.
 
+- [x] **M59 -- merchants.** `buysell.s` and the `dstar_e`/`dstar_w` shop
+  conversations were dead ends: ten merchant scripts between them made
+  **363** `AddProduct` calls that reached nothing, and every buy/sell
+  native on the player soft-failed. The whole system is now recovered --
+  the data file it runs on, the store object, the three natives that fill
+  it and the three verbs that spend it. New
+  `src/assets/product_database.{h,cpp}` and
+  `src/simkin_bindings/store.{h,cpp}`; smoke test
+  `src/tests/m59_merchant_smoke.cpp` (37 checks). `GetPlayer()` coverage
+  88% -> **90%**, and the suite's soft-fail count drops 97 -> 81 even
+  though `buysell.s` now runs for the first time.
+
+    - **`products.dat`, the last shipped data file this port had never
+      opened.** 279 records, decoded from `FUN_10035634` and verified by
+      exact byte consumption (7258 of 7258). Full format in
+      [`ZONE_FORMAT.md`](ZONE_FORMAT.md). Two traps: the read order is
+      **not** the offset order (the one-byte armour slot at `+0x12` is
+      read before the name string id at `+0x10`, so an offset-ordered
+      parse desynchronises on record one), and the "version" field is
+      really the record stride -- the guard is `version < 0x24` and 0x24
+      is 36, the size of a record.
+
+    - **The shop scripts lie, and the file proves it.** A merchant stocks
+      itself with `AddProduct(678, "Steel Pauldron", 111, 10, IPT_Armor)`
+      and the handler reads **the first argument and the fourth**. Name,
+      price and category come from `products.dat` -- where a Steel
+      Pauldron is 1111, not 111. Across the corpus's 363 calls every
+      template id resolves in the file and **65 of them quote a price the
+      file contradicts**. The literals in the scripts are stale
+      documentation.
+
+    - **The trie is not the whole native surface** -- see
+      [`SIMKIN_NATIVE_API.md`](SIMKIN_NATIVE_API.md)'s new section.
+      `AddProduct`, `ClearProducts` and `ReducePrices` are dispatched by
+      `FUN_1008607c`, a layer *above* the creature's trie dispatcher that
+      tests three names with a plain `wcscmp` chain and tail-calls the
+      trie for everything else. They appear nowhere in the 703-binding
+      enumeration because nothing ever inserts them into a trie, and they
+      are called 363 times. So "absent from the 703" no longer implies
+      "script-level handler" -- the extra step is to search the image's
+      string data for the literal, which finds all three.
+
+    - **A store is 0x40 bytes inside a creature.** There is no shop
+      object: `GetPlayer().SetMerchant(self)` is literally
+      `player+0xf84 = monster + 0x330`, so "the shop I am standing in" is
+      one pointer and every trading native is inert while it is null --
+      and inert in a specific way, `return 1` with **no return value
+      written**, so a script reading one outside a shop keeps whatever its
+      variable already held rather than seeing a 0. Reproduced.
+
+    - **`BuyItem`'s four return codes**, which `buysell.s` shows four
+      different messages for, and the order of the tests that produce
+      them: stock (2) before inventory room (3, a flat cap of 100 items)
+      before gold (0). A bought item is created from the entity factory
+      and given the **products.dat row's** rating rather than its own
+      script's -- and a Consumable the player already carries stacks onto
+      the existing one instead of making more objects.
+
+    - **What a merchant will and will not buy.** `FUN_10035c28` is both
+      the "will you take this" test and the code that puts it on the
+      shelf. Misc is refused outright (the four-way type test names every
+      category except it). A Spell is *accepted* -- the player is paid and
+      loses the item -- but the guard that puts it on the shelf sits
+      **after** the accept decision, so selling a spell to a merchant who
+      does not already deal in spells makes it vanish. Reproduced, and
+      pinned against the real `dstar_w/weapons_merchant.s` and
+      `monsters/llewydr.s`.
+
+    - **`ClearProducts` leaks the counters.** It frees the shelf list and
+      zeroes the head, count and tail, and never touches the five
+      per-category counters at `+0x24`. Those counters are exactly what
+      `GetProductCount` and `GetDefaultStore` read, so a merchant is left
+      claiming tabs it cannot fill. Every merchant script opens its
+      `Init()` with `ClearProducts()`, so on a second visit the counters
+      are double what the shelves hold. Reproduced.
+
+    - **Selling more than one removes all of them.** `SellItem(item, n)`
+      with `n > 1` does not remove `n`: the real loop removes by
+      *template id* until nothing matches. `SellAllItems` counts a
+      Consumable's whole stack and everything else one each, then goes
+      through the same path.
+
+    - Smaller findings: `wendek_freetalker.s` lists template 704 twice
+      under two different names ("Rat I" and "Ratseye") and the handler
+      appends unconditionally, so that really is two shelf lines sharing
+      one product row; `ReducePrices(pct)` recomputes from the base price
+      rather than compounding, so `ReducePrices(0)` puts every price back;
+      and `GetProduct` and `GetItemDescription` both return the
+      *description* string, with only the latter falling back to the
+      player's own inventory when the name is not on the shelves -- which
+      is what makes the same popup work on the sell page.
+
+    - **Not carried over**: the store *screen* itself. `buysell.s` now
+      loads and runs (`BuyFromMerchant`/`SellToMerchant` open it with the
+      buy flag `IsBuyMode()` reads back), but the six store-menu bindings
+      that populate its product table -- `DisplayWeaponsPage`,
+      `DisplayArmorMenu`, `DisplayConsumablesMenu`, `DisplaySpellsPage`,
+      `DisplayMiscItemsMenu`, `SetInventoryList` (trie `0x14de0`) -- are
+      still soft-failing, along with the widget natives around them
+      (`SetGoldText`, `SetLocalizedText`, `Button::SetX/SetVisible`,
+      `PopupMenu::UpdatePopupItem`, `Table::SetInset`). The data model
+      underneath them is complete; what is missing is the table
+      population. That is the natural follow-up.
+
+    - Also decompiled in passing, for whoever takes the next entry:
+      **`SetCameraStart(a, b, c, d, e, f)`** is Player case `0x39`. It
+      sets a flag at `engine+0x14a20` and writes the six arguments to
+      `+0x14a24`, `+0x14a28`, `+0x14a2c`, **`+0x14a34`**, **`+0x14a38`**,
+      **`+0x14a30`** -- the last three out of order, exactly as the
+      roadmap's own entry suspected.
+
 ## Next milestones (not yet started)
 
 Roughly in priority order for reaching "actually playable," not commitments:
@@ -4754,21 +4865,25 @@ M56's coverage tool
 these by real call-site count instead of by guess -- re-run it rather
 than trusting this list to stay current.
 
-- **Merchants.** `SetMerchant` (10), `BuyFromMerchant` (9),
-  `SellToMerchant` (9), `VisitStore` (5), `GetProductCount` (4),
-  `BuyItem`/`SellItem`/`SellAllItems`/`GetDefaultStore`, plus the
-  `Monster: AddProduct(...)`/`ClearProducts()` pair that is ~35 of the
-  suite's remaining soft-fail lines (a merchant's whole stock list). One
-  coherent feature: `buysell.s` and the `dstar_e`/`dstar_w` shop
-  conversations are all currently dead ends.
+- **The store screen.** M59 built the whole shop data model but not the
+  screen that shows it: the six store-menu bindings that populate the
+  product table (`DisplayWeaponsPage`, `DisplayArmorMenu`,
+  `DisplayConsumablesMenu`, `DisplaySpellsPage`, `DisplayMiscItemsMenu`,
+  `SetInventoryList`, trie `0x14de0`, dispatcher `FUN_10033660`) plus the
+  widget natives `buysell.s` calls around them -- `SetGoldText`,
+  `MenuItem::SetLocalizedText`, `Button::SetX`/`SetVisible`,
+  `PopupMenu::UpdatePopupItem`, `Table::SetInset`. `buysell.s` loads and
+  runs today; it just draws nothing.
 
 - **`SetCameraStart(x, y, z, a, b, c)`** -- 49 sites, all in zone-root
-  scripts. Case `0x39` arms a flag at `engine+0x14a20` and writes six
-  fields at `+0x14a24..+0x14a38` (note the argument-to-offset order is
-  not sequential); shipped data has arguments 4 and 6 always 0 and
-  argument 5 a signed angle, so this is a scripted spawn position and
-  heading override. Needs main.cpp to consume it after the zone script's
-  `Init()` rather than before.
+  scripts, and now the single largest unhandled native left. Case `0x39`
+  arms a flag at `engine+0x14a20` and writes the six arguments, in order,
+  to `+0x14a24`, `+0x14a28`, `+0x14a2c`, `+0x14a34`, `+0x14a38`,
+  `+0x14a30` -- the last three genuinely out of order (M59 decompiled it
+  in passing). Shipped data has arguments 4 and 6 always 0 and argument 5
+  a signed angle, so this is a scripted spawn position and heading
+  override. Needs main.cpp to consume it after the zone script's `Init()`
+  rather than before.
 
 - **`Level.CreateEffect(...)`** -- 13 sites and 24 of the suite's
   remaining soft-fail lines, all ten-argument calls from `crypt1.s` and

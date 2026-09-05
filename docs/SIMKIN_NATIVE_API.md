@@ -569,14 +569,14 @@ port. `OpenMenu` was implemented on Item, Menu and Monster, so any
 name-level check reported it as done; `GetPlayer().OpenMenu(...)`, **332
 real call sites across the corpus**, was soft-failing.
 
-Coverage when M56 started, after it, and after M58's effects system:
+Coverage when M56 started, and after each milestone since:
 
-| receiver | call sites | before M56 | after M56 | after M58 |
-|---|---|---|---|---|
-| `Level` | 1318 | 97% | 97% | 97% |
-| `GetOpener()` | 124 | 79% | 79% | 79% |
-| `GetOwner()` | 195 | 64% | 64% | **100%** |
-| **`GetPlayer()`** | **2207** | **55%** | **87%** | **88%** |
+| receiver | call sites | before M56 | after M56 | after M58 | after M59 |
+|---|---|---|---|---|---|
+| `Level` | 1318 | 97% | 97% | 97% | 97% |
+| `GetOpener()` | 124 | 79% | 79% | 79% | 79% |
+| `GetOwner()` | 195 | 64% | 64% | **100%** | 100% |
+| **`GetPlayer()`** | **2207** | **55%** | **87%** | **88%** | **90%** |
 
 M58 finished `GetOwner()` outright. Its whole residual was one feature:
 `AddEffect` (63 sites on this receiver), `SetSpellEffect` (7) and
@@ -649,6 +649,50 @@ not four unrelated flags:
 | 805 (`0x325`) | `items\frozen_key.s` | `frozen_key` | `0x10` |
 
 Note the bit order does not follow the template order.
+
+## The trie is not the whole native surface (M59)
+
+**703 is not the number of native bindings in this game.** The
+enumeration above is complete for the trie mechanism, and the trie is not
+the only mechanism.
+
+`FUN_1008607c` is a dispatcher layer sitting *above* the creature's trie
+dispatcher (`FUN_10084924`). It copies the incoming method name into a
+buffer and runs a plain `wcscmp` chain over three literals, tail-calling
+the trie dispatcher for anything it does not recognise:
+
+```c
+if (name == L"AddProduct")         Store_Add(self + 0x330, args[0], qty);
+else if (name == L"ReducePrices")  Store_ReducePrices(self + 0x330, args[0]);
+else if (name == L"ClearProducts") Store_Clear(self + 0x330);
+else                               return FUN_10084924(self, ...);
+```
+
+So there is an extra class in the hierarchy — a merchant creature — whose
+entire API is three names registered by hand. Those three are called
+**363 times** across ten shipped merchant scripts and appear nowhere in
+`simkin_native_bindings.json`, because nothing ever inserts them into a
+trie.
+
+Two consequences worth carrying:
+
+- **A name absent from the 703 is not automatically a script-level
+  handler.** `SIMKIN_NATIVE_API.md` used that inference for
+  `GetOpener()`'s residual (correctly — those really are handler
+  declarations in the placed object's own `.s`) and
+  `player_executable.cpp` used it for `MoveToOtherQueue` /
+  `RemoveItemFromQueue` (still correct — both are genuinely absent from
+  the image). But the inference needs the extra step this pass did for
+  `AddProduct`: search the **image's string data** for the literal, and
+  see whether anything references it. `AddProduct`, `ClearProducts` and
+  `ReducePrices` are all there, at `0x100b4224`, `0x100b4258` and
+  `0x100b423c`, referenced from exactly one function each.
+- **The enumeration script cannot find these.** It decompiles the 28
+  registration functions and regexes their `SimKinNameTrie_Insert` calls;
+  a `wcscmp` chain in a dispatcher is invisible to it. Whether other
+  classes have their own such layer was not surveyed — the three found
+  here were reached from the other end, by asking what a shipped script
+  calls that nothing implements.
 
 ## Labels applied / tools
 
