@@ -192,6 +192,38 @@ public:
     void RequestQuit() { m_QuitRequested = true; }
     bool quitRequested() const { return m_QuitRequested; }
 
+    // M54: `QuitToMenu()` -- GameEngine root binding index 0x33, the
+    // *other* thing a real "Quit" row can mean. RequestQuit() above is
+    // `QuitGame()`, which ends the process; this one ends the current
+    // *session* and returns to mainmenu.s, and it is what deathmenu.s,
+    // gameended.s, mainmenu.s's End Game confirmation, mpdeathmenu.s and
+    // saveconfirm.s's save-then-quit chain all actually call.
+    //
+    // In the real engine it is screen mode **0x1f** (docs/RENDER_LOOP.md's
+    // "Screen mode 0x1f"): the controller's own vtable slot +0x3c spawns
+    // the `nGEN_Quitting` background thread, which tears the level down,
+    // loads the `menu` pseudo-level's manifests and opens MainMenu behind
+    // the same progress bar a zone load uses -- so the host renders a
+    // progress screen for it too, and only then does the teardown. Same
+    // request/latch shape as RequestGameStart().
+    void RequestQuitToMenu() { m_QuitToMenuRequested = true; }
+    bool quitToMenuRequested() const { return m_QuitToMenuRequested; }
+    void ClearQuitToMenuRequest() { m_QuitToMenuRequested = false; }
+
+    // M54: `QuitAfterSave()` / `SetQuitAfterSave(b)` -- GameEngine root
+    // bindings 0x37 and 0x38, and the one piece of state that carries a
+    // "quit" intent across a menu boundary. mainmenu.s's and gameended.s's
+    // End Game rows arm it and then send the player to SaveGameMenu;
+    // saveconfirm.s's MenuDoneSave reads it back once the write has
+    // finished and calls QuitToMenu() instead of a plain Quit(). Both
+    // scripts soft-failed here before, so choosing "save first" left the
+    // player sitting on the save screen with the session still running.
+    // Global rather than per-menu for the same reason muteOnCall is: the
+    // two screens that set and read it are different objects, and the one
+    // that reads it is rebuilt on every visit.
+    bool quitAfterSave() const { return m_QuitAfterSave; }
+    void SetQuitAfterSave(bool quit) { m_QuitAfterSave = quit; }
+
     // Set by MenuExecutable's NewGame()/LoadGame() handlers -- main.cpp
     // checks this each tick and, when set, switches from menu mode into
     // the 3D zone renderer (render3d/zone_renderer.h). Only "azra" (the
@@ -259,6 +291,8 @@ private:
     std::string m_SaveDir = ".";
     std::string m_CurrentLevel;
     bool m_QuitRequested = false;
+    bool m_QuitToMenuRequested = false;  // M54: see quitToMenuRequested() above
+    bool m_QuitAfterSave = false;        // M54: see quitAfterSave() above
     bool m_CreditsActive = false;
     std::vector<std::string> m_CreditsLines;
     bool m_GameStartRequested = false;

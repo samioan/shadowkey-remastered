@@ -197,6 +197,181 @@ actual vtable it points at and lists the first N entries as (offset,
 target address, function name if Ghidra already knows it). This is how
 `ScreenModeController`'s vtable at `0x100fb908` was found and read.
 
+## Screen mode 0x1f: quitting to the main menu (M54)
+
+`ScreenModeController + 0x78` is the screen mode. M26 found that the
+progress bar (`FUN_1002c010`, the controller's own vtable slot `+0x44`) is
+drawn for four of them; M42 named three by walking `SetScreenMode`'s
+(`FUN_1006a344`) call sites, and M44 ruled out the remaining lead by
+showing that `0x1f` is not one of the fade-arming function's deferred
+targets either. It is neither, because **nothing passes it to anything**:
+
+```c
+/* FUN_10026f40 -- ScreenModeController vtable slot +0x3c */
+iVar1 = RThread::Create(&this->quitThread, name /* "nGEN_Quitting" */,
+                        FUN_10027ce0, 0x6400, 0, &this->self, 0);
+if (iVar1 == 0) {
+    this->busy = 1;
+    this->threadRunning = 1;
+    *(int *)(this->engine->controller + 0x78) = 0x1f;   /* <- here */
+    RThread::SetPriority(&this->quitThread, EPriorityMuchLess);
+    RThread::Resume(&this->quitThread);
+    ...
+}
+```
+
+The mode is written **straight into the field**, beside the `RThread`
+that does the work. That is why every search for it as an argument came
+back empty, and why the caller search came back empty too: slot `+0x3c`
+is a three-instruction thunk at `0x1006c268` that Ghidra never marked as
+a function at all, so it appears in no call graph.
+
+```asm
+1006c268  LDR r3, [r0, #0x14]   ; controller->engine
+1006c26c  LDR r0, [r3, #8]      ; engine->appview
+1006c270  B   FUN_10026f40      ; spawn nGEN_Quitting
+```
+
+It is slot `+0x3c` in both the concrete `ScreenModeController` vtable
+(`0x100fb908`) and its base (`0x100fe574`), one slot below the level
+changer (`+0x2c`, `FUN_1006c31c`, mode **3**) and two below the bar draw
+(`+0x44`).
+
+### Two background threads, one progress bar
+
+There are exactly two named threads in the whole image, and they are a
+symmetric pair:
+
+| | loading | quitting |
+|---|---|---|
+| thread name | `nGEN_Loading` | `nGEN_Quitting` |
+| spawner | `FUN_10027d44` | `FUN_10026f40` |
+| entry point | `FUN_10027d0c` | `FUN_10027ce0` |
+| body | `GameEngine_InitLevel` | `FUN_1002707c` |
+| closing log line | `"Loading thread closed"` | `"Quitting thread closed"` |
+| screen mode | set by the caller (3 or 10) | set by the spawner (**0x1f**) |
+| progress values | 0, 3, 5, …, 98, 100 | 4, 15, 22, 30, 40, 80, 100 |
+
+Both write the same counter (`appview+0x408`, whose setter is
+`FUN_10027e34`), and that counter is exactly what the bar samples — the
+draw call in `FUN_10029cb0` passes it in as argument 6:
+
+```c
+if (mode == 10 || mode == 3 || mode == 0x1f || mode == 4) {
+    Blit_RLESprite(engine, fb, 0, 0, engine->sprites[174], ...);   /* splash */
+    (**(vt + 0x44))(ctrl, 0, 0, 0, 0, appview->progress, 0);        /* the bar */
+    if (mode == 10 || mode == 3) { /* "Travel to: <zone>" */ }
+    if (engine->inMultiplayer && engine->messagePending) { /* see below */ }
+}
+```
+
+Two details worth keeping. The banner is nested *inside* the gate, under
+`mode == 10 || mode == 3` only — the two that travel to a named zone — so
+a save and a quit show the bar over the bare splash. And the sub-dispatch
+one line above the gate is `if (mode < 0x25 && 0x1f < mode)
+FUN_1002bdf4(...)`, the vignette's own per-frame tick: `0x1f` sits one
+below that run and is deliberately excluded from it, which is why M44's
+"the vignette run beginning one above it" lead went nowhere.
+
+### What the quitting thread actually does
+
+`FUN_1002707c`, in order, with its progress writes:
+
+| progress | work |
+|---|---|
+| 4 | stop the level's audio (`FUN_100096b8(snd, 5)`, `FUN_100094ac(snd, 0)`) |
+| 15 | engine-side teardown (`FUN_1000e3c4(engine, 0, 0)`, `FUN_1000e5c8`) |
+| 22 | `FUN_10023910(this, 1)` — free every loaded asset; then queue the `menu` sound set (`FUN_100092f4(snd, "menu")`) |
+| 30 | clear the multiplayer flags, stop the world object (`world->vtable[0x178](world, 0, 0)`) |
+| 40 | `FUN_10024c8c(this, "menu")` — load the `menu` sprite manifest |
+| 80 | `FUN_1001b180(engine, 70, 100, 0xff)` — start the front-end music |
+| 100 | `FUN_100779b8(ctrl->interp, "MainMenu", 0, 0)` — open mainmenu.s |
+
+then `if (mode != 0xb) mode = 1;`, logs `"Quitting thread closed"` and
+kills its own `RThread`.
+
+Three of those resolve things this port had only half-named:
+
+- **`FUN_10023910` is `UnloadLevelAssets`.** It frees all 384 `global.spr`
+  slots at `engine+0x4460`, all 256 model slots at `engine+0x6b38`, and
+  several other caches — **except slots `0xcd` and `0xce`**, which it
+  skips by index. `0x4460 + 205*4 = 0x4794` and `+ 206*4 = 0x4798` are
+  exactly the two pointers `FUN_1002c010` reads. The progress bar's own
+  art is the one thing a level unload is not allowed to throw away, which
+  is what lets the bar keep drawing on a screen where nothing else is
+  loaded any more.
+- **`FUN_10024c8c` is the `<level>_sprites.txt` manifest loader** —
+  `sprintf("%s\\%s_sprites.txt", dataDir, level)`, `strtok` on newlines,
+  `atoi` each line, and pull that slot out of `global.spr` (whose per-slot
+  size table it caches at `this+0x388` on first use). It has a dead
+  `strcmp(level, "menu")` whose `CMP r0, #0` at `0x10024cf0` nothing
+  consumes — a special case that was removed but not deleted.
+- **`"menu"` is a real pseudo-level.** It ships `menu_sprites.txt`,
+  `menu_models.txt` and `menu_sounds.txt` but no `.zon`, `.ent` or `.zmp`:
+  a manifest set, not a place. Slot 70 in `menu_sounds.txt` is
+  `battle3.ogg`, the only non-`NULL.wav` music entry in it — so the
+  progress-80 `FUN_1001b180(engine, 0x46, 100, 0xff)` is the main menu's
+  own theme starting up.
+
+### Where it is called from, and what it is called
+
+Slot `+0x3c` has three callers:
+
+1. **`FUN_10078de4` case `0x33`** — the GameEngine root SimKin dispatcher.
+   The registration pass names index `0x33` on the root trie (`0x14cf0`)
+   **`QuitToMenu`**, and the three consecutive cases confirm each other:
+   `0x32` `Quit` sets mode 5, `0x33` `QuitToMenu` calls this slot, `0x34`
+   `QuitGame` ends the process. The case first clears `engine+0x14a81`,
+   the pending-message flag below.
+2. **`FUN_1004fc50`**, the screen fade, when its deferred target
+   (`engine+0x5ac`) is `0xb` — a fade straight into a session end.
+3. **`FUN_1003627c`**, twice, on the multiplayer paths that lose the
+   session out from under the player.
+
+Seven shipped scripts call `QuitToMenu()`: `deathmenu.s`'s
+`DeathMenuBack` and `mpdeathmenu.s`'s `MPDeathMenuBack` (both with a
+`//QuitGame();` left commented out on the line above the call that
+replaced it), `gameended.s`'s and `mainmenu.s`'s `CancelEndGame`,
+`saveconfirm.s`'s `MenuDoneSave`, and `savegamecorrupted.s` /
+`savegamenospace.s`, which name it as a menu row's handler outright
+(`AddMenuItem(3591, "QuitToMenu")` — string 3591 is "Exit").
+
+Two of those call something else in the *same* handler right afterwards
+(`QuitToMenu(); OnDisplay();` and `QuitToMenu(); Init();`), which only
+works because the native does not block: it hands the teardown to the
+thread and returns at once.
+
+### The one thing the 0x1f screen draws that a zone load does not
+
+```c
+if (engine->inMultiplayer /* +0x5c0 */ && engine->messagePending /* +0x14a81 */) {
+    DrawWrappedText(app, engine + 0x14a82, 0, 0x6e, 0xb0, 0x3c, white, ..., font 0x19);
+}
+```
+
+`engine+0x14a82` is a wide-string buffer filled just before the quit is
+triggered, and every writer of it is a multiplayer path. The two constant
+messages come from the string table: `+0x3b8c` is id **3811**
+`"Connection lost"` (Bluetooth dropped) and `+0x3fc4` is id **4081**
+`"Game terminated by the host "`. So the quit screen doubles as the
+"here is why your session just ended" screen — and only ever in
+multiplayer.
+
+> The string-table offsets are plain indices: `offset / 4`. M26 already
+> knew id 3950 is `"Travel to: "`, and `0x3db8 / 4 == 3950` exactly, with
+> `0x3fc4 / 4 == 4081` landing on the last of the table's 4082 entries.
+
+### Implemented in the port
+
+`port/src/engine/screen_mode.h` holds the recovered table (which modes
+draw the bar, which of those draw the banner, both progress lists, the
+reserved sprite slots, the front-end level name and music slot);
+`MenuStack::RequestQuitToMenu()` and `MenuExecutable`'s `QuitToMenu` /
+`QuitAfterSave` / `SetQuitAfterSave` handlers implement the natives; and
+`main.cpp` renders the mode-0x1f screen on the quit stage list before
+tearing the session down and reopening MainMenu. Smoke test
+`src/tests/m54_quit_to_menu_smoke.cpp`.
+
 ## Open follow-ups
 
 - ~~Explore the `0x1006Bxxx`–`0x1006Dxxx` cluster~~ — done, see

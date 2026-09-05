@@ -415,3 +415,8 @@ target_link_libraries(save_fields_smoke PRIVATE sk_save sk_world)
 # src/tests/m53_script_delay_smoke.cpp.
 add_executable(script_delay_smoke src/tests/m53_script_delay_smoke.cpp)
 target_link_libraries(script_delay_smoke PRIVATE sk_bindings sk_world)
+
+# Screen mode 0x1f -- QuitToMenu() -- and the rest of the screen-mode
+# table it completes. See src/tests/m54_quit_to_menu_smoke.cpp.
+add_executable(quit_to_menu_smoke src/tests/m54_quit_to_menu_smoke.cpp)
+target_link_libraries(quit_to_menu_smoke PRIVATE sk_bindings sk_world)

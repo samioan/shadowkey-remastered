@@ -2953,6 +2953,10 @@ algorithms.
       (`FUN_1004fc50`) calls `SetScreenMode` with a *deferred* target
       stored at `engine+0x5ac`, so that mode need never appear as a
       literal at any call site.
+      > **Closed by M54** (below): `0x1f` is "quit to the main menu", and
+      > the deferred-fade theory was the wrong lead. `FUN_10026f40` writes
+      > the value directly into `controller+0x78` as it spawns the
+      > `nGEN_Quitting` thread, so it is not an argument to anything.
     - **Correction: `FUN_10018e70` is the save-game writer, not a
       crash/error display.** `docs/WORLD_MODEL.md` had it as the latter
       since the first pass over the `0x1006Bxxx` cluster, and that made
@@ -3249,6 +3253,11 @@ algorithms.
       vignette's `0x20..0x24` run. **0x1f is in none of them**, so that
       mode is not any fade target; the vignette run starting one above it
       is the nearest thing to a lead.
+      > **Closed by M54** (below). The negative result held -- `0x1f` is
+      > not a fade target -- but the vignette lead was a false one: the
+      > run starting one above it is `0x1f`'s *neighbour*, not its
+      > relative, and the real dispatch (`mode < 0x25 && 0x1f < mode`)
+      > excludes `0x1f` by exactly one.
 
     - **Still not implemented: encounter spawning.** The Encounter object
       model (sets, per-region limits, respawn) has been in place since
@@ -4201,22 +4210,110 @@ algorithms.
       in the tick loop, the clock reset on zone load, and pickups added to
       the `GetEntity` registry.
 
+- [x] **M54 -- screen mode `0x1f` is "quit to the main menu".** The last
+  of the four states that reach `FUN_1002c010`, and the last open item on
+  the screen-mode table M26 opened, M42 narrowed and M44 dead-ended. Full
+  RE writeup in [`docs/RENDER_LOOP.md`](RENDER_LOOP.md) ("Screen mode
+  0x1f"); smoke test `src/tests/m54_quit_to_menu_smoke.cpp` (31 checks).
+
+    - **Why three passes missed it: nothing passes the value to
+      anything.** `FUN_10026f40` writes `0x1f` *straight into*
+      `controller+0x78` on the line where it spawns a background
+      `RThread`, so it is neither a `SetScreenMode` argument (M42's
+      search) nor a deferred fade target (M44's). And the caller search
+      failed for a second, independent reason: the function that calls it
+      is a **three-instruction thunk at `0x1006c268` Ghidra never marked
+      as a function**, so it appears in no call graph. It is
+      `ScreenModeController` vtable slot **`+0x3c`**, in both the concrete
+      vtable (`0x100fb908`) and its base (`0x100fe574`) -- one slot below
+      the level changer (`+0x2c`, mode 3) and two below the bar draw
+      (`+0x44`).
+
+    - **The two background threads are a symmetric pair.** There are
+      exactly two named threads in the image: `nGEN_Loading`
+      (`FUN_10027d44` -> `GameEngine_InitLevel`, mode 3 or 10) and
+      **`nGEN_Quitting`** (`FUN_10026f40` -> `FUN_1002707c`, mode
+      `0x1f`), each with its own closing log line. Both write the *same*
+      progress counter (`appview+0x408`), which is exactly the value
+      `FUN_10029cb0` hands the bar -- so a quit fills the same bar a zone
+      load does, on its own seven-stage list (4, 15, 22, 30, 40, 80, 100)
+      rather than loading's twenty-three.
+
+    - **The banner is not part of the gate.** `FUN_10029cb0` draws the bar
+      for `mode == 3 || 4 || 10 || 0x1f`, but nests the "Travel to:
+      `<zone>`" text one level deeper under `mode == 10 || mode == 3`
+      only -- the two that travel to a named zone. A save and a quit show
+      the bar over the bare splash. (M26's own note in `main.cpp` that
+      this was "undetermined" is now corrected.) The vignette's per-frame
+      sub-dispatch immediately above is `mode < 0x25 && 0x1f < mode`, so
+      `0x1f` is deliberately *excluded* from the run beginning one above
+      it -- which is why M44's last lead went nowhere.
+
+    - **`FUN_10023910` is `UnloadLevelAssets`, and it proves the mode.**
+      It frees all 384 `global.spr` slots at `engine+0x4460` and all 256
+      model slots at `engine+0x6b38` -- **except slots `0xcd` and
+      `0xce`**, skipped by index. `0x4460 + 205*4 = 0x4794` and
+      `+ 206*4 = 0x4798` are precisely the two pointers `FUN_1002c010`
+      reads. The progress bar's own art is the one thing a level unload
+      may not throw away, which is what lets the bar keep drawing on a
+      screen where nothing else is loaded any more.
+
+    - **`"menu"` is a real pseudo-level.** The quit thread calls
+      `FUN_10024c8c(this, "menu")` -- now identified as the
+      `<level>_sprites.txt` manifest loader -- and `menu` ships
+      `menu_sprites.txt`/`_models.txt`/`_sounds.txt` but no `.zon`,
+      `.ent` or `.zmp`. Slot 70 in `menu_sounds.txt` is `battle3.ogg`,
+      its only non-`NULL.wav` music entry, so the progress-80
+      `FUN_1001b180(engine, 0x46, 100, 0xff)` is the main menu theme
+      starting. `FUN_10024c8c` also carries a dead `strcmp(level,
+      "menu")` whose `CMP` at `0x10024cf0` nothing consumes.
+
+    - **The script-visible name is `QuitToMenu()`**, GameEngine root
+      binding index `0x33` -- and the three consecutive cases in
+      `FUN_10078de4` confirm each other outright: `0x32` `Quit` sets mode
+      5, `0x33` `QuitToMenu` calls slot `+0x3c`, `0x34` `QuitGame` ends
+      the process. **Seven shipped scripts call it** (`deathmenu.s`,
+      `mpdeathmenu.s`, `gameended.s`, `mainmenu.s`'s End Game
+      confirmation, `saveconfirm.s`'s save-then-quit chain, and
+      `savegamecorrupted.s`/`savegamenospace.s`, which name it as a menu
+      row's handler outright). This port implemented `QuitGame()` and
+      never `QuitToMenu()`, so **every one of those rows did nothing** --
+      dying and choosing "back" included.
+
+    - **The 0x1f screen has one decoration a zone load does not**: a
+      wrapped message at `engine+0x14a82`, drawn only when
+      `engine+0x5c0` (a live Bluetooth session) is set. Every writer of it
+      is a multiplayer path, and its two constant messages are string
+      **3811** "Connection lost" and **4081** "Game terminated by the
+      host ". The quit screen doubles as the "why your session ended"
+      screen -- and only in multiplayer. (Incidentally this pins the
+      string-table addressing for good: the offsets are plain `index * 4`,
+      and M26's known id 3950 "Travel to: " sits at `+0x3db8`.)
+
+    - **Wired up in the port**: `engine/screen_mode.h` holds the recovered
+      table (bar gate, banner gate, both progress lists, the two reserved
+      sprite slots, the front-end level name and music slot) so it is
+      testable outside the windowed loop; `main.cpp` renders the mode-0x1f
+      screen on the real quit stage list and only then tears the session
+      down -- scripts, entities, zone, region occupancy, timers, viewmodel
+      -- reloads the `menu` manifests and reopens MainMenu.
+      `MenuStack::RequestQuitToMenu()` keeps it a *request*, which two
+      shipped scripts depend on (`QuitToMenu(); OnDisplay();` only works
+      because the real native hands off to a thread and returns).
+
+    - **Also implemented, found by the test**: `QuitAfterSave()` /
+      `SetQuitAfterSave(b)` (root bindings `0x37`/`0x38`) were
+      soft-failing. They are the flag that carries the quit intent across
+      the save screen: `mainmenu.s`/`gameended.s` arm it before sending
+      the player to SaveGameMenu, and `saveconfirm.s`'s `MenuDoneSave`
+      reads it back and calls `QuitToMenu()` instead of `Quit()`. Without
+      it, "End Game -> save first" left the player on the save screen with
+      the session still running.
+
 ## Next milestones (not yet started)
 
 Roughly in priority order for reaching "actually playable," not commitments:
 
-- **Which scenario `FUN_1002c010`'s mode 0x1f means.** M42 identified the
-  other three (3 = zone travel, 4 = saving, 10 = loading a saved game) plus
-  1 and 5, by walking `SetScreenMode`'s call sites. 0x1f never appears as a
-  literal argument, and M42 found why: the screen fade (`FUN_1004fc50`)
-  calls `SetScreenMode` with a deferred target read from `engine+0x5ac`,
-  so whoever arms that fade is where the value comes from.
-  **M44 found the arming function and closed that avenue**:
-  `FUN_1001b788(engine, mode, flag)` writes `engine+0x5ac`, and its
-  complete call-site set is `1`, `5`, `0xc`, `0x20`, the attract
-  slideshow's `1..0x10` run and the vignette's `0x20..0x24` run. 0x1f is
-  in none of them, so it is not a fade target either. The vignette run
-  beginning one above it is the only remaining lead.
 - **Two fields in an entity that nothing names** -- `+0x8c` and `+0x92`.
   M52 named every other scalar in the save record; these two are zeroed by
   the Entity constructor, carried by the save format, and read by no code

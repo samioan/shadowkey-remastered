@@ -31,6 +31,7 @@
 #include "engine/game_clock.h"
 #include "engine/input_state.h"
 #include "engine/pc_key_map.h"
+#include "engine/screen_mode.h"
 #include "graphics/backbuffer.h"
 #include "graphics/bitmap_font.h"
 #include "platform/win32/console_tee.h"
@@ -929,17 +930,27 @@ std::string ZoneDisplayName(const sk::StringTable& strings, const std::string& z
 // 3950 "Travel to: " concatenated with a real per-zone display name,
 // ZoneDisplayName() above).
 //
+// M54 resolves the last of the four states that reach this draw. The gate
+// really is `mode == 3 || mode == 4 || mode == 10 || mode == 0x1f`, and
+// all four are now named: **3** = zone travel, **4** = saving, **10** =
+// loading a saved game, **0x1f** = quit to the main menu. The banner is
+// *not* drawn for all four -- the real code draws it under
+// `mode == 10 || mode == 3` only, i.e. exactly the two that travel to a
+// named zone -- so callers pass an empty string for the other two, which
+// is what the quit-to-menu screen below does. The percentage the bar
+// samples is the one counter both background threads write
+// (`appview+0x408`), so a save and a quit fill the same bar a zone load
+// does, just with their own stage lists.
+//
 // **Not decompiled, this port's own choice**: this port's zone loading is
 // synchronous (main.cpp's zone-load block runs to completion in a single
 // tick, not on a real background thread), so there's no live progress to
 // sample -- `percent` here steps through the real documented stage list
 // on a fixed per-tick schedule purely for visual continuity with the real
-// screen, not a measurement of actual work done. Exact screen position of
-// the "Travel to" text, and which of the real engine's 4 observed trigger
-// states (3/4/10/0x1f) maps to which real scenario, are likewise
-// undetermined -- this port shows the banner for every zone change after
-// the first (the first uses "Loading..." instead, string 3820) as the
-// best-evidenced substitute.
+// screen, not a measurement of actual work done. The exact screen
+// position of the "Travel to" text is likewise undetermined; this port
+// shows the banner for every zone change after the first (the first uses
+// "Loading..." instead, string 3820) as the best-evidenced substitute.
 void RenderLoadingScreen(sk::Backbuffer& backbuffer, sk::SpriteArchive& sprites,
                           const std::string& text, int percent) {
     const sk::Sprite* splash = sprites.GetSprite(174);
@@ -1320,6 +1331,13 @@ int main(int argc, char** argv) {
     // when the request came in) and every later "Travel to: <zone>" one.
     bool loadingScreenActive = false;
     int loadingScreenTick = 0;
+    // M54: the same screen for screen mode 0x1f -- a script's own
+    // QuitToMenu(). Separate latch from the loading screen's because the
+    // two mean opposite things (one is entering a session, the other is
+    // ending one) and the real engine keeps them apart the same way, in
+    // two different background threads.
+    bool quitToMenuActive = false;
+    int quitToMenuTick = 0;
     // M44: `Level.Vignette(n)` -- see RenderVignette().
     sk_bindings::LevelExecutable::VignetteDefinition vignetteDef;
     bool vignetteActive = false;
@@ -1402,6 +1420,83 @@ int main(int argc, char** argv) {
             return;
         }
 
+        // M54: `QuitToMenu()` -- screen mode 0x1f, the last of the four
+        // states that reach RenderLoadingScreen(). See
+        // docs/RENDER_LOOP.md's "Screen mode 0x1f" for the full writeup.
+        //
+        // The real one hands the work to the `nGEN_Quitting` background
+        // thread (`FUN_10026f40` spawns it and writes the mode straight
+        // into `controller+0x78`, which is why the value never appears as
+        // an argument anywhere), and that thread does, in order: stop the
+        // music, free every loaded asset except the two sprite slots the
+        // progress bar itself is drawn from, tell the world object to shut
+        // down, load the `menu` pseudo-level's manifests, and open
+        // MainMenu -- writing 4, 15, 22, 30, 40, 80, 100 into the shared
+        // progress counter as it goes. Those seven really are the stages;
+        // the fixed per-tick schedule they are stepped on here is this
+        // port's own choice, exactly as for the zone-load list below,
+        // since the teardown underneath is synchronous and instant.
+        //
+        // No banner: the real draw gates that on `mode == 3 || mode == 10`
+        // and a quit travels to no named zone.
+        if (stack.quitToMenuRequested() && !quitToMenuActive) {
+            quitToMenuActive = true;
+            quitToMenuTick = 0;
+            stack.ClearQuitToMenuRequest();
+        }
+        if (quitToMenuActive) {
+            RenderLoadingScreen(
+                backbuffer, spriteArchive, std::string(),
+                sk::kQuitProgressStages[(std::min)(quitToMenuTick,
+                                                    sk::kQuitProgressStageCount - 1)]);
+            window.Present(backbuffer);
+            ++quitToMenuTick;
+            if (quitToMenuTick <= sk::kQuitProgressStageCount) return;
+            quitToMenuActive = false;
+
+            // The teardown itself, in the real thread's own order. Scripts
+            // first: a zone script, a monster and a pickup all hold raw
+            // pointers into the zone and into each other, so nothing may
+            // outlive it.
+            gameZoneScript.reset();
+            gameMonsters.clear();
+            gameDoors.clear();
+            gamePickups.clear();
+            gameTraps.clear();
+            gameTrapCandidates.clear();
+            gameProjectiles.clear();
+            gameArrows.clear();
+            gameEntities.clear();
+            stack.level().ClearEntities();
+            gameRegionsOccupied.clear();
+            gameZoneRegions.SetZone(nullptr);
+            gameZone.reset();
+            stack.SetCurrentLevelName(std::string());
+            // Same reset the zone-load block does, for the same reason --
+            // FUN_1002fca4 zeroes the script clock whenever the level goes.
+            stack.gameClock().Reset();
+            gameCastCooldown = sk_bindings::SpellCastCooldown{};
+            gameClockUnits = 0;
+            gamePlayerPeriodicKind = 0;
+            gameWeaponViewmodel = sk_bindings::WeaponViewmodel{};
+            gameVelZ = 0.0f;
+            onGround = true;
+            inGame = false;
+            gamePausedForMenu = false;
+            loadingScreenActive = false;
+
+            // `FUN_10024c8c(this, "menu")` -- the quit thread reloads the
+            // front end's own manifests by name. "menu" is a real
+            // pseudo-level: it ships menu_sprites.txt/_models.txt/
+            // _sounds.txt but no .zon or .ent, which is why nothing else
+            // in this port has ever loaded it as a zone.
+            spriteArchive.LoadCategory(scriptRoot, sk::kFrontEndLevelName);
+            soundArchive.LoadCategory(scriptRoot, sk::kFrontEndLevelName);
+            std::printf("shadowkey-port: QuitToMenu -- session torn down, back to MainMenu\n");
+            stack.OpenMenu("MainMenu");
+            return;
+        }
+
         // M44: a vignette takes over the whole screen until it ends, the
         // same way the loading screen below does -- the real one is a
         // screen mode, and a screen mode is exclusive. Armed by
@@ -1448,11 +1543,10 @@ int main(int argc, char** argv) {
             loadingScreenZoneName = stack.requestedZone();
         }
         if (loadingScreenActive) {
-            static constexpr int kLoadingStages[] = {0,  3,  5,  10, 12, 14, 22, 30, 40, 45, 50,
-                                                       55, 58, 60, 65, 70, 75, 85, 87, 90, 95, 98, 100};
-            constexpr int kNumStages =
-                static_cast<int>(sizeof(kLoadingStages) / sizeof(kLoadingStages[0]));
-            int percent = kLoadingStages[(std::min)(loadingScreenTick, kNumStages - 1)];
+            // M54: the stage list moved to engine/screen_mode.h, beside
+            // the quit screen's own and the mode table both belong to.
+            constexpr int kNumStages = sk::kLoadProgressStageCount;
+            int percent = sk::kLoadProgressStages[(std::min)(loadingScreenTick, kNumStages - 1)];
             std::string bannerText =
                 loadingScreenIsFirstZone
                     ? strings.Get(3820)  // "Loading..."

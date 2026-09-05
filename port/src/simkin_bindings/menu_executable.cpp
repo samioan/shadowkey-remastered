@@ -732,6 +732,38 @@ bool MenuExecutable::method(const skString& methodName, skRValueArray& args,
         m_Stack.RequestQuit();
         return true;
     }
+    // M54: the other half of that pair, and the one real scripts reach
+    // far more often -- GameEngine root binding index 0x33. `QuitGame()`
+    // above ends the process; `QuitToMenu()` ends the current game
+    // session and returns to mainmenu.s. Seven shipped scripts call it:
+    // deathmenu.s's DeathMenuBack (whose `//QuitGame();` sits commented
+    // out on the line right above the call that replaced it),
+    // gameended.s and mainmenu.s's CancelEndGame, mpdeathmenu.s,
+    // saveconfirm.s's MenuDoneSave (the "save first, then quit" chain
+    // SetQuitAfterSave arms), and savegamecorrupted.s/savegamenospace.s,
+    // which name it as a menu row's handler outright.
+    //
+    // Two of those -- mainmenu.s and gameended.s -- call something else
+    // in the *same* handler immediately afterwards (`QuitToMenu();
+    // OnDisplay();` and `QuitToMenu(); Init();`), which only works
+    // because the real native does not block: it hands the teardown to a
+    // background thread and returns at once. Recording a request and
+    // letting the host act on it next tick reproduces that, and is the
+    // same shape RequestGameStart()/RequestCloseMenu() already use.
+    if (methodName == skString("QuitToMenu") && args.entries() == 0) {
+        m_Stack.RequestQuitToMenu();
+        return true;
+    }
+    // M54: the flag that carries that intent across the save screen --
+    // GameEngine root bindings 0x37/0x38, see MenuStack::quitAfterSave().
+    if (methodName == skString("QuitAfterSave") && args.entries() == 0) {
+        returnValue = skRValue(m_Stack.quitAfterSave());
+        return true;
+    }
+    if (methodName == skString("SetQuitAfterSave") && args.entries() == 1) {
+        m_Stack.SetQuitAfterSave(args[0].boolValue());
+        return true;
+    }
     // M51: the two real music-fade bindings (GameEngine indices 11 and
     // 12, FUN_100090bc / FUN_1000915c), four real call sites in the whole
     // corpus: multiplayermenu.s fades the front-end track out on entry
