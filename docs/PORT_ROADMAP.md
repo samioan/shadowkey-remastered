@@ -5308,6 +5308,451 @@ algorithms.
       them yet.
 
 
+- [x] **M64 -- the `levelup.s` cluster, and the character system behind
+  it.** The bullet asked for four natives and eight setters. Following
+  `UpdateAttributes` one call deep turned up **the game's whole
+  race/class/level system**, none of which had been looked at: the
+  per-race starting attributes, the nine class rows, the experience
+  curve, and the two ability ranks every level raises.
+  `simkin_bindings/character_progression.h`/`.cpp` for the three tables,
+  four new methods on `PlayerExecutable`, and M58's one deliberately
+  unfinished branch closed. Smoke test
+  `src/tests/m64_level_up_smoke.cpp`, **142 checks**. Suite **57/57**,
+  soft-fails **39 -> 39**, `GetPlayer()` coverage **92% -> 94%** (42 more
+  handled call sites, 13 fewer unhandled names).
+
+    - **The character-creation stat system exists, and M10 said it did
+      not.** `player_executable.h` has carried this since M10: "Stat block
+      values are fixed, documented placeholders (strength=50 etc.) -- no
+      character-creation stat-rolling system exists (M5's race/class
+      picker doesn't feed into these), so there was nothing to derive them
+      from." There is one. `chooseportraitmenu.s`'s two handlers each end
+      `GetPlayer().UpdateAttributes(true)`, and that native
+      (`FUN_1001fc24`) is an eight-arm switch on the race, each arm
+      branching on the sex, writing all eight attributes from a table of
+      30 / 40 / 50. The picker did feed into them; nothing had followed
+      the call.
+
+      The mapping is confirmed by the series' own lore, which is what
+      rules out an off-by-one: Nord strength 50, Breton intelligence *and*
+      willpower 50, Redguard endurance 50, Khajiit agility 50, Dark Elf
+      speed 50, Wood Elf agility and speed 50, High Elf intelligence and
+      personality 50 -- and High Elf is separately the one race that gains
+      magicka per level.
+
+    - **Two of the sixteen rows are unbalanced, and they are real.** Six
+      races total exactly 310 points whichever sex is picked -- the sex
+      branch is a pure swap. Two are not: an **Argonian male totals 330**
+      against the female's 310, and a **High Elf totals 320 male / 330
+      female**, both above everyone else's 310. Verified in the ARM
+      disassembly, not just the decompiler's C, precisely because six
+      clean rows make the other two look like a transcription error. They
+      are not; the jump table's arms really do write those values, and
+      nothing downstream rebalances them.
+
+    - **`UpdateAttributes` is two functions sharing a name**, selected by
+      the character's *current* level, which is why `ChooseCharacter`'s
+      third line (`player+0x3e0 = 1`, the level) is load-bearing and why
+      this port had to start reproducing it. At level 1 it seeds the
+      attributes and refills all three pools; above level 1 it skips the
+      table entirely and instead raises two ability ranks, rescales the
+      magicka bonus, and refills only if asked. `levelup.s`'s back key
+      passes false, `chooseportraitmenu.s` passes true, and that single
+      boolean is the whole difference between the two callers.
+
+    - **Every level-up counts twice.** The rank increments are
+      unconditional in the above-level-1 path, so they count
+      *UpdateAttributes calls*, not levels -- and a real level-up makes
+      two of them: `FUN_10044618` (the award) calls it, then the player
+      closes the screen and `LevelUpBack` calls it again. So a character
+      who gains one level comes out two ranks higher, and a High Elf
+      collects the racial +5 magicka twice. Nothing debounces it.
+      Reproduced and asserted in the test rather than tidied up.
+
+    - **M58's one open branch, closed.** `effects.cpp`'s
+      `RecomputeDerivedStats` carried "the real player branch adds two
+      fields at player+0xfb8/+0xfba and returns early -- without writing
+      max magicka at all -- when the character's class row says the class
+      has none. This port has neither the class table nor those two
+      fields." This milestone supplies both, via two new `SpellActor`
+      virtuals whose defaults keep the creature arm exactly as it was.
+      The early return is the interesting half: max health and max fatigue
+      are *already written* by the time it fires, so a non-caster's
+      recompute is a partial one, and its max magicka keeps whatever was
+      last put there rather than being zeroed. The test proves that by
+      writing max magicka through the effect table and watching a
+      `SetEndurance` move health while leaving magicka alone.
+
+    - **`HasMagic` and the magicka growth are different sets of classes.**
+      The class table (`FUN_1001f9ac`, nine 0x10-byte rows built field by
+      field in code) has a `+6` byte the `HasMagic` native returns
+      directly: Battlemage, Nightblade, Spellsword, Sorcerer. The growth
+      switch inside `UpdateAttributes` has arms for Battlemage,
+      Nightblade and Sorcerer only. **A Spellsword has magic and no
+      growth arm**, so its pool is its intelligence at level 1 and its
+      intelligence at level 40. Battlemage's and Sorcerer's arms are two
+      separate code paths computing the identical `0x26` -- the compiler
+      folded the constant differently in each -- so they are not merely
+      similar, they are the same number, which makes the Spellsword's
+      absence look like an omission rather than a tuning choice. Recorded,
+      not corrected.
+
+    - **The experience curve is the triangular numbers.** `AddExperience`
+      (`FUN_1004a104`) is also the level-up trigger, and it is the only
+      thing in the shipped game that awards a level-up point outside
+      `cheatmenu.s`'s `LevelUp()` -- which is what makes the whole screen
+      reachable. Its threshold is a per-class base (900 Thief/Barbarian,
+      1000 Knight/Nightblade/Rogue, 1100 Assassin/Spellsword, 1200
+      Battlemage/Sorcerer) times a 99-entry `u16` table, and reading that
+      table out of the binary gives 1, 3, 6, 10, 15 ... 4950: `n(n+1)/2`
+      for all 99 entries, so it is reproduced as the closed form rather
+      than as 198 bytes of data. Three quirks came with it and are all
+      reproduced: the test is strictly greater (exactly the threshold does
+      not level), **only one level per call** however large the award, and
+      the amount is converted through a 16-bit read on the way in, so
+      `StatModXP(40000)` banks -25536.
+
+    - **`SetSpeed` is the one setter that does not recompute.** Seven of
+      the eight attribute setters end `b 0x10048d50`, a shared
+      `mov r0, r6 / bl 0x10049698` tail; `SetSpeed` ends `b 0x10048428`,
+      straight to the epilogue. Checked in the disassembly because it is
+      exactly the kind of distinction a decompiler flattens. Speed feeds
+      none of the three derived maxima, so on its own it changes nothing
+      -- it is observable only as a *missed* recompute, which is how the
+      test catches it: move strength behind the recompute's back, then
+      watch `SetSpeed` leave the stale maximum and any other setter fix
+      it.
+
+    - **`GetSpecialAbility` and `GetRaceAbility` were returning the wrong
+      type.** Both answered the string `"None"`. Both real cases return an
+      **int** -- the class rank at `player+0xfb0` and the race rank at
+      `+0xfb4`, the same two words `UpdateAttributes` raises --  and
+      `statsscreen.s` writes `""#GetPlayer().GetSpecialAbility()`,
+      string-concatenating a number. Their setters were missing entirely;
+      three guild-training conversations and `crypt2/shadowgate.s` use
+      them to sell a rank outright. Neither getter reads its argument
+      count in the engine, which matters because
+      `dstar_e/join_thief_guild.s` calls `GetSpecialAbility(val)` with a
+      stray argument -- so neither checks it here.
+
+    - **A menu-layout constant this port had guessed, now decompiled.**
+      `levelup.s` line 20 is `SetStartCoord(10)`, its only unhandled
+      native and the corpus's **only** call to it. It writes `menu+0x96`,
+      which is the y the real menu draw (`FUN_10076b64`) starts its row
+      cursor at -- and the menu constructor seeds that field with `0x32`.
+      main.cpp had `menu.backgroundId() == 69 ? 50 : 8` with a comment
+      saying the 50 was measured off a screenshot because "no native
+      y-offset call exists". The 50 was right and the reasoning was not:
+      it is every menu's default, not the main menu's logo art. Now
+      `menu.startCoord()`. `AddTitle` appends to the same row list the
+      draw walks, so the title sits at the start coordinate too, which is
+      the shape this port already had. **Not screenshot-verified** -- it
+      moves every non-main menu's list down 42 pixels, the largest visible
+      change in this milestone.
+
+    - **`DisplayLevelUp` is how the screen opens**, and no script calls
+      it: the six `Display*` natives are the character-manager menu's, and
+      five of them hand a screen-mode number to one shared setter while
+      this one calls `FUN_1002c274(controller, 8)` directly. Implemented
+      so `levelup.s` is reachable at all; the engine-side trigger that
+      raises it (`FUN_1002f694` gates on `levelUpPoints < 1`) is a HUD
+      prompt this port does not have.
+
+    - **Five save words that had slots and nothing to put in them.** M50
+      and M52 recovered `+0xf44`, `+0xfb0`, `+0xfb4`, `+0xfb8`, `+0xfba`
+      and the class byte into `SavedPlayer`; every one of them was being
+      written as a hard zero. All five round-trip now. The class matters
+      most: it is what every derived number is computed from, so a save
+      that dropped it came back as `FUN_1003d670`'s default Battlemage
+      wearing someone else's numbers.
+
+    - **A fourth way to be invisible to the coverage tool.** The eight
+      setters were first written as one loop over a `{name, field,
+      recomputes}` table -- tidier than eight near-identical blocks, and
+      the tool scored them as still unimplemented. It collects
+      `skString("Name")` *literals* out of the binding sources, so a name
+      that reaches `skString` through a variable does not exist as far as
+      it is concerned. Rewritten as a literal chain (one shared body, an
+      `if`/`else if` picking the field) so the measurement keeps working.
+      Worth knowing before refactoring any handler group.
+
+    - **Not reproduced:** the two ability ranks' *effects* beyond magicka
+      -- the Thief's trap-avoidance bonus (`CanAvoidTrap` adds `+0xfb0`
+      for class 8) and the Argonian's haggling bonus (`FUN_10020894` adds
+      `+0xfb4` for race 0) are separate systems that happen to read these
+      fields; the fields are correct now, the two consumers are not
+      implemented. Nor are the three unnamed `u16`s in each class row,
+      which look like starting-equipment ids but are read by nothing this
+      port has decompiled, so they are carried verbatim rather than
+      claimed.
+
+- [x] **M65 -- the `TestX` attribute rolls, and the `crypt1.s` gauntlet
+  they gate.** Character-stats cases `0x0b..0x12`: eight bindings, one per
+  attribute, 14 shipped call sites. The roll itself is four instructions,
+  but they are not the four anyone would guess, and following the fail
+  branch turned up two natives with no handler anywhere in the port.
+  `AttributeCheck()` in `simkin_bindings/character_progression.h`/`.cpp`,
+  the eight bindings plus `DoDamage` on `PlayerExecutable`, and `Random`
+  on `MenuExecutable`. Smoke test
+  `src/tests/m65_attribute_check_smoke.cpp`, **40 checks**. Suite
+  **58/58**, soft-fails **39 -> 39**, `GetPlayer()` coverage
+  **94% -> 96%** (33 more handled call sites, 5 fewer unhandled names).
+
+    - **The difficulty is not a threshold -- it is extra sides on the
+      die.** All eight arms of the dispatcher are the same shape:
+
+      ```
+      span = attribute + difficulty        // the script's argument
+      roll = Math::Rand(engine->iSeed) % span
+      return !(attribute < roll)
+      ```
+
+      The obvious readings are all wrong. It is not "roll d100 and beat the
+      difficulty", and it is not "the attribute must exceed the
+      difficulty": the attribute is *inside the die*, so a bigger attribute
+      both widens the range and raises the passing band, and the pass
+      chance is exactly
+
+      ```
+      P(pass) = (attribute + 1) / (attribute + difficulty)
+      ```
+
+      At strength 50 the easiest shipped check (`TestStrength(25)`) passes
+      68% of the time and the hardest (`TestStrength(45)`) still passes
+      54%. Measured against the closed form over 20 (attribute, difficulty)
+      pairs at 200k trials each; worst error 0.0012.
+
+    - **A check is never certain and never impossible.** Both follow from
+      the `+1` and the `>=`, and both are asserted rather than assumed.
+      `P(fail) = (difficulty - 1) / (attribute + difficulty)`, so a
+      difficulty of 1 or 0 can never be failed *at any attribute* -- which
+      the field-map test below then leans on to get a deterministic answer
+      out of a random function. In the other direction, 24 of the 1045
+      outcomes still fail at attribute 1000 against difficulty 45, and a
+      character with the attribute at zero still passes roughly one attempt
+      in 45. There is no critical success, no critical failure, and no luck
+      term -- `TestLuck` exists as a binding and no script calls it.
+
+    - **The binding-index order is not the setter order, and the fields
+      still agree.** Reading the eight `Test` cases straight down gives
+      Strength, Intelligence, **Agility**, **Will**, Speed, Endurance,
+      Personality, Luck; reading the eight setters at `0x24..0x2b` gives
+      Strength, Intelligence, **Will**, **Agility**, Speed, ... The two
+      middle entries are transposed between the two tables. This is the one
+      slip in this milestone that would have been invisible in play and
+      wrong forever, so it was checked three ways: against the getters at
+      `0x1b..0x23` (which read `+0x18` for `GetAgility` and `+0x1a` for
+      `GetWill`, agreeing with the `Test` cases), against the setters'
+      actual stores (`0x26 SetWillpower` writes `+0x1a`, `0x27 SetAgility`
+      writes `+0x18` -- so the *fields* agree and only the indices differ),
+      and
+      against `effects.h`'s independently-derived stat map from M58, which
+      lists the same two offsets. The smoke test's Part 4 then drives all
+      eight bindings against all eight fields and requires an exact 8x8
+      identity matrix, writing the fields through `EffectStatSlot()` so
+      that a future divergence between this milestone's map and M58's fails
+      a test rather than going unnoticed.
+
+    - **The roll reads the live field.** It reads `stats+0x14..0x22`
+      directly -- the same storage the effect applier writes -- so a
+      Fortify Strength really does move the odds of a strength check, and a
+      drain really does move them the other way. Checked end to end: 30
+      strength against difficulty 45 passes 41%, and after a `+40` effect
+      the same check passes 62%.
+
+    - **A drained attribute always fails, whichever way the span lands.**
+      Only reachable through the effects system, but it is reachable, and
+      the arithmetic is not obviously safe: a large enough drain makes
+      `attribute + difficulty` negative. Signed remainder takes the
+      *dividend's* sign and `Math::Rand` is documented non-negative, so the
+      roll stays `>= 0` either way and the comparison fails. Reproduced as
+      found rather than clamped.
+
+    - **What failing a check costs, which nothing implemented.** Every one
+      of the 14 sites has the same shape -- a named trigger zone, a
+      once-only `saved_` flag, and a pass/fail popup -- and the fail popups
+      are where the milestone stopped being about one native:
+
+      - `DoDamage` (Character-stats `0x16`) had **19 live call sites and no
+        handler on any receiver**. All three fail menus open with
+        `GetPlayer().DoDamage(Random(2,4))` (4-8 and 6-12 for the harder
+        tiers), so without it the entire cost of failing a check was
+        silently zero. It needed no new RE: the case reads its argument as
+        a short and calls the stats block's own vtable slot at `+0x80`
+        index 4, which is `FUN_10049e78` -- already recovered in M58 as
+        `ApplyDamage()`, Sanctuary gate included. So this is a route, not
+        behaviour. All 19 live sites are `GetPlayer()`; the only trace of
+        anyone damaging a creature this way is a **commented-out**
+        `target.DoDamage(...)` in `blaze.s`.
+
+      - `Random(min, max)` is a Menu-class binding in its own right (index
+        `0x6a` on the menu dispatcher `FUN_10078de4`), not only the
+        root-class one M21 wired into items and creatures, and a menu
+        script reaches it bare from inside `Init()`. It soft-failed to 0,
+        which is what made `DoDamage(Random(2,4))` deal nothing even after
+        `DoDamage` existed. One line, sharing M21's existing helper.
+
+      This is M64's "a milestone that opens new ground can hold the
+      soft-fail count steady only by finishing what it opened" happening
+      again, and for the same reason: the new smoke test drives a dungeon
+      the suite had never entered.
+
+    - **Half the bindings have no caller.** `TestIntelligence`,
+      `TestWill`, `TestPersonality` and `TestLuck` are registered and never
+      used, which is asserted rather than assumed -- it is why those four
+      have no shipped difficulty to check them against, and why Part 4's
+      matrix is the only thing pinning their fields.
+
+    - **The whole feature is one dungeon.** All 14 calls are in `crypt1.s`:
+      four attributes (Strength, Agility, Endurance, Speed) at difficulties
+      25, 30 and 35, plus two strength-only checks at 40 and 45. Passing
+      opens `crypt1/checkpass.s`; failing opens `checkfail5`/`6`/`7to9.s`,
+      which deal 2-4, 4-8 and 6-12. The same dungeon separately has four
+      `brazier_*.s` objects that cost health and grant a permanent `+5` to
+      the matching attribute -- the intended way to pass the later tiers.
+      Part 6 of the smoke test drives the real script: a forced failure
+      (strength -2, which cannot pass) opens the fail menu and costs
+      health, the check stays live and hurts again on re-entry, a
+      high-strength character passes and latches `saved_str5` so five more
+      entries cost nothing, and `str6` is confirmed independent with its
+      own flag.
+
+    - **Not reproduced.** Symbian's `Math::Rand` LCG itself -- the engine
+      seeds it from the clock and its exact stream is not observable, so
+      this uses the same host `std::rand()` every other roll in the port
+      already uses. The four `crypt1` brazier menus that grant the `+5`
+      rewards work (they are `AddEffect`, which M58 implemented) but the
+      trigger objects that open them are entity `OnUse` handlers, not part
+      of this milestone.
+
+- [x] **M66 -- the `ZoneRenderer::Render` crash, and a second one behind
+  it.** The oldest open item in this file: an access violation recorded at
+  `render3d/zone_renderer.cpp:731` since M56, never chased, and the stated
+  reason M50-M56 were all verified against data and unit tests rather than
+  by playing. It reproduces in about two hundred frames, and the cause is a
+  clip buffer sized from a bound that does not hold for this geometry.
+  Fixed in `ZoneRenderer::Render`/`ClipNear`; smoke test
+  `src/tests/m66_render_clip_smoke.cpp`, **16 checks**. Suite **59/59**,
+  soft-fails **39 -> 39** (this milestone adds no script coverage, so
+  neither measure was expected to move).
+
+    - **Reproduced first, in a harness, not by playing.** A sweep that
+      stands the camera on sampled open tiles and renders every yaw at
+      seven pitches faulted after 224 frames with
+      `ACCESS_VIOLATION (0xc0000005)`, reading an address inside its own
+      stack frame. The existing M36 crash reporter
+      (`platform/win32/crash_report.h`) was linked into the harness to
+      symbolize it, and named `ZoneRenderer::Render` -- the same projection
+      loop the roadmap's line number points at. Adding *camera pitch* to
+      the sweep is what made it reproduce at all; nothing else about the
+      harness is clever.
+
+    - **The bug: a textbook bound applied to non-textbook geometry.**
+      `ClipNear` is a Sutherland-Hodgman clip against the near plane, and
+      it was documented as needing room for `count + 1` outputs -- true,
+      and only true, for a **planar convex** polygon. A plane meets one of
+      those in a line, so exactly two of its edges cross, giving
+      `kept + 2 <= count + 1`. The tile-grid pipeline hands it quads that
+      are neither. It writes six vertices into a five-entry
+      `ViewVertex clipped[5]`, and the projection loop then writes a sixth
+      `ProjectedVertex pv[5]` -- both on the stack, in the frame that also
+      holds the `faces` vector and the loop counter, which is why the fault
+      surfaces as a wild *read* a line or two after the write that caused
+      it.
+
+    - **Two independent things in the shipped data break the
+      precondition,** and the smoke test's Part 2 replicates the renderer's
+      own view transform to demonstrate each from real `.zcp` records
+      rather than from argument:
+
+        1. **Four independent corner heights.** `AddFloorCeiling` builds
+           every floor and ceiling from `ZcpEntry::floorHeight[4]`, i.e. a
+           bilinear patch, not a plane. It is planar only when the two
+           diagonals' height sums agree, and across the 21 zones
+           **33,363 of 248,001 open tiles have a non-planar floor** and
+           7,386 a non-planar ceiling -- 47.2% of azra, 48.8% of stouttp,
+           45.2% of ghstpass. Once the camera pitches, a vertex's view
+           `forward` picks up a height term, and such a tile can put its
+           four corners in an in-out-in-out ring: `azra` tile (81,2),
+           heights `[-1984 -608 -4608 -1664]`, gives `2 kept + 4 crossings`
+           = six vertices.
+        2. **M28's half-tile corner nudge**, with no pitch at all. The
+           nudge moves each vertex by 128 raw units from the cell it falls
+           in, so a tile's four XY positions stop being the corners of a
+           square and the projected ring can lose convexity. `azra` tile
+           (48,5) -- flat, all four heights within 320 units -- reaches six
+           vertices at `pitch == 0`. 6.7% of azra's open tiles are nudged.
+
+      The same sweep confirms the bound *does* hold where its precondition
+      does: a planar, un-nudged tile never exceeded five in 5.4 million
+      probes. So the old comment was not wrong so much as unqualified.
+
+    - **The fix is to clip the two triangles the quad is already drawn
+      as.** The rasterizer never draws a quad; the old code clipped a
+      four-sided ring and then fanned the result into triangles. Splitting
+      into `{0,1,2}` and `{0,2,3}` *before* clipping restores `count + 1`
+      exactly (a triangle is planar by construction), and for an unclipped
+      quad it produces the identical pair the fan did. `ClipNear` also
+      takes an explicit `capacity` now -- the invariant the old code stated
+      in prose and got wrong, moved somewhere the running program can see
+      it.
+
+    - **What that changes on screen, measured rather than asserted.**
+      Twelve of the fourteen tracked `.ppm` render dumps are **byte-identical**
+      before and after. The two that move -- the entity-render views at yaw
+      0 and 270 -- move *entirely* because of `SurfaceDetailMask`, the real
+      engine's depth-keyed texel-precision band, which is chosen per
+      triangle from its three vertex depths: changing which triangles exist
+      near the near plane can move a face into a different band. Pinning
+      that mask to a constant makes even those two byte-identical, which is
+      the experiment that says the difference is texel precision on
+      near-camera surfaces and nothing else. It is also the better answer,
+      since the band is now measured on the triangles actually being
+      rasterized. Part 4 of the smoke test covers the other half of the
+      argument directly: on a planar quad the two possible triangulations
+      agree to 2e-6 at every interior sample, so where the split runs is
+      not observable.
+
+    - **A second crash, on the same function, found by the same sweep --
+      and the more likely one in practice.** Once the clip overflow was
+      fixed the sweep still died, on the *second* zone, with
+      `Assertion failed: invalid bounds arguments passed to std::clamp`.
+      `RasterizeModelTriangle` clamps texel coordinates to
+      `[0, model.width - 1]`, and **nine of the twenty-one shipped zones
+      load a `.zsk` room mesh whose texture header reads
+      `skinCount=256, width=256, height=0`** -- broken1, broken2, crypt1,
+      crypt2, crypt3, erthcave, ffarena, lothcav, twilite. `hi < lo` is
+      undefined behaviour, and a Debug MSVC STL turns it into an outright
+      `abort()`, so a Debug build died on the first frame of any of those
+      nine zones -- including all three crypts and twilite, i.e. the whole
+      dungeon chain M65 had just been working on. `port/build.bat` builds
+      Debug, so that is the configuration anyone playing this port is
+      running. Guarded: a model with no skin pixels draws nothing, which is
+      exactly what already happened (every `TexelAt` sample was returning
+      the chroma key), just without the abort.
+
+    - **Open, and deliberately not chased here: what a `.zsk` actually
+      is.** The nine zones above ship *byte-identical* `.zsk` files, and so
+      do several of the others -- across all 21 zones there are only
+      **three distinct meshes**: a 30-vertex/56-face one shared by eleven
+      zones, a 98-vertex/192-face one shared by the nine above, and a
+      variant of the first unique to raiders. Their 128 KB "texture" blocks
+      are all zeros in the second group. Whatever these are, they are not
+      the per-zone baked room mesh M11 took them for, and the port draws
+      them at a zero offset in every zone. That is a data/loader question
+      in `world/zone.cpp` + `ParseModelResource`, not a renderer one, and
+      re-opening M11 is a milestone of its own. Recorded here because the
+      renderer now survives them either way.
+
+    - **Not reproduced.** The exact original crash report from M56 --
+      whether the player who hit it hit the clip overflow, the `std::clamp`
+      abort, or both -- cannot be recovered; the recorded line number
+      matches the projection loop, so this entry attributes it to the clip
+      overflow. `render_clip_smoke` takes ~75s at its default stride
+      (Part 3's broad sweep is essentially all of it; Parts 1 and 2 cost
+      under half a second between them), and takes a stride and a zone name
+      to narrow or widen it.
+
 ## Next milestones (not yet started)
 
 Roughly in priority order for reaching "actually playable," not commitments:
@@ -5343,19 +5788,53 @@ M63 moved both measures at once, which is unusual: soft-fails **62 -> 39**
 `Level` 97% -> 98%, its unhandled-name list down to five. An
 explicit-receiver native with a lot of arguments shows up in both.
 
-- **The `levelup.s` cluster**: `DecreaseLevelUpPoints` (8),
-  `GetLevelUpPoints`, `LevelUp`, `UpdateAttributes` (3) and the eight
-  attribute setters (~25 sites between them), which together are the
-  whole level-up screen.
+M64 shows the two measures can also *disagree usefully*. `GetPlayer()`
+went 92% -> 94% and its unhandled-name list lost thirteen entries, while
+soft-fails stayed flat at **39** -- and that flatness is the result, not
+an absence of one: the new smoke test drives a screen the suite had never
+opened, which added nine soft-fail lines, and implementing that screen's
+one unhandled native (`SetStartCoord`) removed them again. A milestone
+that opens new ground can hold the soft-fail count steady only by
+finishing what it opened.
 
-- **The `TestX` skill rolls** -- `TestStrength` (5), `TestSpeed`,
-  `TestEndurance`, `TestAgility` (3 each) -- Character-stats cases
-  `0x0b..0x12`, used by `crypt1.s`'s trap and obstacle checks.
+M65 is the same shape again -- `GetPlayer()` **94% -> 96%**, soft-fails
+flat at **39** -- and worth reading as the pattern rather than the
+coincidence it looks like. Its smoke test enters a dungeon the suite had
+never entered, which surfaced two natives with no handler anywhere
+(`DoDamage`, 19 sites; `Random` on the *menu* class), both of them one
+line each on top of machinery M58 and M21 had already built. Expect a
+milestone that drives new script territory to find one or two of these,
+and budget for finishing them: the alternative is a milestone that reports
+a feature as done while the branch it gates does nothing.
 
-- **The pre-existing `ZoneRenderer::Render` crash** at
-  `port/src/render3d/zone_renderer.cpp:731`, still unchased. It is why
-  M50-M56 are all verified against real data and unit tests rather than
-  by playing.
+M66 moved **neither** measure -- `GetPlayer()` stayed at 96%, soft-fails
+at 39 -- and that is the correct reading, not a null result: it implements
+no natives at all. Both measures are script-coverage measures, and a
+renderer or engine milestone is invisible to both by construction. Its
+evidence is elsewhere: a reproduction harness, a census over the shipped
+`.zcp` data, and a byte-comparison of the tracked `.ppm` render dumps
+before and after the change. Do not reach for the coverage tool to justify
+work below the script layer.
+
+**The bullet list below is empty for the first time.** Every item that was
+in it -- merchants, the store screen, `SetCameraStart`, `Level.CreateEffect`,
+the `levelup.s` cluster, the `TestX` rolls, and the `ZoneRenderer::Render`
+crash -- is done (M59-M66). Re-run
+`shadowkey/ghidra/scripts/analyze_port_native_coverage.py` to repopulate it
+from real call-site counts rather than adding guesses here. The one item
+this pass deliberately left open:
+
+- **What a `.zsk` actually is** (M66's last finding). All 21 zones ship
+  only **three distinct** `.zsk` meshes between them -- nine zones share
+  one byte-identical file, eleven share another, raiders has a variant --
+  and the nine-zone one carries a 128 KB texture block that is entirely
+  zeros behind a header reading `skinCount=256, width=256, height=0`. M11
+  read `.zsk` as the zone's own baked room mesh, verified against `azra`
+  alone; that reading does not survive nine zones sharing one file. The
+  renderer no longer crashes on them either way (M66), so this is a
+  correctness question about `world/zone.cpp` + `ParseModelResource` and
+  about what the real engine does with the resource, not a stability one.
+
 
 ## Verification approach
 

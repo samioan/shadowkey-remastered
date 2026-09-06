@@ -626,6 +626,12 @@ bool MenuExecutable::method(const skString& methodName, skRValueArray& args,
         m_BackgroundId = args[0].intValue();
         return true;
     }
+    if (methodName == skString("SetStartCoord") && args.entries() == 1) {
+        // M64: a bare call in `levelup.s`, and its only one in the corpus
+        // -- see startCoord()'s comment for what menu+0x96 does.
+        m_StartCoord = static_cast<int16_t>(args[0].intValue());
+        return true;
+    }
     if (methodName == skString("AddTitle") && args.entries() >= 1) {
         // questlog.s calls this twice with an explicit y position
         // (AddTitle(3785,10); AddTitle(3786,25);) -- this port's renderer
@@ -1217,6 +1223,17 @@ bool MenuExecutable::method(const skString& methodName, skRValueArray& args,
         m_Stack.OpenMenu("charactermanager");
         return true;
     }
+    if (methodName == skString("DisplayLevelUp") && args.entries() == 0) {
+        // M64: case 0xe, and the only way `levelup.s` opens -- no shipped
+        // script calls it, so the screen is engine-driven. It is also the
+        // odd one out among the six Display* natives: the other five hand
+        // a screen-mode number (1 charactermanager, 2 inventory, 3
+        // questlog, 4 statsscreen, ...) to one shared setter, while this
+        // one calls `FUN_1002c274(controller, 8)` directly. Both arms
+        // stall 10ms in `User::After` first.
+        m_Stack.OpenMenu("levelup");
+        return true;
+    }
     if (methodName == skString("DisplayInventory") && args.entries() == 0) {
         m_Stack.OpenMenu("inventory");
         return true;
@@ -1282,6 +1299,18 @@ bool MenuExecutable::method(const skString& methodName, skRValueArray& args,
         return true;
     }
 
+    if (TryHandleRandom(methodName, args, returnValue)) {
+        // M65: `Random(min, max)` is a real Menu-class binding in its own
+        // right -- index 0x6a on the menu dispatcher (FUN_10078de4), not
+        // only the root-class one M21 wired into items and creatures -- and
+        // a menu script reaches it bare, from inside Init().
+        //
+        // Found by driving crypt1's attribute checks: every one of the
+        // three fail menus opens with `GetPlayer().DoDamage(Random(2,4))`
+        // (4-8 and 6-12 for the harder tiers), so without this the entire
+        // cost of failing a check was silently zero.
+        return true;
+    }
     if (skScriptedExecutable::method(methodName, args, returnValue, context)) {
         return true;
     }

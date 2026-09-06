@@ -531,14 +531,22 @@ void RenderMenu(sk::Backbuffer& backbuffer, sk_bindings::MenuExecutable& menu,
         backbuffer.Fill(kBackgroundColor);
     }
 
-    // Slot 69 (the main menu's background, MenuBackground(69) in
-    // mainmenu.s) has "The Elder Scrolls Travels / SHADOWKEY" logo art
-    // baked into its top ~50px -- unlike every other menu background
-    // (20, 174), which are plain parchment. The real game's item list
-    // starts below it; nothing in mainmenu.s sets this explicitly (no
-    // native y-offset call exists), so this is a fixed native constant
-    // measured against a real screenshot, not a decompiled value.
-    int y = menu.backgroundId() == 69 ? 50 : 8;
+    // M64 -- CORRECTED, and the previous guess was half right.
+    //
+    // This used to read `menu.backgroundId() == 69 ? 50 : 8`, with a
+    // comment saying the 50 was measured off a screenshot because "no
+    // native y-offset call exists". One does: `SetStartCoord`, root
+    // binding 0x2c, which writes menu+0x96 -- the exact field the real
+    // menu draw (FUN_10076b64) starts its row cursor at. The menu
+    // constructor seeds that field with 0x32, so **50 is every menu's
+    // default**, not just the main menu's, and the logo art the old
+    // comment reasoned from was a coincidence.
+    //
+    // Not screenshot-verified: this moves every non-main menu's list down
+    // 42 pixels, which is what the engine does but is a bigger visible
+    // change than any other line in this milestone. The one script that
+    // overrides it is `levelup.s`, whose eleven rows need y=10.
+    int y = menu.startCoord();
     const int lineHeight = sk::BitmapFont::kGlyphHeight + 4;
 
     if (menu.titleTextId() >= 0) {

@@ -53,6 +53,11 @@ constexpr int kStoreQuantityLabelStringId = 3040;
 constexpr int kStoreBetterArrowSprite = 24;
 constexpr int kStoreWorseArrowSprite = 25;
 
+// M64: the sound FUN_10044618 plays when a level is gained -- a literal
+// 0x57 in the engine, and slot 87 of every zone's `<zone>_sounds.txt` is
+// `pl_cast_powerup.wav`.
+constexpr int kLevelUpSoundSlot = 87;
+
 // Registers every bare-identifier constant this port's curated starting-
 // inventory scripts (see PlayerExecutable::LoadStartingInventory) are known
 // to reference. Idempotent -- safe to call once per skInterpreter instance,

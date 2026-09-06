@@ -6,6 +6,7 @@
 #include "assets/sound_archive.h"
 #include "assets/string_table.h"
 #include "audio/audio_engine.h"
+#include "simkin_bindings/character_progression.h"
 #include "simkin_bindings/combat.h"
 #include "simkin_bindings/effects.h"
 #include "simkin_bindings/game_constants.h"
@@ -297,6 +298,139 @@ void PlayerExecutable::SetHealth(int value) {
     if (m_Health < 0) m_Health = 0;
 }
 
+// ---- M64: the level-up cluster (`levelup.s`) ----
+
+bool PlayerExecutable::actorClassHasMagic() const { return ClassHasMagic(m_CharacterClass); }
+
+// Player dispatcher case 4. Two lines in the engine, and the second is a
+// virtual call on the stats block's `+0x80` vtable, slot 0x24 -- which for
+// the player resolves (through a `this -= 0x3ac` thunk) to FUN_10044618.
+void PlayerExecutable::LevelUp() {
+    m_Level = static_cast<int16_t>(m_Level + 1);
+    GrantLevelUpPoint();
+}
+
+// FUN_10044618.
+void PlayerExecutable::GrantLevelUpPoint() {
+    m_LevelUpPoints += 1;
+    // `FUN_1001b198(engine, 0x57, x, y, 100, 0, 0, 1, 1)` -- the player's
+    // own position, default volume, one repeat. Slot 87 of every zone's
+    // sound manifest is `pl_cast_powerup.wav`.
+    if (m_Sounds && m_Audio) {
+        if (const sk::Sound* sound = m_Sounds->GetSound(kLevelUpSoundSlot)) {
+            m_Audio->PlaySfx(*sound, sk::kDefaultSoundVolume, sk::kDefaultSoundRepeats);
+        }
+    }
+    // The award always re-derives, and never refills -- gaining a level
+    // raises the maxima without healing you.
+    UpdateAttributes(false);
+}
+
+// FUN_1001fc24.
+void PlayerExecutable::UpdateAttributes(bool restoreVitals) {
+    // The class row, looked up once. A class id with no row leaves this
+    // null; the engine then dereferences it for the magic flag below, so
+    // the id it reads is whatever sits at address 6. Treated as "no magic"
+    // here -- ChooseCharacter already clamps every script-reachable id
+    // into 0..8, so no shipped path gets here with one.
+    const bool hasMagic = ClassHasMagic(m_CharacterClass);
+
+    if (m_Level == 1) {
+        // A race outside 0..7 is the switch's `default`, which writes no
+        // attributes at all but still falls into the recompute and refill.
+        if (m_Race >= 0 && m_Race < kRaceCount) {
+            // `SetSex(true)` is the male portrait -- see M51's jump-sound
+            // polarity note; the engine's branch is `if (sex == 0)` taking
+            // the female arm.
+            const BaseAttributes base = RaceBaseAttributes(m_Race, m_Sex != 0);
+            m_Strength = base.strength;
+            m_Intelligence = base.intelligence;
+            m_Agility = base.agility;
+            m_Will = base.willpower;
+            m_Speed = base.speed;
+            m_Endurance = base.endurance;
+            m_Personality = base.personality;
+            m_Luck = base.luck;
+        }
+        RecomputeDerivedStats(*this);
+        // The three clamping setters, in the engine's order: fatigue,
+        // health, magicka, each handed its own freshly derived maximum.
+        SetActorFatigue(m_MaxFatigue);
+        SetHealth(m_MaxHealth);
+        SetActorMagicka(m_MaxMagicka);
+    }
+
+    // Both paths converge here. A class with no magic has its pool zeroed
+    // outright rather than merely clamped, which is why a Knight shows 0/0
+    // magicka instead of 0/intelligence.
+    if (!hasMagic) {
+        m_MaxMagicka = 0;
+        SetActorMagicka(0);
+    } else {
+        SetActorMagicka(m_MaxMagicka);
+    }
+
+    // The character-creation flag (+0xf35) is set by *this* native, not by
+    // ChooseCharacter -- which is why `HasCreatedCharacter()` only goes
+    // true once the portrait screen has been through.
+    m_HasCreatedCharacter = true;
+    if (m_Level == 1) return;
+
+    // ---- above level 1 ----
+    //
+    // Both ability ranks go up, unconditionally, on every call. Note that
+    // this makes them count *UpdateAttributes calls above level 1*, not
+    // levels: `levelup.s`'s back key calls it again after the player has
+    // spent their points, so a normal level-up raises each rank by two.
+    // That is what the shipped code does; nothing debounces it.
+    m_SpecialAbility += 1;
+    m_RaceAbility += 1;
+
+    if (const int growth = ClassMagickaGrowth(m_CharacterClass)) {
+        // `fba = (intelligence * 0x100 * ((rank * 0x100 * growth) >> 8)) >> 0x10`,
+        // which is `(intelligence * rank * growth) >> 8` once the two
+        // shifts cancel. Assigned, not accumulated.
+        m_MagickaBonusClass =
+            static_cast<int16_t>((m_Intelligence * m_SpecialAbility * growth) >> 8);
+    }
+    if (m_Race == kRaceHighElf) {
+        // The one racial arm: a flat five more magicka per call, through a
+        // 16-bit store.
+        m_MagickaBonusRace = static_cast<int16_t>(m_MagickaBonusRace + 5);
+    }
+
+    RecomputeDerivedStats(*this);
+    if (!hasMagic) {
+        m_MaxMagicka = 0;
+        SetActorMagicka(0);
+    }
+    if (restoreVitals) {
+        SetHealth(m_MaxHealth);
+        SetActorMagicka(m_MaxMagicka);
+    }
+}
+
+int PlayerExecutable::experienceToNextLevel() const {
+    return ExperienceToLeaveLevel(m_CharacterClass, m_Level) - m_Experience;
+}
+
+// FUN_1004a104.
+void PlayerExecutable::AddExperience(int amount) {
+    // The award is a `short` all the way down: the dispatcher converts the
+    // atom with the 16-bit AtomToInt and the receiving function's parameter
+    // is a short too. `StatModXP(40000)` would therefore *subtract*.
+    const int delta = static_cast<int16_t>(amount);
+    // Strictly less, and only ever one level per call -- award enough
+    // experience for three levels at once and you get one.
+    if (ExperienceToLeaveLevel(m_CharacterClass, m_Level) < m_Experience + delta) {
+        m_Level = static_cast<int16_t>(m_Level + 1);
+        GrantLevelUpPoint();
+    }
+    // Banked after the check, so the threshold is tested against the
+    // pre-award total plus the delta rather than against the new total.
+    m_Experience += delta;
+}
+
 // M37: the real derived stats -- see combat.h. Both are computed, never
 // stored: the shipped engine's own GetSpellToHit/GetSpellResistance
 // bindings recompute them on every read too.
@@ -434,6 +568,17 @@ bool PlayerExecutable::method(const skString& methodName, skRValueArray& args,
         // second field, which is a sprite slot, not modelled here.)
         int chosen = args[0].intValue();
         m_CharacterClass = (chosen >= 0 && chosen <= 8) ? chosen : 0;
+        // M64: the case's third line, `*(u16*)(player + 0x3e0) = 1` --
+        // stats+0x34, the character level. Picking a class resets it, and
+        // that reset is load-bearing: `UpdateAttributes`, which the
+        // portrait screen calls two screens later, takes its
+        // seed-the-attributes branch only at level 1.
+        m_Level = 1;
+        // The real case does *not* raise the created-character flag
+        // (+0xf35); UpdateAttributes does, one screen further on. Kept
+        // here as well so nothing that already depended on it regresses,
+        // and because the two orders are indistinguishable from any
+        // shipped script -- no menu between the two reads it.
         m_HasCreatedCharacter = true;
         return true;
     }
@@ -517,11 +662,50 @@ bool PlayerExecutable::method(const skString& methodName, skRValueArray& args,
         return true;
     }
     if (methodName == skString("GetExpToNextLevel") && args.entries() == 0) {
-        returnValue = skRValue(m_ExpToNextLevel);
+        // M64: was a stored flat 1000. The real one (FUN_1004a020) is
+        // computed on every read from the class's own experience base and
+        // the level'th triangular number -- see character_progression.h.
+        returnValue = skRValue(experienceToNextLevel());
         return true;
     }
     if (methodName == skString("AddExperience") && args.entries() == 1) {
-        m_Experience += args[0].intValue();
+        // M64: was a bare `+=`. The real one is also the level-up
+        // trigger, which is the only thing in the shipped game that
+        // awards a level-up point outside `cheatmenu.s`.
+        AddExperience(args[0].intValue());
+        return true;
+    }
+    // M64: `levelup.s`'s two counters, and `cheatmenu.s`'s LevelUp().
+    if (methodName == skString("GetLevelUpPoints") && args.entries() == 0) {
+        returnValue = skRValue(m_LevelUpPoints);
+        return true;
+    }
+    if (methodName == skString("DecreaseLevelUpPoints") && args.entries() == 0) {
+        DecreaseLevelUpPoints();
+        return true;
+    }
+    if (methodName == skString("LevelUp") && args.entries() == 0) {
+        LevelUp();
+        return true;
+    }
+    if (methodName == skString("UpdateAttributes") && args.entries() == 1) {
+        // The real case leaves with KErrArgument on a *missing* argument
+        // and converts what it gets with the boolean atom reader, so any
+        // truthy value is a restore.
+        UpdateAttributes(args[0].intValue() != 0);
+        return true;
+    }
+    if (methodName == skString("TestUpdateAttributes") && args.entries() == 0) {
+        // Case 0x1e, a debug native with no shipped call site: level up
+        // by one *without* awarding a point, then re-derive and refill.
+        m_Level = static_cast<int16_t>(m_Level + 1);
+        UpdateAttributes(true);
+        return true;
+    }
+    if (methodName == skString("HasMagic") && args.entries() == 0) {
+        // Case 0xd, the class row's `+6` byte -- the same one
+        // UpdateAttributes gates the magicka pool on.
+        returnValue = skRValue(ClassHasMagic(m_CharacterClass));
         return true;
     }
     if (methodName == skString("CountInventory") && args.entries() == 1) {
@@ -765,6 +949,118 @@ bool PlayerExecutable::method(const skString& methodName, skRValueArray& args,
         returnValue = skRValue(m_Luck);
         return true;
     }
+
+    // ---- M65: the eight attribute rolls, cases 0x0b..0x12 ----
+    //
+    // `if (GetPlayer().TestStrength(25) = true)`. The roll itself is
+    // AttributeCheck() (character_progression.h, which carries the
+    // derivation); all this arm does is pick which of the eight fields it
+    // reads -- the same fields the getters just above read, and the same
+    // fields the effects system writes, so a Fortify Strength really does
+    // move the odds of a strength check.
+    //
+    // Every one of the 14 shipped call sites is in `crypt1.s`, and every
+    // one has the same shape: a named trigger zone, a `saved_` flag so the
+    // check is once-only, and a pass/fail popup. Four attributes are
+    // tested (Strength, Agility, Endurance, Speed) at difficulty 25, 30 and
+    // 35, plus two strength-only checks at 40 and 45. Intelligence,
+    // Willpower, Personality and Luck have bindings and no caller.
+    //
+    // The engine leaves with KErrArgument on *no* arguments and ignores any
+    // beyond the first, so this takes >= 1 rather than exactly 1.
+    {
+        const int* attribute = nullptr;
+        if (methodName == skString("TestStrength")) {  // 0x0b
+            attribute = &m_Strength;
+        } else if (methodName == skString("TestIntelligence")) {  // 0x0c
+            attribute = &m_Intelligence;
+        } else if (methodName == skString("TestAgility")) {  // 0x0d
+            attribute = &m_Agility;
+        } else if (methodName == skString("TestWill")) {  // 0x0e
+            attribute = &m_Will;
+        } else if (methodName == skString("TestSpeed")) {  // 0x0f
+            attribute = &m_Speed;
+        } else if (methodName == skString("TestEndurance")) {  // 0x10
+            attribute = &m_Endurance;
+        } else if (methodName == skString("TestPersonality")) {  // 0x11
+            attribute = &m_Personality;
+        } else if (methodName == skString("TestLuck")) {  // 0x12
+            attribute = &m_Luck;
+        }
+        if (attribute && args.entries() >= 1) {
+            returnValue = skRValue(AttributeCheck(*attribute, args[0].intValue()));
+            return true;
+        }
+    }
+
+    if (methodName == skString("DoDamage") && args.entries() >= 1) {
+        // M65: case 0x16, which is what *failing* one of the rolls above
+        // costs. The engine reads the argument as a **short**
+        // (`sVar4 = AtomToInt(...)`, sign-extended back to int at the call)
+        // and then invokes the stats block's own DoDamage through its
+        // secondary vtable at stats+0x80, slot 4, with three zero arguments
+        // after it -- that slot is FUN_10049e78, which M58 already
+        // recovered as ApplyDamage(), Sanctuary gate included. So this is a
+        // route to existing machinery, not new behaviour: the milestone
+        // needs it only because all 14 attribute checks pay for a failure
+        // with it, and a check whose failure did nothing would be half
+        // implemented.
+        //
+        // All 20 shipped call sites are `GetPlayer().DoDamage(...)` -- no
+        // script ever damages a creature this way, which is consistent with
+        // the vtable slot being reached only from the Character-stats
+        // dispatcher and every scripted use being an environmental hazard
+        // (crypt1's failed checks and braziers, Dragonstar's traps).
+        ApplyDamage(static_cast<int16_t>(args[0].intValue()));
+        return true;
+    }
+
+    // ---- M64: the eight attribute setters, cases 0x24..0x2b ----
+    //
+    // Each is `field = (short)AtomToInt(arg)` followed by the derived-stat
+    // recompute -- *except* SetSpeed, whose arm branches straight to the
+    // function epilogue instead of into the shared
+    // `mov r0, r6 / bl 0x10049698` tail the other seven jump to. Verified
+    // in the disassembly rather than trusted from the decompiler, because
+    // it is the kind of thing a decompiler flattens. Speed feeds none of
+    // the three derived maxima, so skipping it changes nothing on its own;
+    // it is observable only as a *missed* recompute -- if something else
+    // moved strength, endurance, willpower or intelligence without
+    // recomputing, SetSpeed will not catch up for it the way its seven
+    // siblings would.
+    //
+    // 21 shipped call sites across eight setters. Sixteen are
+    // `GetPlayer().SetX(GetPlayer().GetX() + 5)` on `levelup.s` and the
+    // two Dragonstar skeleton-key shrines; the rest (Lothna's chests and
+    // stones, the grey mushroom) compute a value and assign it outright.
+    {
+        int* field = nullptr;
+        bool recomputes = true;
+        if (methodName == skString("SetStrength")) {  // 0x24
+            field = &m_Strength;
+        } else if (methodName == skString("SetIntelligence")) {  // 0x25
+            field = &m_Intelligence;
+        } else if (methodName == skString("SetWillpower")) {  // 0x26
+            field = &m_Will;
+        } else if (methodName == skString("SetAgility")) {  // 0x27
+            field = &m_Agility;
+        } else if (methodName == skString("SetSpeed")) {  // 0x28 -- the odd one
+            field = &m_Speed;
+            recomputes = false;
+        } else if (methodName == skString("SetEndurance")) {  // 0x29
+            field = &m_Endurance;
+        } else if (methodName == skString("SetPersonality")) {  // 0x2a
+            field = &m_Personality;
+        } else if (methodName == skString("SetLuck")) {  // 0x2b
+            field = &m_Luck;
+        }
+        if (field && args.entries() == 1) {
+            // A halfword store in the engine, so the value truncates.
+            *field = static_cast<int16_t>(args[0].intValue());
+            if (recomputes) RecomputeDerivedStats(*this);
+            return true;
+        }
+    }
     if (methodName == skString("GetDefense") && args.entries() == 0) {
         returnValue = skRValue(m_BaseDefense);
         return true;
@@ -941,11 +1237,10 @@ bool PlayerExecutable::method(const skString& methodName, skRValueArray& args,
         m_MagicResistance = args[0].intValue();
         return true;
     }
-    if ((methodName == skString("SetWillpower") || methodName == skString("SetWill")) &&
-        args.entries() == 1) {
-        m_Will = args[0].intValue();
-        return true;
-    }
+    // M64: SetWillpower moved into the eight-setter table above, which
+    // adds the derived-stat recompute it was missing. Its `SetWill` alias
+    // went with it -- the real trie has `SetWillpower` (0x26) and no
+    // `SetWill`, and nothing in the corpus calls one.
     if (methodName == skString("SetLevel") && args.entries() == 1) {
         m_Level = args[0].intValue();
         return true;
@@ -954,16 +1249,41 @@ bool PlayerExecutable::method(const skString& methodName, skRValueArray& args,
         returnValue = skRValue(skString("Special Ability"));
         return true;
     }
-    if (methodName == skString("GetSpecialAbility") && args.entries() == 0) {
-        returnValue = skRValue(skString("None"));
+    // M64 -- CORRECTED. Both of these were returning the string "None".
+    // The real cases (0x17 and 0x16) return an **int**: the class ability
+    // rank at player+0xfb0 and the race ability rank at +0xfb4, the same
+    // two words UpdateAttributes raises on every level. `statsscreen.s`
+    // shows them as `""#GetPlayer().GetSpecialAbility()`, string-
+    // concatenating a number, which is what a rank looks like and a name
+    // does not.
+    //
+    // Neither case reads its argument count, so a stray argument is
+    // ignored rather than rejected -- which matters, because
+    // `dstar_e/join_thief_guild.s` calls `GetSpecialAbility(val)` with
+    // one. That is why these do not test `args.entries()`.
+    if (methodName == skString("GetSpecialAbility")) {
+        returnValue = skRValue(m_SpecialAbility);
+        return true;
+    }
+    if (methodName == skString("SetSpecialAbility") && args.entries() == 1) {
+        // Cases 0xe / 0xf: a plain 32-bit store, no clamp. The three
+        // guild-training conversations (`fighter_training.s`,
+        // `thief_convo.s`, `eranthos_convo.s`) read the rank, add to it
+        // and write it back -- a trainer selling a rank outright.
+        m_SpecialAbility = args[0].intValue();
         return true;
     }
     if (methodName == skString("GetRaceAbilityText") && args.entries() == 0) {
         returnValue = skRValue(skString("Race Ability"));
         return true;
     }
-    if (methodName == skString("GetRaceAbility") && args.entries() == 0) {
-        returnValue = skRValue(skString("None"));
+    if (methodName == skString("GetRaceAbility")) {
+        returnValue = skRValue(m_RaceAbility);
+        return true;
+    }
+    if (methodName == skString("SetRaceAbility") && args.entries() == 1) {
+        // `crypt2/shadowgate.s` is the one shipped caller: +3 ranks.
+        m_RaceAbility = args[0].intValue();
         return true;
     }
 

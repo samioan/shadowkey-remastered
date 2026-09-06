@@ -71,9 +71,8 @@ sk::SavedEntity PlayerExecutable::BuildSaveRecord(const std::string& levelName) 
         rec.player.monstersKilled[static_cast<size_t>(kv.first)] =
             static_cast<uint8_t>(kv.second & 0xff);
     }
-    // GetLevelUpPoints / DecreaseLevelUpPoints (+0xf44). This port has no
-    // level-up-point economy yet, so the field round-trips as zero.
-    rec.player.levelUpPoints = 0;
+    // M64: real now. GetLevelUpPoints / DecreaseLevelUpPoints (+0xf44).
+    rec.player.levelUpPoints = m_LevelUpPoints;
 
     // --- the stats block (player+0x3ac) ---
     sk::SavedStats& st = rec.stats;
@@ -108,6 +107,15 @@ sk::SavedEntity PlayerExecutable::BuildSaveRecord(const std::string& levelName) 
     rec.player.race = static_cast<uint8_t>(m_Race & 0xff);
     rec.player.portraitId = static_cast<uint16_t>(m_PortraitId);
     rec.player.sex = static_cast<uint8_t>(m_Sex & 0xff);
+    // M64: the four progression words the tail already had slots for and
+    // nothing to put in them. The class is one of them -- every one of the
+    // other three is derived from it, so a save that dropped it would come
+    // back a Battlemage (FUN_1003d670's default) with a Thief's numbers.
+    rec.player.characterClass = static_cast<uint8_t>(m_CharacterClass & 0xff);
+    rec.player.specialAbility = m_SpecialAbility;
+    rec.player.raceAbility = m_RaceAbility;
+    rec.player.ffb8 = static_cast<int16_t>(m_MagickaBonusRace);
+    rec.player.ffba = static_cast<uint16_t>(m_MagickaBonusClass);
 
     // --- the two hand queues (+0xf4c / +0xf68) and their selections ---
     //
@@ -240,6 +248,16 @@ void PlayerExecutable::ApplySaveRecord(const sk::SavedEntity& record, MenuStack&
     m_Race = record.player.race;
     m_PortraitId = record.player.portraitId;
     m_Sex = record.player.sex;
+    // M64. The attributes and the three maxima came off the stats block
+    // above, so nothing here re-derives -- a load restores the character
+    // as saved rather than recomputing it, which is what the real loader
+    // does too (FUN_10043bb0 reads all of these and calls nothing).
+    m_LevelUpPoints = record.player.levelUpPoints;
+    m_CharacterClass = record.player.characterClass;
+    m_SpecialAbility = record.player.specialAbility;
+    m_RaceAbility = record.player.raceAbility;
+    m_MagickaBonusRace = record.player.ffb8;
+    m_MagickaBonusClass = record.player.ffba;
 
     // Rebuild the inventory from scratch. Everything the port had before
     // is dropped -- a load replaces the character, it does not merge.

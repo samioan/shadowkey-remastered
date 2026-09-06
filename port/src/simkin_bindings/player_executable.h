@@ -9,10 +9,16 @@
 // charactermanager.s/inventory.s/statsscreen.s as real, navigable screens
 // rather than soft-failing placeholders.
 //
-// Stat block values are fixed, documented placeholders (strength=50 etc.)
-// -- no character-creation stat-rolling system exists (M5's race/class
-// picker doesn't feed into these), so there was nothing to derive them
-// from. GetArmorRating()/GetAttack() *do* reflect real state though: they
+// Stat block values *were* fixed, documented placeholders (strength=50
+// etc.) because no character-creation stat-rolling system had been found:
+// M5's race/class picker didn't feed into them. M64 found the system --
+// `UpdateAttributes` (character_progression.h), which `chooseportraitmenu
+// .s` calls the moment the sex is chosen -- so a character created through
+// the real menus now gets real per-race, per-sex attributes and real
+// derived vitals. The 50s below are what a PlayerExecutable that never
+// went through character creation still starts at; they are the
+// placeholder, and they are now only the *initial* value of a field the
+// game overwrites. GetArmorRating()/GetAttack() *do* reflect real state: they
 // sum the equipped armor's real SetArmorValue()/weapon's real
 // SetDamageMin/Max() on top of the flat base, so equipping something
 // through the real inventory screen visibly changes these numbers.
@@ -253,6 +259,71 @@ public:
     int spellToHit() const;
     int spellResistance() const;
 
+    // ---- M64: the level-up screen (`levelup.s`) ----
+    //
+    // `GetLevelUpPoints` / `DecreaseLevelUpPoints` (player +0xf44). The
+    // screen quits immediately when this is below 1, and every one of its
+    // eight buttons spends one point for five points of one attribute.
+    // The real decrement has **no floor** -- `*(int*)(p+0xf44) -= 1`, and
+    // nothing else clamps it -- so a script that spends a point it does
+    // not have leaves the counter negative. Reproduced.
+    int levelUpPoints() const { return m_LevelUpPoints; }
+    void DecreaseLevelUpPoints() { m_LevelUpPoints -= 1; }
+
+    // Player dispatcher case 4, `LevelUp`: bump the level, then take the
+    // level-gained hook below. `cheatmenu.s` is its only shipped caller.
+    void LevelUp();
+
+    // FUN_10044618 -- the stats block's `vtable[0x24]` "a level was
+    // gained" slot, which the player overrides with this. Awards the
+    // point, plays the power-up sting (sound slot 87, `pl_cast_powerup
+    // .wav`) and re-derives the character. It is what both the `LevelUp`
+    // native and the experience threshold below go through.
+    void GrantLevelUpPoint();
+
+    // FUN_1001fc24, the whole of it. Two quite different jobs behind one
+    // name, selected by the character's *current level*:
+    //
+    //   level == 1  seed all eight attributes from race and sex, then
+    //               refill health, fatigue and magicka to their new
+    //               maxima. This is character creation --
+    //               `chooseportraitmenu.s` calls it the moment the
+    //               portrait (and therefore the sex) is picked.
+    //   level > 1   raise the class and race ability ranks by one, rescale
+    //               the class magicka bonus and, for a High Elf, add five
+    //               to the racial one; re-derive; and refill health and
+    //               magicka only if `restoreVitals`.
+    //
+    // Both paths force max magicka to zero for a class with no magic.
+    // `levelup.s`'s back key passes false, `chooseportraitmenu.s` true.
+    void UpdateAttributes(bool restoreVitals);
+
+    // FUN_1004a104. The experience add is also the level-up trigger: if
+    // the new total would pass the threshold the level goes up *first*,
+    // by exactly one, and then the experience is banked. The argument
+    // reaches the engine through a 16-bit conversion, so a huge award
+    // wraps -- reproduced, since `StatModXP` is script-facing.
+    void AddExperience(int amount);
+    // FUN_1004a020: the same threshold, minus the experience already
+    // held. Negative once the threshold is passed and before the next
+    // AddExperience re-levels, which the real one is too.
+    int experienceToNextLevel() const;
+
+    // Player +0xfb0 / +0xfb4, the two ranks `UpdateAttributes` raises
+    // together on every level. Both are script-visible in their own right
+    // (`SetSpecialAbility` / `SetRaceAbility`, which shrines and trainers
+    // use to grant a rank outright) and both start at **1**, not 0.
+    // The class rank also scales the magicka bonus and is the Thief's
+    // trap-avoidance bonus; the race rank is the Argonian's haggling one.
+    int specialAbility() const { return m_SpecialAbility; }
+    int raceAbility() const { return m_RaceAbility; }
+
+    // The two magicka bonus words the derived-stat recompute adds to
+    // intelligence (spell_actor.h). Neither has a script binding of its
+    // own -- both are written only by UpdateAttributes.
+    bool actorClassHasMagic() const override;
+    int actorMagickaBonus() const override { return m_MagickaBonusRace + m_MagickaBonusClass; }
+
     // M34: the real stats-block SetHealth (FUN_1004bb88), which is three
     // instructions long and does exactly one interesting thing -- it
     // clamps into [0, maxHealth], so nothing can ever overheal:
@@ -443,7 +514,15 @@ private:
     int m_Fatigue = 100, m_MaxFatigue = 100;
     int m_Level = 1;
     int m_Experience = 0;
-    int m_ExpToNextLevel = 1000;
+    // M64: player +0xf44 / +0xfb0 / +0xfb4 / +0xfb8 / +0xfba. The three
+    // non-zero defaults are the real ones -- FUN_1003d670 (the new-game
+    // reset) writes `fb0 = 1; fb4 = 1;` next to `f44 = 0`, so a fresh
+    // character already holds rank 1 of both abilities.
+    int m_LevelUpPoints = 0;    // +0xf44
+    int m_SpecialAbility = 1;   // +0xfb0, the class ability rank
+    int m_RaceAbility = 1;      // +0xfb4, the race ability rank
+    int m_MagickaBonusRace = 0;   // +0xfb8, the High Elf's +5 a level
+    int m_MagickaBonusClass = 0;  // +0xfba, intelligence x rank x class
 
     // Stat block (M10), matching statsscreen.s's ShowStats()/ShowSkills().
     int m_Strength = 50, m_StrengthBonus = 0;

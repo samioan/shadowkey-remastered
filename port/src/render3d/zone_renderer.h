@@ -156,6 +156,28 @@
 //    and how camera *position* -- not just rotation -- factors into this
 //    path at all, which bears on whether this mesh is genuinely
 //    walk-around-able or a camera-relative decorative piece).
+//
+// M66 -- the crash this file carried since M56, and one behind it. Two
+// corrections, both in zone_renderer.cpp with the full reasoning:
+//
+//  * The "no near-plane clipping" line at the top of this comment has been
+//    stale since M30/M35 -- there is a clipper, and its documented output
+//    bound (`count + 1`) was wrong for the quads this pipeline feeds it.
+//    Floor/ceiling quads are bilinear patches (four independent corner
+//    heights, non-planar for 33,363 of the 248,001 open tiles across the
+//    21 zones) and M28's corner nudge can cost the projected ring its
+//    convexity, so a quad could clip to six vertices into room for five
+//    and smash this function's own stack frame. Quads are now split into
+//    their two triangles *before* clipping, which restores the bound
+//    exactly and clips the geometry that actually gets rasterized.
+//
+//  * A model whose skin has no area is skipped rather than clamped
+//    against an inverted range. Nine of the 21 zones load a `.zsk` room
+//    mesh declaring `height = 0`, which aborted a Debug build on the
+//    first frame of each of them. What those nine `.zsk` files really are
+//    is an open question -- see the M66 entry in docs/PORT_ROADMAP.md;
+//    the note above about `.zsk` being *this zone's* room mesh should be
+//    read with that open.
 
 #include <vector>
 

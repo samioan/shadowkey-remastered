@@ -237,12 +237,19 @@ void RecomputeDerivedStats(SpellActor& actor) {
                                            strength + endurance);
     }
     if (int* maxMagicka = actor.EffectStatSlot(kEffectStatMaxMagicka)) {
-        // The real player branch adds two fields at player+0xfb8/+0xfba and
-        // returns early -- without writing max magicka at all -- when the
-        // character's class row says the class has none. This port has
-        // neither the class table nor those two fields, so it takes the
-        // non-player arm for both actors: max magicka is intelligence.
-        *maxMagicka = static_cast<int16_t>(actor.EffectStatValue(kEffectStatIntelligence));
+        // M64 completes what M58 left as the non-player arm for both
+        // actors. The real function branches on `vtable[0xcc]`, and the
+        // player side does two extra things (see spell_actor.h): it bails
+        // *without writing max magicka* when the class row has no magic --
+        // note that max health and max fatigue above have already been
+        // written by then, so this is a partial recompute, not a no-op --
+        // and it adds the two bonus words on top of intelligence.
+        const int intelligence = actor.EffectStatValue(kEffectStatIntelligence);
+        if (!actor.isPlayerActor()) {
+            *maxMagicka = static_cast<int16_t>(intelligence);
+        } else if (actor.actorClassHasMagic()) {
+            *maxMagicka = static_cast<int16_t>(actor.actorMagickaBonus() + intelligence);
+        }
     }
 }
 

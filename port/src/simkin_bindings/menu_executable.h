@@ -282,6 +282,12 @@ public:
     };
     const std::vector<MenuRow>& rows() const { return m_Rows; }
     int backgroundId() const { return m_BackgroundId; }
+    // M64: `SetStartCoord` (root-class binding 0x2c) -- the y the menu's
+    // draw (FUN_10076b64) starts its row cursor at, menu+0x96. The menu
+    // constructor seeds it with **0x32**, so 50 is every menu's default,
+    // and exactly one script in the whole corpus overrides it:
+    // `levelup.s`, which moves to 10 to fit eleven rows on one page.
+    int startCoord() const { return m_StartCoord; }
     int titleTextId() const { return m_TitleTextId; }
     int selectedItem() const { return m_SelectedItem; }  // 1-based, 0 = none
     bool useHoriz() const { return m_UseHoriz; }
@@ -380,6 +386,9 @@ private:
     MenuStack& m_Stack;
     skiExecutable* m_Opener = nullptr;
     int m_BackgroundId = -1;
+    // menu+0x96, and 0x32 is what FUN_10073bd8 puts there -- see
+    // startCoord() above.
+    int m_StartCoord = 50;
     int m_TitleTextId = -1;
     TitleHandle m_TitleHandle{*this};
     bool m_UseHoriz = false;

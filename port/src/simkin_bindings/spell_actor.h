@@ -108,6 +108,21 @@ public:
     virtual int actorMaxFatigue() const { return 0; }
     virtual void SetActorFatigue(int /*value*/) {}
 
+    // ---- M64: the two things the derived-stat recompute's *player* arm
+    // needs, and the reason M58 could not take that arm at all. ----
+    //
+    // FUN_10049698 branches on `vtable[0xcc]` -- the player predicate
+    // isPlayerActor() already answers -- and then does two things a
+    // creature's arm does not: it looks the character's class row up
+    // (`FUN_100450d4`) and **returns without writing max magicka at all**
+    // if that row says the class has none, and it adds two per-character
+    // bonus words (player +0xfb8 and +0xfba) on top of intelligence.
+    //
+    // Both defaults here are the creature's answer, so a monster keeps the
+    // arm it already had: max magicka is its intelligence, unconditionally.
+    virtual bool actorClassHasMagic() const { return true; }
+    virtual int actorMagickaBonus() const { return 0; }
+
     // M48: FUN_1003e6f4 -- "is the player carrying entity typeId 0x328",
     // which takes 6 off every spell's cost. Only the player half of the
     // cast consults it. 808 is not a typeId the shipped entities.txt

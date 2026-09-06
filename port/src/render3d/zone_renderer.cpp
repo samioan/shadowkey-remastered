@@ -336,16 +336,42 @@ struct ViewVertex {
 // the same operation Poly3D_ClipAgainstPlane performs in the original
 // (which this port deliberately does not reproduce instruction-for-
 // instruction, per docs/ROADMAP.md's Phase 2 decision). Returns the
-// clipped vertex count; `out` must have room for `count + 1`.
+// clipped vertex count.
+//
+// **M66 -- the bound, and the crash the old one caused.** This used to be
+// documented as "`out` must have room for `count + 1`", which is the
+// textbook figure and is only true for a **planar** input polygon: a plane
+// meets a planar convex polygon in a line, so exactly two edges cross it,
+// giving `kept + 2 <= count + 1` outputs. Feed it a polygon whose vertices
+// are *not* coplanar and that reasoning collapses -- the in/out pattern can
+// alternate all the way around the ring, and every one of the `count` edges
+// can contribute a crossing vertex on top of the kept ones. The real bound
+// is therefore `2 * count`, and this port had a real non-planar caller: a
+// tile's floor/ceiling quad is built from four independent corner heights
+// (AddFloorCeiling above), i.e. a bilinear patch, not a plane.
+//
+// That caller passed a 5-entry buffer. It only ever overflowed once the
+// camera could pitch (M30) -- with `pitch == 0` a vertex's view `forward`
+// does not depend on its height at all, so `forward` is an affine function
+// of (x, y) over a flat unit square and its in/out pattern can never
+// alternate. Add pitch and the height term enters, and a sloped tile
+// straddling the near plane produces 6 vertices into room for 5. See
+// `Render`'s own comment for what the port does about it now, and
+// docs/PORT_ROADMAP.md's M66 entry for the reproduction.
+//
+// `capacity` is not defensive dressing: it is the invariant the old code
+// stated in prose and got wrong, now stated somewhere the compiler and the
+// running program can both see it.
 constexpr float kNearPlane = 0.05f;  // tile units
 
-int ClipNear(const ViewVertex* in, int count, ViewVertex* out) {
+int ClipNear(const ViewVertex* in, int count, ViewVertex* out, int capacity) {
     int n = 0;
     for (int i = 0; i < count; ++i) {
         const ViewVertex& a = in[i];
         const ViewVertex& b = in[(i + 1) % count];
         bool aIn = a.forward >= kNearPlane;
         bool bIn = b.forward >= kNearPlane;
+        if (n + 2 > capacity) break;  // unreachable for a planar input; see above
         if (aIn) out[n++] = a;
         if (aIn != bIn) {
             float t = (kNearPlane - a.forward) / (b.forward - a.forward);
@@ -477,6 +503,22 @@ void RasterizeTriangle(Backbuffer& backbuffer, std::vector<float>& depthBuffer,
 void RasterizeModelTriangle(Backbuffer& backbuffer, std::vector<float>& depthBuffer,
                              const ProjectedVertex& a, const ProjectedVertex& b,
                              const ProjectedVertex& c, const Model& model, int skinIndex) {
+    // M66: a model with no skin pixels has nothing to sample. Every texel
+    // would come back as the chroma key anyway (Model::TexelAt returns
+    // 0x0f0f for any out-of-range coordinate), so this changes nothing
+    // that reaches the screen -- but without it the `std::clamp(..., 0,
+    // model.width - 1)` calls below are handed `hi < lo`, which is
+    // undefined behaviour and which a Debug MSVC STL turns into an
+    // outright `abort()` ("invalid bounds arguments passed to std::clamp").
+    //
+    // This is not hypothetical: nine of the twenty-one shipped zones --
+    // broken1, broken2, crypt1, crypt2, crypt3, erthcave, ffarena,
+    // lothcav and twilite -- load a `.zsk` room mesh whose texture header
+    // reads skinCount=256, width=256, **height=0**, so entering any of
+    // them killed a Debug build on the first frame. See the M66 entry in
+    // docs/PORT_ROADMAP.md for what that `.zsk` actually turns out to be.
+    if (model.width <= 0 || model.height <= 0 || model.skinCount <= 0) return;
+
     float area = (b.sx - a.sx) * (c.sy - a.sy) - (b.sy - a.sy) * (c.sx - a.sx);
     if (std::fabs(area) < 1e-6f) return;
 
@@ -628,7 +670,7 @@ void SubmitModel(Backbuffer& backbuffer, std::vector<float>& depthBuffer, const 
         // dropped whole, which made a model visibly vanish in chunks the
         // moment the player walked up to it.
         ViewVertex clipped[4];
-        int clippedCount = ClipNear(vv3, 3, clipped);
+        int clippedCount = ClipNear(vv3, 3, clipped, 4);
         if (clippedCount < 3) continue;
 
         ProjectedVertex pvc[4];
@@ -721,23 +763,66 @@ void ZoneRenderer::Render(Backbuffer& backbuffer, const Zone& zone, const Camera
                                       static_cast<float>(kMaxLightLevel));
         }
 
-        ViewVertex clipped[5];
-        int clippedCount = ClipNear(vv, 4, clipped);
-        if (clippedCount < 3) continue;
+        // M66: clip and draw the quad as the two triangles it has always
+        // *been* drawn as, instead of clipping it once as a four-sided
+        // polygon and fanning the result.
+        //
+        // This is the fix for the long-standing `ZoneRenderer::Render`
+        // crash (docs/PORT_ROADMAP.md). The quad handed to the clipper is
+        // not planar -- a tile's floor and ceiling each carry four
+        // independent corner heights -- so once the camera could pitch, the
+        // near-plane test could alternate in/out around its four corners
+        // and ClipNear could return **six** vertices into a five-entry
+        // buffer, writing past the end of both stack arrays below. The
+        // overrun lands on this function's own frame, so the fault surfaces
+        // as a wild read a line or two later rather than at the write that
+        // caused it, which is why the recorded symptom was an access
+        // violation inside this projection loop.
+        //
+        // Splitting first also makes the clip *correct* rather than merely
+        // safe. Triangles are planar by construction, so ClipNear's
+        // `count + 1` bound genuinely holds for them, and the two triangles
+        // below are the exact pair the old fan produced for an unclipped
+        // quad -- so a flat tile renders identically (u, v and light are
+        // affine within a plane, so barycentric interpolation does not care
+        // where the split runs). For a *sloped* tile the old code clipped
+        // a surface that neither triangle actually covered; this clips the
+        // geometry that gets rasterized.
+        //
+        // What visibly changes, measured rather than assumed: twelve of the
+        // fourteen tracked `.ppm` render dumps come out byte-identical
+        // across this change, and the two that move (the entity-render
+        // views at yaw 0 and 270) move *entirely* because of
+        // SurfaceDetailMask. That mask is chosen per triangle from its
+        // three vertex depths, so changing which triangles exist near the
+        // near plane can move a face into a different detail band. Pinning
+        // the mask to a constant makes even those two byte-identical --
+        // which is the check that says the difference is texel precision on
+        // near-camera surfaces and nothing else. It is also the better
+        // answer: the band is now picked from the triangles actually being
+        // rasterized.
+        constexpr int kQuadTriangles[2][3] = {{0, 1, 2}, {0, 2, 3}};
+        for (const auto& tri : kQuadTriangles) {
+            ViewVertex vv3[3] = {vv[tri[0]], vv[tri[1]], vv[tri[2]]};
 
-        ProjectedVertex pv[5];
-        for (int i = 0; i < clippedCount; ++i) {
-            pv[i].invW = 1.0f / clipped[i].forward;
-            pv[i].sx = Backbuffer::kWidth * 0.5f + clipped[i].right * focalX * pv[i].invW;
-            pv[i].sy = Backbuffer::kHeight * 0.5f - clipped[i].up * focalY * pv[i].invW;
-            pv[i].depthWorld = clipped[i].forward * kTileScale;
-            pv[i].u = clipped[i].u * pv[i].invW;
-            pv[i].v = clipped[i].v * pv[i].invW;
-            pv[i].light = clipped[i].light;
-        }
-        for (int i = 1; i + 1 < clippedCount; ++i) {
-            RasterizeTriangle(backbuffer, depthBuffer, pv[0], pv[i], pv[i + 1], zone,
-                               sur.textureIndex, face.hueGroup);
+            ViewVertex clipped[4];
+            int clippedCount = ClipNear(vv3, 3, clipped, 4);
+            if (clippedCount < 3) continue;
+
+            ProjectedVertex pv[4];
+            for (int i = 0; i < clippedCount; ++i) {
+                pv[i].invW = 1.0f / clipped[i].forward;
+                pv[i].sx = Backbuffer::kWidth * 0.5f + clipped[i].right * focalX * pv[i].invW;
+                pv[i].sy = Backbuffer::kHeight * 0.5f - clipped[i].up * focalY * pv[i].invW;
+                pv[i].depthWorld = clipped[i].forward * kTileScale;
+                pv[i].u = clipped[i].u * pv[i].invW;
+                pv[i].v = clipped[i].v * pv[i].invW;
+                pv[i].light = clipped[i].light;
+            }
+            for (int i = 1; i + 1 < clippedCount; ++i) {
+                RasterizeTriangle(backbuffer, depthBuffer, pv[0], pv[i], pv[i + 1], zone,
+                                   sur.textureIndex, face.hueGroup);
+            }
         }
     }
 

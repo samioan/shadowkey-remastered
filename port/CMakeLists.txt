@@ -109,6 +109,7 @@ target_include_directories(sk_save PUBLIC src)
 add_library(sk_bindings STATIC
   src/assets/string_table.cpp
   src/simkin_bindings/button_executable.cpp
+  src/simkin_bindings/character_progression.cpp
   src/simkin_bindings/combat.cpp
   src/simkin_bindings/combo_box_executable.cpp
   src/simkin_bindings/door_executable.cpp
@@ -475,3 +476,24 @@ target_link_libraries(camera_start_smoke PRIVATE sk_bindings sk_world)
 # See src/tests/m62_set_position_smoke.cpp.
 add_executable(set_position_smoke src/tests/m62_set_position_smoke.cpp)
 target_link_libraries(set_position_smoke PRIVATE sk_bindings sk_world)
+
+# The level-up screen: the level-up points, UpdateAttributes and the race/
+# class tables behind it, the eight attribute setters, and the experience
+# curve that makes any of it reachable.
+# See src/tests/m64_level_up_smoke.cpp.
+add_executable(level_up_smoke src/tests/m64_level_up_smoke.cpp)
+target_link_libraries(level_up_smoke PRIVATE sk_bindings sk_world)
+
+# The TestX attribute rolls and the crypt1.s gauntlet they gate: the roll's
+# closed form, the eight-binding field map, and both outcomes of a real
+# EnterZone check. See src/tests/m65_attribute_check_smoke.cpp.
+add_executable(attribute_check_smoke src/tests/m65_attribute_check_smoke.cpp)
+target_link_libraries(attribute_check_smoke PRIVATE sk_bindings sk_world)
+
+# The near-plane clipper's real output bound, and the long-standing
+# ZoneRenderer::Render crash that came from getting it wrong: the
+# non-planar-tile census behind it, the camera pose that triggers it, and a
+# full sweep of all 21 zones at every pitch.
+# See src/tests/m66_render_clip_smoke.cpp.
+add_executable(render_clip_smoke src/tests/m66_render_clip_smoke.cpp)
+target_link_libraries(render_clip_smoke PRIVATE sk_render3d)
