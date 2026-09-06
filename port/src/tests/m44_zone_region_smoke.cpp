@@ -211,13 +211,13 @@ int main(int argc, char** argv) {
                         locked, expectedTiles);
             Check(locked == expectedTiles,
                   "LockZone locks ONE rectangle, even though four share the name");
-            Check(azra.CellAt(first->x0, first->y0).IsLocked(),
+            Check(azra.CellAt(first->x0, first->y0).IsBlocked(),
                   "...and the cells it covers really carry the block bit");
 
             int unlocked = azra.UnlockRegion("YouSure");
             Check(unlocked > locked,
                   "UnlockZone reaches ALL four -- the real asymmetry, not a tidy-up");
-            Check(!azra.CellAt(first->x0, first->y0).IsLocked(), "...and clears the bit again");
+            Check(!azra.CellAt(first->x0, first->y0).IsBlocked(), "...and clears the bit again");
         }
     }
 

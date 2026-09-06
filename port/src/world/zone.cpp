@@ -79,8 +79,9 @@ bool Zone::Load(const std::string& scriptRoot, const std::string& zoneName) {
     for (size_t i = 0; i < cellCount; ++i) {
         const uint8_t* p = &zmp[0x84 + i * kZmpCellSize];
         cells_[i].flags = p[0];
-        // M44: the second byte, which Lock/UnlockZone toggle -- see
-        // ZmpCell::blockFlags.
+        // M44: the second byte, which Lock/UnlockZone toggle. M67: and
+        // which already arrives carrying every solid tile-stamped
+        // placement's baked footprint -- see ZmpCell::blockFlags.
         cells_[i].blockFlags = p[1];
         cells_[i].lightLevel = ReadU16(p + 2);
         cells_[i].zcpIndex = ReadU16(p + 4);
@@ -341,13 +342,67 @@ int Zone::LockRegion(const std::string& name) {
             for (int y = r.y0; y < r.y1; ++y) {
                 // An assignment, not an OR: locking wipes whatever else
                 // the byte held. Transcribed as written.
-                SetBlockFlags(x, y, ZmpCell::kBlockLocked);
+                SetBlockFlags(x, y, ZmpCell::kBlockSolid);
                 ++changed;
             }
         }
         break;
     }
     return changed;
+}
+
+int Zone::StampEntityBox(int worldX, int worldY, int headingRaw, int halfExtentX, int halfExtentY,
+                          uint8_t mask, bool set, bool journal) {
+    // The real guard, shared by both functions: a zero extent on either
+    // axis walks nothing. (FUN_10066204's other two conditions -- solid,
+    // and not already passable -- belong to the caller, because the
+    // *clearing* half deliberately does not test passability: a door has
+    // already been marked passable by the time it clears its own stamp.)
+    if (halfExtentX == 0 || halfExtentY == 0) return 0;
+
+    // The engine reads its trig from a 2048-entry table indexed by
+    // `angle >> 5`, and picks `sin(0x4000 - h)` and `sin(0x8000 - h)` --
+    // i.e. cos(h) and sin(h). Written as the trig it is.
+    const double radians = static_cast<double>(headingRaw & 0xffff) * (2.0 * 3.14159265358979323846)
+                            / 65536.0;
+    const double cosH = std::cos(radians);
+    const double sinH = std::sin(radians);
+
+    int written = 0;
+    // Both loops are do-whiles stepping half a tile, so an extent smaller
+    // than 128 still stamps its own centre row/column exactly once.
+    for (int dy = -halfExtentY;; dy += 128) {
+        for (int dx = -halfExtentX;; dx += 128) {
+            // The rotation as the decompile composes it: the X offset
+            // takes (sin, cos) and the Y offset (cos, sin), which is a
+            // rotation by heading with the engine's own axis convention
+            // baked in.
+            const double offX = sinH * dx - cosH * dy;
+            const double offY = cosH * dx + sinH * dy;
+            int tx = static_cast<int>(std::floor((worldX + offX) / kTileScale));
+            int ty = static_cast<int>(std::floor((worldY + offY) / kTileScale));
+            tx = std::clamp(tx, 0, width_ - 1);
+            ty = std::clamp(ty, 0, height_ - 1);
+            if (width_ > 0 && height_ > 0) {
+                size_t index = static_cast<size_t>(ty) * static_cast<size_t>(width_) +
+                                static_cast<size_t>(tx);
+                uint8_t before = cells_[index].blockFlags;
+                uint8_t after = set ? static_cast<uint8_t>(before | mask)
+                                    : static_cast<uint8_t>(before & ~mask);
+                if (journal) {
+                    // SetBlockFlags writes *and* journals, which is what
+                    // the real `param_3 != 0` path does per cell.
+                    SetBlockFlags(tx, ty, after);
+                } else {
+                    cells_[index].blockFlags = after;
+                }
+                if (after != before) ++written;
+            }
+            if (dx + 128 > halfExtentX) break;
+        }
+        if (dy + 128 > halfExtentY) break;
+    }
+    return written;
 }
 
 int Zone::UnlockRegion(const std::string& name) {
@@ -362,7 +417,7 @@ int Zone::UnlockRegion(const std::string& name) {
                 size_t index = static_cast<size_t>(y) * static_cast<size_t>(width_) +
                                 static_cast<size_t>(x);
                 SetBlockFlags(x, y, static_cast<uint8_t>(cells_[index].blockFlags &
-                                                           ~ZmpCell::kBlockLocked));
+                                                           ~ZmpCell::kBlockSolid));
                 ++changed;
             }
         }
@@ -479,15 +534,21 @@ bool Zone::CircleHitsWall(float worldX, float worldY, float radius) const {
             // renderer's neighborBlocks() treatment of the grid edge
             // (render3d/zone_renderer.cpp).
             //
-            // M44: a *locked* tile blocks as well. That is the whole point
-            // of `LockZone`/`UnlockZone` -- 30-odd real call sites of the
-            // shape `UnlockZone("swdoor")` after a key is used or a lever
-            // pulled, on regions that are barriers until then. Locking is
-            // kept out of the *sightline* test below deliberately: the
-            // engine's blocking test is a separate virtual from the one the
-            // renderer and the visibility raycast use, and nothing about
-            // this byte says it stops light or line of sight.
-            if (!InBounds(tx, ty) || CellAt(tx, ty).IsWall() || CellAt(tx, ty).IsLocked()) {
+            // M44: a tile whose second byte carries the block bit stops
+            // you as well -- that is what `UnlockZone("swdoor")` lifts
+            // after a key is used or a lever pulled, on regions that are
+            // barriers until then. It is kept out of the *sightline* test
+            // below deliberately: the engine's blocking test is a separate
+            // virtual from the one the renderer and the visibility raycast
+            // use, and nothing about this byte says it stops light or line
+            // of sight.
+            //
+            // M67: this test was right and its *input* was wrong. The bit
+            // is also where a closed door's own footprint lives (see
+            // ZmpCell::blockFlags and StampEntityBox), and nothing in this
+            // port ever cleared it -- so every door in the game stayed a
+            // wall after it opened. Doors clear it through SetPassable now.
+            if (!InBounds(tx, ty) || CellAt(tx, ty).IsWall() || CellAt(tx, ty).IsBlocked()) {
                 float closestX = std::clamp(worldX, tx * kTileScale, (tx + 1) * kTileScale);
                 float closestY = std::clamp(worldY, ty * kTileScale, (ty + 1) * kTileScale);
                 float dx = worldX - closestX, dy = worldY - closestY;

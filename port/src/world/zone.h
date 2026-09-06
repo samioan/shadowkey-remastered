@@ -107,15 +107,37 @@ struct ZmpCell {
     uint8_t flags = 0;  // bit0 light source, bit1 wall, bit3 force-draw, bit6 ceiling-band-select,
                          // bits4-5 .zlu hue-family selector for faces this cell blocks/owns (this
                          // session, decompiled -- see Zone::PaletteColor()'s comment)
-    // M44: the cell record's **second** byte, which this port skipped
-    // entirely until now. `LockZone`/`UnlockZone` are the two functions
-    // that make it matter: locking a named region assigns `4` to this byte
-    // across every tile in the region's rectangle (an assignment, not an
-    // OR -- see Zone::LockRegion) and unlocking clears bit 2 (`&= 0xfb`).
-    // The rest of the byte is not decoded; the port only reads bit 2.
+    // The cell record's **second** byte: the engine's per-tile "this
+    // square blocks movement" bit, plus other undecoded bits.
+    //
+    // M44 found `LockZone`/`UnlockZone` writing bit 2 here and named it
+    // `kBlockLocked`/`IsLocked()`. That name was half the story and it
+    // misled: **M67 found that the bit has a second, far more common
+    // writer -- the entity tile stamp** (`StampEntityBox` below). The
+    // shipped `.zmp`s carry 39,908 cells with the bit already set, 36,332
+    // of them open floor, and recomputing every solid tile-stamped
+    // placement's footprint reproduces 12,403 of those cells with
+    // **100.0% precision in 19 of the 21 zones** (99.4%/99.9%, one tile
+    // each, in glaciercrawl and raiders). So the on-disk bit is not a
+    // dormant "locked" flag waiting for a script -- it is the baked
+    // initial blocking state, and a closed door's own footprint is part
+    // of it.
+    //
+    // That is also why the corpus contains **thirty `UnlockZone` calls
+    // and not one `LockZone`**: nothing ever needs to lock at runtime,
+    // because whatever starts blocked already says so on disk.
+    //
+    // Renamed to `IsBlocked()` accordingly. The rest of the byte is still
+    // undecoded (values 0x02/0x20/0x40/0x60 also occur, and 0x02 is the
+    // upper-storey selector `CollisionFloorHeightAt` reads).
     uint8_t blockFlags = 0;
-    static constexpr uint8_t kBlockLocked = 0x04;
-    bool IsLocked() const { return (blockFlags & kBlockLocked) != 0; }
+    static constexpr uint8_t kBlockSolid = 0x04;
+    // The engine's own two traces (the projectile tick FUN_1005f928 and
+    // the raycast at 0x100187d0) spell this `(byte & 0x1c) == 4` rather
+    // than a plain bit test. Bits 3 and 4 are set in no shipped cell and
+    // nothing writes them, so the two forms agree everywhere; kept as the
+    // simple test the rest of this port already uses.
+    bool IsBlocked() const { return (blockFlags & kBlockSolid) != 0; }
     // `lightLevel`'s on-disk value is only a leftover editor baseline --
     // the real engine zeroes it at the start of Bullseye_BakeLighting and
     // rebuilds it from scratch (propagation + .zcp's lightDelta). Zone::
@@ -316,7 +338,7 @@ public:
             int ty = region.y0 + std::rand() % spanY;
             if (!InBounds(tx, ty)) continue;
             const ZmpCell& cell = CellAt(tx, ty);
-            if (cell.IsWall() || cell.IsLocked()) continue;
+            if (cell.IsWall() || cell.IsBlocked()) continue;
             if (occupied(tx, ty)) continue;
             outTileX = tx;
             outTileY = ty;
@@ -347,6 +369,50 @@ public:
     // *every* region sharing the name, not just one. Reproduced rather
     // than made symmetric.
     int UnlockRegion(const std::string& name);
+
+    // ---- M67: the entity tile stamp -------------------------------------
+    //
+    // `FUN_10066204` (set) and `FUN_1006640c` (clear) -- one walk, one
+    // line apart (`tile[1] |= mask` vs. `tile[1] &= ~mask`), so they are
+    // one function here with a `set` flag.
+    //
+    // The engine splits entity collision two ways (world/model_collision.h):
+    // anything up to half a tile is tested per-entity from the tile's own
+    // list, and anything **wider** is baked into the tile grid and blocks
+    // like a wall. This is that bake. It walks the entity's box in
+    // half-tile (128-unit) steps, **rotated by the entity's current
+    // heading**, and OR/AND-NOTs `mask` into each covered cell's second
+    // byte. Out-of-grid steps are *clamped* to the edge tile rather than
+    // skipped -- the real loop does `if (t < 0) t = 0; if (dim-1 < t)
+    // t = dim-1;`, and that is reproduced, edge smear included.
+    //
+    // Who calls it, and why it is the fix for "an open door is still a
+    // wall": the `SetPassable(bool)` native (Object/Entity dispatch case
+    // 0x17) is
+    //
+    //     entity->passable /* +0xd5 */ = arg;
+    //     if (entity->vtable[0xac]())            // is it tile-stamped?
+    //         arg ? FUN_1006640c(entity, 4, 1)   // opened -> clear
+    //             : FUN_10066204(entity, 4, 1);  // closed -> set
+    //
+    // -- so a door's own SetPassable is what lifts its footprint out of
+    // the grid. `door.s` swings open with `SetPassable(true);
+    // AddRotationTurn(-64*256)` and closes with `SetPassable(true);
+    // AddRotationTurn(64*256); SetPassable(false)`, and the reason it
+    // asks to be passable *before* rotating even when closing is exactly
+    // this: clear the old footprint at the old heading, turn, re-stamp at
+    // the new one. A native door path in the image spells the same three
+    // steps out literally, `SetPassable`'s two vtable slots included.
+    //
+    // `journal` mirrors the real `param_3`: record each touched cell in
+    // the tile-change journal above. Every `SetPassable`-driven call
+    // passes 1; `GameEngine_InitLevel`'s startup pass passes 0. Returns
+    // the number of cells written.
+    //
+    // Angles are raw 16-bit headings (65536 per turn), the `.ent` and
+    // `AddRotationTurn` convention.
+    int StampEntityBox(int worldX, int worldY, int headingRaw, int halfExtentX, int halfExtentY,
+                       uint8_t mask, bool set, bool journal);
 
     // M44: the per-level tile-change journal (`level+0xfc` / `+0x100`, a
     // fixed 100-entry array of `{i16 x, i16 y, u16 savedByte}`). Every

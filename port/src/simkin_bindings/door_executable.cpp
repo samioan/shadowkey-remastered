@@ -21,7 +21,40 @@ float DoorExecutable::yawRadians() const {
     // See door_executable.h's class comment -- 65536 raw units == one
     // full turn, same convention docs/ZONE_FORMAT.md confirmed for
     // .ent's rotOrScale fields.
+    //
+    // Deliberately the *script's* accumulated turn only, not the full
+    // heading: main.cpp composes this with DoorInstance::placementYaw
+    // when it draws the door, and has since M15. headingRaw() below is
+    // the composed one, for the stamp walk.
     return static_cast<float>(m_RotationRaw) / 65536.0f * kTwoPi;
+}
+
+void DoorExecutable::AttachTileStamp(TileStamp* stamp, int halfExtentX, int halfExtentY,
+                                      int placementYawRaw) {
+    m_TileStamp = stamp;
+    m_HalfExtentX = halfExtentX;
+    m_HalfExtentY = halfExtentY;
+    m_PlacementYawRaw = placementYawRaw;
+}
+
+bool DoorExecutable::isTileStamped() const {
+    // `ModelCollision::tileStamped()` -- kept as a literal rather than an
+    // include, because `sk_bindings` does not link `sk_world`. Half a
+    // tile, the same 128 the real `GameEngine_InitLevel` test uses.
+    constexpr int kTileStampThreshold = 128;
+    return m_HalfExtentX > kTileStampThreshold || m_HalfExtentY > kTileStampThreshold;
+}
+
+int DoorExecutable::headingRaw() const {
+    return (m_PlacementYawRaw + m_RotationRaw) & 0xffff;
+}
+
+void DoorExecutable::ApplyTileStamp() {
+    if (!m_TileStamp || !isTileStamped()) return;
+    // Mask 4 and no other: that is what every real call site passes, and
+    // it is the bit Zone::CircleHitsWall reads.
+    m_TileStamp->StampEntityBox(positionX(), positionY(), headingRaw(), m_HalfExtentX,
+                                 m_HalfExtentY, 0x04, !m_Passable);
 }
 
 void DoorExecutable::InvokeOnUse() {
@@ -55,7 +88,12 @@ bool DoorExecutable::method(const skString& methodName, skRValueArray& args, skR
         return true;
     }
     if (methodName == skString("SetPassable") && args.entries() == 1) {
+        // M67: the real case 0x17 -- assign, then stamp or unstamp the
+        // tile grid at the door's *current* heading. See the class
+        // comment for why the ordering inside door.s makes that the only
+        // correct moment to do it.
         m_Passable = args[0].boolValue();
+        ApplyTileStamp();
         return true;
     }
     if (methodName == skString("AddRotationTurn") && args.entries() == 1) {

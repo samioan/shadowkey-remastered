@@ -1377,6 +1377,35 @@ port. It is what `LockZone`/`UnlockZone` write, bit 2 (`0x04`) being
 > rectangle — whether that ever happens in the shipped content was not
 > checked.
 
+> **M67: bit 2's second writer, quantified — and it is a writer that also
+> erases.** The paragraph above is right that the entity tile stamp ORs
+> into this bit; M67 measured how much of the on-disk population that
+> accounts for, and found the erase half. Recomputing `FUN_10066204`'s
+> footprint for every solid tile-stamped placement and re-stamping it onto
+> the shipped grid: **2,069 placements across the 21 zones set 2
+> previously-clear cells**, so the recomputed footprints are a subset of
+> the baked bits to within two cells, and 19 of the 21 zones are exactly
+> clean. Those footprints are **12,403 of the 40,517 set cells**, so
+> roughly two thirds of the bit's on-disk population is authored blocking
+> that no placement explains — the barriers those 30 `UnlockZone` sites
+> open, plus whatever else. Naming that remainder is still open.
+>
+> The erase is `FUN_1006640c`, the same walk with `&= ~mask`, and its
+> caller is the `SetPassable(bool)` native (Object/Entity dispatch case
+> `0x17`): assign `Entity+0xd5`, then, if the entity is tile-stamped,
+> stamp when it became solid and unstamp when it became passable. **A
+> closed door's footprint is part of the shipped `.zmp`**, and
+> `SetPassable` is the only thing that takes it out again — which is why
+> a port that stored passability without stamping left every door in the
+> game impassable. See `PORT_ROADMAP.md`'s M67 entry and
+> `port/src/world/zone.h`'s `StampEntityBox`.
+>
+> Two properties of the walk worth recording as format facts: it steps
+> **half a tile (128 units)** and is **rotated by the entity's current
+> heading**, so a door's footprint moves when it swings; and the bit is
+> one bit with **no reference count**, so overlapping stamps do not
+> survive one of them clearing.
+
 ### Inclusive containment, half-open iteration
 
 The two disagree in the shipped engine, and the port reproduces both.

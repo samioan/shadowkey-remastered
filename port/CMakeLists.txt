@@ -497,3 +497,6 @@ target_link_libraries(attribute_check_smoke PRIVATE sk_bindings sk_world)
 # See src/tests/m66_render_clip_smoke.cpp.
 add_executable(render_clip_smoke src/tests/m66_render_clip_smoke.cpp)
 target_link_libraries(render_clip_smoke PRIVATE sk_render3d)
+
+add_executable(door_stamp_smoke src/tests/m67_door_stamp_smoke.cpp)
+target_link_libraries(door_stamp_smoke PRIVATE sk_render3d sk_bindings)

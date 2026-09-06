@@ -272,6 +272,27 @@ private:
     sk::Zone* m_Zone = nullptr;
 };
 
+// M67: the host side of DoorExecutable::TileStamp, same shape and the same
+// layering reason as LiveZoneRegions above. A door's SetPassable() reaches
+// the tile grid through this, which is what makes an opened door actually
+// walk-through-able -- see door_executable.h and Zone::StampEntityBox.
+class LiveTileStamp : public sk_bindings::DoorExecutable::TileStamp {
+public:
+    void SetZone(sk::Zone* zone) { m_Zone = zone; }
+    void StampEntityBox(int worldX, int worldY, int headingRaw, int halfExtentX, int halfExtentY,
+                        uint8_t mask, bool set) override {
+        if (!m_Zone) return;
+        // journal = true: every SetPassable-driven call passes the real
+        // `param_3 = 1`, so the touched cells land in the tile-change
+        // journal (Zone::tileChanges()).
+        m_Zone->StampEntityBox(worldX, worldY, headingRaw, halfExtentX, halfExtentY, mask, set,
+                                /*journal=*/true);
+    }
+
+private:
+    sk::Zone* m_Zone = nullptr;
+};
+
 struct MonsterInstance {
     std::unique_ptr<sk_bindings::MonsterExecutable> script;
     float x = 0, y = 0, z = 0;
@@ -1393,6 +1414,9 @@ int main(int argc, char** argv) {
     // M44: the LockZone/UnlockZone/GetZone bridge -- see LiveZoneRegions.
     LiveZoneRegions gameZoneRegions;
     stack.level().SetZoneRegions(&gameZoneRegions);
+    // M67: the SetPassable -> tile-grid bridge -- see LiveTileStamp. Each
+    // door is attached to it as it is created, below.
+    LiveTileStamp gameTileStamp;
     sk::Camera gameCamera;
     // M51: the other way -- `FUN_1001b198` takes a real world position and
     // attenuates by distance from the listener before playing. The curve
@@ -1584,6 +1608,7 @@ int main(int argc, char** argv) {
             stack.level().ClearEffects();  // M63
             gameRegionsOccupied.clear();
             gameZoneRegions.SetZone(nullptr);
+            gameTileStamp.SetZone(nullptr);
             gameZone.reset();
             stack.SetCurrentLevelName(std::string());
             // Same reset the zone-load block does, for the same reason --
@@ -1707,6 +1732,7 @@ int main(int argc, char** argv) {
                 // grid, so the Level global needs the live zone. Repointed
                 // on every zone load.
                 gameZoneRegions.SetZone(gameZone.get());
+                gameTileStamp.SetZone(gameZone.get());
                 // M44: a fresh zone starts with nobody inside any region,
                 // so the first tick fires EnterZone for wherever the
                 // player spawns -- which is what azra's "start"/"help1"
@@ -1881,6 +1907,18 @@ int main(int argc, char** argv) {
                             // list -- so a script whose Init() reads
                             // GetPositionX/Y/Z sees where it actually is.
                             door->SetWorldPosition(e.x, e.y, e.z);
+                            // M67: and its box and heading, so its own
+                            // SetPassable() can lift its footprint out of
+                            // the tile grid. Before Init() for the same
+                            // reason SetWorldPosition is: a script that
+                            // touches passability in Init() must stamp
+                            // against real geometry, not against (0,0).
+                            {
+                                const sk::ModelCollision& dc =
+                                    gameModelCollision.At(desc->modelArchiveIndex);
+                                door->AttachTileStamp(&gameTileStamp, dc.halfExtentX,
+                                                       dc.halfExtentY, e.yawRaw);
+                            }
                             skRValueArray args;
                             args.append(skRValue(0));  // placeholder for Init's "(s)" parameter
                             skRValue ret;
@@ -2312,6 +2350,16 @@ int main(int argc, char** argv) {
                     // closed (`saved_Open [0]`) and only calls
                     // SetPassable(true) from OnUse(). That is the same
                     // `Entity+0xd5` the real walk checks.
+                    //
+                    // M67: this is the *second* of the two things that
+                    // stop you at a door, and it was never the one that
+                    // mattered. A door is wider than half a tile, so the
+                    // real engine blocks it through the tile grid
+                    // (Zone::StampEntityBox) and this per-entity test is
+                    // belt and braces -- faithful belt and braces, since
+                    // `FUN_100017c8` walks the tile's entity list too and
+                    // its box is axis-aligned exactly like this one. The
+                    // grid was what kept opened doors shut.
                     for (const DoorInstance& d : gameDoors) {
                         if (d.script->passable() || !solidAt(d.modelArchiveIndex)) continue;
                         if (sk::BoxesOverlap(mover, boxOf(d.x, d.y, d.modelArchiveIndex))) {

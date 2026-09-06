@@ -5753,6 +5753,113 @@ algorithms.
       under half a second between them), and takes a stride and a zone name
       to narrow or widen it.
 
+- [x] **M67 -- "the door is a wall no matter if it's open or closed": the
+  entity tile stamp.** Reported from actual play, at the first house in
+  azra. Every door in the game was impassable, opened or shut, and the
+  cause was a piece of the engine this port had read the *output* of since
+  M44 without ever knowing it was output. Fixed in `Zone::StampEntityBox` +
+  `DoorExecutable::SetPassable`; smoke test
+  `src/tests/m67_door_stamp_smoke.cpp`, **22 checks**. Suite **60/60**,
+  soft-fails **39 -> 39**, and all 14 tracked `.ppm` renders unchanged
+  (this milestone does not touch the renderer).
+
+    - **The bit was right; nothing ever cleared it.** `.zmp` cell byte 1
+      bit 2 makes a tile block, and `Zone::CircleHitsWall` has read it
+      since M44 under the name `IsLocked()`. M44 found it via
+      `LockZone`/`UnlockZone` and reasonably assumed a *script* was the
+      thing that set it. The shipped data says otherwise: **40,517 cells
+      arrive with the bit already set, 36,332 of them open floor** -- 25%
+      of azra's walkable map, 46% of glaciercrawl's. A bit that a quarter
+      of a town's floor carries on disk is not "a barrier awaiting a
+      key." (Both counts land exactly on M57's independent census in
+      `ZONE_FORMAT.md`, which is a useful cross-check that this milestone
+      and that one were measuring the same thing.)
+
+    - **The corpus confirms it from the other direction.** Grepping all
+      21 zone scripts finds **thirty `UnlockZone` call sites and not one
+      `LockZone`**. Nothing ever locks at runtime, because whatever starts
+      blocked already says so on disk. That asymmetry had been sitting in
+      plain sight since M44 and is the tell.
+
+    - **What actually sets it: `FUN_10066204`, the tile stamp.** The
+      engine splits entity collision two ways (`world/model_collision.h`):
+      up to half a tile it tests per-entity from the tile's own list, and
+      **anything wider it bakes into the tile grid**, where it blocks like
+      a wall. The bake walks the entity's box in 128-unit steps *rotated
+      by its heading* and ORs bit 2 into each covered cell.
+      `FUN_1006640c` is the same walk with `&= ~mask`. A door is
+      `2 64 256` in `<zone>_models.txt` -- 256 is wider than half a tile,
+      so **every door in the game is a tile-stamped entity**, and its
+      closed footprint is part of the shipped `.zmp`.
+
+    - **Verified against the data rather than argued.** Recomputing the
+      footprint of every solid tile-stamped placement and re-stamping it
+      onto the shipped grid: **2,069 placements across the 21 zones set
+      2 previously-clear cells**, i.e. the walk, its half-tile step, its
+      rotation and its edge clamp all reproduce what baked those bits,
+      with 19 of 21 zones exactly clean (glaciercrawl and raiders differ
+      by one cell each, at a grid edge where the real loop clamps). That
+      is Part 2 of the smoke test, and it is what licenses calling this a
+      transcription.
+
+    - **The missing call site is `SetPassable`.** Object/Entity dispatch
+      case 0x17 is
+      `entity->passable = arg; if (isTileStamped()) arg ? unstamp(4,1) :
+      stamp(4,1);` -- so a door's own `SetPassable` is what lifts its
+      footprint out of the grid. This port did the assignment and none of
+      the stamping. **That one missing line is the whole bug**: `door.s`
+      opened the door, swung it, changed its use-text, and left its
+      footprint sitting in the tile grid forever.
+
+    - **Why it has to happen inside the call.** The walk uses the heading
+      *at that moment*, and `door.s` changes passability on both sides of
+      its turn -- `SetPassable(true); AddRotationTurn(-64*256)` to open,
+      and `SetPassable(true); AddRotationTurn(64*256); SetPassable(false)`
+      to close. That leading `SetPassable(true)` on the *closing* path
+      has looked redundant since M15; it is not. It clears the old
+      footprint before the door turns, so the re-stamp lands on the new
+      heading. Reconciling passability after the script ran would clear
+      the closed footprint at the open heading and vice versa. A native
+      door path in the image spells the same three steps out literally.
+      `DoorExecutable` therefore reaches the grid through a `TileStamp`
+      interface, the same layering `LevelExecutable::ZoneRegions` uses
+      (`sk_bindings` does not link `sk_world`).
+
+    - **Renamed, because the old name is what hid this.** `IsLocked()` ->
+      `IsBlocked()`, `kBlockLocked` -> `kBlockSolid`. The bit was never
+      "locked"; it is "this square blocks", and it has two writers.
+
+    - **Worth being honest about how long this sat there.** None of the
+      RE was missing. `WORLD_MODEL.md` has had the stamp and its inverse
+      written up since M55, and `ZONE_FORMAT.md`'s M57 census already said
+      in as many words that bit 2 is "authored blocking, a locked gate and
+      an oversized prop all land on one flag." Everything needed to see
+      the bug was on the page. What nobody did was ask the next question
+      -- *if something ORs this bit in per entity, what ANDs it out?* --
+      and go looking for the call site. The lesson is not "decompile
+      more": it is that a documented write with no documented erase is a
+      loose end worth chasing, and that a **bug report from playing** got
+      there in one afternoon when 23 milestones of data-driven
+      verification had not, because every one of those milestones tested
+      what the port computed rather than whether a door opened.
+
+    - **Reproduced as-is, not fixed:** the bit is one bit and not a
+      reference count, so two overlapping stamps do not survive one of
+      them clearing. The engine has that flaw; the port now has it too,
+      and the smoke test pins it so it stays deliberate.
+
+    - **Left open.** Recall is the other half of Part 2 and is *low* --
+      the stamps account for 12,403 of the 39,908 set cells, so roughly
+      two thirds of the bit's on-disk population is authored level data
+      (the barriers those 30 `UnlockZone` calls open, and whatever else).
+      Naming the rest, and the byte's other populated values
+      (0x02/0x20/0x40/0x60 -- 0x02 is already known to be the
+      upper-storey selector `CollisionFloorHeightAt` reads), is a
+      milestone of its own. Also unwired: an opened door's cleared
+      footprint is journalled in `Zone::tileChanges()` exactly as the real
+      `param_3 = 1` asks, but nothing writes that journal into a save yet,
+      so a door reverts to shut across save/load.
+
 ## Next milestones (not yet started)
 
 Roughly in priority order for reaching "actually playable," not commitments:

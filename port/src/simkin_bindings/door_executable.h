@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstdint>
 #include <map>
 #include <string>
 
@@ -29,11 +30,33 @@
 // (consistent with every prior milestone), nothing lost by leaving it
 // unimplemented.
 //
-// SetPassable(bool): stored but currently inert -- this port has no
-// per-entity collision at all yet (only Zone::CircleHitsWall's tile-grid
-// test, see world/zone.h), so a closed door was never actually blocking
-// movement to begin with. Not a regression this pass introduces, just an
-// existing gap this class doesn't attempt to close.
+// SetPassable(bool) -- M15 stored it and left it inert, M55 gave it teeth
+// in main.cpp's per-entity collision walk, and **M67 found the half that
+// was actually keeping doors shut**. A door is 64x256 in
+// `<zone>_models.txt`, i.e. wider than the half-tile the engine tests
+// per-entity, so it is a *tile-stamped* entity: its footprint is baked
+// into the tile grid and blocks like a wall (world/model_collision.h).
+// The real native (Object/Entity dispatch case 0x17) is
+//
+//     entity->passable /* +0xd5 */ = arg;
+//     if (entity->vtable[0xac]())            // is it tile-stamped?
+//         arg ? FUN_1006640c(entity, 4, 1)   // opened -> clear the stamp
+//             : FUN_10066204(entity, 4, 1);  // closed -> set it
+//
+// -- and this port did the assignment and none of the stamping, so every
+// door in the game stayed impassable after it opened. See
+// Zone::StampEntityBox and the TileStamp interface below.
+//
+// The stamp has to happen **inside** the call rather than being
+// reconciled afterwards, because the footprint is walked at the entity's
+// heading *at that moment* and `door.s` deliberately changes passability
+// on both sides of its turn:
+//
+//     open:  SetPassable(true);  AddRotationTurn(-64*256)
+//     close: SetPassable(true);  AddRotationTurn(64*256); SetPassable(false)
+//
+// Reading it after the fact would clear the closed footprint at the open
+// heading and vice versa.
 //
 // AddRotationTurn(raw): raw units share the same 16-bit-wraparound fixed-
 // point convention already confirmed for .ent's rotOrScale fields
@@ -55,6 +78,39 @@ class PlayerExecutable;
 
 class DoorExecutable : public skScriptedExecutable, public EntityPositionRef {
 public:
+    // M67: the tile grid, reached through an interface for the same
+    // layering reason LevelExecutable::ZoneRegions exists -- `sk_bindings`
+    // deliberately does not link `sk_world`. main.cpp implements it over
+    // the live zone; a test can implement it over a counter.
+    class TileStamp {
+    public:
+        virtual ~TileStamp() = default;
+        // `Zone::StampEntityBox` -- FUN_10066204 / FUN_1006640c.
+        virtual void StampEntityBox(int worldX, int worldY, int headingRaw, int halfExtentX,
+                                     int halfExtentY, uint8_t mask, bool set) = 0;
+    };
+
+    // The half-extents come from `<zone>_models.txt` via
+    // `sk::ModelCollision`, and `placementYawRaw` is the `.ent` record's
+    // own heading -- together with the script's accumulated
+    // AddRotationTurn() they make up `Entity+0xb6`, the single heading the
+    // real stamp walk rotates by. Attach before Init() runs, so a script
+    // whose Init() sets passability stamps against real geometry.
+    //
+    // Before this is attached (and in every test that does not care), the
+    // native still records passability and simply stamps nothing -- the
+    // same late-bound-dependency convention SetEntityTypes()/
+    // SetZoneRegions() already use.
+    void AttachTileStamp(TileStamp* stamp, int halfExtentX, int halfExtentY, int placementYawRaw);
+
+    // `Entity+0x92`, via ModelCollision::tileStamped(): only an entity
+    // wider than half a tile on either axis is baked into the grid at all.
+    bool isTileStamped() const;
+
+    // `Entity+0xb6` -- placement heading plus every AddRotationTurn() so
+    // far, wrapped to the engine's 16 bits.
+    int headingRaw() const;
+
     DoorExecutable(const skString& filename, skExecutableContext& ctxt, PlayerExecutable& player);
 
     bool method(const skString& methodName, skRValueArray& args, skRValue& returnValue,
@@ -101,10 +157,20 @@ private:
     PlayerExecutable& m_Player;
     skInterpreter* m_Interpreter;
 
+    // M67: applies the current passability to the tile grid, at the
+    // heading the door is at right now. See SetPassable's comment above.
+    void ApplyTileStamp();
+
     int m_UseTextId = -1;
     int m_RotationRaw = 0;  // accumulated AddRotationTurn() argument, raw units
     bool m_Passable = false;
     bool m_MpUsable = false;  // SetMPUsable() -- stored but inert, no multiplayer in this port
+
+    // M67: the tile stamp -- see AttachTileStamp().
+    TileStamp* m_TileStamp = nullptr;
+    int m_HalfExtentX = 0;
+    int m_HalfExtentY = 0;
+    int m_PlacementYawRaw = 0;
 };
 
 }  // namespace sk_bindings
