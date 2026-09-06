@@ -122,7 +122,36 @@ struct Window::Impl {
     HFONT overlayFont = nullptr;
     int overlayCharWidth = 0;
     int overlayLineHeight = 0;
+    // Post-M68 fix: the offscreen surface the frame is composed into before being
+    // blitted to the window in one go -- see Present(). Cached across
+    // frames and rebuilt only when the client area changes size.
+    HDC backDc = nullptr;
+    HBITMAP backBitmap = nullptr;
+    HGDIOBJ backOldBitmap = nullptr;
+    int backWidth = 0;
+    int backHeight = 0;
 };
+
+namespace {
+
+// Post-M68 fix: tears down the cached offscreen surface, restoring the memory DC's
+// original bitmap first -- a DC still holding a selected bitmap will not
+// let that bitmap be deleted, which is how this kind of cache turns into a
+// slow GDI handle leak on every window resize.
+void ReleaseBackBuffer(Window::Impl* impl) {
+    if (impl->backDc) {
+        if (impl->backOldBitmap) SelectObject(impl->backDc, impl->backOldBitmap);
+        DeleteDC(impl->backDc);
+    }
+    if (impl->backBitmap) DeleteObject(impl->backBitmap);
+    impl->backDc = nullptr;
+    impl->backBitmap = nullptr;
+    impl->backOldBitmap = nullptr;
+    impl->backWidth = 0;
+    impl->backHeight = 0;
+}
+
+}  // namespace
 
 namespace {
 
@@ -183,6 +212,14 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             ReleaseCapture();
             if (impl && impl->focusLostCallback) impl->focusLostCallback();
             return 0;
+        // Post-M68 fix: the other half of the flicker. The window class asks for a
+        // COLOR_WINDOW background brush, so any invalidation had Windows
+        // repaint the whole client area in the system window colour before
+        // the next Present overwrote it -- a full-window flash. Present
+        // paints every pixel of the client area itself, every tick, so
+        // there is nothing for an erase to usefully do.
+        case WM_ERASEBKGND:
+            return 1;
         case WM_CHAR:
             if (impl && impl->charCallback) {
                 impl->charCallback(static_cast<wchar_t>(wParam));
@@ -241,6 +278,7 @@ Window::Window(int clientWidth, int clientHeight, const std::wstring& title) {
 Window::~Window() {
     if (impl_) {
         if (impl_->overlayFont) DeleteObject(impl_->overlayFont);  // SK_DEBUG_SUITE (M68)
+        ReleaseBackBuffer(impl_);                                   // Post-M68 fix
         if (impl_->hwnd) DestroyWindow(impl_->hwnd);
         delete impl_;
     }
@@ -299,10 +337,53 @@ void Window::Present(const Backbuffer& backbuffer) {
     GetClientRect(impl_->hwnd, &client);
     int destW = client.right - client.left;
     int destH = client.bottom - client.top;
+    if (destW <= 0 || destH <= 0) {  // minimized
+        ReleaseDC(impl_->hwnd, hdc);
+        return;
+    }
 
-    SetStretchBltMode(hdc, COLORONCOLOR);
+    // Post-M68 fix: when there is an overlay, the frame is composed into an
+    // offscreen bitmap and blitted once, instead of being drawn straight
+    // onto the window.
+    //
+    // Why: StretchDIBits writes to the front buffer immediately, and the
+    // overlay's own fills and text follow it as separate GDI calls. So
+    // every frame the console's region was briefly repainted with *game*
+    // pixels and then re-covered a moment later -- and at the fixed 25Hz
+    // tick that gap is long enough to see. The game alone never flickered
+    // because consecutive frames of a static menu are identical pixels;
+    // the console flickered because that region toggled between two very
+    // different images 25 times a second. Composing first and blitting
+    // once closes the gap entirely.
+    //
+    // Only taken when an overlay is installed, so a build without the
+    // debug suite presents through exactly the code path it always has.
+    HDC target = hdc;
+    if (impl_->overlayCallback) {
+        if (!impl_->backDc || impl_->backWidth != destW || impl_->backHeight != destH) {
+            ReleaseBackBuffer(impl_);
+            impl_->backDc = CreateCompatibleDC(hdc);
+            if (impl_->backDc) {
+                // From the *window* DC, not the memory DC -- a bitmap made
+                // compatible with a fresh memory DC would be 1bpp
+                // monochrome, which is the classic form of this bug.
+                impl_->backBitmap = CreateCompatibleBitmap(hdc, destW, destH);
+                if (impl_->backBitmap) {
+                    impl_->backOldBitmap = SelectObject(impl_->backDc, impl_->backBitmap);
+                    impl_->backWidth = destW;
+                    impl_->backHeight = destH;
+                } else {
+                    DeleteDC(impl_->backDc);
+                    impl_->backDc = nullptr;
+                }
+            }
+        }
+        if (impl_->backDc) target = impl_->backDc;
+    }
+
+    SetStretchBltMode(target, COLORONCOLOR);
     StretchDIBits(
-        hdc, 0, 0, destW, destH, 0, 0, Backbuffer::kWidth, Backbuffer::kHeight,
+        target, 0, 0, destW, destH, 0, 0, Backbuffer::kWidth, Backbuffer::kHeight,
         backbuffer.Data(), reinterpret_cast<const BITMAPINFO*>(&impl_->bmi),
         DIB_RGB_COLORS, SRCCOPY);
 
@@ -316,19 +397,25 @@ void Window::Present(const Backbuffer& backbuffer) {
                 OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
                 FIXED_PITCH | FF_MODERN, L"Consolas");
             if (impl_->overlayFont) {
-                HGDIOBJ old = SelectObject(hdc, impl_->overlayFont);
+                HGDIOBJ old = SelectObject(target, impl_->overlayFont);
                 TEXTMETRICW tm{};
-                GetTextMetricsW(hdc, &tm);
+                GetTextMetricsW(target, &tm);
                 impl_->overlayCharWidth = static_cast<int>(tm.tmAveCharWidth);
                 impl_->overlayLineHeight = static_cast<int>(tm.tmHeight + tm.tmExternalLeading);
-                SelectObject(hdc, old);
+                SelectObject(target, old);
             }
         }
         if (impl_->overlayFont && impl_->overlayCharWidth > 0 && impl_->overlayLineHeight > 0) {
-            GdiOverlaySurface surface(hdc, destW, destH, impl_->overlayFont,
+            GdiOverlaySurface surface(target, destW, destH, impl_->overlayFont,
                                        impl_->overlayCharWidth, impl_->overlayLineHeight);
             impl_->overlayCallback(surface);
         }
+    }
+
+    // Post-M68 fix: the whole composed frame -- game and overlay together -- reaches
+    // the window in one operation.
+    if (target != hdc) {
+        BitBlt(hdc, 0, 0, destW, destH, target, 0, 0, SRCCOPY);
     }
 
     ReleaseDC(impl_->hwnd, hdc);
