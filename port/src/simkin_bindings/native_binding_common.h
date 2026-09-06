@@ -26,6 +26,22 @@ std::string ToStdString(const skString& s);
 bool SoftFailNativeCall(const char* objectDebugName, const skString& methodName,
                          skRValueArray& args, skRValue& returnValue);
 
+// SK_DEBUG_SUITE (M68): an optional observer for every soft-failed native
+// call. A plain function pointer, null by default, so a build without the
+// debug suite pays one null test on a path that was already doing a printf
+// with a formatted argument list -- and so `sk_bindings` keeps knowing
+// nothing about `sk_debug` (the dependency runs the other way; the debug
+// library installs itself here at startup).
+//
+// This is only the *miss* side of the bridge. There is no single dispatch
+// point for a native call that a binding class actually handles -- each
+// class owns its own `method()` override -- so "which natives ran" on the
+// hit side comes from the interpreter's own trace callback instead (see
+// src/debug/script_tracer.h), not from here.
+using SoftFailObserver = void (*)(const char* objectDebugName, const char* methodName,
+                                   const char* formattedArgs);
+void SetSoftFailObserver(SoftFailObserver observer);
+
 // M21: shared "Random(min,max)" handler -- a real, bare-reachable global
 // (the GameEngine root class every script's default reachable-class set
 // chains in, docs/SIMKIN_NATIVE_API.md, same footing as Level/GetPlayer)

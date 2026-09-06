@@ -32,6 +32,11 @@ public:
     // (docs/ZONE_FORMAT.md).
     const EntityTypeDescriptor* Lookup(int32_t typeId) const;
 
+    // M68: the whole table, for tools that need to enumerate rather than
+    // look one up -- the debug suite's `catalog entities`. Read-only, and
+    // nothing in the game itself calls it.
+    const std::map<int32_t, EntityTypeDescriptor>& all() const { return byTypeId_; }
+
 private:
     std::map<int32_t, EntityTypeDescriptor> byTypeId_;
 };

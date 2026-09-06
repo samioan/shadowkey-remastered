@@ -177,6 +177,35 @@ add_library(sk_render3d STATIC
 target_include_directories(sk_render3d PUBLIC src)
 target_link_libraries(sk_render3d PUBLIC sk_world)
 
+# --- M68: the developer debug suite (console, stat overlay, instrumentation) ---
+#
+# One option controls the whole thing. Turn it OFF and: this library is not
+# built, SK_DEBUG_SUITE is not defined, and every touchpoint in main.cpp and
+# window.cpp compiles out -- the game builds exactly as it did before M68.
+# To delete it outright: set this OFF, delete src/debug/, delete
+# src/graphics/overlay_surface.h, and remove the blocks that
+# `grep -rn SK_DEBUG_SUITE port/src` reports. See docs/DEBUG_SUITE.md.
+#
+# It links sk_bindings (for the soft-fail observer hook) and simkin (for the
+# interpreter's trace/statement-stepper hooks), but deliberately NOT sk_world
+# -- everything the suite knows about the running game arrives through the
+# abstract sk_debug::DebugHost that main.cpp implements.
+option(SK_DEBUG_SUITE "Build the in-game developer debug suite (console + overlay)" ON)
+
+if(SK_DEBUG_SUITE)
+  add_library(sk_debug STATIC
+    src/debug/debug_commands.cpp
+    src/debug/debug_console.cpp
+    src/debug/debug_metrics.cpp
+    src/debug/debug_overlay.cpp
+    src/debug/debug_suite.cpp
+    src/debug/script_tracer.cpp
+  )
+  target_include_directories(sk_debug PUBLIC src)
+  target_link_libraries(sk_debug PUBLIC simkin sk_bindings)
+  target_compile_definitions(sk_debug PUBLIC SK_DEBUG_SUITE=1)
+endif()
+
 add_executable(shadowkey_port
   src/main.cpp
   src/assets/gdr_font.cpp
@@ -192,9 +221,15 @@ add_executable(shadowkey_port
 target_include_directories(shadowkey_port PRIVATE src)
 target_link_libraries(shadowkey_port PRIVATE sk_bindings sk_render3d)
 
+if(SK_DEBUG_SUITE)
+  target_link_libraries(shadowkey_port PRIVATE sk_debug)
+endif()
+
 if(WIN32)
   target_compile_definitions(shadowkey_port PRIVATE UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN)
-  target_link_libraries(shadowkey_port PRIVATE user32 gdi32)
+  # msimg32 is AlphaBlend, used only by the debug overlay's translucent
+  # panels (src/platform/win32/window.cpp) -- see SK_DEBUG_SUITE above.
+  target_link_libraries(shadowkey_port PRIVATE user32 gdi32 msimg32)
 endif()
 
 # M2 milestone smoke test -- see src/tests/m2_simkin_smoke.cpp. Separate
@@ -500,3 +535,13 @@ target_link_libraries(render_clip_smoke PRIVATE sk_render3d)
 
 add_executable(door_stamp_smoke src/tests/m67_door_stamp_smoke.cpp)
 target_link_libraries(door_stamp_smoke PRIVATE sk_render3d sk_bindings)
+
+# The developer debug suite: the console's parsing/history/completion, the
+# metrics sink and its mark/diff, the overlay's layout, and a full pass over
+# every command against a fake DebugHost -- which is why the whole suite is
+# built against an abstract host rather than main.cpp's locals.
+# See src/tests/m68_debug_suite_smoke.cpp.
+if(SK_DEBUG_SUITE)
+  add_executable(debug_suite_smoke src/tests/m68_debug_suite_smoke.cpp)
+  target_link_libraries(debug_suite_smoke PRIVATE sk_debug)
+endif()

@@ -256,6 +256,18 @@ public:
     // scroll variants, which set SetLevel instead).
     int level() const { return m_Level; }
     int willpower() const { return m_Will; }
+    // The other seven attributes and the race, exposed the same way
+    // willpower() already is -- these return exactly what the matching
+    // GetStrength/GetAgility/.../GetRace natives return. Read-only; every
+    // write still goes through the real setters and UpdateAttributes.
+    int strength() const { return m_Strength; }
+    int intelligence() const { return m_Intelligence; }
+    int agility() const { return m_Agility; }
+    int speed() const { return m_Speed; }
+    int endurance() const { return m_Endurance; }
+    int personality() const { return m_Personality; }
+    int luck() const { return m_Luck; }
+    int race() const { return m_Race; }
     int spellToHit() const;
     int spellResistance() const;
 

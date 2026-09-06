@@ -1,8 +1,14 @@
 #include "platform/win32/window.h"
 
+#include <cstdint>
 #include <utility>
 
 #include <windows.h>
+
+// <windows.h> #defines DrawText to DrawTextW, which silently renames
+// OverlaySurface::DrawText's override out of existence. The overlay never
+// calls the Win32 function, so the macro is simply dropped here.
+#undef DrawText
 
 namespace sk {
 
@@ -15,6 +21,89 @@ struct Rgb565BitmapInfo {
     DWORD masks[3];
 };
 
+// SK_DEBUG_SUITE (M68): the OverlaySurface implementation handed to the
+// per-present overlay callback. Draws straight onto the window DC with GDI,
+// after StretchDIBits has already put the game's frame there -- so nothing
+// here can reach the game's 176x208 Backbuffer even by accident.
+//
+// The font is a real fixed-pitch system face at native resolution (the
+// game's own 6px bitmap font would give ~29 columns across a 528px window,
+// which is not enough for a command line). FixedPitchAndFamily is asked for
+// explicitly and the metrics are measured back out of the DC rather than
+// assumed, because the console's whole layout is column arithmetic.
+class GdiOverlaySurface : public OverlaySurface {
+public:
+    GdiOverlaySurface(HDC hdc, int w, int h, HFONT font, int charW, int lineH)
+        : hdc_(hdc), width_(w), height_(h), charWidth_(charW), lineHeight_(lineH) {
+        previousFont_ = static_cast<HFONT>(SelectObject(hdc_, font));
+        SetBkMode(hdc_, TRANSPARENT);
+    }
+    ~GdiOverlaySurface() override {
+        if (previousFont_) SelectObject(hdc_, previousFont_);
+    }
+
+    GdiOverlaySurface(const GdiOverlaySurface&) = delete;
+    GdiOverlaySurface& operator=(const GdiOverlaySurface&) = delete;
+
+    int width() const override { return width_; }
+    int height() const override { return height_; }
+    int charWidth() const override { return charWidth_; }
+    int lineHeight() const override { return lineHeight_; }
+
+    void FillRect(int x, int y, int w, int h, OverlayColor color, int alphaPercent) override {
+        if (w <= 0 || h <= 0 || alphaPercent <= 0) return;
+        if (alphaPercent >= 100) {
+            RECT r{x, y, x + w, y + h};
+            HBRUSH brush = CreateSolidBrush(RGB(color.r, color.g, color.b));
+            ::FillRect(hdc_, &r, brush);
+            DeleteObject(brush);
+            return;
+        }
+        // A 1x1 source bitmap stretched over the destination is the
+        // cheapest way to get a constant-alpha fill out of GDI: with
+        // AC_SRC_ALPHA left off, AlphaBlend uses SourceConstantAlpha alone
+        // and the source needs no premultiplication.
+        HDC memDc = CreateCompatibleDC(hdc_);
+        if (!memDc) return;
+        BITMAPINFO bi{};
+        bi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+        bi.bmiHeader.biWidth = 1;
+        bi.bmiHeader.biHeight = 1;
+        bi.bmiHeader.biPlanes = 1;
+        bi.bmiHeader.biBitCount = 32;
+        bi.bmiHeader.biCompression = BI_RGB;
+        void* bits = nullptr;
+        HBITMAP bmp = CreateDIBSection(memDc, &bi, DIB_RGB_COLORS, &bits, nullptr, 0);
+        if (bmp && bits) {
+            *static_cast<uint32_t*>(bits) =
+                (static_cast<uint32_t>(color.r) << 16) | (static_cast<uint32_t>(color.g) << 8) |
+                static_cast<uint32_t>(color.b);
+            HGDIOBJ old = SelectObject(memDc, bmp);
+            BLENDFUNCTION blend{};
+            blend.BlendOp = AC_SRC_OVER;
+            blend.SourceConstantAlpha = static_cast<BYTE>(alphaPercent * 255 / 100);
+            AlphaBlend(hdc_, x, y, w, h, memDc, 0, 0, 1, 1, blend);
+            SelectObject(memDc, old);
+        }
+        if (bmp) DeleteObject(bmp);
+        DeleteDC(memDc);
+    }
+
+    void DrawText(int x, int y, std::string_view text, OverlayColor color) override {
+        if (text.empty()) return;
+        SetTextColor(hdc_, RGB(color.r, color.g, color.b));
+        TextOutA(hdc_, x, y, text.data(), static_cast<int>(text.size()));
+    }
+
+private:
+    HDC hdc_;
+    int width_;
+    int height_;
+    int charWidth_;
+    int lineHeight_;
+    HFONT previousFont_ = nullptr;
+};
+
 }  // namespace
 
 struct Window::Impl {
@@ -25,6 +114,13 @@ struct Window::Impl {
     Rgb565BitmapInfo bmi{};
     Window::KeyCallback keyCallback;
     Window::CharCallback charCallback;
+    // SK_DEBUG_SUITE (M68). The font is created lazily on the first overlay
+    // present and lives as long as the window, so the per-frame cost of the
+    // overlay is a SelectObject rather than a CreateFont.
+    Window::OverlayCallback overlayCallback;
+    HFONT overlayFont = nullptr;
+    int overlayCharWidth = 0;
+    int overlayLineHeight = 0;
 };
 
 namespace {
@@ -116,6 +212,7 @@ Window::Window(int clientWidth, int clientHeight, const std::wstring& title) {
 
 Window::~Window() {
     if (impl_) {
+        if (impl_->overlayFont) DeleteObject(impl_->overlayFont);  // SK_DEBUG_SUITE (M68)
         if (impl_->hwnd) DestroyWindow(impl_->hwnd);
         delete impl_;
     }
@@ -127,6 +224,11 @@ void Window::SetKeyCallback(KeyCallback callback) {
 
 void Window::SetCharCallback(CharCallback callback) {
     impl_->charCallback = std::move(callback);
+}
+
+// SK_DEBUG_SUITE (M68).
+void Window::SetOverlayCallback(OverlayCallback callback) {
+    impl_->overlayCallback = std::move(callback);
 }
 
 void Window::Close() {
@@ -171,6 +273,32 @@ void Window::Present(const Backbuffer& backbuffer) {
         hdc, 0, 0, destW, destH, 0, 0, Backbuffer::kWidth, Backbuffer::kHeight,
         backbuffer.Data(), reinterpret_cast<const BITMAPINFO*>(&impl_->bmi),
         DIB_RGB_COLORS, SRCCOPY);
+
+    // SK_DEBUG_SUITE (M68): the debug overlay, drawn over the finished
+    // frame at native resolution. Deliberately after the blit and outside
+    // any game state -- see graphics/overlay_surface.h.
+    if (impl_->overlayCallback) {
+        if (!impl_->overlayFont) {
+            impl_->overlayFont = CreateFontW(
+                -13, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
+                OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
+                FIXED_PITCH | FF_MODERN, L"Consolas");
+            if (impl_->overlayFont) {
+                HGDIOBJ old = SelectObject(hdc, impl_->overlayFont);
+                TEXTMETRICW tm{};
+                GetTextMetricsW(hdc, &tm);
+                impl_->overlayCharWidth = static_cast<int>(tm.tmAveCharWidth);
+                impl_->overlayLineHeight = static_cast<int>(tm.tmHeight + tm.tmExternalLeading);
+                SelectObject(hdc, old);
+            }
+        }
+        if (impl_->overlayFont && impl_->overlayCharWidth > 0 && impl_->overlayLineHeight > 0) {
+            GdiOverlaySurface surface(hdc, destW, destH, impl_->overlayFont,
+                                       impl_->overlayCharWidth, impl_->overlayLineHeight);
+            impl_->overlayCallback(surface);
+        }
+    }
+
     ReleaseDC(impl_->hwnd, hdc);
 }
 

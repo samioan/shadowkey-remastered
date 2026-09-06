@@ -3,6 +3,7 @@
 #include <string>
 
 #include "graphics/backbuffer.h"
+#include "graphics/overlay_surface.h"
 
 namespace sk {
 
@@ -29,6 +30,14 @@ public:
     // (backspace), 0x0D (enter).
     using CharCallback = std::function<void(wchar_t ch)>;
 
+    // SK_DEBUG_SUITE (M68): called from inside Present(), immediately after
+    // the game's Backbuffer has been scaled and blitted, with a drawing
+    // surface at the window's real client resolution. Null by default and
+    // never set unless the debug suite is compiled in, so a shipping build
+    // pays one null check per frame. See graphics/overlay_surface.h for why
+    // the debug UI draws here instead of into the Backbuffer.
+    using OverlayCallback = std::function<void(OverlaySurface&)>;
+
     Window(int clientWidth, int clientHeight, const std::wstring& title);
     ~Window();
 
@@ -37,6 +46,8 @@ public:
 
     void SetKeyCallback(KeyCallback callback);
     void SetCharCallback(CharCallback callback);
+    // SK_DEBUG_SUITE (M68) -- see OverlayCallback above.
+    void SetOverlayCallback(OverlayCallback callback);
 
     // Posts WM_CLOSE to this window, same as the user clicking the close
     // button -- for native code (QuitGame()) that needs to end the

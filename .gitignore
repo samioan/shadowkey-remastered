@@ -70,3 +70,10 @@ __pycache__/
 # Runtime action/soft-fail log (platform/win32/console_tee.h) -- written
 # next to wherever shadowkey_port.exe is launched from.
 shadowkey_port.log
+
+# M68: the debug console's startup script. `port/debug/*.cfg` files ARE
+# tracked (a saved bug repro is worth sharing), but autoexec.cfg runs
+# automatically on every launch -- that is one developer's working state,
+# not something anyone else's session should execute. See
+# docs/DEBUG_SUITE.md.
+/port/debug/autoexec.cfg

@@ -5860,6 +5860,163 @@ algorithms.
       `param_3 = 1` asks, but nothing writes that journal into a save yet,
       so a door reverts to shut across save/load.
 
+### M68 -- the developer debug suite
+
+Not a feature of the game: a tool for finding bugs in it. Requested
+directly after M67, and for exactly the reason M67 gave.
+
+M67 is the argument for this milestone. Every door in the game was
+impassable, and that survived twenty-three milestones of data-driven
+verification, a per-milestone smoke suite, two independent tile-flag
+censuses and a documentation pass that had already written down the
+mechanism. It was found in an afternoon by someone playing the game and
+walking into a door. **Smoke tests verify what the port computes; they
+cannot see a feature that was never wired at all.** The conclusion is not
+"write better tests" -- it is that playing is the irreplaceable measure,
+and playing is much faster with tools.
+
+What it is: an in-game console (F1), a stat overlay (F2/F3), and an
+instrumentation layer, built as one static library `sk_debug` behind a
+CMake option that is checked to build clean both ways. Full reference in
+**docs/DEBUG_SUITE.md**; what follows is only the reasoning worth keeping
+in the roadmap.
+
+- **It cannot affect the game's rendering, structurally rather than by
+  promise.** The debug UI draws over the presented frame at the window's
+  native resolution, through a GDI implementation of a new
+  `sk::OverlaySurface` interface, *after* `StretchDIBits` has already put
+  the game's 176x208 `Backbuffer` on screen. It never writes a pixel into
+  the backbuffer. So it cannot perturb the software rasterizer and it
+  cannot move the fourteen tracked `.ppm` dumps -- which is also the
+  practical reason for it: at the game's own 6px bitmap font a 176px-wide
+  console is 29 columns, and a command line needs more than that.
+
+- **The native bridge is what keeps the command table small.** `call
+  <receiver> <Method> [args]` and `sk <receiver> <code>` build a real
+  `skRValueArray` and invoke the real binding object, or run a fragment
+  through `skInterpreter::executeString`. Because the port already
+  implements the real natives for stats, race, class, quests, gold,
+  experience, equipment and entity creation, "change a stat" needed no
+  interface method at all -- and, more importantly, it runs the *same*
+  dispatch the shipped scripts run. In a behavioural port, a debug command
+  that poked a C++ field directly would be exercising something the game
+  never does, which makes it useless as evidence. The same reasoning made
+  `spawn` route through `Level.CreateEntity` (`entities.txt`'s fourth
+  column is the script path, so a script name resolves back to its type id
+  and both forms take the engine's own factory) and `killall` route
+  through `ApplyDamage` (so loot drops, kill counters and zone triggers all
+  really run).
+
+- **The one place a curated command beat the bridge**, and it is a real
+  finding rather than a convenience: the engine recomputes derived stats in
+  `UpdateAttributes`, not in the eight attribute setters. A bare
+  `SetStrength(90)` leaves max health, magicka, attack and defense stale.
+  `stat str 90` calls the setter *and* `UpdateAttributes`, which is what
+  makes it mean what a level-up means. `race` and `class` do the same.
+
+- **"What is running" came from two interpreter hooks this port had never
+  touched.** The vendored Simkin carries `setTraceCallback` and
+  `setStatementStepper`; with `Interpreter.tracing` on, the first logs
+  every script method call with its source location and line, and the
+  second gives a per-frame statement count and turns a script exception
+  into a recorded event. Two landmines, both handled and both commented at
+  the call site because getting either wrong would change how the game
+  runs: `statementExecuted` returning false **halts the running method**,
+  and `exceptionEncountered` returning false **swallows the exception**.
+  This tracer always returns true. With tracing off both hooks are set back
+  to null, so a normal session runs the identical path it ran before M68.
+
+- **`mark` / `diff` is the actual bug-hunting loop.** Snapshot every
+  counter, do the thing, and see only what moved. It is the direct answer
+  to "detailed stats on what is running each time I do something", and it
+  beats reading a log because it answers by subtraction rather than by
+  search.
+
+- **Commands are queued on Enter and drained from inside the game tick.**
+  A console command can run real script code, and running script from a
+  window procedure would execute it outside the tick, on a half-updated
+  world, in a place no exception handler covers. A throwing command is
+  caught and printed rather than taking the process down -- the one thing a
+  debug tool must never do.
+
+- **The layering is the existing one.** `sk_debug` links `simkin` and
+  `sk_bindings` but deliberately not `sk_world`, and cannot see main.cpp's
+  file-local `MonsterInstance`/`DoorInstance`/`PickupInstance` types.
+  Everything arrives through an abstract `sk_debug::DebugHost` that
+  main.cpp implements -- the same seam as `LevelExecutable::ZoneRegions`
+  (M44) and `DoorExecutable::TileStamp` (M67). The interface stayed at
+  sixteen virtuals because every read-only view is a generic `StatGroup`
+  list keyed by a page name, so one virtual serves every panel and the
+  overlay has no per-page code.
+
+- **Removability was verified, not asserted.** `-DSK_DEBUG_SUITE=OFF`
+  builds clean: the library is not built, the macro is undefined, and all
+  twelve `#if SK_DEBUG_SUITE` blocks in main.cpp compile out. What is left
+  behind is four inert additions to game files (a null function-pointer
+  hook in `native_binding_common.h`, a null `std::function` in
+  `Window::Present`, `EntityTypeTable::all()`, and seven
+  `PlayerExecutable` attribute getters mirroring the `willpower()` already
+  there).
+
+- **It found two things on its first live run, which is the point.** Both
+  are recorded here because both are engine behaviour, not tool bugs:
+
+  1. **`UpdateAttributes` at level 1 undoes an attribute you just set.**
+     `stat str 90` on a fresh character reported `str: 50 -> 40`. The
+     header for `FUN_1001fc24` has said since M64 that the level-1 path
+     *reseeds all eight attributes from race and sex* -- it was written
+     down and still surprised the first command that used it. `stat` now
+     calls the recompute only above level 1 and says plainly what it
+     skipped and why; both branches are pinned in the smoke test.
+  2. **`Level.CreateEntity` has a single pending slot, not a queue.**
+     `spawn 202 3` created one creature. `LevelExecutable` parks the
+     result in one slot the tick drains, on the documented grounds that
+     nothing in the corpus calls `CreateEntity` twice without an
+     `AddObject` between -- true of the shipped scripts, and not true of a
+     console. That is a faithful reproduction, so the fix belongs on the
+     tool's side: `spawn` now queues and issues one call per tick (which
+     is what `DebugHost::HostTick` exists for) and says so in its reply.
+
+  Neither would have been found by any test that did not actually run the
+  command. That is M67's lesson repeating itself inside the tool built to
+  answer it.
+
+- **Measurement.** This milestone moves neither script-coverage measure and
+  correctly so -- soft-fails **39 -> 39**, and no native was implemented.
+  The evidence is instead: `debug_suite_smoke` (70 checks, and the suite is
+  built against abstractions precisely so it can be driven with no window,
+  no zone and no interpreter -- including a sweep that runs *every*
+  registered command with no arguments, which is the failure a console is
+  most likely to have); the full suite at **61/61**; all fourteen tracked
+  `.ppm` renders byte-identical; the `SK_DEBUG_SUITE=OFF` configuration
+  building clean; and the thing itself driven end to end on a live window
+  by posting real key messages to it. That last run is worth recording:
+  `zone azra` from the main menu skipped character creation entirely,
+  `ents door` listed all seven of azra's doors including `homdoor` at
+  (30130, 11272) -- M67's door -- as `solid`, `tpt 117 44` teleported onto
+  its doorway tile and warned `[that tile is BLOCKED]`, and the `tilegrid`
+  overlay drew the doorway in the block bits themselves:
+
+  ```
+  y42  W...W...#
+  y43  W...W...#
+  y44  W...@...#
+  y45  W...#....
+  ```
+
+  M67 took a day of Python census work to reach that picture. It is now
+  four keystrokes.
+
+- **Left open.** The `freezeai` toggle stops the creature tick but not
+  projectiles, script delays or the effect clock, so "freeze" is not yet a
+  true single-step pause; a `step` command that advances exactly one tick
+  is the natural follow-up. There is no way to *save* a console session's
+  state, so `exec` scripts are written by hand rather than recorded.
+  Nothing yet visualises geometry in the 3D view itself (collision boxes,
+  the visibility raycast, entity origins) -- that would need drawing into
+  the backbuffer, which this milestone deliberately does not do, so it
+  needs a different mechanism than the overlay.
+
 ## Next milestones (not yet started)
 
 Roughly in priority order for reaching "actually playable," not commitments:

@@ -71,6 +71,21 @@
 #include "world/model_collision.h"
 #include "world/zone.h"
 
+// SK_DEBUG_SUITE (M68): the developer debug suite -- console, stat overlay,
+// instrumentation. Every touchpoint in this file is inside a
+// `#if SK_DEBUG_SUITE` block tagged with this same marker, so
+// `grep SK_DEBUG_SUITE` finds all of them at removal time. See
+// docs/DEBUG_SUITE.md.
+#if SK_DEBUG_SUITE
+#include <cstdlib>
+#include <filesystem>
+
+#include "debug/debug_host.h"
+#include "debug/debug_metrics.h"
+#include "debug/debug_suite.h"
+#include "simkin_bindings/character_progression.h"
+#endif
+
 namespace {
 
 // kBackgroundColor is a placeholder -- only the flat fallback fill for
@@ -456,6 +471,1318 @@ struct PickupInstance {
     // inferred, so an empty container still prompts correctly.
     bool isContainer = false;
 };
+
+#if SK_DEBUG_SUITE
+// SK_DEBUG_SUITE (M68) ======================================================
+//
+// The debug suite's view of the running game. `sk_debug` deliberately links
+// neither `sk_world` nor `sk_bindings` and cannot see the four Instance
+// types above (they are file-local to main.cpp), so everything it needs
+// arrives through the `sk_debug::DebugHost` interface -- the same layering
+// LevelExecutable::ZoneRegions (M44) and DoorExecutable::TileStamp (M67)
+// already use.
+//
+// `DebugGameRefs` is the pointer bundle main() fills in with the addresses
+// of its own locals. Pointers, not copies: everything here has to observe
+// the *live* state, and the state that gets replaced on a zone load (the
+// Zone itself) is reached through the owning unique_ptr so the reference
+// stays valid across a transition.
+//
+// The debug-only toggles live in this struct rather than in main()'s own
+// locals, so that removing the suite removes them too -- there is no
+// leftover `bool noclip` for the game to have to ignore.
+struct DebugGameRefs {
+    std::string scriptRoot;
+    sk::StringTable* strings = nullptr;
+    sk::EntityTypeTable* entityTypes = nullptr;
+    sk::ModelArchive* modelArchive = nullptr;
+    sk::ModelCollisionTable* modelCollision = nullptr;
+    sk_bindings::MenuStack* stack = nullptr;
+    skInterpreter* interpreter = nullptr;
+    std::unique_ptr<sk::Zone>* zone = nullptr;
+    std::unique_ptr<sk_bindings::ZoneScriptExecutable>* zoneScript = nullptr;
+    sk::Camera* camera = nullptr;
+    std::vector<MonsterInstance>* monsters = nullptr;
+    std::vector<DoorInstance>* doors = nullptr;
+    std::vector<PickupInstance>* pickups = nullptr;
+    std::vector<TrapInstance>* traps = nullptr;
+    std::vector<sk::PlacedEntity>* props = nullptr;
+    std::vector<sk_bindings::SpellProjectile>* projectiles = nullptr;
+    std::vector<sk_bindings::ArrowProjectile>* arrows = nullptr;
+    std::set<size_t>* regionsOccupied = nullptr;
+    bool* inGame = nullptr;
+    bool* mapOpen = nullptr;
+
+    // Toggles, owned here. Read by the handful of `#if SK_DEBUG_SUITE`
+    // guards in the tick loop.
+    bool noclip = false;
+    bool godMode = false;
+    bool freezeAi = false;
+    bool showTileGrid = false;
+};
+
+class LiveDebugHost : public sk_debug::DebugHost {
+public:
+    explicit LiveDebugHost(DebugGameRefs& refs) : m_Refs(refs) {}
+
+    bool InGame() const override {
+        return m_Refs.inGame && *m_Refs.inGame && m_Refs.zone && *m_Refs.zone;
+    }
+
+    void HostTick() override;
+
+    // ---- inspection -----------------------------------------------------
+
+    std::vector<std::string> Pages() const override {
+        return {"mini", "world", "player", "zone", "entities", "tile", "inventory", "quests",
+                "render", "script"};
+    }
+
+    void Inspect(const std::string& page, std::vector<sk_debug::StatGroup>& out) const override;
+
+    void Entities(std::vector<sk_debug::EntityRow>& out) const override;
+
+    std::vector<std::string> CatalogKinds() const override {
+        return {"zones",   "entities", "scripts", "monsters", "items",
+                "weapons", "armor",    "spells",  "races",    "classes"};
+    }
+
+    std::vector<std::string> Catalog(const std::string& kind,
+                                      const std::string& filter) const override;
+
+    // ---- toggles ---------------------------------------------------------
+
+    std::vector<sk_debug::DebugFlag> Flags() const override {
+        return {
+            {"noclip", m_Refs.noclip ? 1 : 0, "walk through walls, doors and props"},
+            {"god", m_Refs.godMode ? 1 : 0, "ignore all incoming damage"},
+            {"freezeai", m_Refs.freezeAi ? 1 : 0, "creatures stop thinking, moving and attacking"},
+            {"tilegrid", m_Refs.showTileGrid ? 1 : 0,
+             "overlay the tile block flags around the player on the world page"},
+        };
+    }
+
+    bool SetFlag(const std::string& name, int value, std::string& message) override {
+        bool* target = nullptr;
+        if (name == "noclip") target = &m_Refs.noclip;
+        else if (name == "god") target = &m_Refs.godMode;
+        else if (name == "freezeai") target = &m_Refs.freezeAi;
+        else if (name == "tilegrid") target = &m_Refs.showTileGrid;
+        if (!target) {
+            message = "unknown flag `" + name + "` -- `flags` lists them";
+            return false;
+        }
+        *target = value != 0;
+        message = name + " = " + (*target ? "1" : "0");
+        sk_debug::Log("debug", message);
+        return true;
+    }
+
+    // ---- world actions ----------------------------------------------------
+
+    bool Teleport(float x, float y, bool tileCoords, std::string& message) override;
+    bool TeleportToEntity(int index, std::string& message) override;
+    bool LoadZone(const std::string& zone, std::string& message) override;
+    bool Face(float degrees, std::string& message) override;
+    bool Spawn(const std::string& what, int count, float distance, std::string& message) override;
+    bool Give(const std::string& what, int count, std::string& message) override;
+    bool Equip(const std::string& what, int hand, std::string& message) override;
+    bool KillAll(const std::string& filter, std::string& message) override;
+
+    // ---- the native bridge -------------------------------------------------
+
+    std::vector<std::pair<std::string, std::string>> Receivers() const override;
+    bool CallNative(const std::string& receiver, const std::string& method,
+                     const std::vector<std::string>& args, std::string& message) override;
+    bool ScriptEval(const std::string& receiver, const std::string& code,
+                     std::string& message) override;
+
+private:
+    sk::Zone* zone() const { return m_Refs.zone ? m_Refs.zone->get() : nullptr; }
+    // Resolves a receiver name to the real native object `call`/`sk` will
+    // run against. Returns nullptr and fills `message` when it cannot.
+    skiExecutable* ResolveReceiver(const std::string& name, std::string& message) const;
+    // Turns one console token into an skRValue by shape: a decimal integer
+    // becomes an int (which is what almost every real native wants),
+    // true/false become bools, everything else stays a string. Deliberately
+    // simple and documented rather than clever -- a native that wants a
+    // string "12" can be reached with `sk` instead.
+    static skRValue ArgumentFromText(const std::string& text);
+    // Every .s file under `subdirectory` (relative to the script root),
+    // matching `filter`, as "subdirectory/name.s".
+    std::vector<std::string> ScriptFiles(const std::string& subdirectory,
+                                          const std::string& filter) const;
+    // entities.txt's fourth column is the entity's script path, so a script
+    // name resolves back to the typeId that owns it -- which is what lets
+    // `spawn arat.s` and `give ratchest.s` go through the engine's own
+    // CreateEntity/CreateItem factories instead of a parallel construction
+    // path. 0 when nothing names this script.
+    int TypeIdForScript(const std::string& what) const;
+    // Resolves a spawn/give argument that is either a script path or a
+    // decimal type id into a full path. Empty if it cannot.
+    std::string ResolveScriptPath(const std::string& what,
+                                   const char* const* searchDirectories) const;
+    // Issues one `Level.CreateEntity(typeId, x, y, z)`. Returns false if it
+    // could not be made at all.
+    bool CreateEntityAt(int typeId, float x, float y);
+
+    DebugGameRefs& m_Refs;
+    // Outstanding `spawn` requests, one issued per tick -- see HostTick().
+    struct PendingSpawn {
+        int typeId = 0;
+        float x = 0.0f;
+        float y = 0.0f;
+    };
+    std::vector<PendingSpawn> m_PendingSpawns;
+};
+// ---- LiveDebugHost implementation ---------------------------------------
+
+namespace {
+
+std::string DebugNumber(double value, int decimals = 0) {
+    char buffer[64];
+    std::snprintf(buffer, sizeof(buffer), "%.*f", decimals, value);
+    return buffer;
+}
+
+std::string DebugLower(std::string s) {
+    std::transform(s.begin(), s.end(), s.begin(),
+                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    return s;
+}
+
+bool DebugContains(const std::string& haystack, const std::string& needle) {
+    return needle.empty() || DebugLower(haystack).find(DebugLower(needle)) != std::string::npos;
+}
+
+// The 21 zone names, taken from the .zmp files actually present rather than
+// from a hardcoded list -- so `zones` never drifts from what is installed.
+std::vector<std::string> DebugZoneNames(const std::string& scriptRoot) {
+    std::vector<std::string> names;
+    std::error_code error;
+    for (const auto& entry : std::filesystem::directory_iterator(scriptRoot, error)) {
+        if (error) break;
+        if (!entry.is_regular_file()) continue;
+        if (entry.path().extension() != ".zmp") continue;
+        names.push_back(entry.path().stem().string());
+    }
+    std::sort(names.begin(), names.end());
+    return names;
+}
+
+}  // namespace
+
+std::vector<std::string> LiveDebugHost::ScriptFiles(const std::string& subdirectory,
+                                                     const std::string& filter) const {
+    std::vector<std::string> names;
+    const std::string directory =
+        subdirectory.empty() ? m_Refs.scriptRoot : m_Refs.scriptRoot + "/" + subdirectory;
+    std::error_code error;
+    for (const auto& entry : std::filesystem::directory_iterator(directory, error)) {
+        if (error) break;
+        if (!entry.is_regular_file()) continue;
+        if (entry.path().extension() != ".s") continue;
+        const std::string name = entry.path().filename().string();
+        if (!DebugContains(name, filter)) continue;
+        names.push_back(subdirectory.empty() ? name : subdirectory + "/" + name);
+    }
+    std::sort(names.begin(), names.end());
+    return names;
+}
+
+std::string LiveDebugHost::ResolveScriptPath(const std::string& what,
+                                              const char* const* searchDirectories) const {
+    std::string relative = what;
+    std::replace(relative.begin(), relative.end(), '\\', '/');
+    if (relative.size() < 2 || relative.substr(relative.size() - 2) != ".s") relative += ".s";
+    // An explicit path wins; otherwise try each conventional directory, and
+    // the script root itself last (183 of the game's .s files live there).
+    if (relative.find('/') != std::string::npos) {
+        const std::string full = m_Refs.scriptRoot + "/" + relative;
+        return std::filesystem::exists(full) ? full : std::string();
+    }
+    for (const char* const* directory = searchDirectories; *directory; ++directory) {
+        const std::string full =
+            m_Refs.scriptRoot + "/" + (**directory ? std::string(*directory) + "/" : "") + relative;
+        if (std::filesystem::exists(full)) return full;
+    }
+    return std::string();
+}
+
+int LiveDebugHost::TypeIdForScript(const std::string& what) const {
+    if (!m_Refs.entityTypes) return 0;
+    // Normalise both sides: entities.txt uses backslashes and mixed case
+    // ("monsters\Azra_Rat.s"), a console argument will not.
+    auto normalise = [](std::string text) {
+        std::replace(text.begin(), text.end(), '\\', '/');
+        if (text.size() < 2 || text.substr(text.size() - 2) != ".s") text += ".s";
+        return DebugLower(text);
+    };
+    const std::string wanted = normalise(what);
+    // An exact path match wins; a bare filename matches on the leaf, so
+    // `spawn azra_rat.s` finds `monsters\Azra_Rat.s`.
+    const bool bare = wanted.find('/') == std::string::npos;
+    for (const auto& entry : m_Refs.entityTypes->all()) {
+        if (entry.second.name.empty() || entry.second.name[0] == '!') continue;
+        const std::string candidate = normalise(entry.second.name);
+        if (candidate == wanted) return entry.first;
+        if (bare) {
+            const size_t slash = candidate.rfind('/');
+            if (slash != std::string::npos && candidate.substr(slash + 1) == wanted) {
+                return entry.first;
+            }
+        }
+    }
+    return 0;
+}
+
+std::vector<std::string> LiveDebugHost::Catalog(const std::string& kind,
+                                                 const std::string& filter) const {
+    if (kind == "zones") {
+        std::vector<std::string> names;
+        for (const std::string& name : DebugZoneNames(m_Refs.scriptRoot)) {
+            if (DebugContains(name, filter)) names.push_back(name);
+        }
+        return names;
+    }
+    if (kind == "entities") {
+        std::vector<std::string> rows;
+        if (!m_Refs.entityTypes) return rows;
+        for (const auto& entry : m_Refs.entityTypes->all()) {
+            const std::string row = std::to_string(entry.first) + ":" + entry.second.name;
+            if (DebugContains(row, filter)) rows.push_back(row);
+        }
+        return rows;
+    }
+    if (kind == "races") {
+        std::vector<std::string> rows;
+        for (int race = 0; race < sk_bindings::kRaceCount; ++race) {
+            const int stringId = sk_bindings::RaceNameStringId(race);
+            const std::string name =
+                m_Refs.strings && stringId >= 0 ? m_Refs.strings->Get(stringId) : std::string();
+            const std::string row = std::to_string(race) + ":" + name;
+            if (DebugContains(row, filter)) rows.push_back(row);
+        }
+        return rows;
+    }
+    if (kind == "classes") {
+        std::vector<std::string> rows;
+        for (int classId = 0; classId < sk_bindings::kClassCount; ++classId) {
+            const int stringId = sk_bindings::CharacterClassNameStringId(classId);
+            const std::string name =
+                m_Refs.strings && stringId >= 0 ? m_Refs.strings->Get(stringId) : std::string();
+            const std::string row = std::to_string(classId) + ":" + name;
+            if (DebugContains(row, filter)) rows.push_back(row);
+        }
+        return rows;
+    }
+    if (kind == "monsters" || kind == "scripts") return ScriptFiles("monsters", filter);
+    if (kind == "weapons") return ScriptFiles("weapons", filter);
+    if (kind == "armor") return ScriptFiles("armor", filter);
+    if (kind == "spells") return ScriptFiles("spells", filter);
+    if (kind == "items") {
+        std::vector<std::string> all;
+        for (const char* directory : {"items", "weapons", "armor", "spells"}) {
+            for (std::string& name : ScriptFiles(directory, filter)) {
+                all.push_back(std::move(name));
+            }
+        }
+        std::sort(all.begin(), all.end());
+        return all;
+    }
+    return {};
+}
+
+void LiveDebugHost::Entities(std::vector<sk_debug::EntityRow>& out) const {
+    out.clear();
+    if (!m_Refs.camera) return;
+    const float px = m_Refs.camera->x;
+    const float py = m_Refs.camera->y;
+    auto distance = [px, py](float x, float y) {
+        const float dx = x - px, dy = y - py;
+        return std::sqrt(dx * dx + dy * dy);
+    };
+
+    int index = 0;
+    if (m_Refs.monsters) {
+        for (const MonsterInstance& m : *m_Refs.monsters) {
+            sk_debug::EntityRow row;
+            row.index = index++;
+            row.kind = "monster";
+            row.name = m.script ? m.script->name() : std::string("<no script>");
+            row.x = m.x;
+            row.y = m.y;
+            row.z = m.z;
+            row.distance = distance(m.x, m.y);
+            row.typeId = m.typeId;
+            row.modelIndex = m.modelArchiveIndex;
+            if (m.script) {
+                row.health = m.script->currentHealth();
+                row.maxHealth = m.script->maxHealth();
+                row.alive = m.script->alive() && !m.script->destroyed();
+                row.state = m.script->destroyed() ? "destroyed"
+                            : m.aiState == MonsterInstance::AiState::Chasing ? "chasing"
+                            : m.aiState == MonsterInstance::AiState::Attacking ? "attacking"
+                                                                                : "idle";
+                if (!m.script->aggressive()) row.state += "/npc";
+                if (m.script->usable()) row.state += "/usable";
+            }
+            out.push_back(std::move(row));
+        }
+    }
+    if (m_Refs.doors) {
+        for (const DoorInstance& d : *m_Refs.doors) {
+            sk_debug::EntityRow row;
+            row.index = index++;
+            row.kind = "door";
+            row.name = d.name.empty() ? std::string("<unnamed>") : d.name;
+            row.x = d.x;
+            row.y = d.y;
+            row.z = d.z;
+            row.distance = distance(d.x, d.y);
+            row.typeId = d.typeId;
+            row.modelIndex = d.modelArchiveIndex;
+            // M67: passability is the field that actually matters for the
+            // "an open door is still a wall" class of bug, so it is what a
+            // door reports as its state.
+            if (d.script) row.state = d.script->passable() ? "passable" : "solid";
+            out.push_back(std::move(row));
+        }
+    }
+    if (m_Refs.pickups) {
+        for (const PickupInstance& p : *m_Refs.pickups) {
+            sk_debug::EntityRow row;
+            row.index = index++;
+            row.kind = p.isContainer ? "container" : "pickup";
+            row.name = p.script ? p.script->name() : std::string("<no script>");
+            row.x = p.x;
+            row.y = p.y;
+            row.z = p.z;
+            row.distance = distance(p.x, p.y);
+            row.modelIndex = p.modelArchiveIndex;
+            out.push_back(std::move(row));
+        }
+    }
+    if (m_Refs.traps) {
+        for (const TrapInstance& t : *m_Refs.traps) {
+            sk_debug::EntityRow row;
+            row.index = index++;
+            row.kind = "trap";
+            row.name = t.name.empty() ? std::string("<unnamed>") : t.name;
+            row.x = t.x;
+            row.y = t.y;
+            row.distance = distance(t.x, t.y);
+            row.typeId = t.typeId;
+            out.push_back(std::move(row));
+        }
+    }
+    std::sort(out.begin(), out.end(),
+              [](const sk_debug::EntityRow& a, const sk_debug::EntityRow& b) {
+                  return a.distance < b.distance;
+              });
+}
+
+void LiveDebugHost::Inspect(const std::string& page,
+                             std::vector<sk_debug::StatGroup>& out) const {
+    const sk_bindings::PlayerExecutable* player = m_Refs.stack ? &m_Refs.stack->player() : nullptr;
+    sk::Zone* z = zone();
+    const sk::Camera* camera = m_Refs.camera;
+
+    // A page name may carry an argument after a colon ("tile:12,34",
+    // "entity:3", "inventory:sword") -- one convention rather than a
+    // parameter on the interface.
+    const size_t colon = page.find(':');
+    const std::string name = colon == std::string::npos ? page : page.substr(0, colon);
+    const std::string argument = colon == std::string::npos ? std::string() : page.substr(colon + 1);
+
+    if (name == "mini") {
+        sk_debug::StatGroup group;
+        if (camera && z) {
+            group.Add("@", DebugNumber(camera->x) + "," + DebugNumber(camera->y));
+            group.Add("tile", std::to_string(static_cast<int>(camera->x / sk::kTileScale)) + "," +
+                                   std::to_string(static_cast<int>(camera->y / sk::kTileScale)));
+        } else {
+            group.Add("(menus)", "");
+        }
+        if (m_Refs.monsters) group.Add("mon", std::to_string(m_Refs.monsters->size()));
+        out.push_back(std::move(group));
+        return;
+    }
+
+    if (name == "world") {
+        sk_debug::StatGroup group;
+        group.title = "world";
+        if (!camera || !z) {
+            group.Add("state", "not in a zone");
+            out.push_back(std::move(group));
+            return;
+        }
+        const int tileX = static_cast<int>(std::floor(camera->x / sk::kTileScale));
+        const int tileY = static_cast<int>(std::floor(camera->y / sk::kTileScale));
+        group.Add("zone", m_Refs.stack ? m_Refs.stack->currentLevelName() : std::string("?"));
+        group.Add("position", DebugNumber(camera->x, 1) + ", " + DebugNumber(camera->y, 1) + ", " +
+                                   DebugNumber(camera->z, 1));
+        group.Add("tile", std::to_string(tileX) + ", " + std::to_string(tileY) + "  of " +
+                               std::to_string(z->width()) + "x" + std::to_string(z->height()));
+        // The engine's raw heading, not just the radian yaw: every .ent
+        // record, every SetPosition and every tile stamp is in raw units,
+        // so a bug report is far easier to act on with the raw number in it.
+        group.Add("yaw", DebugNumber(camera->yaw * 180.0f / 3.14159265f, 1) + " deg   raw " +
+                              std::to_string(CameraHeadingUnits(camera->yaw)));
+        group.Add("pitch", DebugNumber(camera->pitch * 180.0f / 3.14159265f, 1) + " deg");
+        if (z->InBounds(tileX, tileY)) {
+            const sk::ZmpCell& cell = z->CellAt(tileX, tileY);
+            group.Add("cell flags", "0x" + std::to_string(cell.flags));
+            group.Add("cell block", std::string(cell.IsBlocked() ? "BLOCKED" : "open") + "  (0x" +
+                                         std::to_string(cell.blockFlags) + ")");
+            group.Add("cell wall", cell.IsWall() ? "wall" : "-");
+            group.Add("cell light", std::to_string(cell.lightLevel));
+            group.Add("floor", DebugNumber(z->FloorHeightAt(camera->x, camera->y), 1));
+            group.Add("ceiling", DebugNumber(z->CeilingHeightAt(camera->x, camera->y), 1));
+        }
+        group.Add("map open", m_Refs.mapOpen && *m_Refs.mapOpen ? "yes" : "no");
+        out.push_back(std::move(group));
+
+        if (m_Refs.regionsOccupied && !m_Refs.regionsOccupied->empty()) {
+            sk_debug::StatGroup regions;
+            regions.title = "regions occupied";
+            for (size_t regionIndex : *m_Refs.regionsOccupied) {
+                if (regionIndex >= z->regions().size()) continue;
+                regions.Add(std::to_string(regionIndex), z->regions()[regionIndex].name);
+            }
+            out.push_back(std::move(regions));
+        }
+
+        if (m_Refs.showTileGrid) {
+            // A 9x9 ASCII window of the block bit around the player. Reading
+            // the grid the collision test actually reads is the fastest way
+            // to tell "the door is still stamped" from "the geometry is
+            // wrong" -- the exact question M67 turned on.
+            sk_debug::StatGroup grid;
+            grid.title = "tile block grid (# blocked, W wall, . open, @ you)";
+            for (int dy = -4; dy <= 4; ++dy) {
+                std::string row;
+                for (int dx = -4; dx <= 4; ++dx) {
+                    const int tx = tileX + dx, ty = tileY + dy;
+                    if (!z->InBounds(tx, ty)) {
+                        row += ' ';
+                        continue;
+                    }
+                    if (dx == 0 && dy == 0) {
+                        row += '@';
+                        continue;
+                    }
+                    const sk::ZmpCell& cell = z->CellAt(tx, ty);
+                    row += cell.IsWall() ? 'W' : (cell.IsBlocked() ? '#' : '.');
+                }
+                grid.Add("y" + std::to_string(tileY + dy), row);
+            }
+            out.push_back(std::move(grid));
+        }
+        return;
+    }
+
+    if (name == "player") {
+        if (!player) return;
+        sk_debug::StatGroup vitals;
+        vitals.title = "vitals";
+        vitals.Add("health", std::to_string(player->health()) + " / " +
+                                  std::to_string(player->maxHealth()));
+        vitals.Add("magicka", std::to_string(player->magicka()) + " / " +
+                                   std::to_string(player->maxMagicka()));
+        vitals.Add("fatigue", std::to_string(player->fatigue()) + " / " +
+                                   std::to_string(player->maxFatigue()));
+        vitals.Add("level", std::to_string(player->level()));
+        vitals.Add("experience", std::to_string(player->experience()) + "  (next in " +
+                                      std::to_string(player->experienceToNextLevel()) + ")");
+        vitals.Add("level-up points", std::to_string(player->levelUpPoints()));
+        vitals.Add("gold", std::to_string(player->gold()));
+        out.push_back(std::move(vitals));
+
+        sk_debug::StatGroup attributes;
+        attributes.title = "attributes";
+        attributes.Add("strength", std::to_string(player->strength()));
+        attributes.Add("intelligence", std::to_string(player->intelligence()));
+        attributes.Add("willpower", std::to_string(player->willpower()));
+        attributes.Add("agility", std::to_string(player->agility()));
+        attributes.Add("speed", std::to_string(player->speed()));
+        attributes.Add("endurance", std::to_string(player->endurance()));
+        attributes.Add("personality", std::to_string(player->personality()));
+        attributes.Add("luck", std::to_string(player->luck()));
+        out.push_back(std::move(attributes));
+
+        sk_debug::StatGroup derived;
+        derived.title = "derived / identity";
+        const int raceStringId = sk_bindings::RaceNameStringId(player->race());
+        const int classStringId = sk_bindings::CharacterClassNameStringId(player->characterClass());
+        derived.Add("race", std::to_string(player->race()) + "  " +
+                                 (m_Refs.strings && raceStringId >= 0
+                                       ? m_Refs.strings->Get(raceStringId)
+                                       : std::string()));
+        derived.Add("class", std::to_string(player->characterClass()) + "  " +
+                                  (m_Refs.strings && classStringId >= 0
+                                        ? m_Refs.strings->Get(classStringId)
+                                        : std::string()));
+        derived.Add("sex", player->sex() ? "male" : "female");
+        derived.Add("attack", std::to_string(player->attack()));
+        derived.Add("defense", std::to_string(player->defense()));
+        derived.Add("armor rating", std::to_string(player->armorRating()));
+        derived.Add("spell to-hit", std::to_string(player->spellToHit()));
+        derived.Add("spell resist", std::to_string(player->spellResistance()));
+        derived.Add("special ability", std::to_string(player->specialAbility()));
+        derived.Add("race ability", std::to_string(player->raceAbility()));
+        std::string status;
+        if (player->paralyzed()) status += "paralyzed ";
+        if (player->blinded()) status += "blinded ";
+        if (player->poisoned()) status += "poisoned ";
+        if (player->burning()) status += "burning ";
+        derived.Add("status", status.empty() ? "-" : status);
+        derived.Add("left hand",
+                     player->leftItem() ? player->leftItem()->name() : std::string("-"));
+        derived.Add("right hand",
+                     player->rightItem() ? player->rightItem()->name() : std::string("-"));
+        out.push_back(std::move(derived));
+        return;
+    }
+
+    if (name == "inventory") {
+        if (!player) return;
+        sk_debug::StatGroup group;
+        group.title = "inventory (" + std::to_string(player->inventoryCount()) + " items)";
+        for (const auto& item : player->inventory()) {
+            if (!item) continue;
+            if (!DebugContains(item->name(), argument)) continue;
+            std::string value = "type " + std::to_string(item->itemType());
+            if (item->quantity() > 1) value += "  x" + std::to_string(item->quantity());
+            if (item->equipped()) value += "  EQUIPPED";
+            group.Add(item->name(), value);
+        }
+        if (group.rows.empty()) group.Add("(empty)", "");
+        out.push_back(std::move(group));
+        return;
+    }
+
+    if (name == "quests") {
+        if (!player) return;
+        sk_debug::StatGroup group;
+        group.title = "quests";
+        // The three sets are private; the natives are not. Scanning a bounded
+        // id range through the real accessors keeps this honest about what a
+        // script can actually see, and 0..255 covers every id the corpus uses.
+        for (int id = 0; id < 256; ++id) {
+            const bool assigned = player->questAssigned(id);
+            const bool solved = player->questSolved(id);
+            const bool completed = player->questCompleted(id);
+            if (!assigned && !solved && !completed) continue;
+            std::string state;
+            if (assigned) state += "assigned ";
+            if (solved) state += "solved ";
+            if (completed) state += "completed";
+            group.Add(std::to_string(id), state);
+        }
+        if (group.rows.empty()) group.Add("(none touched)", "");
+        out.push_back(std::move(group));
+        return;
+    }
+
+    if (name == "zone") {
+        sk_debug::StatGroup group;
+        group.title = "zone";
+        if (!z) {
+            group.Add("state", "no zone loaded");
+            out.push_back(std::move(group));
+            return;
+        }
+        group.Add("name", m_Refs.stack ? m_Refs.stack->currentLevelName() : std::string("?"));
+        group.Add("grid", std::to_string(z->width()) + " x " + std::to_string(z->height()));
+        group.Add("placements", std::to_string(z->entities().size()));
+        group.Add("regions", std::to_string(z->regions().size()));
+        group.Add("tile changes", std::to_string(z->tileChanges().size()) +
+                                       "  (journalled since load)");
+        group.Add("player start", std::to_string(z->playerStartX) + ", " +
+                                       std::to_string(z->playerStartY) + ", " +
+                                       std::to_string(z->playerStartZ));
+        if (m_Refs.modelCollision) {
+            group.Add("solid models", std::to_string(m_Refs.modelCollision->solidCount()));
+        }
+        group.Add("zone script", *m_Refs.zoneScript ? "loaded" : "none");
+        out.push_back(std::move(group));
+
+        // How much of the block bit is authored versus stamped is the exact
+        // census M67 left open, so it is worth having in front of you.
+        int blocked = 0, walls = 0, blockedFloor = 0;
+        for (int ty = 0; ty < z->height(); ++ty) {
+            for (int tx = 0; tx < z->width(); ++tx) {
+                const sk::ZmpCell& cell = z->CellAt(tx, ty);
+                if (cell.IsWall()) ++walls;
+                if (cell.IsBlocked()) {
+                    ++blocked;
+                    if (!cell.IsWall()) ++blockedFloor;
+                }
+            }
+        }
+        sk_debug::StatGroup census;
+        census.title = "tile census";
+        census.Add("cells", std::to_string(z->width() * z->height()));
+        census.Add("walls", std::to_string(walls));
+        census.Add("blocked", std::to_string(blocked));
+        census.Add("blocked, not wall", std::to_string(blockedFloor));
+        out.push_back(std::move(census));
+        return;
+    }
+
+    if (name == "entities") {
+        std::vector<sk_debug::EntityRow> rows;
+        Entities(rows);
+        sk_debug::StatGroup counts;
+        counts.title = "live entities";
+        counts.Add("monsters", m_Refs.monsters ? std::to_string(m_Refs.monsters->size()) : "-");
+        counts.Add("doors", m_Refs.doors ? std::to_string(m_Refs.doors->size()) : "-");
+        counts.Add("pickups", m_Refs.pickups ? std::to_string(m_Refs.pickups->size()) : "-");
+        counts.Add("traps", m_Refs.traps ? std::to_string(m_Refs.traps->size()) : "-");
+        counts.Add("static props", m_Refs.props ? std::to_string(m_Refs.props->size()) : "-");
+        counts.Add("spell projectiles",
+                    m_Refs.projectiles ? std::to_string(m_Refs.projectiles->size()) : "-");
+        counts.Add("arrows", m_Refs.arrows ? std::to_string(m_Refs.arrows->size()) : "-");
+        out.push_back(std::move(counts));
+
+        sk_debug::StatGroup nearest;
+        nearest.title = "nearest";
+        for (size_t i = 0; i < rows.size() && i < 14; ++i) {
+            std::string value = rows[i].kind + "  d=" + DebugNumber(rows[i].distance);
+            if (rows[i].health >= 0) {
+                value += "  hp " + std::to_string(rows[i].health) + "/" +
+                          std::to_string(rows[i].maxHealth);
+            }
+            if (!rows[i].state.empty()) value += "  " + rows[i].state;
+            nearest.Add("[" + std::to_string(rows[i].index) + "] " + rows[i].name, value);
+        }
+        if (nearest.rows.empty()) nearest.Add("(none)", "");
+        out.push_back(std::move(nearest));
+        return;
+    }
+
+    if (name == "entity") {
+        std::vector<sk_debug::EntityRow> rows;
+        Entities(rows);
+        int wanted = -1;
+        try {
+            wanted = std::stoi(argument);
+        } catch (...) {
+            return;
+        }
+        for (const sk_debug::EntityRow& row : rows) {
+            if (row.index != wanted) continue;
+            sk_debug::StatGroup group;
+            group.title = row.kind + "  " + row.name;
+            group.Add("index", std::to_string(row.index));
+            group.Add("position", DebugNumber(row.x, 1) + ", " + DebugNumber(row.y, 1) + ", " +
+                                       DebugNumber(row.z, 1));
+            group.Add("tile", std::to_string(static_cast<int>(row.x / sk::kTileScale)) + ", " +
+                                   std::to_string(static_cast<int>(row.y / sk::kTileScale)));
+            group.Add("distance", DebugNumber(row.distance, 1));
+            group.Add("state", row.state.empty() ? "-" : row.state);
+            if (row.health >= 0) {
+                group.Add("health",
+                          std::to_string(row.health) + " / " + std::to_string(row.maxHealth));
+            }
+            group.Add("alive", row.alive ? "yes" : "no");
+            if (row.typeId >= 0) group.Add("type id", std::to_string(row.typeId));
+            if (row.modelIndex >= 0) {
+                group.Add("model index", std::to_string(row.modelIndex));
+                if (m_Refs.modelCollision) {
+                    const sk::ModelCollision& collision = m_Refs.modelCollision->At(row.modelIndex);
+                    group.Add("collision", std::to_string(collision.solid) + " " +
+                                                std::to_string(collision.halfExtentX) + " " +
+                                                std::to_string(collision.halfExtentY) +
+                                                (collision.tileStamped() ? "  TILE-STAMPED" : ""));
+                }
+            }
+            out.push_back(std::move(group));
+            return;
+        }
+        return;
+    }
+
+    if (name == "tile") {
+        if (!z || !camera) return;
+        int tileX = static_cast<int>(std::floor(camera->x / sk::kTileScale));
+        int tileY = static_cast<int>(std::floor(camera->y / sk::kTileScale));
+        if (!argument.empty()) {
+            const size_t comma = argument.find(',');
+            if (comma != std::string::npos) {
+                try {
+                    tileX = std::stoi(argument.substr(0, comma));
+                    tileY = std::stoi(argument.substr(comma + 1));
+                } catch (...) {
+                }
+            }
+        }
+        sk_debug::StatGroup group;
+        group.title = "tile " + std::to_string(tileX) + "," + std::to_string(tileY);
+        if (!z->InBounds(tileX, tileY)) {
+            group.Add("(out of bounds)", std::to_string(z->width()) + "x" +
+                                              std::to_string(z->height()));
+            out.push_back(std::move(group));
+            return;
+        }
+        const sk::ZmpCell& cell = z->CellAt(tileX, tileY);
+        const float worldX = (static_cast<float>(tileX) + 0.5f) * sk::kTileScale;
+        const float worldY = (static_cast<float>(tileY) + 0.5f) * sk::kTileScale;
+        group.Add("centre", DebugNumber(worldX) + ", " + DebugNumber(worldY));
+        group.Add("flags", std::to_string(cell.flags) +
+                                (cell.IsWall() ? "  WALL" : "") +
+                                (cell.IsLightSource() ? "  LIGHT" : ""));
+        group.Add("blockFlags", std::to_string(cell.blockFlags) +
+                                     (cell.IsBlocked() ? "  BLOCKED" : "  open"));
+        group.Add("light", std::to_string(cell.lightLevel));
+        group.Add("zcp index", std::to_string(cell.zcpIndex));
+        group.Add("floor", DebugNumber(z->FloorHeightAt(worldX, worldY), 1));
+        group.Add("ceiling", DebugNumber(z->CeilingHeightAt(worldX, worldY), 1));
+        group.Add("blocks a 48-radius circle",
+                   z->CircleHitsWall(worldX, worldY, 48.0f) ? "yes" : "no");
+        out.push_back(std::move(group));
+        return;
+    }
+
+    if (name == "render") {
+        sk_debug::StatGroup group;
+        group.title = "render";
+        group.Add("fps", DebugNumber(sk_debug::Metrics::Get().framesPerSecond(), 2));
+        group.Add("frame ms", DebugNumber(sk_debug::Metrics::Get().frameMs(), 2));
+        for (const char* sample : {"tick", "render3d", "present", "debug.overlay"}) {
+            group.Add(std::string(sample) + " ms",
+                       DebugNumber(sk_debug::Metrics::Get().averageMs(sample), 3));
+        }
+        group.Add("draw entities",
+                   std::to_string(sk_debug::Metrics::Get().lastFrame("render.entities")));
+        group.Add("visible tiles",
+                   std::to_string(sk_debug::Metrics::Get().lastFrame("render.visible_tiles")));
+        out.push_back(std::move(group));
+        return;
+    }
+
+    if (name == "script") {
+        const sk_debug::Metrics& metrics = sk_debug::Metrics::Get();
+        sk_debug::StatGroup group;
+        group.title = "script activity";
+        group.Add("statements (frame)", std::to_string(metrics.lastFrame("script.statements")));
+        group.Add("statements (total)", std::to_string(metrics.total("script.statements")));
+        group.Add("method calls (frame)",
+                   std::to_string(metrics.lastFrame("script.method_calls")));
+        group.Add("method calls (total)", std::to_string(metrics.total("script.method_calls")));
+        group.Add("soft-fails", std::to_string(metrics.total("script.softfails")));
+        group.Add("exceptions", std::to_string(metrics.total("script.exceptions")));
+        out.push_back(std::move(group));
+
+        sk_debug::StatGroup misses;
+        misses.title = "top soft-failed natives";
+        std::vector<std::pair<std::string, long long>> ranked;
+        for (const std::string& counter : metrics.counterNames()) {
+            if (counter.compare(0, 9, "softfail.") != 0) continue;
+            ranked.emplace_back(counter.substr(9), metrics.total(counter));
+        }
+        std::sort(ranked.begin(), ranked.end(),
+                  [](const auto& a, const auto& b) { return a.second > b.second; });
+        for (size_t i = 0; i < ranked.size() && i < 16; ++i) {
+            misses.Add(ranked[i].first, std::to_string(ranked[i].second));
+        }
+        if (misses.rows.empty()) misses.Add("(none yet)", "");
+        out.push_back(std::move(misses));
+        return;
+    }
+}
+
+// ---- actions --------------------------------------------------------------
+
+bool LiveDebugHost::CreateEntityAt(int typeId, float x, float y) {
+    if (!InGame()) return false;
+    skRValueArray args;
+    args.append(skRValue(typeId));
+    args.append(skRValue(static_cast<int>(x)));
+    args.append(skRValue(static_cast<int>(y)));
+    args.append(skRValue(static_cast<int>(zone()->FloorHeightAt(x, y))));
+    skRValue result;
+    skExecutableContext context(m_Refs.interpreter);
+    return m_Refs.stack->level().method(skString("CreateEntity"), args, result, context);
+}
+
+void LiveDebugHost::HostTick() {
+    // One queued spawn per tick -- see Spawn()'s comment for why it cannot
+    // be a loop. Dropped entirely if the zone changed under it, since the
+    // queued coordinates belonged to the old one.
+    if (m_PendingSpawns.empty()) return;
+    if (!InGame()) {
+        m_PendingSpawns.clear();
+        return;
+    }
+    const PendingSpawn pending = m_PendingSpawns.front();
+    m_PendingSpawns.erase(m_PendingSpawns.begin());
+    CreateEntityAt(pending.typeId, pending.x, pending.y);
+}
+
+bool LiveDebugHost::Teleport(float x, float y, bool tileCoords, std::string& message) {
+    if (!InGame()) {
+        message = "not in a zone";
+        return false;
+    }
+    if (tileCoords) {
+        x = (std::floor(x) + 0.5f) * sk::kTileScale;
+        y = (std::floor(y) + 0.5f) * sk::kTileScale;
+    }
+    sk::Zone* z = zone();
+    const int tileX = static_cast<int>(std::floor(x / sk::kTileScale));
+    const int tileY = static_cast<int>(std::floor(y / sk::kTileScale));
+    if (!z->InBounds(tileX, tileY)) {
+        message = "tile " + std::to_string(tileX) + "," + std::to_string(tileY) +
+                   " is outside this zone (" + std::to_string(z->width()) + "x" +
+                   std::to_string(z->height()) + ")";
+        return false;
+    }
+    // Through the real SetPosition native, not by writing the camera: the
+    // engine's own two-argument form drops the actor onto the floor of the
+    // destination tile, and the tick's existing drain applies it. Poking the
+    // camera directly would skip the ground snap and leave you standing in
+    // the air or inside the floor.
+    skRValueArray args;
+    args.append(skRValue(static_cast<int>(x)));
+    args.append(skRValue(static_cast<int>(y)));
+    skRValue result;
+    skExecutableContext context(m_Refs.interpreter);
+    m_Refs.stack->player().method(skString("SetPosition"), args, result, context);
+    message = "teleporting to (" + DebugNumber(x) + ", " + DebugNumber(y) + ")  tile " +
+               std::to_string(tileX) + "," + std::to_string(tileY) +
+               (z->CellAt(tileX, tileY).IsBlocked() ? "  [that tile is BLOCKED]" : "");
+    sk_debug::Log("world", "teleport " + message);
+    return true;
+}
+
+bool LiveDebugHost::TeleportToEntity(int index, std::string& message) {
+    std::vector<sk_debug::EntityRow> rows;
+    Entities(rows);
+    for (const sk_debug::EntityRow& row : rows) {
+        if (row.index != index) continue;
+        // Land one tile short of the target rather than inside it, so
+        // teleporting to a creature does not put the camera in its model.
+        const float dx = m_Refs.camera->x - row.x;
+        const float dy = m_Refs.camera->y - row.y;
+        const float length = std::sqrt(dx * dx + dy * dy);
+        const float offset = length > 1.0f ? sk::kTileScale / length : 0.0f;
+        return Teleport(row.x + dx * offset, row.y + dy * offset, false, message);
+    }
+    message = "no entity with index " + std::to_string(index) + " (see `ents`)";
+    return false;
+}
+
+bool LiveDebugHost::LoadZone(const std::string& zoneName, std::string& message) {
+    if (!m_Refs.stack) {
+        message = "no menu stack";
+        return false;
+    }
+    const std::vector<std::string> known = DebugZoneNames(m_Refs.scriptRoot);
+    // Case-insensitive, because the .zmp stems and the names scripts pass to
+    // LoadLevel() do not agree on case (`GhstPass` vs `ghstpass`).
+    std::string resolved;
+    for (const std::string& candidate : known) {
+        if (DebugLower(candidate) == DebugLower(zoneName)) {
+            resolved = candidate;
+            break;
+        }
+    }
+    if (resolved.empty()) {
+        message = "no zone `" + zoneName + "` -- `zones` lists them";
+        return false;
+    }
+    if (m_Refs.inGame && *m_Refs.inGame) {
+        // The same request a script's Level.LoadLevel() makes, so the whole
+        // real transition runs: loading screen, zone teardown, entity
+        // rebuild, zone-script Init, camera start.
+        m_Refs.stack->RequestZoneChange(resolved);
+    } else {
+        m_Refs.stack->RequestGameStart(resolved);
+    }
+    message = "travelling to " + resolved;
+    sk_debug::Log("world", message);
+    return true;
+}
+
+bool LiveDebugHost::Face(float degrees, std::string& message) {
+    if (!InGame()) {
+        message = "not in a zone";
+        return false;
+    }
+    m_Refs.camera->yaw = degrees * 3.14159265f / 180.0f;
+    message = "facing " + DebugNumber(degrees, 1) + " deg  (raw heading " +
+               std::to_string(CameraHeadingUnits(m_Refs.camera->yaw)) + ")";
+    return true;
+}
+
+bool LiveDebugHost::Spawn(const std::string& what, int count, float distance,
+                           std::string& message) {
+    if (!InGame()) {
+        message = "not in a zone";
+        return false;
+    }
+    count = std::clamp(count, 1, 64);
+
+    // A bare number is a typeId, which goes through the real
+    // Level.CreateEntity(typeId, x, y, z) -- the same native crypt1.s uses
+    // to put Umbra Keth in the room, drained by the tick's existing pump.
+    const bool numeric = !what.empty() &&
+                          what.find_first_not_of("0123456789") == std::string::npos;
+    if (numeric) {
+        const int typeId = std::atoi(what.c_str());
+        if (!m_Refs.entityTypes->Lookup(typeId)) {
+            message = "no entities.txt row for type id " + what + " (see `catalog entities`)";
+            return false;
+        }
+        // Queued, one per tick, rather than issued in a loop here.
+        // `LevelExecutable` parks CreateEntity's result in a **single**
+        // pending slot that the tick drains (its own comment notes nothing
+        // in the corpus calls CreateEntity twice without an AddObject
+        // between), so a loop would silently lose all but the last. That is
+        // a faithful reproduction of the engine, so the fix belongs on this
+        // side: spread the calls across ticks. See HostTick().
+        for (int i = 0; i < count; ++i) {
+            const float angle = m_Refs.camera->yaw +
+                                 (static_cast<float>(i) - static_cast<float>(count - 1) * 0.5f) *
+                                     0.4f;
+            PendingSpawn pending;
+            pending.typeId = typeId;
+            pending.x = m_Refs.camera->x + std::cos(angle) * distance;
+            pending.y = m_Refs.camera->y + std::sin(angle) * distance;
+            m_PendingSpawns.push_back(pending);
+        }
+        message = "Level.CreateEntity(" + what + ") queued x" + std::to_string(count) +
+                   " -- one per tick (the engine's pending slot holds one), so " +
+                   std::to_string(count) + " tick(s) to land";
+        sk_debug::Log("world", message);
+        return true;
+    }
+
+    // Otherwise it is a script name. entities.txt's fourth column *is* the
+    // script path ("monsters\Azra_Rat.s"), so a named script almost always
+    // resolves to a real typeId -- and going back through CreateEntity
+    // above means a spawned creature is built by exactly the code that
+    // builds a placed one, model index and all.
+    if (const int typeId = TypeIdForScript(what); typeId > 0) {
+        return Spawn(std::to_string(typeId), count, distance, message);
+    }
+
+    // No entities.txt row names this script. Construct it directly, the way
+    // the zone-load placement loop does -- with no type descriptor there is
+    // no model index, so the creature is real but invisible. Said plainly in
+    // the result rather than left to be discovered.
+    static const char* const kSearch[] = {"monsters", "", nullptr};
+    const std::string path = ResolveScriptPath(what, kSearch);
+    if (path.empty()) {
+        message = "no script `" + what + "` under monsters/ or the script root";
+        return false;
+    }
+    int spawned = 0;
+    for (int i = 0; i < count; ++i) {
+        skExecutableContext loadContext(m_Refs.interpreter);
+        try {
+            auto monster = std::make_unique<sk_bindings::MonsterExecutable>(
+                skString(path.c_str()), loadContext, m_Refs.strings, m_Refs.stack->player(),
+                *m_Refs.stack);
+            const float angle = m_Refs.camera->yaw +
+                                 (static_cast<float>(i) - static_cast<float>(count - 1) * 0.5f) *
+                                     0.4f;
+            MonsterInstance instance;
+            instance.x = m_Refs.camera->x + std::cos(angle) * distance;
+            instance.y = m_Refs.camera->y + std::sin(angle) * distance;
+            instance.z = zone()->FloorHeightAt(instance.x, instance.y);
+            monster->SetWorldPosition(static_cast<int>(instance.x), static_cast<int>(instance.y),
+                                       static_cast<int>(instance.z));
+            skRValueArray args;
+            args.append(skRValue(0));
+            skRValue result;
+            skExecutableContext callContext(m_Refs.interpreter);
+            monster->method(skString("Init"), args, result, callContext);
+            instance.placementYaw = m_Refs.camera->yaw + 3.14159265f;  // looking back at us
+            instance.facingYaw = instance.placementYaw;
+            instance.modelArchiveIndex = -1;  // no entities.txt row -> no model
+            instance.typeId = 0;
+            instance.script = std::move(monster);
+            m_Refs.monsters->push_back(std::move(instance));
+            ++spawned;
+        } catch (skParseException& e) {
+            message = std::string("parse error in ") + path + ": " + e.toString().ptr();
+            return false;
+        } catch (skRuntimeException& e) {
+            message = std::string("runtime error in ") + path + ": " + e.toString().ptr();
+            return false;
+        }
+    }
+    message = "spawned " + std::to_string(spawned) + " x " +
+               path.substr(m_Refs.scriptRoot.size() + 1) + " at " + DebugNumber(distance) +
+               " units -- NOT in entities.txt, so it has no model and will be invisible";
+    sk_debug::Log("world", message);
+    return true;
+}
+
+bool LiveDebugHost::Give(const std::string& what, int count, std::string& message) {
+    if (!m_Refs.stack) {
+        message = "no menu stack";
+        return false;
+    }
+    count = std::clamp(count, 1, 99);
+    const bool numeric = !what.empty() &&
+                          what.find_first_not_of("0123456789") == std::string::npos;
+    int given = 0;
+    for (int i = 0; i < count; ++i) {
+        std::unique_ptr<sk_bindings::ItemExecutable> item;
+        // A bare number is a typeId; a script name is resolved back to its
+        // typeId through entities.txt first, so both go through the engine's
+        // own item factory -- the same call a loot bag's Init() makes.
+        const int typeId = numeric ? std::atoi(what.c_str()) : TypeIdForScript(what);
+        if (typeId > 0) {
+            item = m_Refs.stack->level().CreateItem(typeId, false);
+        } else {
+            static const char* const kSearch[] = {"items", "weapons", "armor", "spells", "",
+                                                   nullptr};
+            const std::string path = ResolveScriptPath(what, kSearch);
+            if (path.empty()) {
+                message = "no item script `" + what +
+                           "` under items/ weapons/ armor/ spells/ or the script root";
+                return false;
+            }
+            skExecutableContext loadContext(m_Refs.interpreter);
+            try {
+                item = std::make_unique<sk_bindings::ItemExecutable>(skString(path.c_str()),
+                                                                     loadContext, *m_Refs.stack);
+                skRValueArray args;
+                args.append(skRValue(0));
+                skRValue result;
+                skExecutableContext callContext(m_Refs.interpreter);
+                item->method(skString("Init"), args, result, callContext);
+            } catch (skParseException& e) {
+                message = std::string("parse error in ") + path + ": " + e.toString().ptr();
+                return false;
+            } catch (skRuntimeException& e) {
+                message = std::string("runtime error in ") + path + ": " + e.toString().ptr();
+                return false;
+            }
+        }
+        if (!item) break;
+        if (given == 0) message = "gave " + item->name();
+        m_Refs.stack->player().AddItem(std::move(item));
+        ++given;
+    }
+    if (given == 0) {
+        message = "could not create `" + what + "`";
+        return false;
+    }
+    message += "  x" + std::to_string(given);
+    sk_debug::Log("world", message);
+    return true;
+}
+
+bool LiveDebugHost::Equip(const std::string& what, int hand, std::string& message) {
+    if (!m_Refs.stack) {
+        message = "no menu stack";
+        return false;
+    }
+    sk_bindings::PlayerExecutable& player = m_Refs.stack->player();
+    sk_bindings::ItemExecutable* found = nullptr;
+    for (const auto& item : player.inventory()) {
+        if (item && DebugContains(item->name(), what)) {
+            found = item.get();
+            break;
+        }
+    }
+    if (!found) {
+        message = "no carried item matching `" + what + "` (see `inv`)";
+        return false;
+    }
+    // UpdateEquipStatus is the real equip path (M35's equip screen calls
+    // exactly this), so hand assignment, two-handed rules and the viewmodel
+    // swap all behave as they do in game. The requested hand is advisory:
+    // the engine picks, and this reports where it actually went.
+    const int result = player.UpdateEquipStatus(found, hand >= 0);
+    (void)hand;
+    message = std::string(hand >= 0 ? "equipped " : "unequipped ") + found->name() +
+               "  (UpdateEquipStatus -> " + std::to_string(result) + ", left=" +
+               (player.leftItem() ? player.leftItem()->name() : "-") + ", right=" +
+               (player.rightItem() ? player.rightItem()->name() : "-") + ")";
+    return true;
+}
+
+bool LiveDebugHost::KillAll(const std::string& filter, std::string& message) {
+    if (!InGame() || !m_Refs.monsters) {
+        message = "not in a zone";
+        return false;
+    }
+    int killed = 0;
+    for (MonsterInstance& m : *m_Refs.monsters) {
+        if (!m.script || !m.script->alive() || m.script->destroyed()) continue;
+        if (!DebugContains(m.script->name(), filter)) continue;
+        // Through ApplyDamage, not by zeroing health: death has to run the
+        // real path (loot drop, kill counters, zone triggers), because those
+        // are exactly the things worth debugging.
+        m.script->ApplyDamage(m.script->currentHealth() + 1);
+        ++killed;
+    }
+    message = "killed " + std::to_string(killed) +
+               (filter.empty() ? std::string(" creature(s)")
+                                : " creature(s) matching `" + filter + "`");
+    sk_debug::Log("world", message);
+    return true;
+}
+
+// ---- the native bridge ------------------------------------------------------
+
+std::vector<std::pair<std::string, std::string>> LiveDebugHost::Receivers() const {
+    std::vector<std::pair<std::string, std::string>> out = {
+        {"player", "the Player object -- stats, quests, inventory, gold, race, class"},
+        {"level", "the Level global -- CreateEntity, GetEntity, LoadLevel, ambient"},
+        {"menu", "the menu currently on top of the stack, if any"},
+        {"zone", "this zone's root script object (azra.s and friends)"},
+        {"ent:<n>", "one live entity by its `ents` index -- its own script object"},
+    };
+    return out;
+}
+
+skiExecutable* LiveDebugHost::ResolveReceiver(const std::string& receiver,
+                                               std::string& message) const {
+    if (!m_Refs.stack) {
+        message = "no menu stack";
+        return nullptr;
+    }
+    if (receiver == "player") return &m_Refs.stack->player();
+    if (receiver == "level") return &m_Refs.stack->level();
+    if (receiver == "menu") {
+        sk_bindings::MenuExecutable* menu = m_Refs.stack->currentMenu();
+        if (!menu) message = "no menu is open";
+        return menu;
+    }
+    if (receiver == "zone") {
+        if (!m_Refs.zoneScript || !*m_Refs.zoneScript) {
+            message = "no zone script loaded";
+            return nullptr;
+        }
+        return m_Refs.zoneScript->get();
+    }
+    if (receiver.compare(0, 4, "ent:") == 0) {
+        int wanted = -1;
+        try {
+            wanted = std::stoi(receiver.substr(4));
+        } catch (...) {
+            message = "bad entity index in `" + receiver + "`";
+            return nullptr;
+        }
+        // Rebuild the same ordering `ents` prints, so the index a user reads
+        // off that list is the one that resolves here.
+        std::vector<sk_debug::EntityRow> rows;
+        Entities(rows);
+        for (const sk_debug::EntityRow& row : rows) {
+            if (row.index != wanted) continue;
+            if (m_Refs.monsters) {
+                for (MonsterInstance& m : *m_Refs.monsters) {
+                    if (m.script && m.x == row.x && m.y == row.y && m.script->name() == row.name) {
+                        return m.script.get();
+                    }
+                }
+            }
+            if (m_Refs.doors) {
+                for (DoorInstance& d : *m_Refs.doors) {
+                    if (d.script && d.name == row.name) return d.script.get();
+                }
+            }
+            if (m_Refs.pickups) {
+                for (PickupInstance& p : *m_Refs.pickups) {
+                    if (p.script && p.script->name() == row.name) return p.script.get();
+                }
+            }
+        }
+        message = "entity " + std::to_string(wanted) + " has no script object";
+        return nullptr;
+    }
+    message = "unknown receiver `" + receiver + "` -- `recv` lists them";
+    return nullptr;
+}
+
+skRValue LiveDebugHost::ArgumentFromText(const std::string& text) {
+    if (text == "true") return skRValue(true);
+    if (text == "false") return skRValue(false);
+    if (!text.empty()) {
+        const size_t start = text[0] == '-' ? 1 : 0;
+        if (start < text.size() &&
+            text.find_first_not_of("0123456789", start) == std::string::npos) {
+            return skRValue(std::atoi(text.c_str()));
+        }
+    }
+    return skRValue(skString(text.c_str()));
+}
+
+bool LiveDebugHost::CallNative(const std::string& receiver, const std::string& method,
+                                const std::vector<std::string>& args, std::string& message) {
+    skiExecutable* target = ResolveReceiver(receiver, message);
+    if (!target) {
+        if (message.empty()) message = "no such receiver";
+        return false;
+    }
+    skRValueArray arguments;
+    for (const std::string& arg : args) arguments.append(ArgumentFromText(arg));
+    skRValue result;
+    skExecutableContext context(m_Refs.interpreter);
+    sk_debug::Count("debug.native_calls");
+    try {
+        const bool handled = target->method(skString(method.c_str()), arguments, result, context);
+        if (!handled) {
+            message = receiver + "." + method + " -- the binding refused the call (wrong "
+                       "argument count is the usual cause)";
+            return false;
+        }
+    } catch (skParseException& e) {
+        message = std::string("parse error: ") + e.toString().ptr();
+        return false;
+    } catch (skRuntimeException& e) {
+        message = std::string("runtime error: ") + e.toString().ptr();
+        return false;
+    }
+    // A void native returns an empty skRValue; saying so beats printing a
+    // blank line, which reads as "the command did nothing".
+    const std::string returned(result.str().ptr());
+    message = returned.empty() ? receiver + "." + method + " ran (no return value)" : returned;
+    sk_debug::Log("debug", receiver + "." + method + " -> " +
+                                (returned.empty() ? std::string("(void)") : returned));
+    return true;
+}
+
+bool LiveDebugHost::ScriptEval(const std::string& receiver, const std::string& code,
+                                std::string& message) {
+    skiExecutable* target = ResolveReceiver(receiver, message);
+    if (!target) {
+        if (message.empty()) message = "no such receiver";
+        return false;
+    }
+    // A bare expression is wrapped into a return, so `sk player GetGold()`
+    // and `sk player SetGold(10);` both do what they look like.
+    std::string body = code;
+    if (body.find(';') == std::string::npos) body = "return " + body + ";";
+    skRValueArray arguments;
+    skRValue result;
+    skExecutableContext context(m_Refs.interpreter);
+    try {
+        m_Refs.interpreter->executeString(skString("debug-console"), target,
+                                           skString(body.c_str()), arguments, result, nullptr,
+                                           context);
+    } catch (skParseException& e) {
+        message = std::string("parse error: ") + e.toString().ptr();
+        return false;
+    } catch (skRuntimeException& e) {
+        message = std::string("runtime error: ") + e.toString().ptr();
+        return false;
+    }
+    const std::string returned(result.str().ptr());
+    message = returned.empty() ? std::string("ran (no return value)") : returned;
+    sk_debug::Log("debug", "sk " + receiver + " " + code + " -> " +
+                                (returned.empty() ? std::string("(void)") : returned));
+    return true;
+}
+#endif  // SK_DEBUG_SUITE
 
 // M25: first-person weapon viewmodel -- state machine (WeaponViewmodel/
 // StartWeaponSwing/TickWeaponViewmodel) lives in simkin_bindings/
@@ -1278,6 +2605,16 @@ int main(int argc, char** argv) {
 
     sk::InputState input;
 
+#if SK_DEBUG_SUITE
+    // SK_DEBUG_SUITE (M68): declared here, before the input callbacks that
+    // have to consult it, and Attach()ed further down once every game local
+    // it points at exists. Until then HandleKey/HandleChar return false and
+    // the suite is completely inert.
+    DebugGameRefs debugRefs;
+    LiveDebugHost debugHost(debugRefs);
+    sk_debug::DebugSuite debugSuite;
+#endif
+
     // M52: `dragonstar.set` -- the one configuration file the real engine
     // writes (assets/game_config.h). Loading it here is the counterpart of
     // the real loader running before the front end: the action map, the
@@ -1317,11 +2654,27 @@ int main(int argc, char** argv) {
     } configWriter{config, input, audioEngine, stack, configPath};
 
     window.SetKeyCallback([&](int vkCode, bool down) {
+#if SK_DEBUG_SUITE
+        // SK_DEBUG_SUITE (M68): first refusal on every key. When the console
+        // is open it consumes everything, so a digit typed into a command
+        // never also reaches InputState and swings a weapon. Key-*up* is
+        // never consumed (see DebugSuite::HandleKey) -- swallowing a release
+        // would leave the slot latched down forever.
+        constexpr int kVkControl = 0x11;
+        const bool ctrlDown = (GetKeyState(kVkControl) & 0x8000) != 0;
+        if (debugSuite.HandleKey(vkCode, down, ctrlDown)) return;
+        if (debugSuite.capturingInput() && down) return;
+#endif
         if (auto slot = sk::MapPcKeyToButtonSlot(vkCode)) {
             input.SetButton(*slot, down);
         }
     });
     window.SetCharCallback([&](wchar_t ch) {
+#if SK_DEBUG_SUITE
+        // SK_DEBUG_SUITE (M68): before the name-entry handler, so typing a
+        // command does not also type into a character name.
+        if (ch < 0x80 && debugSuite.HandleChar(static_cast<char>(ch))) return;
+#endif
         sk_bindings::MenuExecutable* menu = stack.currentMenu();
         if (!menu || !menu->textEntryActive()) return;
         if (ch == 0x08) {
@@ -1504,9 +2857,59 @@ int main(int argc, char** argv) {
     // level at a time).
     bool gamePausedForMenu = false;
 
+#if SK_DEBUG_SUITE
+    // SK_DEBUG_SUITE (M68): now that every game local exists, point the
+    // debug host at them and bring the suite up. Pointers to locals of
+    // main() are stable for the whole run; the one thing that gets replaced
+    // (the Zone) is reached through its owning unique_ptr, so a zone
+    // transition does not invalidate anything here.
+    debugRefs.scriptRoot = scriptRoot;
+    debugRefs.strings = &strings;
+    debugRefs.entityTypes = &entityTypes;
+    debugRefs.modelArchive = &modelArchive;
+    debugRefs.modelCollision = &gameModelCollision;
+    debugRefs.stack = &stack;
+    debugRefs.interpreter = &interpreter;
+    debugRefs.zone = &gameZone;
+    debugRefs.zoneScript = &gameZoneScript;
+    debugRefs.camera = &gameCamera;
+    debugRefs.monsters = &gameMonsters;
+    debugRefs.doors = &gameDoors;
+    debugRefs.pickups = &gamePickups;
+    debugRefs.traps = &gameTraps;
+    debugRefs.props = &gameEntities;
+    debugRefs.projectiles = &gameProjectiles;
+    debugRefs.arrows = &gameArrows;
+    debugRefs.regionsOccupied = &gameRegionsOccupied;
+    debugRefs.inGame = &inGame;
+    debugRefs.mapOpen = &gameMapOpen;
+    debugSuite.Attach(debugHost, interpreter, sk::ExecutableDirectory() + "/../debug");
+    // The debug UI draws at the window's real resolution, after the game's
+    // 176x208 frame has been scaled and blitted -- it never touches the
+    // Backbuffer, so it cannot perturb the renderer or the tracked .ppm
+    // dumps. See graphics/overlay_surface.h.
+    window.SetOverlayCallback([&](sk::OverlaySurface& surface) { debugSuite.Render(surface); });
+#endif
+
     window.RunMessageLoop([&]() {
         if (window.ShouldClose()) return;
         if (!clock.PollTick()) return;
+
+#if SK_DEBUG_SUITE
+        // SK_DEBUG_SUITE (M68): rolls the metrics frame and runs any command
+        // queued by a keystroke since the last tick. Deliberately here, at
+        // the top of the tick, rather than in the window procedure that
+        // queued it -- a console command can run real script code, and
+        // script has to run inside the tick like everything else.
+        {
+            constexpr double kTickSeconds = 0.04;  // the fixed 25Hz tick
+            debugSuite.BeginTick(kTickSeconds);
+            if (debugSuite.quitRequested()) {
+                window.Close();
+                return;
+            }
+        }
+#endif
 
         // Drives held-key auto-repeat for menu navigation only -- see
         // InputState::TickRepeats(). Must run before any Consume* call
@@ -1723,6 +3126,11 @@ int main(int argc, char** argv) {
                 // which `Entity::Init` copies onto every placement of it.
                 gameModelCollision.Load(scriptRoot, stack.requestedZone());
                 gameZone = std::move(zone);
+#if SK_DEBUG_SUITE
+                // SK_DEBUG_SUITE (M68)
+                sk_debug::Count("zone.loads");
+                sk_debug::Log("world", "zone loaded: " + stack.requestedZone());
+#endif
                 // M57: the original allocates its explored bitmap once
                 // and never resizes it (see ExploredTiles::Reset) -- this
                 // port sizes it per zone, the one deliberate departure.
@@ -2250,8 +3658,13 @@ int main(int argc, char** argv) {
             // so this runs unconditionally, off the same call the renderer
             // uses to pick faces.
             if (gameZone) {
-                gameExplored.MarkVisible(
-                    gameZone->RaycastVisibleTiles(gameCamera.x, gameCamera.y, gameCamera.yaw));
+                const std::vector<std::pair<int, int>> visible =
+                    gameZone->RaycastVisibleTiles(gameCamera.x, gameCamera.y, gameCamera.yaw);
+#if SK_DEBUG_SUITE
+                // SK_DEBUG_SUITE (M68)
+                sk_debug::Count("render.visible_tiles", static_cast<long long>(visible.size()));
+#endif
+                gameExplored.MarkVisible(visible);
             }
             // M10: the real default control scheme's own CharacterManager
             // action (docs/INPUT_HANDLING.md, KeyHash by default) opens
@@ -2400,6 +3813,18 @@ int main(int argc, char** argv) {
                 // is what lets you slide along a table instead of sticking
                 // to it.
                 auto tryMove = [&](float mx, float my) {
+#if SK_DEBUG_SUITE
+                    // SK_DEBUG_SUITE (M68): noclip. The single most useful
+                    // toggle for a bug like M67's -- being able to walk
+                    // through the thing that is wrongly solid is how you
+                    // tell "the grid says blocked" from "the geometry is
+                    // wrong".
+                    if (debugRefs.noclip) {
+                        gameCamera.x += mx;
+                        gameCamera.y += my;
+                        return;
+                    }
+#endif
                     float nx = gameCamera.x + mx;
                     if (!gameZone->CircleHitsWall(nx, gameCamera.y, kPlayerRadius) &&
                         !blockedByEntity(nx, gameCamera.y)) {
@@ -2532,6 +3957,10 @@ int main(int argc, char** argv) {
                         std::printf("shadowkey-port: CreateEntity(%d) spawned \"%s\" at "
                                     "(%d, %d, %d)\n",
                                     req.typeId, inst.script->name().c_str(), req.x, req.y, req.z);
+#if SK_DEBUG_SUITE
+                        // SK_DEBUG_SUITE (M68)
+                        sk_debug::Count("entity.created");
+#endif
                         gameMonsters.push_back(std::move(inst));
                     }
                 }
@@ -2987,13 +4416,27 @@ int main(int argc, char** argv) {
                     return true;
                 };
 
+#if SK_DEBUG_SUITE
+                // SK_DEBUG_SUITE (M68): freezeai stops the whole creature
+                // tick -- timers, perception, movement and attacks -- so a
+                // fight can be paused and inspected mid-swing.
+                for (size_t monsterIndex = 0;
+                     !debugRefs.freezeAi && monsterIndex < gameMonsters.size(); ++monsterIndex) {
+#else
                 for (size_t monsterIndex = 0; monsterIndex < gameMonsters.size(); ++monsterIndex) {
+#endif
                     MonsterInstance& m = gameMonsters[monsterIndex];
                     const bool wasAliveBeforeTick = m.script->alive();
                     // M32: the real per-frame AI timers -- the flee/Fear
                     // countdown (which restores the previous package when
                     // it expires) and the paralysis lockout. Runs even for
                     // the dead/destroyed so an effect can't outlive them.
+#if SK_DEBUG_SUITE
+                    // SK_DEBUG_SUITE (M68): how many creatures the AI pass
+                    // actually touched this frame -- the counter that makes
+                    // `freezeai` and a stuck creature both visible in `diff`.
+                    sk_debug::Count("ai.ticks");
+#endif
                     m.script->TickAi(sk_bindings::kAiFrameDeltaUnits);
                     // M34: TickAi() is now a path that can actually kill.
                     if (wasAliveBeforeTick && !m.script->alive()) {
@@ -3187,6 +4630,16 @@ int main(int argc, char** argv) {
                                 // connecting swing uses, so an impact is
                                 // one sound whichever way it is going.
                                 if (dmg > 0) playPlayerSound(sk::kSoundAttackHit);
+#if SK_DEBUG_SUITE
+                                // SK_DEBUG_SUITE (M68): god mode. Applied
+                                // here, at the one place a creature damages
+                                // the player, so the roll still happens and
+                                // is still traceable -- only the damage is
+                                // dropped.
+                                if (debugRefs.godMode) dmg = 0;
+                                sk_debug::Count("combat.damage_taken", dmg);
+                                sk_debug::Count("combat.hits_on_player");
+#endif
                                 stack.player().ApplyDamage(dmg);
                                 playWorldSound(m.script->attackNoiseId(), m.x, m.y);
                             }
@@ -3640,6 +5093,11 @@ int main(int argc, char** argv) {
                                                            target->script->defense(),
                                                            target->script->armorValue(), dmgMin,
                                                            dmgMax);
+#if SK_DEBUG_SUITE
+                        // SK_DEBUG_SUITE (M68)
+                        sk_debug::Count("combat.damage_dealt", dmg);
+                        sk_debug::Count("combat.hits_by_player");
+#endif
                         target->script->ApplyDamage(dmg);
                     }
                     if (!target->script->alive()) {
@@ -3675,11 +5133,19 @@ int main(int argc, char** argv) {
                     // connects (see WeaponViewmodel's comment; a no-op for a
                     // non-weapon/no weaponSprite() item, e.g. bare fists or a
                     // spell).
+#if SK_DEBUG_SUITE
+                    // SK_DEBUG_SUITE (M68)
+                    sk_debug::Count("combat.swings");
+#endif
                     sk_bindings::StartWeaponSwing(gameWeaponViewmodel,
                                                    swingItemFor(stack.player().leftItem()));
                     tryAttack(stack.player().leftItem());
                 }
                 if (input.ConsumeBoundJustPressed(sk::Action::UseRightAction)) {
+#if SK_DEBUG_SUITE
+                    // SK_DEBUG_SUITE (M68)
+                    sk_debug::Count("combat.swings");
+#endif
                     sk_bindings::StartWeaponSwing(gameWeaponViewmodel,
                                                    swingItemFor(stack.player().rightItem()));
                     tryAttack(stack.player().rightItem());
@@ -3837,6 +5303,10 @@ int main(int argc, char** argv) {
                         // (still possibly non-empty), so the 3D view pauses
                         // into the real loot-selection menu instead.
                         sk_bindings::MenuExecutable* beforeMenu = stack.currentMenu();
+#if SK_DEBUG_SUITE
+                        // SK_DEBUG_SUITE (M68)
+                        sk_debug::Count("pickup.used");
+#endif
                         bool hadOnUse = pickup->script->InvokeOnUse();
                         if (!hadOnUse) {
                             // M35: the native default action, for the
@@ -3917,7 +5387,25 @@ int main(int argc, char** argv) {
                                 sk_bindings::TriggerExecutable::kNotifyDoorOpened, door->typeId,
                                 door->name, door->script.get());
                         }
+#if SK_DEBUG_SUITE
+                        // SK_DEBUG_SUITE (M68): the interaction M67 was about
+                        // -- worth a counter and an event of its own, with the
+                        // passability on both sides of the call.
+                        {
+                            const bool before = door->script->passable();
+                            sk_debug::Count("door.used");
+                            sk_debug::Log("world", "Use door \"" + door->name +
+                                                        "\" passable " +
+                                                        (before ? "true" : "false") + " -> ");
+                        }
+#endif
                         door->script->InvokeOnUse();
+#if SK_DEBUG_SUITE
+                        // SK_DEBUG_SUITE (M68)
+                        sk_debug::Log("world",
+                                       std::string("  door \"") + door->name + "\" now passable " +
+                                           (door->script->passable() ? "true" : "false"));
+#endif
                     }
                 }
 
@@ -4004,7 +5492,20 @@ int main(int argc, char** argv) {
                           static_cast<float>(shot.z), shot.modelIndex,
                           sk_bindings::PortYawFromEngineYaw(shot.yaw)});
                 }
+#if SK_DEBUG_SUITE
+                // SK_DEBUG_SUITE (M68): two counters and a timer around the
+                // 3D pass. Cheap enough to leave on -- one clock read either
+                // side and an integer add.
+                sk_debug::Count("render.entities", static_cast<long long>(frameEntities.size()));
+                sk_debug::Count("render.frames");
+                {
+                    sk_debug::ScopedTimer renderTimer("render3d");
+                    zoneRenderer.Render(backbuffer, *gameZone, gameCamera, frameEntities,
+                                         &modelArchive);
+                }
+#else
                 zoneRenderer.Render(backbuffer, *gameZone, gameCamera, frameEntities, &modelArchive);
+#endif
                 RenderHud(backbuffer, stack.player(), spriteArchive, gameCamera.yaw);
                 RenderWeaponViewmodel(backbuffer, gameWeaponViewmodel, spriteArchive);
                 // M57: last, over everything -- the map is an overlay, and

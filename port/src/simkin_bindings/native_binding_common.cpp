@@ -12,14 +12,31 @@ std::string ToStdString(const skString& s) {
     return std::string(s.ptr(), s.length());
 }
 
+namespace {
+// SK_DEBUG_SUITE (M68) -- see native_binding_common.h.
+SoftFailObserver g_SoftFailObserver = nullptr;
+}  // namespace
+
+void SetSoftFailObserver(SoftFailObserver observer) {
+    g_SoftFailObserver = observer;
+}
+
 bool SoftFailNativeCall(const char* objectDebugName, const skString& methodName,
                          skRValueArray& args, skRValue& returnValue) {
-    std::printf("  [soft-fail] %s: %s(", objectDebugName, ToStdString(methodName).c_str());
+    // The argument list is joined once and reused for both the log line and
+    // the observer, so installing the observer costs one string build on a
+    // path that was already formatting the same text.
+    std::string joined;
     for (unsigned int i = 0; i < args.entries(); ++i) {
-        if (i) std::printf(", ");
-        std::printf("%s", ToStdString(args[i].str()).c_str());
+        if (i) joined += ", ";
+        joined += ToStdString(args[i].str());
     }
-    std::printf(") -- not implemented\n");
+    const std::string method = ToStdString(methodName);
+    std::printf("  [soft-fail] %s: %s(%s) -- not implemented\n", objectDebugName, method.c_str(),
+                joined.c_str());
+    if (g_SoftFailObserver) {
+        g_SoftFailObserver(objectDebugName, method.c_str(), joined.c_str());
+    }
     returnValue = skRValue(0);
     return true;
 }
