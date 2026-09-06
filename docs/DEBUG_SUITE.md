@@ -18,13 +18,23 @@ with tools.
 | Key | |
 |---|---|
 | **F1** or **`** | open / close the console |
-| **F2 / F3** | next / previous overlay page |
-| **F4** | toggle the one-line fps/position readout |
+| **Shift+F1** | toggle the one-line fps/position readout |
+| **F2** / **Shift+F2** | next / previous overlay page |
 | **F5–F12** | free — `bind` your own commands to them |
 | **Esc** (console open) | close the console |
 | **Ctrl+↑ / Ctrl+↓**, **PgUp / PgDn** | scroll the scrollback |
 | **↑ / ↓** | command history |
 | **Tab** | complete a command, or its first argument |
+
+**The suite owns F1, F2 and the backtick, and nothing else.** Everything
+the M69 control scheme gives the game — WASD, the arrow keys, Space, E, Q,
+M, C, G, Tab, Return, Esc, the left mouse button, and **F3/F4** (the
+green/red softkeys) — passes straight through. That is checked in the smoke
+test, key by key, rather than assumed; `bind` refuses F1–F4 for the same
+reason, because binding a game key would silently swallow it.
+
+While the console is open it consumes *every* key, so typing `E` into a
+command never also opens a door.
 
 In the console: `help` lists every command grouped by area, `help <command>`
 gives its usage, `find <word>` searches names and help text.

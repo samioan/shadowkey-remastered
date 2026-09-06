@@ -114,6 +114,7 @@ struct Window::Impl {
     Rgb565BitmapInfo bmi{};
     Window::KeyCallback keyCallback;
     Window::CharCallback charCallback;
+    Window::FocusLostCallback focusLostCallback;
     // SK_DEBUG_SUITE (M68). The font is created lazily on the first overlay
     // present and lives as long as the window, so the per-frame cost of the
     // overlay is a SelectObject rather than a CreateFont.
@@ -154,6 +155,33 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             if (msg == WM_SYSKEYDOWN || msg == WM_SYSKEYUP) {
                 return DefWindowProcW(hwnd, msg, wParam, lParam);
             }
+            return 0;
+        // M69: the control sheet binds keypad 5 (the right-hand attack) to
+        // mouse button 0. Delivered through the *key* callback as
+        // VK_LBUTTON, which WM_KEYDOWN can never produce, so the mapping
+        // stays in one table (engine/pc_key_map.h) and nothing downstream
+        // needs a second input path.
+        //
+        // The capture matters: without it, pressing inside the window and
+        // releasing outside never delivers WM_LBUTTONUP, and the slot stays
+        // latched down forever -- the same hazard the WM_SYSKEYUP comment
+        // above describes for Alt.
+        case WM_LBUTTONDOWN:
+            SetCapture(hwnd);
+            if (impl && impl->keyCallback) impl->keyCallback(VK_LBUTTON, true);
+            return 0;
+        case WM_LBUTTONUP:
+            ReleaseCapture();
+            if (impl && impl->keyCallback) impl->keyCallback(VK_LBUTTON, false);
+            return 0;
+        // Focus loss (alt-tab, a click elsewhere) means no further key-up
+        // will arrive for anything currently held. Without this the game
+        // keeps walking forward after the window is left. Signalled as a
+        // key-up on every slot the map knows, which is exactly what the
+        // input layer needs to hear.
+        case WM_KILLFOCUS:
+            ReleaseCapture();
+            if (impl && impl->focusLostCallback) impl->focusLostCallback();
             return 0;
         case WM_CHAR:
             if (impl && impl->charCallback) {
@@ -224,6 +252,10 @@ void Window::SetKeyCallback(KeyCallback callback) {
 
 void Window::SetCharCallback(CharCallback callback) {
     impl_->charCallback = std::move(callback);
+}
+
+void Window::SetFocusLostCallback(FocusLostCallback callback) {
+    impl_->focusLostCallback = std::move(callback);
 }
 
 // SK_DEBUG_SUITE (M68).

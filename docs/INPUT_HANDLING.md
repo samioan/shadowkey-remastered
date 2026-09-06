@@ -303,6 +303,42 @@ native-function bridge's real mechanism**, see
 [`SIMKIN_BRIDGE.md`](SIMKIN_BRIDGE.md) for the complete writeup rather
 than duplicating it here.
 
+### How the PC port maps a keyboard onto all this (M69)
+
+Not RE — a porting decision, recorded here so the two layers are not
+confused with each other. **This document's default control scheme is the
+engine's own, recovered from `FUN_1001a220`, and the port reproduces it
+unchanged** (`InputState::InitDefaultBindings`). What a PC keyboard has to
+supply is the layer *below* it: which physical key stands in for which of
+the device's 21 button slots. That table lives in
+`port/src/engine/pc_key_map.h` and is a convention, not a finding.
+
+Through M68 it was the M0 scaffold's placeholder — arrow keys for the
+D-pad, top-row digits for the keypad, `-`/`=` for `*`/`#` — whose own
+comment called the digits "arbitrary-but-documented". M69 replaced it with
+a real N-Gage-emulator binding sheet: WASD for the D-pad, the arrow keys
+for keypad 2/4/6/8, Space/E/Q/M/G/C/Tab for keypad 1/3/7/9/0/`*`/`#`, the
+left mouse button for keypad 5, Return for the middle softkey and Esc for
+the left/right ones.
+
+Two details of this document mattered to that mapping:
+
+- **The engine has no slot for the green and red softkeys.** The scan-code
+  table above is 21 entries and slots 18/19/20 are gaps (18 reuses the Left
+  Selection Key label, 19 was never registered at all). The emulator sheet
+  binds them to F3/F4; the port maps them to nothing, because there is no
+  button for them to be.
+- **Only two selection slots exist**, and `RightSelectionKey` is the one
+  confirmed to be back/cancel (`mainmenu.s`'s `OnRightSoftkey` backs out to
+  the quit-confirm popup). So Esc — which the sheet gives to both the left
+  and right softkey — takes that one, and Return, the sheet's middle
+  softkey, takes `LeftSelectionKey`.
+
+Everything remains rebindable through `InputState::Rebind`, which is what
+`ConfigKeysMenu` would drive; only the logical table is persisted (in
+`dragonstar.set`'s ACTIONMAP block), so changing the physical layout does
+not invalidate an existing settings file.
+
 ## What's still open
 
 - The exact native-code identity of `ConfigKeysMenu`/`ConfigKeysDefault`

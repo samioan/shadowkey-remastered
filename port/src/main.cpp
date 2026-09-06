@@ -2660,15 +2660,18 @@ int main(int argc, char** argv) {
         // never also reaches InputState and swings a weapon. Key-*up* is
         // never consumed (see DebugSuite::HandleKey) -- swallowing a release
         // would leave the slot latched down forever.
-        constexpr int kVkControl = 0x11;
-        const bool ctrlDown = (GetKeyState(kVkControl) & 0x8000) != 0;
-        if (debugSuite.HandleKey(vkCode, down, ctrlDown)) return;
+        const bool ctrlDown = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
+        const bool shiftDown = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
+        if (debugSuite.HandleKey(vkCode, down, ctrlDown, shiftDown)) return;
         if (debugSuite.capturingInput() && down) return;
 #endif
         if (auto slot = sk::MapPcKeyToButtonSlot(vkCode)) {
             input.SetButton(*slot, down);
         }
     });
+    // M69: alt-tabbing away with a key held would otherwise leave that slot
+    // latched down forever -- see InputState::ReleaseAll.
+    window.SetFocusLostCallback([&]() { input.ReleaseAll(); });
     window.SetCharCallback([&](wchar_t ch) {
 #if SK_DEBUG_SUITE
         // SK_DEBUG_SUITE (M68): before the name-entry handler, so typing a
@@ -2690,19 +2693,23 @@ int main(int argc, char** argv) {
     sk::Backbuffer backbuffer;
     sk::GameClock clock;
 
+    // M69: the control scheme is the user's own N-Gage-emulator binding
+    // sheet -- see engine/pc_key_map.h for the full table and for which
+    // N-Gage button each PC key actually *is*.
     std::printf(
-        "shadowkey-port: menus -- Up/Down move selection, Left/Right cycle combo values or "
-        "navigate horizontal screens, Enter confirms, Esc goes back.\n");
+        "shadowkey-port: menus -- W/S move selection, A/D cycle combo values or navigate "
+        "horizontal screens, Enter confirms, Esc goes back.\n");
     std::printf(
-        "shadowkey-port: New Game/Load Game enter the 3D zone (M6) -- Up/Down walk, "
-        "Left/Right turn, Esc returns to the main menu.\n");
+        "shadowkey-port: in the 3D zone -- W/S walk, A/D turn, arrow keys sidestep and look, "
+        "Space jumps, Esc returns to the main menu.\n");
     std::printf(
-        "shadowkey-port: '3' (real default Use binding, M15) opens/closes the nearest door "
-        "you're facing -- '7'/'5' swing your left/right-hand weapon (M12).\n");
+        "shadowkey-port: 'E' (the real Use binding, keypad 3, M15) opens/closes the nearest "
+        "door you're facing -- 'Q' and the left mouse button (keypad 7/5) swing your "
+        "left/right-hand weapon (M12).\n");
     std::printf(
-        "shadowkey-port: '=' (stands in for the N-Gage's '#') opens the character manager "
-        "(real inventory/stats/quest-log screens, M10) -- Esc there always returns straight "
-        "to the 3D view.\n");
+        "shadowkey-port: Tab (the N-Gage's '#') opens the character manager (real inventory/"
+        "stats/quest-log screens, M10) -- Esc there always returns straight to the 3D view. "
+        "'M' is the map, 'C'/'G' cycle the left/right hand queues.\n");
 
     sk_bindings::MenuExecutable* lastMenu = nullptr;
     int creditsScroll = 0;

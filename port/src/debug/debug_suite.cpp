@@ -29,15 +29,26 @@ constexpr int kVkRight = 0x27;
 constexpr int kVkDown = 0x28;
 constexpr int kVkDelete = 0x2E;
 constexpr int kVkF1 = 0x70;
+constexpr int kVkF5 = 0x74;
 constexpr int kVkF12 = 0x7B;
 constexpr int kVkOem3 = 0xC0;  // the `~ key, left of 1
 
-// The suite's own fixed keys. F5-F12 are deliberately left alone so `bind`
-// has somewhere to put a user's own shortcuts.
+// The suite's own fixed keys.
+//
+// M69: this used to be F1..F4. The control scheme adopted in M69 gives F3
+// and F4 to the game (the N-Gage's green and red softkeys), so the suite
+// moved off them entirely -- F3/F4 must reach the game, not open a debug
+// panel. The two secondary functions went onto Shift rather than onto more
+// function keys, which keeps all eight of F5-F12 free for `bind`.
+//
+//   F1          console          Shift+F1   mini bar
+//   F2          next page        Shift+F2   previous page
 constexpr int kToggleConsoleKey = kVkF1;
-constexpr int kNextPageKey = 0x71;   // F2
-constexpr int kPrevPageKey = 0x72;   // F3
-constexpr int kMiniBarKey = 0x73;    // F4
+constexpr int kNextPageKey = 0x71;  // F2
+// The game's own keys, listed so the reasoning is visible at the one place
+// that would otherwise be tempted to grab them again.
+constexpr int kGameGreenSoftkey = 0x72;  // F3
+constexpr int kGameRedSoftkey = 0x73;    // F4
 
 // SK_DEBUG_SUITE: the soft-fail observer installed into sk_bindings. A
 // free function because the hook is a plain function pointer (see
@@ -76,7 +87,8 @@ void DebugSuite::Attach(DebugHost& host, skInterpreter& interpreter,
     sk_bindings::SetSoftFailObserver(&OnSoftFail);
     m_Attached = true;
 
-    m_Console.Print("F1 console  F2/F3 overlay page  F4 mini bar  F5-F12 free for `bind`",
+    m_Console.Print("F1 console  F2 overlay page (Shift+F2 back)  Shift+F1 mini bar  "
+                     "F5-F12 free for `bind`",
                      LineKind::Notice);
     m_Console.Print("`help` for the command list. `mark`, do a thing, `diff` shows what ran.",
                      LineKind::Notice);
@@ -114,7 +126,10 @@ ConsoleKey DebugSuite::ConsoleKeyFromHostKey(int hostKeyCode) {
 }
 
 std::string DebugSuite::BindNameForHostKey(int hostKeyCode) {
-    if (hostKeyCode >= kVkF1 && hostKeyCode <= kVkF12) {
+    // F1/F2 are the suite's own and F3/F4 are the game's (M69), so only
+    // F5-F12 are offered. Binding a key the game uses would silently
+    // swallow it, which is a worse failure than not being able to bind it.
+    if (hostKeyCode >= kVkF5 && hostKeyCode <= kVkF12) {
         return "f" + std::to_string(hostKeyCode - kVkF1 + 1);
     }
     switch (hostKeyCode) {
@@ -127,14 +142,24 @@ std::string DebugSuite::BindNameForHostKey(int hostKeyCode) {
     }
 }
 
-bool DebugSuite::HandleKey(int hostKeyCode, bool down, bool ctrlDown) {
+bool DebugSuite::HandleKey(int hostKeyCode, bool down, bool ctrlDown, bool shiftDown) {
     if (!m_Attached) return false;
     // Key-up is never consumed. If it were, a key held across a console
     // toggle would leave its InputState slot latched down forever -- the
     // exact hazard window.cpp's WM_SYSKEYUP comment already documents.
     if (!down) return false;
 
+    // M69: F3 and F4 belong to the game now (green/red softkey). Refused
+    // before anything else so no later branch can quietly claim them.
+    if (hostKeyCode == kGameGreenSoftkey || hostKeyCode == kGameRedSoftkey) {
+        if (!m_Console.open()) return false;
+    }
+
     if (hostKeyCode == kToggleConsoleKey || hostKeyCode == kVkOem3) {
+        if (shiftDown && hostKeyCode == kToggleConsoleKey) {
+            m_Overlay.SetMiniBar(!m_Overlay.miniBar());
+            return true;
+        }
         m_Console.Toggle();
         if (m_Console.open()) Count("debug.console_opens");
         return true;
@@ -151,18 +176,8 @@ bool DebugSuite::HandleKey(int hostKeyCode, bool down, bool ctrlDown) {
     }
 
     // Console closed: the suite's own function keys, then user bindings.
-    if (m_Host) {
-        if (hostKeyCode == kNextPageKey) {
-            m_Overlay.CyclePage(*m_Host, 1);
-            return true;
-        }
-        if (hostKeyCode == kPrevPageKey) {
-            m_Overlay.CyclePage(*m_Host, -1);
-            return true;
-        }
-    }
-    if (hostKeyCode == kMiniBarKey) {
-        m_Overlay.SetMiniBar(!m_Overlay.miniBar());
+    if (m_Host && hostKeyCode == kNextPageKey) {
+        m_Overlay.CyclePage(*m_Host, shiftDown ? -1 : 1);
         return true;
     }
 

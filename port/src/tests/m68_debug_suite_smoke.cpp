@@ -36,6 +36,7 @@
 #include "debug/debug_suite.h"
 #include "debug/script_tracer.h"
 #include "graphics/overlay_surface.h"
+#include "skInterpreter.h"
 
 namespace {
 
@@ -534,7 +535,7 @@ int main() {
         sk_debug::DebugSuite suite;
         // Not attached yet: completely inert, which is what makes it safe to
         // declare before the game's own state exists.
-        Check(!suite.HandleKey(0x70 /* F1 */, true, false),
+        Check(!suite.HandleKey(0x70 /* F1 */, true, false, false),
               "an unattached suite consumes nothing");
         Check(!suite.capturingInput(), "and does not claim keyboard focus");
 
@@ -548,6 +549,64 @@ int main() {
               "F5 is bindable by name");
         Check(sk_debug::DebugSuite::BindNameForHostKey('A').empty(),
               "a letter key is not bindable (it would shadow typing)");
+        // M69: the control scheme gives F3 and F4 to the game (the N-Gage's
+        // green and red softkeys). Binding either would silently swallow a
+        // game key, which is worse than not being able to bind it.
+        Check(sk_debug::DebugSuite::BindNameForHostKey(0x72).empty(),
+              "F3 is NOT bindable -- it is the game's green softkey");
+        Check(sk_debug::DebugSuite::BindNameForHostKey(0x73).empty(),
+              "F4 is NOT bindable -- it is the game's red softkey");
+        Check(sk_debug::DebugSuite::BindNameForHostKey(0x71).empty(),
+              "F2 is NOT bindable -- it is the suite's own overlay-page key");
+    }
+    {
+        // Attached, against a real interpreter: the keys the M69 control
+        // scheme gives the game must reach it, and the keys the suite owns
+        // must not reach the game. This is the check that keeps the two
+        // schemes from silently colliding again.
+        skInterpreter interpreter;
+        sk_debug::DebugSuite suite;
+        suite.Attach(host, interpreter, ".");
+
+        Check(!suite.HandleKey(0x72 /* F3 */, true, false, false),
+              "F3 reaches the game -- it is the green softkey now, not a debug key");
+        Check(!suite.HandleKey(0x73 /* F4 */, true, false, false),
+              "F4 reaches the game -- the red softkey");
+        // Every virtual key the M69 control sheet assigns to the game.
+        static const int kGameKeys[] = {
+            'W',  'A',  'S',  'D',  'E',  'Q',  'M',  'C',  'G',
+            0x09 /* Tab */,   0x1B /* Esc */,   0x0D /* Return */, 0x20 /* Space */,
+            0x25, 0x26, 0x27, 0x28 /* arrows */, 0x01 /* VK_LBUTTON */,
+            0x72 /* F3 */,    0x73 /* F4 */,
+        };
+        bool allPassedThrough = true;
+        for (const int gameKey : kGameKeys) {
+            if (suite.HandleKey(gameKey, true, false, false)) {
+                std::printf("    key 0x%02X was swallowed by the debug suite\n", gameKey);
+                allPassedThrough = false;
+            }
+        }
+        Check(allPassedThrough,
+              "every key in the M69 control scheme passes through to the game");
+
+        Check(suite.HandleKey(0x70 /* F1 */, true, false, false), "F1 opens the console");
+        Check(suite.capturingInput(), "and the console takes keyboard focus");
+        Check(suite.HandleKey('E', true, false, false),
+              "which then swallows 'E' -- typing a command never opens a door");
+        suite.HandleKey(0x70, true, false, false);
+        Check(!suite.capturingInput(), "F1 again closes it");
+        Check(!suite.HandleKey('E', true, false, false), "and 'E' reaches the game again");
+
+        Check(suite.HandleKey(0x71 /* F2 */, true, false, false), "F2 cycles the overlay page");
+        const std::string forward = suite.overlay().page();
+        Check(suite.HandleKey(0x71, true, false, /*shiftDown=*/true),
+              "Shift+F2 cycles it too");
+        Check(suite.overlay().page() != forward, "and in the other direction");
+        const bool miniBefore = suite.overlay().miniBar();
+        Check(suite.HandleKey(0x70, true, false, /*shiftDown=*/true),
+              "Shift+F1 is the mini bar, not the console");
+        Check(suite.overlay().miniBar() != miniBefore, "and it really toggled it");
+        Check(!suite.capturingInput(), "while leaving the console closed");
     }
     {
         // The property that makes the suite safe to leave compiled in: while

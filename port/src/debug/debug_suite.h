@@ -47,7 +47,7 @@ public:
     // must not see it. `key` is a raw host key id (a Win32 virtual key in
     // this port); the suite owns the mapping onto its own enum so main.cpp
     // does not have to.
-    bool HandleKey(int hostKeyCode, bool down, bool ctrlDown);
+    bool HandleKey(int hostKeyCode, bool down, bool ctrlDown, bool shiftDown);
     bool HandleChar(char ch);
     // True while the console has keyboard focus -- main.cpp uses this to
     // stop feeding InputState, so typing `3` into the console does not also

@@ -6017,6 +6017,81 @@ in the roadmap.
   the backbuffer, which this milestone deliberately does not do, so it
   needs a different mechanism than the overlay.
 
+### M69 -- the real control scheme
+
+The port's PC key layout came from the M0 scaffold and its own comment
+called it a guess: arrow keys for the D-pad, top-row digits for the keypad,
+`-`/`=` "arbitrary-but-documented" stand-ins for `*`/`#`. It was never
+anyone's actual playing layout. Replaced with the user's own N-Gage
+emulator binding sheet, verbatim, so muscle memory transfers between the
+emulator and this port.
+
+**Only the physical-key side changed.** `InputState::InitDefaultBindings`
+-- the action -> slot indirection recovered from `FUN_1001a220`, which is
+the game's own default control scheme -- is untouched. What a PC key *is*
+changed; what that N-Gage button *does* did not. Nor is any of this
+persisted: `dragonstar.set`'s ACTIONMAP block holds the logical table, so
+an existing settings file has no effect on the new layout.
+
+    W A S D        D-pad          move forward / turn left / back / turn right
+    arrow keys     keypad 2/4/6/8 look up-down, sidestep left-right
+    Space          keypad 1       jump
+    E              keypad 3       Use -- doors, NPCs, pickups
+    Q              keypad 7       swing the left-hand weapon
+    left mouse     keypad 5       swing the right-hand weapon
+    M / G / C      keypad 9/0/*   map, cycle right queue, cycle left queue
+    Tab            keypad #       character manager
+    Return         middle softkey confirm
+    Esc            left/right     back / cancel
+
+Three things the sheet forced, each a decision rather than a transcription:
+
+- **The left mouse button** is the sheet's only non-keyboard binding, and
+  the port had no mouse input at all. Delivered through the existing key
+  callback as `VK_LBUTTON` -- a virtual-key code `WM_KEYDOWN` can never
+  produce -- so the whole mapping stays one table and nothing downstream
+  needs a second input path. `WM_LBUTTONDOWN` takes the mouse capture,
+  because pressing inside the window and releasing outside otherwise never
+  delivers `WM_LBUTTONUP` and leaves the slot latched down forever: the
+  same hazard `window.cpp`'s `WM_SYSKEYUP` comment already documents for
+  Alt. Adding capture made the neighbouring gap obvious, so `WM_KILLFOCUS`
+  now clears held keys too (`InputState::ReleaseAll`) -- alt-tabbing away
+  mid-stride used to leave the game walking forward.
+
+- **The sheet gives Esc as both the left and the right softkey**, and
+  Return as the middle one. This port has only two selection slots (the
+  engine's own table is 21 slots; 18/19/20 are gaps). `RightSelectionKey`
+  is the one confirmed to mean back/cancel -- `mainmenu.s`'s
+  `OnRightSoftkey` backs out to the quit-confirm popup -- so Esc goes
+  there, and Return, the D-pad centre a device actually confirms with,
+  takes `LeftSelectionKey`. Which is what the previous scheme already did,
+  for the same reason.
+
+- **F3 and F4 (green/red softkey) map to nothing.** They are the N-Gage's
+  call and end-call keys and the engine's input table has no slot for
+  either. Left unmapped rather than invented -- but the **debug suite moved
+  off them anyway**, because the user's sheet says they are game keys and
+  an F3 that opens a debug panel would be surprising whether or not the
+  game listens. M68's F1-F4 block became F1/F2 with Shift for the secondary
+  actions (Shift+F1 mini bar, Shift+F2 previous page), which also keeps all
+  eight of F5-F12 free for `bind`. `bind` now refuses F1-F4 outright:
+  binding a key the game uses would silently swallow it, which is a worse
+  failure than not being able to bind it.
+
+The collision question the user actually asked is now a test rather than a
+claim -- `debug_suite_smoke` walks every virtual key the sheet assigns to
+the game (WASD, the arrows, Space, E, Q, M, C, G, Tab, Return, Esc,
+VK_LBUTTON, F3, F4) through an attached `DebugSuite` and fails if any of
+them is consumed, then checks the inverse: that an open console swallows
+`E` so typing a command never opens a door.
+
+Verified by playing: `M` opened the map, `Tab` the character manager, `W`
+walked, and `E` on azra's `homdoor` flipped it from `solid` to `passable`
+in `ents` (M67's fix, reached through the new Use key), while two mouse
+clicks and one `Q` registered as `combat.swings +3` in `diff`. Suite 61/61,
+soft-fails 39 -> 39, all 14 tracked `.ppm` renders byte-identical,
+`debug_suite_smoke` 70 -> 87 checks.
+
 ## Next milestones (not yet started)
 
 Roughly in priority order for reaching "actually playable," not commitments:

@@ -154,6 +154,19 @@ public:
         return slot >= 0 && ConsumeJustPressed(static_cast<ButtonSlot>(slot));
     }
 
+    // M69: drop every held key, without firing anything. For the host's
+    // focus-lost path: alt-tabbing away means the key-up for whatever is
+    // held will never arrive, and the slot would stay latched down forever
+    // (the game keeps walking forward while you are in another window).
+    // Deliberately clears the just-pressed latches too -- a press the
+    // player made before leaving should not fire on their return.
+    void ReleaseAll() {
+        current_.fill(false);
+        justPressed_.fill(false);
+        repeat_.fill(false);
+        holdTicks_.fill(0);
+    }
+
     void Rebind(Action action, ButtonSlot slot) {
         bindingOffset_[static_cast<size_t>(action)] = static_cast<int>(slot);
     }

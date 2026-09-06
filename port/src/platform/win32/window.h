@@ -30,6 +30,12 @@ public:
     // (backspace), 0x0D (enter).
     using CharCallback = std::function<void(wchar_t ch)>;
 
+    // M69: the window lost keyboard focus (alt-tab, a click elsewhere), so
+    // no key-up will arrive for anything currently held. The host clears
+    // its held-key state here; without it the game keeps walking forward
+    // after the window is left behind.
+    using FocusLostCallback = std::function<void()>;
+
     // SK_DEBUG_SUITE (M68): called from inside Present(), immediately after
     // the game's Backbuffer has been scaled and blitted, with a drawing
     // surface at the window's real client resolution. Null by default and
@@ -46,6 +52,7 @@ public:
 
     void SetKeyCallback(KeyCallback callback);
     void SetCharCallback(CharCallback callback);
+    void SetFocusLostCallback(FocusLostCallback callback);
     // SK_DEBUG_SUITE (M68) -- see OverlayCallback above.
     void SetOverlayCallback(OverlayCallback callback);
 
