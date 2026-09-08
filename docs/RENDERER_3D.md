@@ -663,6 +663,118 @@ here" check baked into the shared `.zcp` type table, with a small
 explicit override for tiles that need a face regardless of camera
 position.
 
+## The automatic aim-assist pitch (M72)
+
+The camera's pitch is not only driven by the player's own LookUp/LookDown
+keys. `Render3DScene` ends with a self-contained block
+(**0x10017b7c..0x10017e20**, after the visible-entity pass and after
+`engine+0x61c`/`+0x620` are refreshed) that aims it at whatever small
+creature the player is walking toward. In the game this reads as: face a
+rat or a spider and the view tilts down to it; face a bandit and nothing
+happens.
+
+The block only *chooses* an angle. It writes a **target** pitch to
+`player+0xac` and raises `player+0xc3`; the actual movement happens in the
+actor tick.
+
+### The gates, in order
+
+1. `engine+0xbe0b != 0` — the global auto-look enable. Set to `1` in the
+   engine constructor (0x1000fa7c). When it is clear the actor tick
+   (`FUN_10000c64`) forces `player+0xaf = 1` and `player+0xae = 1`, i.e.
+   permanent manual mode.
+2. `player+0xaf == 0` — the player is not manually looking.
+3. `engine+0x608 <= 0x200` — the map zoom is 1× or 2×. (`+0x608` is the
+   zoom level, default `0x100`, stepped by `0x100`; `engine+0x60c =
+   recip[+0x608] >> 15` is its reciprocal.)
+4. `player+0x204` — if that object exists and its `+0x179` byte is set,
+   clear `player+0xc3` and bail. (The same object's `+0x17e` forces
+   manual mode from the actor tick.)
+5. `engine+0x620 = FUN_1001afb0(engine, 0x58, 0x68)` — an **ID-buffer read
+   at the exact centre pixel** of the 176×208 screen (`engine+0x5b8`,
+   stride 0xb0, the byte there indexing `engine+0x14620[]`). If something
+   is there and its `vt+0xe4` says it is live, bail: the crosshair is
+   already on it, so nothing needs assisting.
+6. `target = FUN_1001db0c(player, 0x20)` — a **forward ray-march**. 32
+   steps of `sinTable[heading] >> 1` / `cosTable[heading+0x4000] >> 1`
+   (the table at 0x100f4954 is `256·sin`, read here with a 4-byte stride,
+   so each step is half a tile); at each step it walks that tile's entity
+   list and returns the first entity that is live (`vt+0xe4`), not flagged
+   out (`+0x1e2`), and answers false to both `vt+0xf0` and `vt+0x170`. It
+   bails at the grid edge.
+7. `target+0xd6 != 0` — the target must have been **drawn this frame**.
+   That is the flag the same function stamps on every entity in a visible
+   tile a few hundred instructions earlier.
+8. **`target->Height() < 0x200`** —
+
+   ```
+   10017c90  ldr  r0, [sb, #0x624]
+   10017c98  ldr  ip, [r3, #0x108]      ; vtable slot 0x108 == Height()
+   10017ca4  cmp  r0, #0x200
+   10017ca8  bge  #0x10017e34           ; too tall: no assist
+   ```
+
+   `Height()` for a creature is the per-model table decoded in
+   docs/ZONE_FORMAT.md: `0x100` for models 18/55/56/66/68 (rats, spiders,
+   wormmouths, stingers, wolves) and `0x200` for everything else. So this
+   single comparison is the whole "only small enemies" rule — 26 of the
+   176 shipped creature rows pass it.
+
+### The angle
+
+```
+horizontal = isqrt(player->DistSq(target) >> 8) * 256   ; vt+0x5c returns dist²/256
+dz         = player+0x224 - (target+0xa4 + Height()/2)  ; eye Z - collision centre
+if (max(dz, horizontal) < 0xa00) { dz *= 4; horizontal *= 4; }   ; precision only
+normalise (dz, horizontal) to an 8.8 unit vector, take each /16, clamp to [-16, 15]
+pitch = (int8)atanTable[(horizIdx+16)*32 + (dzIdx+16)] * 256 - 0x8000
+```
+
+`atanTable` is 32×32 signed bytes at **0x100f6954**; checked entry by
+entry it is `atan2(dz, horizontal)` in the engine's 65536-per-turn
+convention to within **1.4°**, so a port can just call `atan2`.
+
+Then the engage window:
+
+```
+if ((u16)(pitch + 0x2000) <= 0x4000)   ; |pitch| <= 45 degrees
+    player+0xac = pitch; player+0xc3 = 1; player+0xae = 1;
+else
+    player+0xc3 = 0;
+```
+
+Two consequences worth spelling out, because they are what the feature
+actually feels like:
+
+- `horizontal` is **floored to whole tiles** by the `isqrt(x >> 8) * 256`
+  round trip. Inside one tile it becomes 0, `atan2` returns a right angle,
+  the window rejects it and the assist lets go — so nose-to-nose with a
+  rat the camera holds rather than pointing at the floor.
+- Losing the target does **not** re-level the camera. `player+0xc3` just
+  goes to 0 and the pitch stops where it is.
+
+### The two movement paths
+
+- **Toward the target** — `FUN_100657bc` (and its twin `FUN_10068618`),
+  run per tick while `player+0xc3` is set and `player+0xaf` is clear:
+  `delta = (s16)(player+0xac - player+0xa8)`; if `|delta| < 5` snap and
+  clear both `+0xac` and `+0xc3`, otherwise step by `delta/2` clamped to
+  ±500 raw units. 500/tick at 25 Hz is ≈1.2 rad/s.
+- **Back to level** — the actor tick, `if (player+0xae == 0) player+0xa8 =
+  FUN_10068814(player+0xa8, 0x14)`, where `FUN_10068814(v, k) = v -
+  roundAwayFromZero(v·k/256)`, i.e. a 20/256 exponential decay with a
+  guaranteed ±1 so it reaches 0. `player+0xae` is cleared at the top of
+  the same tick only when the player has non-zero velocity
+  (`player+0x98`/`+0xa0`) **and** there is no aim target
+  (`engine+0x624 == 0`). So the pan unwinds when you walk away, not when
+  you merely stop looking at the creature.
+
+Ported in `port/src/main.cpp`'s auto-aim block (M72), which reproduces
+gates 1/2/6/7/8, the angle, the window, and both movement paths. Gates 3
+and 4 have no port equivalent (there is no map zoom and no `+0x204`
+controller object), and gate 5's per-pixel entity ID buffer is not kept by
+this renderer, so gate 7 stands in for it via `Zone::HasLineOfSight`.
+
 ## Labels applied (surface/wall-face renderer)
 
 - `SurfaceFace_BuildAndProject` (0x1005d784)

@@ -551,6 +551,13 @@ target_link_libraries(door_stamp_smoke PRIVATE sk_render3d sk_bindings)
 add_executable(placement_smoke src/tests/m71_placement_smoke.cpp)
 target_link_libraries(placement_smoke PRIVATE sk_render3d sk_bindings)
 
+# The automatic aim-assist pitch: the real per-model creature-height table
+# behind it (CMonster::Height, 0x1008679c) checked against every creature row
+# in the shipped entities.txt, plus the engage window and the ease.
+# See src/tests/m72_autoaim_smoke.cpp.
+add_executable(autoaim_smoke src/tests/m72_autoaim_smoke.cpp)
+target_link_libraries(autoaim_smoke PRIVATE sk_render3d sk_entity_types)
+
 # The developer debug suite: the console's parsing/history/completion, the
 # metrics sink and its mark/diff, the overlay's layout, and a full pass over
 # every command against a fake DebugHost -- which is why the whole suite is

@@ -91,6 +91,19 @@ constexpr float kMaxCameraPitch = 0.85f;  // radians, ~49 degrees
 // ~27 tile-widths) -- verified structurally that X/Y/Z share one uniform
 // scale via SurfaceFace_BuildAndProject's rotation-matrix code, so
 // that's real level geometry, not a units bug.
+//
+// M72 narrows what the field *is* without settling its value. The
+// player-side actor classes override entity `Height()` (vtable slot
+// 0x108) with 0x10006230, a switch on the actor's stance byte `+0x1e1`
+// that returns `CMap+0x18`, `+0x1a` or `+0x1c` -- so `CMap+0x1a` is not a
+// camera constant at all, it is the *standing collision height* of a
+// person, which the engine then reuses as the eye offset. That makes a
+// literal 0 much less likely than the note above assumed (a zero-height
+// collision cylinder for every humanoid), but the write still has not been
+// found, so 800 stays a calibrated stand-in. Note this is a separate
+// number from the per-creature `MonsterCollisionHeight` table in
+// world/entity_types.h: creatures are a different class with a different
+// Height() override.
 constexpr float kEyeHeightOffset = 800.0f;
 
 }  // namespace sk

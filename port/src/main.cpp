@@ -441,18 +441,22 @@ int AdvanceMonsterAnimation(MonsterInstance& m, sk::ModelArchive& models) {
     return clip->startFrame + frameInClip;
 }
 
-// M30: the world-space height of a creature's centre of mass, from its
-// real model's own vertical extent scaled by its script's SetScale(). Used
-// to aim the camera at whatever the player is fighting -- a rat's centre
-// sits far below eye level, a person's does not, so "is this a small
-// enemy" is measured from the real art rather than hardcoded per monster.
-// Falls back to eye height (i.e. no pitch) if the model can't be resolved.
-float MonsterCenterZ(const MonsterInstance& m, sk::ModelArchive& models) {
-    const sk::Model* model = models.GetModel(m.modelArchiveIndex);
-    if (!model || model->localHeight() <= 0) return m.z + sk::kEyeHeightOffset;
-    float scale = m.script->scale();
-    return m.z + (static_cast<float>(model->minLocalY) +
-                  static_cast<float>(model->localHeight()) * 0.5f) * scale;
+// M72: what the automatic aim-assist aims *at* -- the midpoint of the
+// creature's collision cylinder, exactly as `Render3DScene` computes it:
+//
+//     targetCentre = target->z + Height() / 2
+//
+// (0x10017ce8: `ldrh r1,[target,#0xa4]` then `asr r0,r0,#1` on the
+// Height() result, plus the -0x80/+0x80 pair that only exists to force the
+// intermediate through a 16-bit truncation). Height() is the real
+// per-creature table -- see sk::MonsterCollisionHeight.
+//
+// This replaces M30's `MonsterCenterZ`, which measured the drawn model's
+// vertical extent instead. That guess is what made the pan fire for
+// everything: it produced *some* non-zero aim point for every creature,
+// where the engine has a hard yes/no gate on this height.
+float MonsterAimCenterZ(const MonsterInstance& m) {
+    return m.z + static_cast<float>(sk::MonsterCollisionHeight(m.modelArchiveIndex)) * 0.5f;
 }
 
 // M15: Action::Use interact binding, first (narrow) slice -- doors only,
@@ -2838,6 +2842,13 @@ int main(int argc, char** argv) {
     // door is attached to it as it is created, below.
     LiveTileStamp gameTileStamp;
     sk::Camera gameCamera;
+    // M72: the real `player+0xae` -- "something owns the camera pitch, so
+    // do not drift it back to level". The auto-aim block sets it whenever
+    // it engages; the actor tick (0x10000c64) clears it the moment the
+    // player is moving with no aim target, and only then does the pitch
+    // decay toward the horizon. So a pan held after a fight stays held
+    // until the player walks.
+    bool gamePitchHeld = false;
     // M51: the other way -- `FUN_1001b198` takes a real world position and
     // attenuates by distance from the listener before playing. The curve
     // is linear in *squared* distance, so its 512 hardcodes an audible
@@ -3788,6 +3799,13 @@ int main(int argc, char** argv) {
                     gameCamera.pitch += kPitchSpeed;
                     manualLook = true;
                 }
+                // M72: the real actor tick tests the player's own velocity
+                // (`player+0x98`/`+0xa0` non-zero) to decide whether the
+                // pitch may drift back to level. This port has no stored
+                // velocity, so it asks the equivalent question directly:
+                // did the player's position actually change this tick.
+                const float preMoveCamX = gameCamera.x;
+                const float preMoveCamY = gameCamera.y;
                 float dx = std::cos(gameCamera.yaw) * kMoveSpeed;
                 float dy = std::sin(gameCamera.yaw) * kMoveSpeed;
                 // right = (sinYaw, -cosYaw), matching zone_renderer.cpp's
@@ -4802,50 +4820,171 @@ int main(int argc, char** argv) {
                     m.z = gameZone->FloorHeightAt(m.x, m.y);
                 }
 
-                // M30: automatic aim-assist pitch. Requested behaviour:
-                // facing a small creature (a rat, a spider) the camera
-                // should tilt down to it and level off again once it is out
-                // of range.
+                // M72: automatic aim-assist pitch -- the real one.
                 //
-                // "Small" is measured, not listed: MonsterCenterZ() takes
-                // the creature's real model height (scaled by its script's
-                // own SetScale) so the camera aims at its actual centre of
-                // mass. A rat's is far below eye level and produces a real
-                // downward tilt; a humanoid's is near eye level and
-                // produces almost none, which is why this needs no
-                // per-creature special-casing.
+                // M30 wrote this from the requested behaviour ("facing a
+                // small creature the camera tilts down to it") because
+                // nothing had been traced that aimed the pitch
+                // automatically. It has since been found, in one block at
+                // the tail of `Render3DScene` (0x10017b7c..0x10017e20),
+                // and it is not a soft function of creature size at all --
+                // it is a hard gate, which is why this port panned for
+                // bandits and the original does not. Transcribed:
                 //
-                // No RE ground truth: the original's own camera pitch is
-                // real (render3d/camera.h) but nothing has been traced that
-                // aims it automatically, so this is a port-side design,
-                // documented as such. Manual LookUp/LookDown overrides it
-                // while held.
+                //   1. global auto-look enable  (`engine+0xbe0b`, set to 1
+                //      in the engine constructor; when it is off the actor
+                //      tick forces manual mode instead)
+                //   2. the player is not manually looking (`player+0xaf`)
+                //   3. the map zoom is 1x or 2x (`engine+0x608 <= 0x200`)
+                //   4. no modal/controller state suppressing it
+                //      (`player+0x204`'s `+0x179`)
+                //   5. nothing alive is already under the crosshair --
+                //      `engine+0x620 = pick(engine, 88, 104)`, an
+                //      ID-buffer read at the exact centre pixel of the
+                //      176x208 screen
+                //   6. target = the first live creature the player's own
+                //      forward ray walks into: `FUN_1001db0c(player, 0x20)`
+                //      marches 32 half-tile steps along (sin h, cos h) and
+                //      takes the first entity in each tile's list that is
+                //      alive, not flagged out (`+0x1e2`), and neither
+                //      `vt+0xf0` nor `vt+0x170`
+                //   7. that creature must have been drawn this frame
+                //      (`target+0xd6`, the flag Render3DScene stamps on
+                //      every entity in a visible tile)
+                //   8. **`Height() < 0x200`** -- `ldr ip,[r3,#0x108] /
+                //      blx / cmp r0,#0x200 / bge skip`. This is the whole
+                //      bug: Height() is the per-model table in
+                //      world/entity_types.h, 0x100 for rats, spiders,
+                //      wormmouths, stingers and wolves and 0x200 for
+                //      everything else, so a bandit (model 22/23) fails
+                //      here and never pans at all.
+                //   9. pitch = atan2(eyeZ - (targetZ + Height()/2),
+                //      horizontal distance), via a 32x32 signed-byte atan
+                //      table at 0x100f6954 (verified against atan2 to
+                //      within 1.4 degrees, so this port just calls atan2)
+                //  10. engage only if |pitch| <= 0x2000, i.e. 45 degrees.
+                //      Outside that the target is dropped and the pitch is
+                //      simply left where it is.
+                //
+                // Two engine quirks reproduced deliberately because they
+                // are load-bearing for how this feels:
+                //
+                //  * the horizontal distance is quantised to whole tiles.
+                //    `vt+0x5c` returns dist^2/256, then `isqrt(x >> 8) *
+                //    256` floors it to a multiple of 256. Inside one tile
+                //    it becomes 0, atan2 gives +-90 degrees, and rule 10
+                //    drops the target -- so nose-to-nose with a rat the
+                //    camera holds rather than staring at the floor.
+                //  * losing the target does NOT re-level the camera. That
+                //    is a separate path: the actor tick clears `+0xae`
+                //    only when the player is *moving* with no target, and
+                //    only then decays the pitch toward 0 by `v -= v*20/256`
+                //    per tick (`FUN_10068814(pitch, 0x14)`).
+                //
+                // Deviations, both forced: gates 3 and 4 have no port
+                // equivalent (there is no map zoom and no `+0x204`
+                // controller object), and gate 7 uses Zone::HasLineOfSight
+                // in place of the real per-frame visibility stamp.
                 if (!manualLook) {
-                    constexpr float kAutoAimRange = 3.0f * sk::kTileScale;
-                    constexpr float kAutoAimEase = 0.18f;  // fraction closed per tick
+                    // 0x200 -- the `cmp r0,#0x200 / bge` at 0x10017ca4.
+                    constexpr int32_t kAutoAimMaxTargetHeight = 0x200;
+                    // 0x2000 of 65536 == 45 degrees.
+                    constexpr float kAutoAimEngageLimit = 0.78539816339f;
+                    // `FUN_1001db0c(player, 0x20)`: 32 steps of
+                    // `sinTable[heading] >> 1`, and the table's amplitude
+                    // is 256, so each step is half a tile.
+                    constexpr int kAutoAimRaySteps = 0x20;
+                    constexpr float kAutoAimRayStep = sk::kTileScale * 0.5f;
+                    // `FUN_100657bc`: halve the remaining gap each tick,
+                    // clamped to 500 raw angle units, snapping inside 5.
+                    constexpr float kTurn = 6.28318530718f;  // 65536 raw units
+                    constexpr float kAutoAimMaxStep = 500.0f / 65536.0f * kTurn;
+                    constexpr float kAutoAimSnap = 5.0f / 65536.0f * kTurn;
+                    // `FUN_10068814(pitch, 0x14)`.
+                    constexpr float kPitchDecayPerTick = 20.0f / 256.0f;
+
+                    const float fwdX = std::cos(gameCamera.yaw);
+                    const float fwdY = std::sin(gameCamera.yaw);
+
+                    // Gate 6: the first live creature the forward ray
+                    // walks into. (Gate 5 is not reproduced -- it reads a
+                    // per-pixel entity ID buffer this renderer does not
+                    // keep. Its effect is to switch the assist off while
+                    // the crosshair is already dead on a creature, so
+                    // leaving it out only means the assist stays engaged
+                    // in a case where the original would have let go.)
                     const MonsterInstance* aimTarget = nullptr;
-                    float aimBest = kAutoAimRange;
-                    float fwdX = std::cos(gameCamera.yaw), fwdY = std::sin(gameCamera.yaw);
-                    for (const MonsterInstance& m : gameMonsters) {
-                        if (!m.script->alive() || m.script->destroyed()) continue;
-                        if (!m.script->aggressive()) continue;
-                        float dx = m.x - gameCamera.x, dy = m.y - gameCamera.y;
-                        float d = std::sqrt(dx * dx + dy * dy);
-                        if (d > aimBest || d < 1.0f) continue;
-                        if ((fwdX * dx + fwdY * dy) / d < 0.5f) continue;  // roughly ahead
-                        aimBest = d;
-                        aimTarget = &m;
+                    float rayX = gameCamera.x, rayY = gameCamera.y;
+                    for (int step = 0; step < kAutoAimRaySteps && !aimTarget; ++step) {
+                        const int tx = static_cast<int>(std::floor(rayX / sk::kTileScale));
+                        const int ty = static_cast<int>(std::floor(rayY / sk::kTileScale));
+                        // The real loop bails at the grid edge exactly
+                        // this way (`iVar4 < 1`, then `width-1 <= tx ||
+                        // height-1 <= ty`).
+                        if (tx < 1 || ty < 1 || tx >= gameZone->width() - 1 ||
+                            ty >= gameZone->height() - 1) {
+                            break;
+                        }
+                        for (const MonsterInstance& m : gameMonsters) {
+                            if (!m.script->alive() || m.script->destroyed()) continue;
+                            if (static_cast<int>(std::floor(m.x / sk::kTileScale)) != tx) continue;
+                            if (static_cast<int>(std::floor(m.y / sk::kTileScale)) != ty) continue;
+                            aimTarget = &m;
+                            break;
+                        }
+                        rayX += fwdX * kAutoAimRayStep;
+                        rayY += fwdY * kAutoAimRayStep;
                     }
-                    float desiredPitch = 0.0f;
+                    // Gate 7: drawn this frame.
+                    if (aimTarget && !gameZone->HasLineOfSight(gameCamera.x, gameCamera.y,
+                                                              aimTarget->x, aimTarget->y)) {
+                        aimTarget = nullptr;
+                    }
+                    // Gate 8 -- the fix. A creature whose collision height
+                    // reaches 0x200 (every humanoid) is not an aim-assist
+                    // target at all.
+                    if (aimTarget && sk::MonsterCollisionHeight(aimTarget->modelArchiveIndex) >=
+                                         kAutoAimMaxTargetHeight) {
+                        aimTarget = nullptr;
+                    }
+
+                    bool engaged = false;
                     if (aimTarget) {
-                        float centerZ = MonsterCenterZ(*aimTarget, modelArchive);
-                        desiredPitch = std::atan2(gameCamera.z - centerZ, (std::max)(1.0f, aimBest));
+                        const float dx = aimTarget->x - gameCamera.x;
+                        const float dy = aimTarget->y - gameCamera.y;
+                        // Quantised to whole tiles, as the engine does.
+                        const float horizontal =
+                            std::floor(std::sqrt(dx * dx + dy * dy) / sk::kTileScale) *
+                            sk::kTileScale;
+                        const float desiredPitch =
+                            std::atan2(gameCamera.z - MonsterAimCenterZ(*aimTarget), horizontal);
+                        if (std::fabs(desiredPitch) <= kAutoAimEngageLimit) {
+                            engaged = true;
+                            const float delta = desiredPitch - gameCamera.pitch;
+                            if (std::fabs(delta) < kAutoAimSnap) {
+                                gameCamera.pitch = desiredPitch;
+                            } else {
+                                gameCamera.pitch += std::clamp(delta * 0.5f, -kAutoAimMaxStep,
+                                                               kAutoAimMaxStep);
+                            }
+                        }
                     }
-                    desiredPitch = std::clamp(desiredPitch, -sk::kMaxCameraPitch,
-                                               sk::kMaxCameraPitch);
-                    // Ease rather than snap, so acquiring or losing a target
-                    // reads as the camera panning, not cutting.
-                    gameCamera.pitch += (desiredPitch - gameCamera.pitch) * kAutoAimEase;
+
+                    if (engaged) {
+                        gamePitchHeld = true;
+                    } else if (gameCamera.x != preMoveCamX || gameCamera.y != preMoveCamY) {
+                        // Moving with no target: release the hold, then let
+                        // the pitch bleed back to level.
+                        gamePitchHeld = false;
+                    }
+                    if (!gamePitchHeld) {
+                        gameCamera.pitch -= gameCamera.pitch * kPitchDecayPerTick;
+                    }
+                } else {
+                    // Manual look owns the pitch outright -- the real
+                    // `player+0xaf` path sets `+0xae` with it, so nothing
+                    // drifts it back while the key is held.
+                    gamePitchHeld = true;
                 }
                 gameCamera.pitch =
                     std::clamp(gameCamera.pitch, -sk::kMaxCameraPitch, sk::kMaxCameraPitch);

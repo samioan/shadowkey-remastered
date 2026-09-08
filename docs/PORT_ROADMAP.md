@@ -6292,6 +6292,92 @@ soft-fails 39 -> 39, all 14 tracked `.ppm` renders byte-identical,
   the wall behind azra's candelabra, present before this milestone and not in
   the device screenshot.
 
+- [x] **M72 -- the camera only stoops for the small things again.** Reported
+  from play: the original pans the camera down when the player closes on a
+  rat or a spider, but the port did it for **every** enemy, bandits included.
+  The port's version (M30) was written from the requested behaviour, and said
+  so -- "No RE ground truth: nothing has been traced that aims it
+  automatically, so this is a port-side design." It has now been traced, and
+  the difference is not a tuning problem: the real feature is a **hard gate
+  on a discrete per-creature height**, where M30 approximated "small" as a
+  continuous function of the drawn model's extent. A continuous function has
+  no way to say *no*, which is exactly the reported symptom.
+
+    - **Where it lives.** One self-contained block at the tail of
+      `Render3DScene`, **0x10017b7c..0x10017e20**, after the visible-entity
+      pass. It only picks a target angle -- `player+0xac` -- and raises
+      `player+0xc3`; two other paths move the camera. Fully written up in
+      docs/RENDERER_3D.md's new "The automatic aim-assist pitch" section.
+
+    - **The gate, and the whole bug.** `cmp r0, #0x200 / bge` on the
+      target's `Height()` (entity vtable slot `0x108`). Creatures are all
+      `entities.txt` category 2, so they share one class, whose `Height()`
+      override (0x1008679c) is a `switch` on the creature's own **model
+      index** -- 51 arms for indices 18..68, of which five return `0x100`
+      and the other 46, the default and the descriptor-not-found path all
+      return `0x200`. Read against the shipped `entities.txt` those five are
+      **18 = rats, 55 = spiders, 56 = wormmouths, 66 = stingers/rays,
+      68 = wolves**; bandits are 22 and 23 and fail the gate. **26 of the
+      176 creature rows in the game pan; 150 do not.** Transcribed as
+      `sk::MonsterCollisionHeight`, and the category -> class factory table
+      it hangs off is now in docs/ZONE_FORMAT.md.
+
+    - **What else came out of the same block**, and is now ported rather
+      than approximated: target selection is a **forward ray-march**
+      (`FUN_1001db0c(player, 0x20)`, 32 half-tile steps along `(sin h,
+      cos h)`, first live entity in each tile), not a cone test; the aim
+      point is the collision-cylinder midpoint `z + Height()/2`, not a
+      model centroid; the angle comes from a 32x32 signed-byte atan table
+      at **0x100f6954** (verified entry-by-entry against `atan2` to within
+      **1.4 degrees**, so the port just calls `atan2`); and it engages only
+      inside a **+-45 degree** window (`(u16)(pitch + 0x2000) <= 0x4000`).
+
+    - **Two engine quirks kept deliberately, because they are what it feels
+      like.** The horizontal distance is **floored to whole tiles** by the
+      `isqrt(dist^2/256 >> 8) * 256` round trip -- inside one tile it is 0,
+      `atan2` gives a right angle, the window rejects it, and the camera
+      *holds* instead of staring at the floor. And losing the target does
+      not re-level: that is a separate path in the actor tick, which clears
+      `player+0xae` only when the player has velocity **and** there is no
+      target, and only then decays the pitch by `v -= v*20/256` per tick
+      (`FUN_10068814`). So a pan unwinds when you walk away, not when you
+      look away. The approach itself is `FUN_100657bc`: halve the remaining
+      gap each tick, clamped to 500 raw units (~1.2 rad/s at 25 Hz),
+      snapping inside 5.
+
+    - **Deviations, all forced and all documented in place.** Two gates
+      have no port equivalent -- the map zoom (`engine+0x608 <= 0x200`) and
+      the `player+0x204` controller object's `+0x179`. A third, "nothing
+      alive is already under the crosshair", reads a per-pixel entity ID
+      buffer at the centre pixel (`engine+0x5b8` at 88,104) that this
+      renderer does not keep; the port uses `Zone::HasLineOfSight` in place
+      of the real per-frame `+0xd6` visibility stamp instead.
+
+    - **A side finding for an old open question.** `kEyeHeightOffset`'s
+      comment has carried an unresolved hypothesis that `CMap+0x1a` might
+      simply be 0. It is now clear what the field *is*: the player-side
+      actor classes' own `Height()` override (0x10006230) switches on the
+      stance byte `+0x1e1` and returns `CMap+0x18`/`+0x1a`/`+0x1c`, so
+      `+0x1a` is the **standing collision height of a person**, which the
+      engine then reuses as the eye offset (`player+0x224 = player+0xa4 +
+      CMap+0x1a`). That makes 0 much less likely -- it would give every
+      humanoid a zero-height collision cylinder -- but the write still has
+      not been found, so 800 stays a calibrated stand-in. Noted in
+      `render3d/camera.h`.
+
+  **Verification.** New `m72_autoaim_smoke` (34 checks, suite **63/63 ->
+  64/64**): the transcribed jump table arm by arm, including the two
+  out-of-switch defaults and the not-found path; then the same table run
+  against the **real `entities.txt`**, classifying all 176 creature rows and
+  asserting thirteen named creatures individually, so the check fails loudly
+  if either the table or the shipped data ever drifts (`azra_rat.s` and
+  `cave_spider.s` pan, `bandit_brawler.s` and `bandit_thug.s` do not); and
+  the engagement geometry -- that a rat inside one tile does *not* engage,
+  that four tiles out it does and tilts down, that the tilt shallows with
+  distance, that a bandit at an identical position is gated out, that the
+  ease converges without overshoot in 18 ticks, and that the decay levels
+  the camera only while moving.
+
 ## Next milestones (not yet started)
 
 Roughly in priority order for reaching "actually playable," not commitments:

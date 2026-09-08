@@ -20,6 +20,46 @@ struct EntityTypeDescriptor {
     std::string name;
 };
 
+// M72 -- the real creature-height table, transcribed from the binary.
+//
+// Every creature in the game is entities.txt category 2, so they all share
+// one C++ class (the factory at 0x1002aa14 news `0x330` bytes and runs
+// 0x100815e0 for category 2 -> vtable 0x100fe2b8). That class overrides the
+// entity `Height()` virtual (vtable slot 0x108) with 0x1008679c, which is
+// nothing but a switch on the creature's own **entities.txt model index**
+// (`EntityTypeDescriptor_Lookup(...)->modelArchiveIndex`, this struct's
+// first field):
+//
+//     sub r3, r3, #0x12        ; index -= 18
+//     cmp r3, #0x32            ; 51 cases, model indices 18..68
+//     ldrls pc, [pc, r3, lsl #2]
+//     ...
+//     100868a8  mov r0, #0x100  ; 256 -- models 18, 55, 56, 66, 68
+//     100868b4  mov r0, #0x200  ; 512 -- every other case, the default,
+//     100868c0  mov r0, #0x200  ;        and the descriptor-not-found path
+//
+// Those five short-model entries are, from entities.txt: 18 = every rat,
+// 55 = every spider, 56 = the wormmouths, 66 = the stingers/rays, 68 =
+// every wolf. Bandits (22, 23), mages, skeletons and the rest of the
+// humanoids all fall through to 512.
+//
+// It is a *collision* height (the engine uses Height() for the `z .. z +
+// Height()` band in its vertical hit tests), not the drawn model's extent
+// -- and it is the only per-creature size the engine has. The automatic
+// aim-assist pitch is gated on it; see main.cpp's auto-aim block.
+inline int32_t MonsterCollisionHeight(int32_t modelArchiveIndex) {
+    switch (modelArchiveIndex) {
+        case 18:  // rats
+        case 55:  // spiders
+        case 56:  // wormmouths
+        case 66:  // stingers / rays
+        case 68:  // wolves
+            return 0x100;
+        default:
+            return 0x200;
+    }
+}
+
 class EntityTypeTable {
 public:
     // scriptRoot e.g. ".../system/apps/6r51" -- reads entities.txt from it.

@@ -492,6 +492,90 @@ So `EntityTypeDescriptor::thirdField` (renamed **`category`**) is confirmed
 as a coarse entity-class enum, not a numeric stat. `13` is unused in the
 real data (no gap in the enum's *meaning*, just no entities assigned it).
 
+### The category → C++ class table, and the per-model creature height (M72)
+
+The category is consumed one more way, and it is the most literal one:
+it *is* the class selector. `GameEngine_InitLevel` hands
+`descriptor+0x10` to a virtual call on the engine's entity factory
+(`engine+0x28`, `vtable+0x18`), which lands on **`FUN_1002aa14`** — a bare
+`switch (category)` where every arm allocates a fixed size and runs one
+constructor:
+
+| category | `operator new` size | constructor | vtable |
+|---------:|--------------------:|-------------|--------|
+| default | 300 (0x12c) | `FUN_10060d54` (the base entity) | `0x100ff938` |
+| 1 | 0x160 | `FUN_10067998` | |
+| **2** | **0x330** | **`FUN_100815e0`** | **`0x100fe2b8`** |
+| 3 | 0x1cc | `FUN_1002eeb8` | |
+| 4 | 600 (0x258) | `FUN_1002ce9c` | |
+| 5 | 0x1d8 | `FUN_10047740` | |
+| 6 | 0x1d8 | `FUN_1002e954` | |
+| 7 | 0x364 | `FUN_10086754` | `0x100ffaf4` |
+| 8 | 0x184 | `FUN_10029044` | |
+| 9 | 0x1cc | `FUN_1002e78c` | |
+| 10 | 0x26c | `FUN_1009037c` | |
+| 11 | 0x160 | `FUN_1002e708` | |
+| 12 | 0x194 | `FUN_1002e678` | |
+| 13 | 0x334 | `FUN_10086660` | |
+| 14 | 0x1d8 | `FUN_1002e5ac` | |
+| 15 | 0x1d8 | `FUN_1002e844` | |
+| 16 | 0x25c | `FUN_10047500` | |
+
+(Category 13 *does* have a factory arm even though no shipped entity uses
+it — so the gap really is in the data, not the enum, confirming the note
+above from the other direction.)
+
+Every creature in the game is category 2, so they all share one class and
+one vtable. That matters because of what that class overrides. Entity
+`Height()` (vtable slot `0x108`, the `z .. z + Height()` band the engine's
+vertical hit tests use) has three implementations in the whole binary:
+
+- `0x100a1534` — the base entity: `mov r0, #0; bx lr`, i.e. no height.
+- `0x10006230` — the **player-side actor** classes (the player's own class
+  `FUN_1003d670` among them): a switch on the actor's stance byte
+  `+0x1e1` returning one of three *globals*, `CMap+0x18` / `+0x1a` /
+  `+0x1c`. `+0x1a` is the standing one — the same field
+  `GameEngine_InitLevel` adds to the player's feet Z to get its eye Z
+  (`player+0x224 = player+0xa4 + CMap+0x1a`), i.e. this is a single
+  global human height, not a per-entity one.
+- `0x1008679c` — the **creature** class. This one is per-creature, and
+  the key it switches on is the creature's own **`entities.txt` model
+  index** (`EntityTypeDescriptor_Lookup(...)->modelArchiveIndex`):
+
+```
+1008679c  ldr  r3, [r0, #0x44]          ; the CMap
+100867a4  ldrb r2, [r0, #0xc8]          ; this creature's typeId
+100867ac  add  r0, r3, #0xbe00
+100867b0  add  r0, r0, #0x34            ; CMap+0xbe34, the entity-type BST
+100867bc  bl   #0x1008c1cc              ; EntityTypeDescriptor_Lookup
+100867c8  ldr  r3, [r0, #0xc]           ; -> modelArchiveIndex
+100867cc  sub  r3, r3, #0x12            ; 51 cases, model indices 18..68
+100867d0  cmp  r3, #0x32
+100867d4  ldrls pc, [pc, r3, lsl #2]
+...
+100868a8  mov  r0, #0x100               ; 256 -- models 18, 55, 56, 66, 68
+100868b4  mov  r0, #0x200               ; 512 -- the other 46 cases + default
+100868c0  mov  r0, #0x200               ; 512 -- descriptor not found
+```
+
+So there are exactly **two creature sizes in the game**, and the five
+short-model entries are, read straight off `entities.txt`:
+
+| model | height | creatures |
+|------:|-------:|-----------|
+| 18 | 0x100 | every rat (`Azra_Rat`, `Assault_Rat`, `Field_Rat`, `Mountain_Rat`, `Umbric_Rats`, `ratherb`) |
+| 55 | 0x100 | every spider (`Cave_Spider`, `spider_savager`, `Spider_Guardian`) |
+| 56 | 0x100 | the wormmouths (`wormmouth`, `Horrid_Wormmouth`, `Nubbed_Wormmouth`, `shriek_tentacles`) |
+| 66 | 0x100 | the stingers/rays (`Cavern_Stinger`, `Shadowray`, `Snowray`) |
+| 68 | 0x100 | every wolf (`Alpha_Wolf`, `Dusk_Wolves`, `Twilight_Wolf`, `Dire_Wolf`, `shardwolf`) |
+| everything else | 0x200 | bandits (22/23), mages, skeletons, and every other humanoid |
+
+Of the 176 category-2 rows, **26 are short and 150 are tall**. This is a
+collision height, not the drawn model's extent — it is the only
+per-creature size the engine carries, and it is what the automatic
+aim-assist pitch gates on (docs/RENDERER_3D.md). Transcribed in the port
+as `sk::MonsterCollisionHeight` (`port/src/world/entity_types.h`).
+
 ## Compressed per-zone files, and where the actual room geometry comes from
 
 A second per-zone file loader exists alongside the streaming
