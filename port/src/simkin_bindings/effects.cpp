@@ -24,13 +24,28 @@ namespace sk_bindings {
 //     carried them as "real identifiers, unconfirmed values"). Every weapon
 //     rating is a distinct bit, which is what lets a single stored word say
 //     "this scabbard takes long blades or daggers".
-//   * `IPT_Consumable` is registered as **4** by the global bootstrap and as
-//     **0** by the per-menu constructor -- and 0 is `IPT_Misc`. Both are
-//     plain immediates in their respective functions. A menu script asking
+//   * `IPT_Consumable` is registered as **4** by the global bootstrap
+//     (`GameEngine_FirstTickBootstrap`, the run at 0x10023fa8: 1, 2, 0, 3,
+//     **4**) and as **0** by the per-menu constructor (`FUN_10073d3c`, the
+//     run at 0x10074044) -- and 0 is `IPT_Misc`. Both are plain immediates
+//     in their respective functions, and there are two copies of the name
+//     strings to match (0x100ac798 and 0x100b2da8). A menu script asking
 //     `if (GetItemType() = IPT_Consumable)` is therefore asking a different
 //     question from the same line in an item script. This port has one
 //     interpreter and takes the bootstrap's 4, which is the value the item
 //     side (where the type is actually set) uses.
+//
+//     **M74 closes this as a non-issue rather than a deviation.** A census
+//     of every `IPT_` reference in the shipped corpus: eleven scripts use
+//     the constants by name and all eleven are world/creature merchants
+//     (`dstar_e\blk_market.s`, `monsters\eranthos_merchant.s`, ...), which
+//     run in the *game* interpreter, where the value is 4. The only two
+//     menu-side scripts that mention `IPT_Consumable` at all --
+//     `buysell.s:161` and `inventory.s:215` -- mention it **in a comment**
+//     and compare against the literal `4` in the code. So the per-menu 0 is
+//     read by nothing in the shipped game, and collapsing the two
+//     interpreters onto the bootstrap's 4 is not just the safer choice, it
+//     is observationally identical.
 const EffectConstant kEffectConstants[] = {
     {"IPT_Weapon", 1},
     {"IPT_Spell", 2},
