@@ -14,6 +14,7 @@
 #include "simkin_bindings/menu_stack.h"
 #include "simkin_bindings/native_binding_common.h"
 #include "simkin_bindings/player_executable.h"
+#include "simkin_bindings/use_prompt.h"
 #include "skExecutableContext.h"
 #include "skParseException.h"
 #include "skRValue.h"
@@ -80,6 +81,13 @@ void MonsterExecutable::ApplyDamage(int amount) {
     if (m_CurrentHealth <= 0) {
         m_CurrentHealth = 0;
         m_Alive = false;
+        // M75: a corpse offers no use prompt. The engine's own fatal-hit
+        // tail (0x10083e2c, inside the creature damage path 0x10083c04)
+        // writes `entity+0xd8 = 0` right beside the `+0xd5` dead flag.
+        // main.cpp's target search already skips dead creatures, so this
+        // changes nothing on its own -- it keeps the flag itself honest
+        // for anything that reads it directly (use_prompt.h).
+        m_Usable = false;
         // M28: death noise wins over hit noise -- both fire from the same
         // single ApplyDamage() choke point (melee and spell HitTarget
         // both route through here), so there's no risk of ever double-
@@ -102,7 +110,13 @@ void MonsterExecutable::InvokeOnUse() {
     skRValue ret;
     skExecutableContext ctxt(m_Interpreter);
     try {
-        method(skString("OnUse"), args, ret, ctxt);
+        // M75: the base class directly, not this->method() -- an NPC
+        // with no OnUse handler is an ordinary shape (bled.s, lt_breser.s,
+        // diamond_spider_queen.s all name a use text and define nothing),
+        // and routing it through the native dispatcher logged a bogus
+        // "OnUse(0) -- not implemented" soft-fail on every Use press. Same
+        // one-line fix M35 already made in ItemExecutable::InvokeOnUse().
+        skScriptedExecutable::method(skString("OnUse"), args, ret, ctxt);
     } catch (skParseException& e) {
         std::printf("MonsterExecutable: PARSE ERROR in OnUse(): %s\n", e.toString().ptr());
     } catch (skRuntimeException& e) {
@@ -809,6 +823,14 @@ bool MonsterExecutable::method(const skString& methodName, skRValueArray& args,
     }
     if (methodName == skString("SetUseText") && args.entries() == 1) {
         m_UseTextId = args[0].intValue();
+        // M75: and it makes the entity usable. The shipped handler
+        // (0x10068418, shared by 31 entity vtables) writes the id, the
+        // "has use text" flag and `entity+0xd8` in three consecutive
+        // stores -- see use_prompt.h. 54 placed NPCs, Gravel Trothgar and
+        // Dark Star West's whole market among them, set a use text and
+        // never call SetUsable(true); without this they have no prompt
+        // and Use does nothing on them.
+        m_Usable = kSetUseTextImpliesUsable;
         return true;
     }
     if (methodName == skString("SetInvulnerable") && args.entries() == 1) {
@@ -821,7 +843,21 @@ bool MonsterExecutable::method(const skString& methodName, skRValueArray& args,
         // branching lives in the target menu's Init() (see menu_stack.h's
         // comment), which needs to rerun on every visit, not just the
         // first.
-        m_Stack.ReopenMenu(ToStdString(args[0].str()));
+        //
+        // M75: with `this` as the new menu's opener. The entity class's
+        // OpenMenu is `FUN_100779b8(menuManager, name, 1, self)` -- the
+        // caller is always the opener (the same shape ItemExecutable's
+        // handler has passed since M21, and the same one
+        // PlayerExecutable's comment quotes). Passing nothing was not a
+        // cosmetic gap: `fearfrst/Ivgrizt_convo2.s` opens with
+        // `if (GetOpener().saved_WeTalked = 0)`, where `saved_WeTalked[0]`
+        // is declared at the top of `fearfrst/Ivgrizt.s` itself, so with
+        // no opener the very first line of the conversation raised
+        // "Cannot get field saved_WeTalked from a non-object" and the
+        // menu never opened. `ghstpass/Trailslag_convo.s`,
+        // `StoutTP/OldTrinketConvo3.s` and `erthcave/EC_Menu3.s` fail the
+        // same way. 210 real call sites read GetOpener().
+        m_Stack.ReopenMenu(ToStdString(args[0].str()), static_cast<skiExecutable*>(this));
         return true;
     }
     if (methodName == skString("SetLoot") && args.entries() >= 2) {

@@ -583,3 +583,10 @@ if(SK_DEBUG_SUITE)
   add_executable(debug_suite_smoke src/tests/m68_debug_suite_smoke.cpp)
   target_link_libraries(debug_suite_smoke PRIVATE sk_debug)
 endif()
+
+# Talking to people: the one byte that gates every use prompt
+# (`entity+0xd8`, and the SetUseText that also writes it), the `Level`
+# global turning out to be the zone-root script object, and GetOpener().
+# See src/tests/m75_dialogue_smoke.cpp.
+add_executable(dialogue_smoke src/tests/m75_dialogue_smoke.cpp)
+target_link_libraries(dialogue_smoke PRIVATE sk_bindings sk_world)

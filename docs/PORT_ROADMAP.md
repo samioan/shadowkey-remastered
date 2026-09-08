@@ -6554,6 +6554,125 @@ soft-fails 39 -> 39, all 14 tracked `.ppm` renders byte-identical,
   Battlemage given typeId 50 in `azra` reads `Blaze  type 2  EQUIPPED` on
   the debug inventory page, with the spell's book icon in the viewmodel.
 
+- [x] **M75 -- nobody would talk.** Reported from play: approaching an NPC
+  never produced the prompt that starts a conversation, so no dialogue tree
+  and no shop screen was reachable at all. Three independent defects, full
+  write-up in docs/WORLD_MODEL.md's new "Talking to people: one byte, and
+  the object called `Level`" section.
+
+    - **`SetUseText(id)` also makes the entity usable.** The engine has one
+      gate for the whole interaction, `entity+0xd8`: the per-frame
+      use-target search `FUN_1001dd40` (a twelve-ray fan out of the
+      player's heading, parked in `engine+0x61c` by `Render3DScene`) tests
+      it, and so does the use action `FUN_100646a8`, which is `if
+      (entity->+0xd8 == 0) return false;` then `vtable[0xa8]("OnUse")`. So
+      "no prompt" and "Use does nothing" are one condition. The port had
+      that byte on creatures only and set only by an explicit
+      `SetUsable(true)` -- but the shipped `SetUseText` handler
+      (**0x10068418**) is three stores, not one:
+
+      ```
+      str  r1, [r0, #0xdc]   ; useTextId  = id
+      strb r3, [r0, #0xd9]   ; hasUseText = 1
+      strb r3, [r0, #0xd8]   ; usable     = 1
+      ```
+
+      and that same function is `vtable+0x8c` in **31 of the game's entity
+      vtables**, i.e. every class. **54 of the 152 talkable placements in
+      the shipped game -- 35% -- name a use text and never call SetUsable**:
+      Gravel Trothgar (azra's shop), Acolyte Menlin and Priestess Almathea
+      (azra's two starting quests), Old Trinket, the four villager
+      prisoners, Heather, and all four Dark Star West merchants.
+
+      Also recovered: the constructor default (only categories 4 and 9, the
+      weapon and consumable arms, start usable -- 0x1002cf6c and
+      0x1002e7f8), the fatal-hit tail that clears it (0x10083e2c), and the
+      reader `0x1006842c`, whose fallback when no use text was ever set is
+      `stringTable[13]` -- the literal word **"default"**, a developer
+      placeholder, which is the same statement from the other side.
+
+    - **`Level` is the zone-root script object,** not a native-only
+      singleton. Two independent proofs in the shipped corpus:
+      `crypt2/pedestal_entity.s` calls `Level.AddCrystal()` seven times and
+      `AddCrystal[()...]` is defined in **`crypt2.s`** and in no native
+      trie; and of the **168 distinct `Level.<field>` names across 423
+      sites**, **163 are declared at the top level of the zone-root script
+      of exactly the zone they are used in** (`EndGame_Trinket` in
+      `azra.s`, `saved_Birgitta`/`saved_taker`/`saved_Given` in
+      `delfhide.s`, `saved_Crys1[0]`..`saved_Crys7[0]` in `crypt2.s`, ...).
+      Every one of those 423 sites raised "Cannot get field", and because
+      that is a *runtime error* rather than a soft-fail it aborts the whole
+      handler -- for a conversation menu that means its `Init()` never
+      finishes and the menu never opens. Six real conversations died on the
+      first line of theirs: `trinketconvo`, `AzraSkelosConvo`,
+      `delfhide/Chef_convo`, `delfhide/RescueConvo`,
+      `crypt1/azra_final_convo` and `Talker`.
+
+    - **`GetOpener()` was null for an NPC and missing for a door.** The
+      entity classes' `OpenMenu` is `FUN_100779b8(menuManager, name, 1,
+      self)` -- the caller is always the opener, and 210 corpus sites read
+      it back. A creature's handler passed nothing, so
+      `fearfrst/Ivgrizt_convo2.s`'s opening
+      `if (GetOpener().saved_WeTalked = 0)` -- a field declared at the top
+      of `fearfrst/Ivgrizt.s` itself -- raised on a non-object (same for
+      `ghstpass/Trailslag_convo.s`, `StoutTP/OldTrinketConvo3.s`,
+      `erthcave/EC_Menu3.s`). A door had **no `OpenMenu` handler at all**,
+      which is why no lock in the game could be picked: `lockeddoor.s`'s
+      `OnUse()` is `OpenMenu("Menus\\UsePicks")` and nothing else, and that
+      menu's `Pick` reads `GetOpener().resistDisarm` and calls
+      `GetOpener().LockPicked()`.
+
+    - **The gate now applies to all three interact lists,** not just NPCs.
+      In the shipped data that costs nothing and is strictly more faithful:
+      all 404 container placements with a real script come out usable and
+      433 of the 434 doors do, the one exception being
+      `dstar_e/Cell_Door.s`, whose entire `Init()` is `SetUsable(false);
+      SetMPUsable(true);` -- a prison door a quest event opens, never the
+      player. `crypt2/controller.s`, the invisible seven-crystal logic
+      object, correctly stops offering to be picked up.
+
+    - **Ordering change in the zone load.** The zone-root script is now
+      *constructed* before the placement loop and attached to `Level` there
+      (its `Init()` still runs last, after every named door/monster/pickup
+      is registered, which is what its `Level.GetEntity("m1")` lookups
+      need). Constructing it is what materialises the top-level
+      declarations, so every placement's own `Init()` sees the real zone
+      variables.
+
+    - **One piece of noise removed on the way.** `MonsterExecutable::
+      InvokeOnUse()` and `DoorExecutable::InvokeOnUse()` dispatched
+      `"OnUse"` through the native path, so an entity with no `OnUse`
+      handler -- an ordinary shape now that 54 more of them are reachable
+      -- logged a bogus `OnUse(0) -- not implemented` on every Use press.
+      Same one-line fix M35 already made for items.
+
+  **Verification.** New `m75_dialogue_smoke` (66 checks, suite **66/66 ->
+  67/67**): the byte's three sources against real scripts (Trothgar, Tanyin
+  Aldwyr, Ivgrizt's `SetUseText`-then-`SetUsable(false)`, a hostile rat, a
+  locked door, a dropped weapon, `blaze.s`) plus death clearing it; a census
+  over **all 21 zones** loading every category-2/7/8/11/12 placement that
+  has a real script through its real binding class; `Level` resolving to
+  `azra.s`'s own `EndGame_Trinket` declaration and sharing the slot with the
+  zone script's bare access, plus `Level.AddCrystal()` running `crypt2.s`'s
+  handler; each of the five conversations that died at `Init()` opening for
+  real; `GetOpener()` being the NPC; **Gravel Trothgar's whole quest
+  conversation branch by branch** -- offer, accept, "still open", solved,
+  the 400 gold + 400 experience reward, quest completed, then `BuyItems`
+  landing on `buysell.s` in Buy mode with his own shelves; and the lock-pick
+  menu opening with the door as `GetOpener()` and `resistDisarm` reading 5.
+
+    - **Not attempted: `OnDetect`.** A non-aggressive creature that calls
+      `AiDetect()` asks to be told when the player comes into range, and the
+      engine runs its `OnDetect` handler instead of attacking (call site
+      0x10083320). 31 shipped scripts define one and several start a
+      conversation from it (`monsters/bbrawler_talk.s` opens `Talker` and
+      then arms itself; `monsters/olpac_trailslag.s` opens
+      `ghstpass/GP_Menu3`). This port's AI tick returns early for any
+      non-aggressive creature, so none of it runs. It is the *other*
+      mechanism -- an NPC that talks to you rather than one you talk to --
+      and needs the detection half of the AI package, not this milestone's
+      gate. `MenuClosed` (2 sites, one script) is its other half.
+
 ## Next milestones (not yet started)
 
 Roughly in priority order for reaching "actually playable," not commitments:

@@ -3083,6 +3083,11 @@ int main(int argc, char** argv) {
             // first: a zone script, a monster and a pickup all hold raw
             // pointers into the zone and into each other, so nothing may
             // outlive it.
+            // M75: `Level` holds a non-owning pointer to the zone script
+            // (level_executable.h's AttachZoneScript) -- detach before it
+            // dies, or the next `Level.<field>` on the main menu reads
+            // freed memory.
+            stack.level().AttachZoneScript(nullptr);
             gameZoneScript.reset();
             gameMonsters.clear();
             gameDoors.clear();
@@ -3335,6 +3340,44 @@ int main(int argc, char** argv) {
                 // right here anyway, so there is nothing left holding a
                 // stale one.
                 stack.gameClock().Reset();
+
+                // M75: build the zone-root script *now*, before any
+                // placement runs, and hand it to the `Level` global.
+                //
+                // `Level` and the zone-root script are the same object in
+                // the engine (level_executable.h's AttachZoneScript() has
+                // the corpus proof), and the one thing that ordering
+                // controls is when `Level.<field>` starts resolving to the
+                // right store. Merely constructing the script parses its
+                // `.s` and materialises every top-level declaration --
+                // `azra.s`'s `EndGame_Trinket [0]`, `crypt2.s`'s
+                // `saved_Crys1 [0]` .. `saved_Crys7 [0]` -- so from here on
+                // every placement's own Init() sees the real, declared
+                // zone variables rather than the no-zone fallback bucket.
+                //
+                // `Init()` itself still runs at the end of the load, after
+                // every door/monster/pickup is registered, because that is
+                // what its many `Level.GetEntity("m1")`-shaped lookups
+                // need (see the M23 comment down there).
+                stack.level().AttachZoneScript(nullptr);
+                gameZoneScript.reset();
+                {
+                    std::string zoneScriptPath =
+                        std::string(scriptRoot) + "/" + stack.requestedZone() + ".s";
+                    skExecutableContext zoneScriptCtxt(&interpreter);
+                    try {
+                        gameZoneScript = std::make_unique<sk_bindings::ZoneScriptExecutable>(
+                            skString(zoneScriptPath.c_str()), zoneScriptCtxt, stack);
+                        stack.level().AttachZoneScript(gameZoneScript.get());
+                    } catch (skParseException& ex) {
+                        std::printf("shadowkey-port: PARSE ERROR loading zone script %s: %s\n",
+                                    zoneScriptPath.c_str(), ex.toString().ptr());
+                    } catch (skRuntimeException& ex) {
+                        std::printf("shadowkey-port: RUNTIME ERROR loading zone script %s: %s\n",
+                                    zoneScriptPath.c_str(), ex.toString().ptr());
+                    }
+                }
+
                 // M35: which script a placement actually runs.
                 //
                 // The .ent record carries its own script path (see
@@ -3644,19 +3687,21 @@ int main(int argc, char** argv) {
                 // "birg", "skelos", "azra", "vil1".."vil4", "heather",
                 // "tanyin" -- every one a real, named .ent placement,
                 // confirmed this session) can actually resolve.
-                gameZoneScript.reset();
-                std::string zoneScriptPath = std::string(scriptRoot) + "/" + stack.requestedZone() +
-                                              ".s";
-                skExecutableContext zoneScriptCtxt(&interpreter);
+                //
+                // M75: the object itself was built (and attached to
+                // `Level`) before the placement loop above -- see that
+                // block's comment. Only its Init() waits until here.
                 try {
-                    auto zoneScript = std::make_unique<sk_bindings::ZoneScriptExecutable>(
-                        skString(zoneScriptPath.c_str()), zoneScriptCtxt, stack);
+                    if (!gameZoneScript) {
+                        // The construction above already logged why.
+                        throw skRuntimeException(skString(""), 0,
+                                                  skString("zone script did not load"));
+                    }
                     skRValueArray args;
                     args.append(skRValue(0));  // placeholder for Init's "(s)" parameter
                     skRValue ret;
                     skExecutableContext callCtxt(&interpreter);
-                    zoneScript->method(skString("Init"), args, ret, callCtxt);
-                    gameZoneScript = std::move(zoneScript);
+                    gameZoneScript->method(skString("Init"), args, ret, callCtxt);
                     // M39: SetZone(zoneId, totalExperience) -- the real
                     // handler divides that total evenly across every
                     // creature in the zone whose script called SetMob(),
@@ -3692,11 +3737,11 @@ int main(int argc, char** argv) {
                                     gameTraps.size(), stack.requestedZone().c_str());
                     }
                 } catch (skParseException& ex) {
-                    std::printf("shadowkey-port: PARSE ERROR loading zone script %s: %s\n",
-                                zoneScriptPath.c_str(), ex.toString().ptr());
+                    std::printf("shadowkey-port: PARSE ERROR in zone script Init(): %s\n",
+                                ex.toString().ptr());
                 } catch (skRuntimeException& ex) {
-                    std::printf("shadowkey-port: RUNTIME ERROR loading zone script %s: %s\n",
-                                zoneScriptPath.c_str(), ex.toString().ptr());
+                    std::printf("shadowkey-port: RUNTIME ERROR in zone script Init(): %s\n",
+                                ex.toString().ptr());
                 }
             } else {
                 std::printf("shadowkey-port: failed to load zone '%s', staying in menu\n",
@@ -5502,10 +5547,22 @@ int main(int argc, char** argv) {
                 // at a tile's centre while the player walks its edges, so a
                 // tight cone misses things plainly on screen.
                 constexpr float kInteractFacing = 0.30f;
+                // M75: all three lists are filtered by the same one byte
+                // the engine's own use-target search reads --
+                // `entity+0xd8`, see simkin_bindings/use_prompt.h. Only the
+                // NPC list used to be, and only for an explicit
+                // SetUsable(true); the other two offered a prompt for
+                // anything that existed. In the shipped data that costs
+                // nothing (every one of the 434 door placements and 393
+                // container placements that has a real script is usable)
+                // and gains one thing: `crypt2/controller.s`, the
+                // invisible seven-crystal logic object, stops asking to be
+                // picked up.
                 auto findNearbyDoor = [&]() -> DoorInstance* {
                     DoorInstance* nearest = nullptr;
                     float bestDist = kInteractRange + 1.0f;
                     for (DoorInstance& d : gameDoors) {
+                        if (!d.script->usable()) continue;
                         if (!sk_bindings::InInteractRange(gameCamera.x, gameCamera.y,
                                                            gameCamera.yaw, d.x, d.y,
                                                            kInteractRange, kInteractFacing)) {
@@ -5524,6 +5581,16 @@ int main(int argc, char** argv) {
                 // (monster_executable.h) -- an aggressive monster never
                 // sets it, so this naturally only ever finds NPCs, not
                 // hostile creatures the player is fighting.
+                //
+                // M75: ...and, far more often, its `SetUseText(...)`,
+                // which the engine treats as the same thing. That was the
+                // missing half: 54 of the 152 talkable placements in the
+                // shipped game -- Gravel Trothgar, Acolyte Menlin,
+                // Priestess Almathea, Old Trinket, the villager prisoners,
+                // Heather, all four Dark Star West merchants -- name a use
+                // text and never call SetUsable at all, so none of them had
+                // a prompt or answered Use. It stays an NPC-only filter:
+                // a hostile creature names neither.
                 auto findNearbyUsableMonster = [&]() -> MonsterInstance* {
                     MonsterInstance* nearest = nullptr;
                     float bestDist = kInteractRange + 1.0f;
@@ -5550,6 +5617,7 @@ int main(int argc, char** argv) {
                     PickupInstance* nearest = nullptr;
                     float bestDist = kInteractRange + 1.0f;
                     for (PickupInstance& p : gamePickups) {
+                        if (!p.script->usable()) continue;
                         if (!sk_bindings::InInteractRange(gameCamera.x, gameCamera.y,
                                                            gameCamera.yaw, p.x, p.y,
                                                            kInteractRange, kInteractFacing)) {

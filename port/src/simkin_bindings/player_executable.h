@@ -76,6 +76,12 @@ public:
     // handlers soft-fail exactly as they did before, rather than
     // pretending to work.
     void AttachStack(MenuStack& stack) { m_Stack = &stack; }
+    // M75: null until AttachStack() -- every caller has to handle that,
+    // the same way this class's own natives already do. DoorExecutable
+    // reaches the menu stack through here rather than holding its own
+    // reference, because a door is constructed with a PlayerExecutable&
+    // and nothing else and that shape is load-bearing in five call sites.
+    MenuStack* stack() const { return m_Stack; }
 
     bool method(const skString& methodName, skRValueArray& args, skRValue& returnValue,
                 skExecutableContext& context) override;

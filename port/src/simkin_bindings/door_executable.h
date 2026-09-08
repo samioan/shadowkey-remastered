@@ -144,6 +144,11 @@ public:
     int useTextId() const { return m_UseTextId; }
     float yawRadians() const;
     bool passable() const { return m_Passable; }
+    // M75: `entity+0xd8`, the one byte that decides whether this door
+    // offers a prompt and answers Use at all -- see use_prompt.h. A door
+    // (category 11) is constructed unusable and turned on by its own
+    // `SetUsable(true)` or, far more often, by `SetUseText(...)`.
+    bool usable() const { return m_Usable; }
 
     // Runs the real script's OnUse() handler -- same
     // skParseException/skRuntimeException-catching convention
@@ -164,6 +169,7 @@ private:
     int m_UseTextId = -1;
     int m_RotationRaw = 0;  // accumulated AddRotationTurn() argument, raw units
     bool m_Passable = false;
+    bool m_Usable = false;  // M75: entity+0xd8, see usable() above
     bool m_MpUsable = false;  // SetMPUsable() -- stored but inert, no multiplayer in this port
 
     // M67: the tile stamp -- see AttachTileStamp().

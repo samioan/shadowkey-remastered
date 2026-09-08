@@ -224,6 +224,11 @@ public:
     // "Pick up"-style prompt) -- main.cpp's interact-prompt line reads this
     // the same way it already reads DoorExecutable/MonsterExecutable's.
     int useTextId() const { return m_UseTextId; }
+    // M75: `entity+0xd8` -- whether this world placement offers a prompt
+    // and answers Use at all. Written by the entities.txt category's
+    // constructor default, by `SetUsable(b)`, and by `SetUseText(id)`.
+    // See use_prompt.h.
+    bool usable() const { return m_Usable; }
     int cost() const { return m_Cost; }
     // M59: SetMarketValue()'s stored number (item+0x1b8), which is what a
     // merchant pays for the item -- see PlayerExecutable::SellItem.

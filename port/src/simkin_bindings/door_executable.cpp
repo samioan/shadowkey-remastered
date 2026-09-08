@@ -2,8 +2,10 @@
 
 #include <cstdio>
 
+#include "simkin_bindings/menu_stack.h"
 #include "simkin_bindings/native_binding_common.h"
 #include "simkin_bindings/player_executable.h"
+#include "simkin_bindings/use_prompt.h"
 #include "skExecutableContext.h"
 #include "skParseException.h"
 #include "skRValue.h"
@@ -69,7 +71,11 @@ void DoorExecutable::InvokeOnUse() {
     skRValue ret;
     skExecutableContext ctxt(m_Interpreter);
     try {
-        method(skString("OnUse"), args, ret, ctxt);
+        // M75: see MonsterExecutable::InvokeOnUse() -- the base class
+        // directly, so a door script with no OnUse (every plain door02.s
+        // variant that only swaps its own use text) does not log an
+        // unresolved-native soft-fail.
+        skScriptedExecutable::method(skString("OnUse"), args, ret, ctxt);
     } catch (skParseException& e) {
         std::printf("DoorExecutable: PARSE ERROR in OnUse(): %s\n", e.toString().ptr());
     } catch (skRuntimeException& e) {
@@ -81,6 +87,39 @@ bool DoorExecutable::method(const skString& methodName, skRValueArray& args, skR
                              skExecutableContext& context) {
     if (methodName == skString("SetUseText") && args.entries() == 1) {
         m_UseTextId = args[0].intValue();
+        // M75: SetUseText also sets `entity+0xd8` -- see use_prompt.h.
+        // door.s swaps its prompt between "Open Door" and "Close Door"
+        // through this handler, and never calls SetUsable at all.
+        m_Usable = kSetUseTextImpliesUsable;
+        return true;
+    }
+    if (methodName == skString("OpenMenu") && args.entries() == 1) {
+        // M75: the same entity-class OpenMenu every other placed thing
+        // has -- `FUN_100779b8(menuManager, name, 1, self)`, so the door
+        // is the new menu's opener. This had no handler at all, which is
+        // why no lock in the game could be picked: `lockeddoor.s`'s
+        // OnUse() is `OpenMenu("Menus\\UsePicks")` and nothing else, and
+        // `Menus/UsePicks.s`'s own Pick handler is
+        // `if (GetOpener() != null) { ... GetPlayer().CanDisarmTrap(
+        // GetOpener().resistDisarm) ... }` -- it needs the door back to
+        // read the `resistDisarm[5]` declared at the top of that same
+        // door script, and calls `GetOpener().LockPicked()` on success.
+        //
+        // ReopenMenu() for the M17 reason, same as every other class: the
+        // branching lives in the target's Init() and has to rerun per
+        // visit.
+        if (MenuStack* stack = m_Player.stack()) {
+            stack->ReopenMenu(ToStdString(args[0].str()), static_cast<skiExecutable*>(this));
+            return true;
+        }
+        return SoftFailNativeCall("Door", methodName, args, returnValue);
+    }
+    if (methodName == skString("SetUsable") && args.entries() == 1) {
+        // M75: entity binding 30 (dispatcher case 0x1e). Previously
+        // soft-failed on a door -- 434 of the shipped door placements are
+        // usable, and every one of them says so through one of these two
+        // handlers.
+        m_Usable = args[0].boolValue();
         return true;
     }
     if (methodName == skString("SetMPUsable") && args.entries() == 1) {

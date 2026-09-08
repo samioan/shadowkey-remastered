@@ -11,6 +11,7 @@
 #include "simkin_bindings/monster_executable.h"
 #include "simkin_bindings/native_binding_common.h"
 #include "simkin_bindings/player_executable.h"
+#include "simkin_bindings/zone_script_executable.h"
 #include "skExecutableContext.h"
 #include "skParseException.h"
 #include "skRValue.h"
@@ -379,7 +380,51 @@ bool LevelExecutable::method(const skString& methodName, skRValueArray& args,
                     e.sizeY);
         return true;
     }
+    // M75: `Level` is the zone-root script object -- see AttachZoneScript()
+    // in the header for the two independent pieces of corpus evidence.
+    // Anything this class has no native handler for is a call on that
+    // script: `crypt2/pedestal_entity.s` says `Level.AddCrystal()` seven
+    // times and `AddCrystal[()...]` is defined in `crypt2.s`.
+    //
+    // The zone script's own method() runs its native handlers first and
+    // then falls through to skScriptedExecutable, which is what finds the
+    // script-defined handler; a name neither of them knows comes back
+    // false and lands on this class's soft-fail below, so the "unresolved
+    // native" log still reports every genuinely missing binding.
+    if (m_ZoneScript && m_ZoneScript->method(methodName, args, returnValue, context)) return true;
     return SoftFailNativeCall("Level", methodName, args, returnValue);
+}
+
+void LevelExecutable::AttachZoneScript(ZoneScriptExecutable* script) {
+    m_ZoneScript = script;
+    if (!script) return;
+    // Undeclared fields auto-create rather than raising "Cannot get
+    // field". 163 of the 168 `Level.<field>` names in the corpus are
+    // declared at the top level of the right zone's root script and so
+    // never need this; the remaining five are shipped typos that differ
+    // from a declared name only in case or a digit (`saved_Openswdoor`
+    // for `saved_OpenSwdoor`, `saved_Bread4` where dstar_w declares
+    // 1..3), and each one of them sits on the first line of a real
+    // conversation's Init(). Erroring there would close the whole menu
+    // over a misspelling, so they read back falsy instead -- the same
+    // choice, for the same reason, that PlayerExecutable::getValue()
+    // already makes for `GetPlayer().saved_X`.
+    script->setAddIfNotPresent(true);
+}
+
+bool LevelExecutable::setValue(const skString& fieldName, const skString& attribute,
+                                const skRValue& value) {
+    if (m_ZoneScript) return m_ZoneScript->setValue(fieldName, attribute, value);
+    m_Fields[ToStdString(fieldName)] = value;
+    return true;
+}
+
+bool LevelExecutable::getValue(const skString& fieldName, const skString& attribute,
+                                skRValue& value) {
+    if (m_ZoneScript) return m_ZoneScript->getValue(fieldName, attribute, value);
+    auto it = m_Fields.find(ToStdString(fieldName));
+    value = it != m_Fields.end() ? it->second : skRValue(0);
+    return true;
 }
 
 void LevelExecutable::TickEffects(int frameDelta, int gravityUnits) {

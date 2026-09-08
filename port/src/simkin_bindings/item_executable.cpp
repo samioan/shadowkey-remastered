@@ -14,6 +14,7 @@
 #include "simkin_bindings/monster_executable.h"
 #include "simkin_bindings/native_binding_common.h"
 #include "simkin_bindings/player_executable.h"
+#include "simkin_bindings/use_prompt.h"
 #include "skExecutableContext.h"
 #include "skParseException.h"
 #include "skRValue.h"
@@ -38,6 +39,15 @@ void ItemExecutable::SetEntityCategory(int category) {
     m_EntityCategory = category;
     m_ItemType = ItemTypeForCategory(category);
     m_EquipSlot = EquipSlotForCategory(category);
+    // M75: and the constructor default for `entity+0xd8`. Two of the
+    // seventeen factory arms write 1 into it -- weapons (category 4) and
+    // consumables (category 9) -- so a world-dropped sword or potion can
+    // be picked up by a script that never mentions usability at all.
+    // Everything else starts off and has to be switched on. Set here
+    // rather than in the constructor because the category is what selects
+    // the C++ class in the first place, and (like the item type above) it
+    // arrives before the script's Init() runs. See use_prompt.h.
+    m_Usable = StartsUsable(category);
 }
 
 void ItemExecutable::InferItemType(int type) {
@@ -251,6 +261,12 @@ bool ItemExecutable::method(const skString& methodName, skRValueArray& args,
     }
     if (methodName == skString("SetUseText") && args.entries() == 1) {
         m_UseTextId = args[0].intValue();
+        // M75: SetUseText also sets `entity+0xd8` (use_prompt.h). This is
+        // deliberately not routed through the SetUsable handler below --
+        // that one additionally infers a *consumable* item type, which is
+        // M74's fallback for a script that never told us its category and
+        // has nothing to do with the use prompt.
+        m_Usable = kSetUseTextImpliesUsable;
         return true;
     }
     if (methodName == skString("SetID") && args.entries() == 1) {

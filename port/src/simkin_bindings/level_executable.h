@@ -76,6 +76,7 @@
 
 #include "simkin_bindings/effect_entity.h"
 #include "simkin_bindings/native_stub_executable.h"
+#include "skRValue.h"
 
 namespace sk {
 class EntityTypeTable;
@@ -264,6 +265,54 @@ public:
     // covers.
     void TickEffects(int frameDelta, int gravityUnits = 0);
 
+    // ---- M75: `Level` is the zone-root script object ----
+    //
+    // This class was built (M18) on the assumption that `Level` is a
+    // native-only singleton like `GetPlayer()`. It is half of one. The
+    // corpus settles the other half, twice over:
+    //
+    //   * `crypt2/pedestal_entity.s` calls `Level.AddCrystal()` seven
+    //     times, and `AddCrystal[()...]` is defined **in `crypt2.s`** --
+    //     the zone-root script -- and nowhere else. It is not in any
+    //     native binding trie.
+    //   * Scripts read and write 168 distinct `Level.<field>` names across
+    //     423 sites, and **163 of them are declared at the top level of
+    //     the zone-root script of exactly the zone they are used in** --
+    //     `EndGame_Trinket`/`EndGame_Skelos` in `azra.s`,
+    //     `saved_Birgitta`/`saved_taker`/`saved_Given` in `delfhide.s`,
+    //     `saved_Crys1`..`saved_Crys7` in `crypt2.s`, and so on for every
+    //     zone. Inside `crypt2.s`'s own `AddCrystal` those same variables
+    //     are read bare (`saved_Tele1 = 1`) alongside `Level.GetEntity(...)`
+    //     and bare `GetEntity(...)`, used interchangeably.
+    //
+    // So `Level` and the zone-root script are one object: a TreeNode-backed
+    // script executable whose `method()` also answers the Zone/Level
+    // (0x14d38) and zone-effects (0x14df8) natives -- exactly the shape
+    // MonsterExecutable/DoorExecutable already have. This port keeps them
+    // as two C++ objects (the split is load-bearing elsewhere: `Level`
+    // outlives any one zone and is reachable from menus with no zone
+    // loaded at all) and bridges them here: field access and unresolved
+    // method names forward to the attached zone script.
+    //
+    // Without this, `Level.<anything>` raised "Cannot get field", and
+    // because that is a *runtime error* rather than a soft-fail it aborted
+    // the whole handler -- which for a conversation menu means its `Init()`
+    // never finishes and the menu never opens at all. Six real
+    // conversations died that way on the first line of their `Init()`:
+    // Old Trinket, Azra Skelos, delfhide's Chef and RescueConvo, crypt1's
+    // final Azra conversation, and `Talker`.
+    //
+    // Set by main.cpp's zone-load block; cleared before the zone script is
+    // destroyed. Same late-bound-dependency convention as SetEntityTypes()
+    // and SetZoneRegions().
+    void AttachZoneScript(class ZoneScriptExecutable* script);
+    class ZoneScriptExecutable* zoneScript() const { return m_ZoneScript; }
+
+    bool setValue(const skString& fieldName, const skString& attribute,
+                  const skRValue& value) override;
+    bool getValue(const skString& fieldName, const skString& attribute,
+                  skRValue& value) override;
+
 private:
     MenuStack& m_Stack;
     std::map<std::string, skiExecutable*> m_Entities;
@@ -276,6 +325,17 @@ private:
     std::unique_ptr<MonsterExecutable> m_PendingCreatureScript;
     bool m_PendingCreaturePending = false;
     std::vector<EffectEntity> m_Effects;  // M63
+
+    // M75: see AttachZoneScript(). Non-owning -- main.cpp owns the zone
+    // script and clears this before destroying it.
+    class ZoneScriptExecutable* m_ZoneScript = nullptr;
+    // Field storage for the case the engine does not have: a script
+    // touching `Level.<field>` with no zone loaded (every menu screen
+    // reachable from the main menu, and every smoke test that does not
+    // build a zone). Reads default to 0 rather than erroring, the same
+    // convention -- and for the same reason -- as
+    // PlayerExecutable::getValue()'s own bucket.
+    std::map<std::string, skRValue> m_Fields;
 };
 
 }  // namespace sk_bindings

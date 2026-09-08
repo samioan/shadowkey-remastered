@@ -3091,3 +3091,171 @@ else                                           SetUseText(405);
 
 and for `blaze.s` those two strings are **"Learn Blaze"** and **"Pickup
 Blaze Scroll"**.
+
+## Talking to people: one byte, and the object called `Level` (M75)
+
+Reported from play: walking up to an NPC never produced the prompt that
+starts a conversation, and the merchants never opened a shop. Three
+independent defects sat behind that one symptom.
+
+### `entity+0xd8` is the whole of "you can interact with this"
+
+The engine has exactly one gate, and both halves of the interaction read
+it. The search that decides what the prompt is *about* is `FUN_1001dd40`,
+called once per frame out of `Render3DScene` (0x10017b60) and parked in
+`engine+0x61c`. It fans **twelve rays** out of the player's heading —
+`heading + 0x600` stepping down by `0x100` — marches each one up to twelve
+half-steps, walks the entity list of every tile it crosses, and stops at
+the first wall (`.zmp` blocking bit 2):
+
+```
+for (e = tile->firstEntity; e; e = e->next)
+  if (e->+0xd8 != 0) {                              /* the gate */
+    dz = |player->+0x224 - e->+0xa4|;               /* eye Z vs feet Z */
+    if (dz <= (player->+0x1e1 == 3 ? 0xc0 : 0x300))
+      return e;
+  }
+```
+
+and the *action* is `FUN_100646a8`, which is
+
+```
+if (entity->+0xd8 == 0) return false;
+entity->vtable[0xa8]("OnUse");
+return true;
+```
+
+So "no prompt appears" and "pressing Use does nothing" are the same
+condition, not two.
+
+Three things write that byte:
+
+- **The constructor.** The base entity (`FUN_10060d54`) zeroes it, and two
+  of the seventeen factory arms write 1 back: category 4, weapons
+  (`FUN_1002ce9c`, the store at 0x1002cf6c) and category 9, consumables
+  (`FUN_1002e78c`, at 0x1002e7f8). Misc loot, armour, spells, doors,
+  containers, creatures and merchants all start off.
+- **`SetUsable(b)`** — entity binding 30, dispatcher case 0x1e — assigns
+  it, and additionally clears `engine+0x61c` if the entity being switched
+  off happens to be the current use target.
+- **`SetUseText(id)`**, and this is the rule the port was missing. The
+  handler is one store longer than its name suggests (0x10068418):
+
+  ```
+  str  r1, [r0, #0xdc]     ; useTextId  = id
+  mov  r3, #1
+  strb r3, [r0, #0xd9]     ; hasUseText = 1
+  strb r3, [r0, #0xd8]     ; usable     = 1
+  bx   lr
+  ```
+
+  That one function is `vtable+0x8c` in **31 of the game's entity
+  vtables** — every class — so naming a use text *is* how a thing becomes
+  usable, universally.
+
+A fatal hit clears it again: the creature damage path (0x10083c04) ends
+with `strb r3(0), [sl, #0xd8]` at 0x10083e2c, beside the `+0xd5` dead flag.
+
+The reader is `0x1006842c` (`vtable+0x90`):
+
+```
+if (entity->+0xd9)  text = stringTable[entity->+0xdc];
+else                text = stringTable[13];
+```
+
+and shipped string 13 is the word `"default"` — a developer placeholder,
+which is the same statement from the other side: a usable entity is
+expected to have called `SetUseText`. The ids the NPCs pass are simply
+their names — 2063 "Gravel Trothgar", 2027 "Menlin", 177 "Almathea", 1199
+"Refugee", 835 "Heather".
+
+**Why it matters.** 54 of the 152 talkable creature/merchant placements in
+the shipped game — 35% — call `SetUseText(...)` and never call
+`SetUsable(true)`. Gravel Trothgar (azra's shop), Acolyte Menlin and
+Priestess Almathea (azra's two starting quests), Old Trinket, the four Azra
+villager prisoners, Heather, and all four of Dark Star West's merchants are
+in that set.
+
+The shipped data corroborates the model from the other direction. Applying
+the rule to *every* category and then counting placements that have a real
+script: all 404 containers come out usable, and 433 of the 434 doors do.
+The single exception is `dstar_e/Cell_Door.s`, whose entire `Init()` is
+`SetUsable(false); SetMPUsable(true);` — a prison door opened by a quest
+event calling its own `OpenDoor` handler, never by a player walking up to
+it. So the byte really is the one gate, and honouring it costs nothing.
+
+### `Level` is the zone-root script object
+
+The port had `Level` as a native-only singleton, like `GetPlayer()`. It is
+only half of one, and the corpus settles the other half twice over:
+
+- `crypt2/pedestal_entity.s` calls `Level.AddCrystal()` seven times.
+  `AddCrystal[()...]` is defined in **`crypt2.s`** — the zone-root script —
+  and in no other file, and it is not in any native binding trie.
+- Scripts read and write **168 distinct `Level.<field>` names across 423
+  sites**, and **163 of them are declared at the top level of the zone-root
+  script of exactly the zone they are used in**: `EndGame_Trinket` and
+  `EndGame_Skelos` in `azra.s`, `saved_Birgitta` / `saved_taker` /
+  `saved_Given` in `delfhide.s`, `saved_Crys1[0]`..`saved_Crys7[0]` in
+  `crypt2.s`, and so on for all 21 zones. Inside `crypt2.s`'s own
+  `AddCrystal`, those same variables are written bare (`saved_Tele1 = 1`)
+  next to `Level.GetEntity("tele1")` and bare `GetEntity("star")`, used
+  interchangeably.
+
+So `Level` is a TreeNode-backed script executable whose `method()` also
+answers the Zone/Level (`0x14d38`) and zone-effects (`0x14df8`) natives —
+the same shape `MonsterExecutable`/`DoorExecutable` already have. That is
+consistent with `SAVE_FORMAT.md`'s account of these flags as "ordinary
+SimKin instance variables… scoped to that level", as against the eighteen
+hardcoded story flags that live on the player.
+
+This is not a cosmetic distinction. An undeclared field read raises a
+*runtime error*, not a soft-fail, so it aborts the whole handler — and for
+a conversation menu that means its `Init()` never finishes and the menu
+never opens. Six real conversations died on the first line of theirs:
+`trinketconvo`, `AzraSkelosConvo`, `delfhide/Chef_convo`,
+`delfhide/RescueConvo`, `crypt1/azra_final_convo`, and `Talker`.
+
+Five of the 168 names are declared by no zone root at all, and each differs
+from a declared name only by case or a digit — `saved_Openswdoor` for
+`saved_OpenSwdoor`, `saved_Bread4` where `dstar_w` declares 1..3. They are
+shipped typos, and each sits on the first line of a real conversation's
+`Init()`. `twilite/azra_zombiedawn.s` has a second one of its own kind:
+line 33 reads `Level.saved_Dawn` as a field and line 37 calls
+`Level.saved_Dawn()` as a method.
+
+### `GetOpener()` is the object that called `OpenMenu`
+
+The entity classes' `OpenMenu` is `FUN_100779b8(menuManager, name, 1,
+self)` — the caller is always the new menu's opener, and 210 corpus call
+sites read it back. Two of this port's classes were not passing it:
+
+- A creature's `OpenMenu` passed nothing, so `GetOpener()` was null.
+  `fearfrst/Ivgrizt_convo2.s` opens with
+  `if (GetOpener().saved_WeTalked = 0)`, where `saved_WeTalked[0]` is
+  declared at the top of `fearfrst/Ivgrizt.s` itself — with no opener that
+  raised "Cannot get field … from a non-object" and the conversation never
+  opened. `ghstpass/Trailslag_convo.s`, `StoutTP/OldTrinketConvo3.s` and
+  `erthcave/EC_Menu3.s` fail the same way.
+- A door had no `OpenMenu` handler at all, which is why no lock in the game
+  could be picked: `lockeddoor.s`'s `OnUse()` is
+  `OpenMenu("Menus\\UsePicks")` and nothing else, and `Menus/UsePicks.s`'s
+  `Pick` handler is `if (GetOpener() != null) { … GetPlayer().CanDisarmTrap(
+  GetOpener().resistDisarm) … }`, reading the `resistDisarm[5]` declared at
+  the top of that same door script and calling `GetOpener().LockPicked()`
+  on success.
+
+### Still open: `OnDetect`
+
+A non-aggressive creature that calls `AiDetect()` is asking to be told when
+the player comes into range, and the engine answers by running its
+`OnDetect` handler rather than attacking (the call site is 0x10083320,
+`vtable[0xa8]("OnDetect")`). 31 shipped scripts define one, and several
+start a conversation from it — `monsters/bbrawler_talk.s` opens `Talker`
+that way and then arms itself, `monsters/olpac_trailslag.s` opens
+`ghstpass/GP_Menu3`. This port's AI tick returns early for any
+non-aggressive creature, so none of it runs. That is a separate mechanism
+from the prompt — an NPC that talks to *you* — and is not implemented.
+`MenuClosed`, the hook `bbrawler_talk.s` uses to turn hostile after the
+conversation, is the other half of it and is also unimplemented (2 call
+sites, one script).

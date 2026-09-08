@@ -379,6 +379,10 @@ public:
     // rather than crash, same as any other unset optional reference in
     // this port.
     void SetOpener(skiExecutable* opener) { m_Opener = opener; }
+    // M75: read back host-side, so a test can assert *which* object a
+    // conversation was opened by -- the thing 210 real `GetOpener()` call
+    // sites depend on.
+    skiExecutable* opener() const { return m_Opener; }
 
 private:
     MenuRow& AddRow(RowKind kind, int textId, const std::string& callback, bool selectable);
