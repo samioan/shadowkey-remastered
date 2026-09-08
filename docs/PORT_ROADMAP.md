@@ -6194,6 +6194,104 @@ soft-fails 39 -> 39, all 14 tracked `.ppm` renders byte-identical,
   Dragonfields one is a blue sky with clouds over the terrain, and the
   azra one has both moons in it.
 
+- [x] **M71 -- placed models sit and face where the level says, and the
+  camera sees what the device saw.** Reported from play against a device
+  screenshot of the same room: tables hovering a few inches off the floor,
+  chairs facing the wrong way, and "the starting room in the original seems
+  much larger than in the port." Four separate defects, all of them port-side
+  mistranslations of things the decompile already had -- the recurring shape
+  this roadmap has now seen enough times to expect.
+
+    - **The field of view was a guess, and the real one is in the binary.**
+      Both pipelines end in `screenX = 0x5800 + 0x5800*x/z`,
+      `screenY = 0x6800 - 0x6800*y/z`, which `RENDERER_3D.md` has recorded
+      since the first pass as "the screen center in 8.8" and never turned
+      into a frustum. Read alone it looks anisotropic (focal 88 across, 104
+      down); it isn't, because `Render3DScene` scales the camera matrix's
+      **screen-right row only** by `(recip[176] >> 15) * 0xd0 / 0x10000`,
+      where `recip` is the `2^31/n` table at 0x100b4954 -- i.e. by
+      **208/176**, the aspect ratio. Effective focal length is therefore
+      **104 px both ways**: `fovY` is exactly **pi/2**, `fovX` about 80.5
+      degrees. The port had `fovY = 1.2` (focal 152) at every call site since
+      M6, a **1.46x over-zoom** -- the whole of the "room looks smaller"
+      report. Now `sk::kEngineFovY`, and the default for `Camera`.
+
+    - **`yaw = pi/2 - heading`, not `-heading` -- M61 read the wrong
+      function.** M61 derived the heading convention from `FUN_100063f0`,
+      calling it "walk forward". It is **sidestep**. The forward one is
+      `FUN_100065b4`, which advances by `(sin h, cos h)` -- a quarter turn
+      away from what M61 concluded. The renderer agrees independently: the
+      camera matrix `FUN_10073760(engine+0x5d8, -roll, -pitch, -heading)`'s
+      depth row is `[sin h, 0, cos h]`. And so does this port's *own*
+      `sk_bindings::PortYawFromEngineYaw`, which M48 derived from the spell
+      spawn's `vx = sin(yaw); vy = cos(yaw)` and which has quietly disagreed
+      with `CameraAngleRadians` ever since. Three derivations, one answer;
+      `main.cpp` now has one conversion instead of two that contradict.
+
+    - **Which is why chairs faced backwards.** `PlacementYawRadians`'s own
+      comment admitted its zero reference "was never derived from the binary,
+      it was fitted by eye until doors stopped reading as permanently open" --
+      and a door is a flat slab, so that fit could not see a half turn.
+      Against the real relation the old formula was off by `pi - 2*heading`:
+      **exactly zero at 90 and 270 degrees, exactly 180 degrees off at 0 and
+      180**. Shipped doors cluster at 90/270, so it looked right. Measured on
+      the level data instead of by eye: of the 180 shipped door placements
+      whose heading is near 0 or 180 -- the only ones where the two
+      conventions differ -- the corrected one puts the door's panel in the
+      doorway rather than inside the wall for **163**, against **3** for the
+      old one (14 ties).
+
+    - **The `-0x40` draw offset.** `Actor3D_TransformAndSubmitModel` hands
+      its matrix the vertical translation `(actor.z - cam.eyeZ) + -0x40` for
+      every non-player actor: models are drawn **64 raw units below** their
+      stored `.ent` Z, about 13 cm at this game's scale. The level data is
+      authored against that -- over 3,507 floor-standing scenery placements,
+      74% have their lowest vertex above the tile's floor as stored, and the
+      offset drops that to 35% (median +38 -> -26 units). That is the
+      hovering, to the inch.
+
+    - **Two orientation channels and a per-instance scale the port had never
+      read.** `ZONE_FORMAT.md` decoded `.ent`'s `rotOrScale[2]`/`[0]` ->
+      `+0xa8`/`+0xb2` in M35 and `unkB`'s low halfword -> `+0x5e` (the 8.8
+      model scale) in M52; the renderer used none of them. `SubmitModel` now
+      transcribes `BuildRotationMatrix3x4` (0x10073a70) literally instead of
+      the yaw-only special case, and the loader reads all three fields. 203
+      and 232 placements carry a real angle, and **958 of 8,216 are not 1:1**
+      (0.125x to 29x, 764 of them ordinary scenery) -- so nearly a thousand
+      props were drawn at the wrong size. The scale is applied in the
+      engine's own order too: `GameEngine_InitLevel` writes `+0x5e` in step
+      5, *after* the entity's `Init()`, so a placement's size overrides what
+      its script asked for at load (`MonsterExecutable::SetPlacementScaleRaw`).
+
+    - **Doors compose their swing in raw units now.** `d.placementYaw +
+      script->yawRadians()` added a converted heading to a raw turn's
+      radians, which runs the swing backwards under the corrected
+      convention; it is `PortYawFromEngineYaw(script->headingRaw())` --
+      the same composed heading the M67 tile stamp already walks.
+
+  **Verification.** New `m71_placement_smoke` (21 checks, suite **62/62 ->
+  63/63**): the focal-length arithmetic against `0x5800`/`0x6800`; the
+  heading relation against the engine's forward vector and its own inverse
+  over 1024 sampled headings; that the renderer's `C = -(yaw + pi/2)` is
+  exactly the engine's `heading + 0x8000`; that `BuildRotationMatrix3x4`
+  sends local -Z to `(sin h, cos h)`, independently re-confirming M36; the
+  163-vs-3 door census; the 3,507-prop floor-gap census; and a real frame
+  rendered from azra's actual player-start record. That frame is the check
+  that matters -- side by side with the device screenshot of the same spot it
+  now shows the same room at the same scale, with the table, chest, chair,
+  candelabra and door all where the original puts them. All thirteen tracked
+  `.ppm` dumps move, as they must when the projection changes; a fourteenth,
+  `placement_azra_start.ppm`, is tracked from here on.
+
+  **Still open, and visible in that comparison:** the roof model reads much
+  darker than the original's. That is M35's model-lighting approximation (a
+  flat RGB scale by `cellLight/kMaxLightLevel`) rather than the engine's
+  fade-rasterizer + `engine+0x5c4` remap table, whose contents were never
+  dumped -- a large model spanning several cells samples wall cells with
+  almost no light and goes black. Also unexplained: a bright green patch on
+  the wall behind azra's candelabra, present before this milestone and not in
+  the device screenshot.
+
 ## Next milestones (not yet started)
 
 Roughly in priority order for reaching "actually playable," not commitments:
@@ -6258,12 +6356,23 @@ before and after the change. Do not reach for the coverage tool to justify
 work below the script layer.
 
 M70 is another one -- no natives, both measures flat -- and its evidence is
-a census, a decompiled draw path, and a set of `.ppm` dumps.
+a census, a decompiled draw path, and a set of `.ppm` dumps. M71 is a third,
+and it adds the measure those two were missing: **a screenshot of the real
+device, of a place the port can be put.** Every one of its four defects had
+sat in the port for dozens of milestones with every smoke test passing,
+because none of them is a computation the port gets wrong -- they are
+constants the port never read. The lesson M67 wrote down ("play the game")
+generalises: when the report is *visual*, get the two images side by side
+first and let the difference tell you which decompiled function to re-read.
 
 **The bullet list below is empty.** Every item that was in it -- merchants,
 the store screen, `SetCameraStart`, `Level.CreateEffect`, the `levelup.s`
 cluster, the `TestX` rolls, the `ZoneRenderer::Render` crash, and "what a
-`.zsk` actually is" -- is done (M59-M70). Re-run
+`.zsk` actually is" -- is done (M59-M70). Two things M71 left behind belong
+in it when it is repopulated: **model lighting** (the `engine+0x5c4` fade
+table, never dumped -- large models read far too dark), and **azra's green
+wall patch** behind the candelabra, which no decompiled path explains yet.
+Re-run
 `shadowkey/ghidra/scripts/analyze_port_native_coverage.py` to repopulate it
 from real call-site counts rather than adding guesses here.
 

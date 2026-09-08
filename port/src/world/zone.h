@@ -205,6 +205,23 @@ public:
         // carry 0 / 16640 / 16768 / 33152 / 49408 / 49472 / 49536, i.e.
         // the four axis directions.
         uint16_t yawRaw = 0;
+        // M71: the record's other two orientation channels and its scale,
+        // all three decoded in docs/ZONE_FORMAT.md since M52 and none of
+        // them read until now.
+        //
+        //   rotOrScale[2] @0x10 -> object +0xa8   (rotARaw)
+        //   rotOrScale[0] @0x0c -> object +0xb2   (rotBRaw)
+        //   unkB low u16  @0x18 -> object +0x5e   (scaleRaw, 8.8; 256 == 1x)
+        //
+        // The two angles are zero for ~97% of shipped placements, so the
+        // renderer's yaw-only transform looked right nearly everywhere.
+        // The scale is not: 958 of the 8,258 placements across the 21
+        // zones carry something other than 256, spanning 32 (0.125x) to
+        // 7424 (29x), 764 of them ordinary scenery -- so a port that
+        // ignores it draws that many props at the wrong size.
+        uint16_t rotARaw = 0;
+        uint16_t rotBRaw = 0;
+        uint16_t scaleRaw = 256;
         // M18: the record's own 40-byte instance name (offset 0x20) --
         // distinct from entities.txt's per-typeId descriptor name (a
         // script path). Empty for the overwhelming majority of placements

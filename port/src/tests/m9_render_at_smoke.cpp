@@ -84,7 +84,7 @@ int main(int argc, char** argv) {
     camera.y = (ty + 0.5f) * sk::kTileScale;
     camera.z = localFloor + sk::kEyeHeightOffset;
     camera.yaw = yawDeg * 3.14159265f / 180.0f;
-    camera.fovY = 1.2f;
+    camera.fovY = sk::kEngineFovY;
 
     sk::Backbuffer backbuffer;
     sk::ZoneRenderer renderer;

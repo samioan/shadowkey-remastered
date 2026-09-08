@@ -497,7 +497,7 @@ int main(int argc, char** argv) {
         camera.yaw = static_cast<float>(c.yawStep) * 2.0f * 3.14159265f /
                      static_cast<float>(kProbeYaws);
         camera.pitch = c.pitch;
-        camera.fovY = 1.2f;
+        camera.fovY = sk::kEngineFovY;
         renderer.Render(backbuffer, zone, camera, entitiesPerZone[c.zone], &models);
         ++targetedFrames;
     }
@@ -527,7 +527,7 @@ int main(int argc, char** argv) {
                         camera.z = static_cast<float>(type.floorHeight[0]) + sk::kEyeHeightOffset;
                         camera.yaw = static_cast<float>(yawStep) * 3.14159265f / 4.0f;
                         camera.pitch = pitch;
-                        camera.fovY = 1.2f;
+                        camera.fovY = sk::kEngineFovY;
                         renderer.Render(backbuffer, zone, camera, entitiesPerZone[z], &models);
                         ++zoneFrames;
                     }

@@ -227,6 +227,11 @@ bool Zone::Load(const std::string& scriptRoot, const std::string& zoneName) {
             placement.z = z;
             placement.typeId = typeId;
             placement.yawRaw = ReadU16(p + 0x14);  // see EntPlacement::yawRaw
+            // M71: the other two orientation channels and the per-instance
+            // model scale -- see EntPlacement::rotARaw.
+            placement.rotARaw = ReadU16(p + 0x10);
+            placement.rotBRaw = ReadU16(p + 0x0c);
+            placement.scaleRaw = ReadU16(p + 0x18);
             placement.name = readFixedString(p + 0x20, 8);
             placement.scriptPath = readFixedString(p + 0x28, 32);
             entities_.push_back(std::move(placement));

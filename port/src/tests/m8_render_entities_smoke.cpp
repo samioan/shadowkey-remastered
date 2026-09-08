@@ -106,7 +106,7 @@ int main(int argc, char** argv) {
     camera.x = static_cast<float>(zone.playerStartX);
     camera.y = static_cast<float>(zone.playerStartY);
     camera.z = static_cast<float>(zone.playerStartZ) + sk::kEyeHeightOffset;
-    camera.fovY = 1.2f;
+    camera.fovY = sk::kEngineFovY;
 
     sk::Backbuffer backbuffer;
     sk::ZoneRenderer renderer;

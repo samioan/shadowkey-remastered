@@ -67,7 +67,7 @@ int main() {
         camera.y = target.y - std::sin(angle) * 256.0f;
         camera.z = target.z + 100.0f;
         camera.yaw = angle;
-        camera.fovY = 1.2f;
+        camera.fovY = sk::kEngineFovY;
         renderer.Render(backbuffer, zone, camera, one, &models);
         WriteBackbufferPpm(backbuffer, "closeup_barrel_" + std::to_string(i) + ".ppm");
     }

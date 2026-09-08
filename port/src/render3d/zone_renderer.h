@@ -32,21 +32,22 @@
 // axis. Worth folding back into MODEL_FORMAT.md once independently
 // re-confirmed against more model/context pairs.
 //
-// Known simplifications/open questions specific to entity rendering:
-// frame 0 (resting pose) only, no per-instance skin/variant selection
-// (always skin 0), no orientation (the .ent record's rotOrScale[0..2]
-// fields' exact meaning is still unconfirmed -- docs/ZONE_FORMAT.md --
-// so entities render in their model's default facing rather than a
-// guessed-at rotation formula), no distance culling (every resolved
+// M8 wrote this paragraph as a list of open questions specific to entity
+// rendering -- "frame 0 only", "skin 0 only", "no orientation", "no
+// confirmed vertex-to-world scale factor". **All four are now closed**, the
+// last two by M71: `Actor3D_TransformAndSubmitModel` (0x10056eb0) applies
+// `BuildRotationMatrix3x4`'s full three-angle rotation and an 8.8
+// per-instance scale from `actor+0x5e`, and both come straight off the
+// `.ent` record (docs/ZONE_FORMAT.md). Frames arrived in M28, skins in M28's
+// per-instance appearance work.
+//
+// What remains simplified here: **no distance culling** (every resolved
 // entity in the zone is submitted every frame, regardless of the
-// renderRadius tile scan below), and **no confirmed vertex-to-world
-// scale factor** -- vertices are currently assumed to share the same raw
-// unit convention as .ent positions with no extra multiplier, which
-// visually renders entities a bit large (a barrel about as wide as a
-// full floor tile). RENDERER_3D.md's `ComposeTransform3x4` writeup
-// mentions the actor transform block covering "position/orientation/
-// scale," hinting a real per-instance scale field exists somewhere this
-// port isn't reading yet -- not chased down this pass.
+// renderRadius tile scan below), and model lighting is the M35 RGB-scale
+// approximation rather than the engine's own fade-rasterizer + `engine
+// +0x5c4` lookup table, which was never extracted -- so a large model
+// spanning several cells (a roof, a tree) reads darker than the walls
+// around it.
 //
 // World Z-scale investigation (this session, follow-up to the above):
 // confirmed, by decompiling SurfaceFace_BuildAndProject (0x1005d784),
@@ -214,6 +215,15 @@ struct PlacedEntity {
     // other placed entity keeps 0, matching this file's existing "no
     // orientation" scope note above (still true for everything but doors).
     float yaw = 0.0f;
+    // M71: the placement's other two orientation channels, radians, in the
+    // engine's own raw sense (no port-space conversion -- they are fed
+    // straight into the transcribed `BuildRotationMatrix3x4`, see
+    // zone_renderer.cpp). `rotA` is the object's `+0xa8` channel
+    // (`.ent`'s `rotOrScale[2]`), `rotB` its `+0xb2` (`rotOrScale[0]`).
+    // Zero for 97% of shipped placements and for everything this port
+    // creates at runtime, which is why yaw-only survived this long.
+    float rotA = 0.0f;
+    float rotB = 0.0f;
     // Real per-instance appearance, from a monster script's own
     // SetSkin()/SetScale() (simkin_bindings/monster_executable.h) -- both
     // were soft-failed and unused before, so every creature drew as skin 0
@@ -294,6 +304,27 @@ constexpr float kModelForwardYawOffset = 1.57079632679f;  // +pi/2
 //   about the vertical axis, moving azra's moons to a different compass
 //   bearing) and the one that can't be checked against a device screenshot,
 //   so it is transcribed from the code rather than tuned.
+// M71 -- the constant every placed model is drawn *below* its stored Z.
+//
+// `Actor3D_TransformAndSubmitModel` (0x10056eb0) hands its rotation builder
+// the vertical translation
+//
+//     (actor->z /* +0xa4 */ - player->eyeZ /* +0x224 */) + -0x40
+//
+// for every actor that is not the player themselves (the player's own body
+// model takes `+0x30` instead, on the other arm of the same `if`). So a
+// placement's `.ent` Z is not where the model's origin lands: the engine
+// sinks it 64 raw units -- a quarter of a tile, and at this game's scale
+// (a door model is 1036 units tall, so ~2 mm/unit) about 13 cm.
+//
+// That is exactly the reported symptom this milestone started from: tables
+// and chests floating a few inches clear of the floor. The level data puts
+// most floor props' lowest vertex at or just above the tile's floor height
+// -- `!table`'s single most common placement is `z == floorHeight` to the
+// unit -- and the original then pushes them 64 units *into* the ground, so
+// legs and bases disappear into the floor instead of hovering over it.
+constexpr float kEntityDrawZOffset = -64.0f;
+
 constexpr float kSkyboxUpOffset = 270.0f;
 constexpr float kSkyboxScale = 2.0f;
 constexpr float kSkyboxYaw = -1.57079632679f;  // -pi/2, i.e. -0x4000

@@ -289,6 +289,17 @@ per-field mapping:
 > rotations, and the scale lives one field along. See
 > `SAVE_FORMAT.md`'s "What the scalars are".
 
+> **How the three channels are actually consumed (M71).**
+> `Actor3D_TransformAndSubmitModel` passes them to
+> `BuildRotationMatrix3x4` as `(actor[0xa8], actor[0xb2], actor[0xb6] +
+> 0x8000)` — note the **half turn** added to the heading, and note that the
+> heading is the *third* matrix argument, not the first. Counted across all
+> 21 shipped zones: 203 placements carry a non-zero `+0xa8` and 232 a
+> non-zero `+0xb2`, out of 8,216 — so a consumer that implements only the
+> heading is right for ~97% of the world and visibly wrong for the rest.
+> `RENDERER_3D.md`'s "The actor placement transform, in full" has the whole
+> call site, including the `-0x40` vertical draw offset that goes with it.
+
 So only 2 of the 4 `rotOrScale` fields are used at all — `idx0`/`idx2`,
 both real angle data, feeding 2 of the object's 3 orientation channels.
 The 3rd orientation channel (`+0xb6`) is fed by `unkA`'s low 16 bits, a

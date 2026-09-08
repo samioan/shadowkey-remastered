@@ -543,6 +543,14 @@ target_link_libraries(skybox_smoke PRIVATE sk_render3d)
 add_executable(door_stamp_smoke src/tests/m67_door_stamp_smoke.cpp)
 target_link_libraries(door_stamp_smoke PRIVATE sk_render3d sk_bindings)
 
+# The placement transform and the projection: the engine's real field of
+# view, the `yaw = pi/2 - heading` convention (checked against 180 real door
+# placements), the actor transform's -0x40 draw offset, and the two .ent
+# orientation channels plus the per-instance scale this port never read.
+# See src/tests/m71_placement_smoke.cpp.
+add_executable(placement_smoke src/tests/m71_placement_smoke.cpp)
+target_link_libraries(placement_smoke PRIVATE sk_render3d sk_bindings)
+
 # The developer debug suite: the console's parsing/history/completion, the
 # metrics sink and its mark/diff, the overlay's layout, and a full pass over
 # every command against a fake DebugHost -- which is why the whole suite is

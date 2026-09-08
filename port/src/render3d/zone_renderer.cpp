@@ -626,7 +626,7 @@ void SubmitModel(Backbuffer& backbuffer, std::vector<float>& depthBuffer, const 
                   float offsetZ, float camX, float camY, float camZ, float cosYaw, float sinYaw,
                   float cosPitch, float sinPitch, float focalX, float focalY,
                   float entityYaw = 0.0f, float scale = 1.0f, int frameIndex = 0,
-                  bool asSkybox = false) {
+                  bool asSkybox = false, float rotA = 0.0f, float rotB = 0.0f) {
     // M35: see kModelForwardYawOffset -- a model's forward is its local
     // +Z, so a heading measured from world +X needs a quarter turn taken
     // out of it before it can be used as a rotation of the local axes.
@@ -634,7 +634,49 @@ void SubmitModel(Backbuffer& backbuffer, std::vector<float>& depthBuffer, const 
     // -0x4000 the engine hands its own transform (see kSkyboxYaw), applied
     // in the same place a placed entity's converted heading lands.
     float modelYaw = asSkybox ? kSkyboxYaw : entityYaw + kModelForwardYawOffset;
-    float cosEntityYaw = std::cos(modelYaw), sinEntityYaw = std::sin(modelYaw);
+
+    // M71 -- the placement transform, now `BuildRotationMatrix3x4`
+    // (0x10073a70) verbatim instead of the yaw-only special case that
+    // stood since M15.
+    //
+    // The engine builds an actor's rotation from **three** angles, read off
+    // the object at `+0xa8`, `+0xb2` and `+0xb6` -- which
+    // docs/ZONE_FORMAT.md already traced back to the `.ent` record's
+    // `rotOrScale[2]`, `rotOrScale[0]` and `unkA`'s low halfword. Only the
+    // third was ever plumbed through here, so the 232 placements carrying a
+    // real `+0xb2` and the 204 carrying a real `+0xa8` (out of 8,258 across
+    // the 21 zones) all drew bolt upright.
+    //
+    // Transcribing the matrix means naming its angles the way the *call*
+    // does, not the way a human would: `A` is the object's `+0xa8` channel,
+    // `B` its `+0xb2`, and `C` its heading. The third argument the engine
+    // passes is `heading + 0x8000` -- a **half turn** on top of the stored
+    // heading, which is the other half of the facing bug M71 fixed (see
+    // main.cpp's PlacementYawRadians). Expressed against this port's own
+    // `entityYaw`, that whole chain collapses to `C = -modelYaw`:
+    //
+    //     entityYaw = pi/2 - heading           (main.cpp, engine -> port)
+    //     modelYaw  = entityYaw + pi/2         (kModelForwardYawOffset)
+    //               = pi - heading
+    //     C         = heading + pi == -modelYaw   (mod 2pi)
+    //
+    // so the yaw-only case below reduces to exactly the two lines this
+    // function used to have, and A == B == 0 (97% of all placements, and
+    // every door, monster, projectile and the skybox) costs nothing.
+    const float cA = std::cos(rotA), sA = std::sin(rotA);
+    const float cB = std::cos(rotB), sB = std::sin(rotB);
+    const float cC = std::cos(-modelYaw), sC = std::sin(-modelYaw);
+    // dst[0..2] / [4..6] / [8..10] of BuildRotationMatrix3x4, in the
+    // engine's own (worldX, up, worldY) row order.
+    const float m0 = cA * cC - sC * sB * sA;
+    const float m1 = sC * sB * cA + sA * cC;
+    const float m2 = sC * cB;
+    const float m4 = -cB * sA;
+    const float m5 = cB * cA;
+    const float m6 = -sB;
+    const float m8 = -cC * sB * sA - sC * cA;
+    const float m9 = cC * sB * cA - sC * sA;
+    const float m10 = cB * cC;
     for (const ModelFace& face : model.faces) {
         if (face.vA < 0 || face.vB < 0 || face.vC < 0 ||
             face.vC >= model.vertsPerFrame || face.vB >= model.vertsPerFrame ||
@@ -664,12 +706,15 @@ void SubmitModel(Backbuffer& backbuffer, std::vector<float>& depthBuffer, const 
             // the yaw rotation and world offset -- so a scaled creature
             // still stands on the same ground point.
             float sxv = mv[i]->x * scale, syv = mv[i]->y * scale, szv = mv[i]->z * scale;
-            float lx = sxv * cosEntityYaw - szv * sinEntityYaw;
-            float lz = sxv * sinEntityYaw + szv * cosEntityYaw;
+            // The three rows above, applied in the engine's own operand
+            // order: local (x, y, z) -> world (X, up, Y).
+            float lx = m0 * sxv + m1 * syv + m2 * szv;
+            float lup = m4 * sxv + m5 * syv + m6 * szv;
+            float lz = m8 * sxv + m9 * syv + m10 * szv;
 
             float rx = offsetTileX + lx / kTileScale - camX;
             float ry = offsetTileY + lz / kTileScale - camY;
-            float rz = (offsetZ + syv) / kTileScale - camZ;
+            float rz = (offsetZ + lup) / kTileScale - camZ;
 
             vv3[i].right = rx * sinYaw - ry * cosYaw;
             float flatForward = rx * cosYaw + ry * sinYaw;
@@ -751,10 +796,16 @@ void ZoneRenderer::Render(Backbuffer& backbuffer, const Zone& zone, const Camera
     float cosYaw = std::cos(camera.yaw), sinYaw = std::sin(camera.yaw);
     float cosPitch = std::cos(camera.pitch), sinPitch = std::sin(camera.pitch);
     // forward = (cosYaw, sinYaw, 0); right = (sinYaw, -cosYaw, 0); up = (0,0,1)
-    float aspect = static_cast<float>(Backbuffer::kWidth) / static_cast<float>(Backbuffer::kHeight);
+    // M71: the real engine's projection. `focalX == focalY` is not a
+    // "square-ish texel assumption" as this line used to say -- it is what
+    // the binary does, and now for the decompiled reason: the two divides
+    // use different constants (0x5800 = 88 across, 0x6800 = 104 down) but
+    // `Render3DScene` pre-scales the camera matrix's screen-right row by
+    // 208/176, which makes the horizontal focal length 88 * 208/176 = 104
+    // as well. At the real `fovY` (kEngineFovY, pi/2) the expression below
+    // evaluates to exactly 104, i.e. `0x6800 >> 8`. See camera.h.
     float focalY = (Backbuffer::kHeight * 0.5f) / std::tan(camera.fovY * 0.5f);
-    float focalX = focalY;  // square-ish texel assumption; aspect handled via screen center only
-    (void)aspect;
+    float focalX = focalY;
 
     // M70: the skybox (<zone>.zsk), first and underneath everything.
     //
@@ -918,7 +969,12 @@ void ZoneRenderer::Render(Backbuffer& backbuffer, const Zone& zone, const Camera
             // panel, tall along its up axis).
             float baseTileX = pe.x / kTileScale;
             float baseTileY = pe.y / kTileScale;
-            float baseZ = pe.z;
+            // M71: `Actor3D_TransformAndSubmitModel`'s own `-0x40` -- see
+            // kEntityDrawZOffset. The offset is a *render* constant, not a
+            // position one, so it deliberately lives here rather than in
+            // the placement: collision, tile stamps, use-range and the
+            // automap all keep reading the .ent Z the engine stores.
+            float baseZ = pe.z + kEntityDrawZOffset;
 
             // Real per-instance skin/scale (PlacedEntity), clamped to what
             // this resource actually has -- a script naming a skin the
@@ -927,7 +983,7 @@ void ZoneRenderer::Render(Backbuffer& backbuffer, const Zone& zone, const Camera
             int skin = (pe.skinIndex >= 0 && pe.skinIndex < model->skinCount) ? pe.skinIndex : 0;
             SubmitModel(backbuffer, depthBuffer, zone, *model, skin, baseTileX, baseTileY, baseZ,
                         camX, camY, camZ, cosYaw, sinYaw, cosPitch, sinPitch, focalX, focalY,
-                        pe.yaw, pe.scale, pe.frameIndex);
+                        pe.yaw, pe.scale, pe.frameIndex, /*asSkybox=*/false, pe.rotA, pe.rotB);
         }
     }
 }

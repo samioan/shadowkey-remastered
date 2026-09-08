@@ -346,7 +346,7 @@ int main(int argc, char** argv) {
     camera.x = static_cast<float>(zone.playerStartX);
     camera.y = static_cast<float>(zone.playerStartY);
     camera.z = static_cast<float>(zone.playerStartZ) + sk::kEyeHeightOffset;
-    camera.fovY = 1.2f;
+    camera.fovY = sk::kEngineFovY;
 
     // Find a pose with a real mix of world and open sky in frame. The
     // "sky changes only background pixels" check below is worth nothing
@@ -443,7 +443,7 @@ int main(int argc, char** argv) {
         ic.y = static_cast<float>(interior.playerStartY);
         ic.z = static_cast<float>(interior.playerStartZ) + sk::kEyeHeightOffset;
         ic.pitch = -0.5f;
-        ic.fovY = 1.2f;
+        ic.fovY = sk::kEngineFovY;
         Frame iOff = RenderFrame(interior, ic, false);
         Frame iOn = RenderFrame(interior, ic, true);
         int bare = 0, bareBlack = 0;
@@ -473,7 +473,7 @@ int main(int argc, char** argv) {
             nc.z = static_cast<float>(night.playerStartZ) + sk::kEyeHeightOffset;
             nc.pitch = -0.85f;
             nc.yaw = 2.2f;
-            nc.fovY = 1.2f;
+            nc.fovY = sk::kEngineFovY;
             sk::Backbuffer nb;
             renderer.Render(nb, night, nc);
             WriteBackbufferPpm(nb, "skybox_azra.ppm");

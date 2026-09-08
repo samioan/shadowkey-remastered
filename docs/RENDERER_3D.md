@@ -111,6 +111,93 @@ follow-up.
    `Poly3D_RasterizeTextured` variants" below for how the other 9 build on
    this.
 
+## The projection is a 90° isotropic frustum, focal length 104 px (M71)
+
+Item 5 above records `screenX = 0x5800 + 0x5800*x/z` and
+`screenY = 0x6800 - 0x6800*y/z` and stops at "the screen center in 8.8 fixed
+point". The same pair appears verbatim in `SurfaceFace_BuildAndProject`
+(0x1005d784) and `Actor3D_TransformAndSubmitModel` (0x10056eb0), so it is
+*the* projection, not one pipeline's. What was never spelled out is what
+field of view it is — and read literally it looks **anisotropic**: the
+horizontal multiplier is `0x5800>>8 = 88` and the vertical one is
+`0x6800>>8 = 104`.
+
+It is not anisotropic. Immediately after `Render3DScene` rebuilds the camera
+matrix, it scales **row 0 alone** — the screen-right row, `engine+0x5d8/
++0x5dc/+0x5e0`:
+
+```c
+FUN_10073760(engine + 0x5d8, -player[0xb2], -player[0xa8], -player[0xb6]);
+iVar37 = (*(uint *)(DAT_10016b48 + 0x2c0) >> 0xf) * 0xd0;
+engine[0x5d8] = engine[0x5d8] * iVar37 >> 0x10;   // and 0x5dc, 0x5e0
+```
+
+`DAT_10016b48` points at 0x100b4954, a **reciprocal table** whose entry `n`
+is `≈ 2^31/n`; `+0x2c0` is byte offset 704, i.e. **entry 176** — the screen
+width. So `iVar37 = (2^31/176 >> 15) * 208 = 372 * 208`, and the row-0 scale
+is `372*208/65536 = 1.1807 ≈ 208/176`, the screen aspect ratio.
+
+Effective focal lengths are therefore `88 * 208/176 = 104` across and `104`
+down — **isotropic, 104 pixels**, which over a 176×208 screen is
+
+| axis | half-extent | focal | field of view |
+|---|---|---|---|
+| vertical | 104 | 104 | `2·atan(1)` = **90°** |
+| horizontal | 88 | 104 | `2·atan(88/104)` ≈ **80.5°** |
+
+`engine+0x608` is a separate zoom multiplier on the *same* divide (both
+pipelines special-case it being `0x100`); it is initialised to `0x100` and
+only the automap moves it, so the 3D view always runs at 1.0.
+
+The PC port had been using a guessed `fovY = 1.2 rad` (focal 152) since M6,
+a 1.46× over-zoom — the reason a device screenshot of the game's opening
+room showed most of the room and the port showed a table filling the frame.
+See `port/src/render3d/camera.h`'s `kEngineFovY`.
+
+## The actor placement transform, in full (M71)
+
+`Actor3D_TransformAndSubmitModel`'s two `BuildRotationMatrix3x4` call sites
+are the whole of how a placed entity is positioned, and three details in
+them were never transcribed:
+
+```c
+// non-player actor
+BuildRotationMatrix3x4(m, actor[0xa8], actor[0xb2], actor[0xb6] + 0x8000,
+                       actor.x - cam.x, (actor.z - cam.eyeZ) + -0x40, actor.y - cam.y);
+// the player's own body
+BuildRotationMatrix3x4(m, actor[0xa8], actor[0xb2], actor[0xb6] - 0x4000,
+                       actor.x - cam.x, (actor.z - cam.eyeZ) + 0x30,  actor.y - cam.y);
+```
+
+1. **All three orientation channels are used.** `+0xa8` and `+0xb2` are the
+   `.ent` record's `rotOrScale[2]`/`rotOrScale[0]` (`ZONE_FORMAT.md`), and
+   they are passed as the *first two* matrix arguments; the heading is the
+   third. 203 and 232 shipped placements respectively carry a non-zero one.
+   Each channel is suppressed to 0 by its own bit in `actor+0x86`
+   (bits 1/2/3).
+2. **The heading gets a half turn added** (`+ 0x8000`) before it reaches the
+   matrix. Combined with the model's forward being local −Z (M36), this is
+   what makes a model face the way its record says.
+3. **The vertical translation is `heightDelta - 0x40`.** Every non-player
+   model is drawn 64 raw units *below* its stored Z — about 13 cm at this
+   game's scale (a door model is 1036 units tall). Level props are authored
+   against that: measured over 3,507 floor-standing scenery placements in
+   the 21 zones, 74% have their lowest vertex above the tile's floor height
+   as stored, and applying the −0x40 drops that to 35%, moving the median
+   from +38 units to −26. Without it a port draws tables and chests hovering
+   a few inches clear of the floor.
+
+The vertex scale is `actor+0x5e`, 8.8 (`0x100` = 1:1, fast-pathed): the
+`.ent` record's `unkB` low halfword, written in `GameEngine_InitLevel`'s
+step 5 — *after* the entity's `Init()`, so a placement's size overrides
+whatever its script asked for at load. 958 of 8,216 shipped placements are
+not 1:1, spanning 0.125× to 29×.
+
+Note the argument names in item 2's signature above (`yaw, pitch, roll`) are
+the original guess and are **not** how the call site uses them — the third
+argument is the heading. The matrix itself is transcribed literally in
+`port/src/render3d/zone_renderer.cpp`'s `SubmitModel`.
+
 ## Where this is called from (all actor/entity rendering)
 
 - `FUN_10064ffc` (called via `thunk_FUN_10064ffc`) — picks a static/idle

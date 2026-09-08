@@ -2443,21 +2443,67 @@ there.
 - **`FUN_1001c0f4` is an empty function**, so whatever the original
   wanted to do alongside stamping an entity into the grid was compiled
   out of this build.
-- **Which way a heading points (M61).** `FUN_100063f0` is "walk forward":
-  it reads `+0xb6`, and against the 2048-entry sine table adds
+- **Which way a heading points (M61, ~~corrected~~ in M71).** `FUN_100063f0`
+  reads `+0xb6` and, against the 2048-entry sine table, adds
 
   ```c
   entity->dx /* +0x98 */ += speed * sin(heading + 0x4000);   /* == +cos(heading) */
   entity->dy /* +0xa0 */ += speed * sin(heading + 0x8000);   /* == -sin(heading) */
   ```
 
-  so the forward vector is `(+cos h, -sin h)` and a heading advances
-  **clockwise** in world XY. `FUN_10006480` is the same function with both
-  signs flipped — walk backward. This settles a direction the port had
-  only fitted by eye: its camera moves by `(cos yaw, sin yaw)`, so
-  `yaw = -heading` exactly, and the automap marker's own
-  `-0x8000 - heading` (below) composes with that rather than compensating
-  for it.
+  M61 read this as "walk forward" and concluded the forward vector is
+  `(+cos h, -sin h)`, hence `yaw = -heading` for the port's own
+  `(cos yaw, sin yaw)` camera. **That function is `Strafe`, not `Walk`.**
+
+  > **M71 correction.** The forward one is `FUN_100065b4`, which takes its
+  > angle from the virtual getter at `vtable+0x11c` rather than the raw
+  > field and adds
+  >
+  > ```c
+  > entity->dx += speed * sin(heading);              /* == +sin(heading) */
+  > entity->dy += speed * sin(heading + 0x4000);     /* == +cos(heading) */
+  > ```
+  >
+  > so **forward is `(sin h, cos h)`** — a quarter turn off what M61 read.
+  > `FUN_100063f0`'s `(cos h, -sin h)` is that vector turned a quarter turn
+  > the other way, which is exactly what a sidestep is. The four movement
+  > functions are two mirrored pairs, and they split on which vector they
+  > use, not on sign alone:
+  >
+  > | function | delta | what it is |
+  > |---|---|---|
+  > | `FUN_100065b4` | `+(sin h, cos h)` | walk forward |
+  > | `FUN_10006510` | `-(sin h, cos h)` | walk backward |
+  > | `FUN_100063f0` | `+(cos h, -sin h)` | sidestep |
+  > | `FUN_10006480` | `-(cos h, -sin h)` | sidestep, the other way |
+  >
+  > (The two walk functions take their angle from the virtual getter at
+  > `vtable+0x11c`; the two sidesteps read `+0xb6` directly.)
+  >
+  > The **renderer agrees independently**, which is what settles it:
+  > `Render3DScene` builds the camera matrix as
+  > `FUN_10073760(engine+0x5d8, -roll, -pitch, -heading)` and that
+  > function's depth row evaluates, for a level camera, to
+  > `[sin h, 0, cos h]` against its `(worldX, up, worldY)` input — the same
+  > forward vector. So the relation to this port's camera is
+  >
+  > ```
+  > yaw = pi/2 - heading          (and, being a reflection, its own inverse)
+  > ```
+  >
+  > which is the conversion `sk_bindings::PortYawFromEngineYaw` had already
+  > derived in M48 from a completely different function (the spell spawn's
+  > `vx = sin(yaw); vy = cos(yaw)`). Three derivations, one answer. The
+  > practical consequence of the M61 version: the port spawned the player
+  > facing ninety degrees away from where the level designer pointed them,
+  > and — because `PlacementYawRadians` was fitted against the *same* wrong
+  > relation — drew every placed prop mirrored about the world Y axis, i.e.
+  > exactly backwards at headings 0 and 180 and correct at 90 and 270. See
+  > `RENDERER_3D.md`'s "The actor placement transform, in full".
+  >
+  > Whether a heading runs clockwise or counter-clockwise is a statement
+  > about the world axes' handedness and is unchanged; only the zero
+  > reference moved.
 
 ### In the port
 

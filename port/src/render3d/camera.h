@@ -2,6 +2,40 @@
 
 namespace sk {
 
+// M71 -- the real engine's field of view, recovered rather than chosen.
+//
+// Both 3D pipelines end in the same two lines. `SurfaceFace_BuildAndProject`
+// (0x1005d784) for tile faces and `Actor3D_TransformAndSubmitModel`
+// (0x10056eb0) for models each finish a vertex with
+//
+//     screenX = 0x5800 + (viewRight * 0x5800) / viewDepth
+//     screenY = 0x6800 - (viewUp    * 0x6800) / viewDepth
+//
+// in 8.8 fixed point, so `0x5800 >> 8 == 88 == 176/2` and
+// `0x6800 >> 8 == 104 == 208/2`: the half-extents of the real 176x208
+// screen. Taken alone that is an *anisotropic* projection -- focal 88
+// across, 104 down.
+//
+// It does not stand alone. Right after `Render3DScene` rebuilds the camera
+// matrix it scales **row 0 only** -- the screen-right row, `engine+0x5d8/
+// +0x5dc/+0x5e0` -- by `(recip[176] >> 15) * 0xd0 / 0x10000`, where
+// `recip[n] ~= 2^31/n` is the reciprocal table at 0x100b4954. That is
+// `(65536/176) * 208 / 65536 == 208/176` to the fixed-point rounding, i.e.
+// the aspect ratio. So the effective horizontal focal length is
+// `88 * 208/176 == 104`, the same as the vertical one, and the projection
+// is isotropic with a focal length of **104 pixels**:
+//
+//     fovY = 2 * atan(104 / 104) = pi/2      (90 degrees)
+//     fovX = 2 * atan( 88 / 104) = ~80.5 degrees
+//
+// This port had `fovY = 1.2` (69 degrees, focal 152) at every call site --
+// a guess that predates the projection ever being read out of the binary.
+// The visible effect was a view roughly 1.46x too zoomed in: rooms looked
+// cramped and props looked oversized next to a device screenshot of the
+// same spot, which is exactly the symptom that sent this milestone
+// looking.
+constexpr float kEngineFovY = 1.57079632679f;  // pi/2
+
 // World units match the game's own 8.8-fixed-point convention (256
 // units/tile, docs/WORLD_MODEL.md) but stored as plain floats here --
 // the port targets "behaviorally faithful," not byte-exact fixed-point
@@ -18,7 +52,10 @@ struct Camera {
     // LookDown actions (Key2/Key8, docs/INPUT_HANDLING.md) had nothing to
     // drive and were left unbound.
     float pitch = 0.0f;
-    float fovY = 1.0f;                   // radians, vertical field of view
+    // Radians, vertical field of view. Defaults to the real engine's own
+    // projection -- see kEngineFovY, which is a decompiled constant, not a
+    // taste call.
+    float fovY = kEngineFovY;
 };
 
 // Clamp for Camera::pitch. No original limit was recovered; this keeps the

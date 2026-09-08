@@ -209,7 +209,7 @@ int main(int argc, char** argv) {
         camera.y = static_cast<float>(doorPlacement->y);
         camera.z = static_cast<float>(doorPlacement->z) + sk::kEyeHeightOffset;
         camera.yaw = 0.0f;
-        camera.fovY = 1.2f;
+        camera.fovY = sk::kEngineFovY;
 
         sk::PlacedEntity pe{static_cast<float>(doorPlacement->x), static_cast<float>(doorPlacement->y),
                              static_cast<float>(doorPlacement->z), desc->modelArchiveIndex, 0.0f};

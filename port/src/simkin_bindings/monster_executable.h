@@ -256,6 +256,13 @@ public:
     int skin() const { return m_Skin; }
     // SetScale()'s 8.8 fixed-point value as a plain multiplier (256 -> 1).
     float scale() const { return m_Scale > 0 ? static_cast<float>(m_Scale) / 256.0f : 1.0f; }
+    // M71: the `.ent` record's own `+0x5e` scale (`unkB`'s low halfword).
+    // `GameEngine_InitLevel` writes it in step 5, *after* the Init() call
+    // in step 4 (docs/ZONE_FORMAT.md's step list), so the placement's value
+    // genuinely overrides whatever the script's Init() asked for -- and a
+    // later, in-play `SetScale` still overrides the placement. Called from
+    // the zone-load loop in that same order.
+    void SetPlacementScaleRaw(int raw) { m_Scale = raw; }
 
     // See chaseRadius(): the real comparison value is (d^2)/256, so the
     // distance it stands for is 16*sqrt(value).

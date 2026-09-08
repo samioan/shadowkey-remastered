@@ -154,57 +154,104 @@ std::string RowText(int textId, const std::string& literalText, const sk::String
 // 16-bit angle with 65536 == one full turn) as radians. Same units and
 // convention as DoorExecutable's AddRotationTurn() accumulator, so the two
 // simply add.
+// **M71 -- corrected, and the correction is the whole "chairs face the
+// wrong way" bug.**
+//
+// The old body here was `raw*2pi/65536 - pi/2`, and its own comment said
+// where that came from: the zero reference "was never derived from the
+// binary, it was fitted by eye until doors stopped reading as permanently
+// open". A door is a flat slab, so that fit could not see a half turn --
+// and a half turn is precisely what it got wrong. Written as an error term,
+// the old formula differed from the real one by `pi - 2*heading`: exactly
+// zero at headings of 90 and 270 degrees, exactly 180 degrees off at 0 and
+// 180. Doors in the shipped zones sit overwhelmingly at the two headings
+// where the two agree, which is why it survived; a chair at heading 0 was
+// drawn with its back to where its back should be.
+//
+// The real relation was already in this codebase, derived twice over from
+// two unrelated functions, just not here:
+//
+//  * `sk_bindings::PortYawFromEngineYaw` (M48/M49) took it from the spell
+//    spawn's `vx = sin(yaw); vy = cos(yaw)`.
+//  * The camera matrix itself: `Render3DScene` builds `engine+0x5d8` as
+//    `FUN_10073760(m, -roll, -pitch, -heading)`, whose depth row comes out
+//    `[sin h, 0, cos h]` -- so the engine's forward is `(sin h, cos h)` in
+//    world X/Y, and this port's is `(cos yaw, sin yaw)`.
+//
+// Both give `yaw = pi/2 - heading`. So a placement's heading converts
+// exactly like the camera's does, and this function is now literally the
+// same one -- see CameraYawRadians below.
 float PlacementYawRadians(uint16_t yawRaw) {
-    constexpr float kTwoPi = 6.28318530718f;
-    // M35: the trailing `- kModelForwardYawOffset` holds every *placed*
-    // entity (doors, world pickups) exactly where it already rendered.
-    //
-    // The renderer now takes a quarter turn out of every heading, because
-    // a model's forward axis is its local +Z (see kModelForwardYawOffset
-    // -- decompiled from the real actor transform). Creature headings are
-    // computed here from atan2(dy, dx) and were genuinely a quarter turn
-    // wrong, which that fixes. This raw .ent angle is a different case:
-    // its own zero-reference was never derived from the binary, it was
-    // fitted by eye until doors stopped reading as permanently open. That
-    // fit silently absorbed the same quarter turn, so cancelling it here
-    // keeps the one thing that *was* verified -- how these actually look
-    // in the world -- rather than rotating it by an angle the fit already
-    // accounted for.
-    return static_cast<float>(yawRaw) / 65536.0f * kTwoPi - sk::kModelForwardYawOffset;
+    return sk_bindings::PortYawFromEngineYaw(static_cast<int>(yawRaw));
 }
 
-// M61: a raw engine *camera* angle (the player object's own `+0xb6` /
-// `+0xa8` channels, 65536 == one full turn, signed) as this port's camera
-// radians. Distinct from PlacementYawRadians() above, which carries a
-// model's forward-axis correction this does not want.
-//
-// The negation is the interesting part, and it is now derived rather than
-// fitted. The engine's own "walk forward" (`FUN_100063f0`) advances the
-// entity by
-//
-//     dx += speed * sin(heading + 0x4000)   ==  +speed * cos(heading)
-//     dy += speed * sin(heading + 0x8000)   ==  -speed * sin(heading)
-//
-// against this port's own `dx = cos(yaw), dy = sin(yaw)` in the tick loop
-// -- so a raw heading and this camera's yaw run opposite ways round, and
-// `yaw = -heading` is exact, not a guess. RenderAutomapOverlay() and
-// RenderHud() already assumed that relation in the other direction (M57's
-// automap marker, whose comment called the direction unverified); this is
-// the evidence they were missing, and all three now agree by construction.
-float CameraAngleRadians(int32_t rawAngle) {
+// M71: the placement's other two orientation channels. Unlike the heading
+// these need no port-space conversion at all -- `sk::PlacedEntity::rotA/rotB`
+// feed straight into the transcribed `BuildRotationMatrix3x4`, so all that
+// is wanted is the engine's 65536-per-turn unit in radians.
+float PlacementRotRadians(uint16_t raw) {
     constexpr float kTwoPi = 6.28318530718f;
-    return -static_cast<float>(static_cast<int16_t>(rawAngle & 0xffff)) / 65536.0f * kTwoPi;
+    return static_cast<float>(raw) / 65536.0f * kTwoPi;
 }
 
-// The inverse: this port's camera yaw as the engine's own `player+0xb6`
-// heading, [0, 65536). Everything that consumes a real decompiled heading
-// formula -- the compass tape and the automap marker -- goes through this
-// so they cannot drift apart.
+// M71: `.ent`'s `unkB` low halfword -> the object's `+0x5e`, an 8.8 model
+// scale where 256 is 1:1 (docs/ZONE_FORMAT.md's M52 note). Zero never
+// occurs in shipped data; guarded anyway so a corrupt record cannot
+// collapse a model to a point.
+float PlacementScale(uint16_t raw) {
+    return raw > 0 ? static_cast<float>(raw) / 256.0f : 1.0f;
+}
+
+// A raw engine *heading* (the player object's own `+0xb6` channel, 65536 ==
+// one full turn) as this port's camera yaw, and back.
+//
+// **M71 corrects M61's sign, and the correction is derived twice.** M61
+// read the relation off `FUN_100063f0` -- but that function is **strafe**,
+// not walk-forward. Its sibling `FUN_100065b4` is the forward one, and it
+// advances the entity by
+//
+//     dx += speed * sin(heading)
+//     dy += speed * sin(heading + 0x4000)  ==  +speed * cos(heading)
+//
+// i.e. forward is `(sin h, cos h)`, ninety degrees off what M61 concluded
+// from the strafe. `FUN_100063f0`'s `(cos h, -sin h)` is that vector turned
+// a quarter turn clockwise, which is what a strafe is.
+//
+// Independently, the renderer agrees: `Render3DScene` builds the camera
+// matrix as `FUN_10073760(engine+0x5d8, -roll, -pitch, -heading)`, whose
+// depth row evaluates to `[sin h, 0, cos h]` against a `(worldX, up,
+// worldY)` input vector -- the same forward vector, straight out of the
+// projection this port's own `flatForward` reproduces.
+//
+// Against this port's `(cos yaw, sin yaw)` that gives `yaw = pi/2 -
+// heading`, which is exactly the conversion `sk_bindings::
+// PortYawFromEngineYaw` has carried since M48 (derived there from the spell
+// spawn's `vx = sin(yaw); vy = cos(yaw)`). Three functions, one answer --
+// so this now simply calls it rather than keeping a fourth copy that
+// disagreed with the other three.
+float CameraYawRadians(int32_t rawAngle) {
+    return sk_bindings::PortYawFromEngineYaw(static_cast<int>(rawAngle) & 0xffff);
+}
+
+// **Pitch is not yaw and never was.** M61 pushed both channels through one
+// conversion, which silently gave the pitch a quarter-turn offset it must
+// not have (and the wrong sign besides). The camera matrix settles it: with
+// `p3 = -pitch`, `FUN_10073760`'s depth row picks up `up * sin(p3) == -up *
+// sin(pitch)`, and this port's own `forward = flatForward*cosPitch -
+// rz*sinPitch` has the same `-sin` coefficient on the same term. So the raw
+// channel *is* the port's pitch, unit conversion and nothing else.
+float CameraPitchRadians(int32_t rawAngle) {
+    constexpr float kTwoPi = 6.28318530718f;
+    return static_cast<float>(static_cast<int16_t>(rawAngle & 0xffff)) / 65536.0f * kTwoPi;
+}
+
+// The inverse of CameraYawRadians: this port's camera yaw as the engine's
+// own `player+0xb6` heading, [0, 65536). Everything that consumes a real
+// decompiled heading formula -- the compass tape and the automap marker --
+// goes through this so they cannot drift apart. `pi/2 - x` is its own
+// inverse, which is why this is the same reflection run the other way.
 int CameraHeadingUnits(float cameraYaw) {
-    constexpr float kTwoPi = 6.28318530718f;
-    float turns = -cameraYaw / kTwoPi;
-    turns -= std::floor(turns);  // wrap to [0,1)
-    return static_cast<int>(turns * 65536.0f) & 0xffff;
+    return sk_bindings::EngineYawFromPortYaw(cameraYaw);
 }
 
 // M30: the entities.txt categories that are *item-shaped* -- a placement
@@ -323,6 +370,11 @@ struct MonsterInstance {
     // it is still far better than every creature staring in one fixed
     // direction regardless of where it is walking.
     float facingYaw = 0.0f;
+    // M71: see DoorInstance's identical pair. (A creature's scale is not
+    // here -- it lives on the script, which the placement seeds via
+    // MonsterExecutable::SetPlacementScaleRaw and a later SetScale can
+    // still change.)
+    float rotA = 0.0f, rotB = 0.0f;
     enum class AiState { Idle, Chasing, Attacking } aiState = AiState::Idle;
     // Ticks since this monster last actually had the player in sight.
     // Chasing survives brief losses of sight (the player ducking round a
@@ -422,6 +474,11 @@ struct DoorInstance {
     // every door rendered face-on regardless of which wall it was in,
     // which is what made them all look permanently open.
     float placementYaw = 0.0f;
+    // M71: the record's other two orientation channels (radians, engine
+    // sense) and its `+0x5e` model scale -- see sk::PlacedEntity::rotA and
+    // Zone::EntPlacement::rotARaw.
+    float rotA = 0.0f, rotB = 0.0f;
+    float scale = 1.0f;
     // M38: the two ways a zone trigger identifies the entity it guards --
     // its entities.txt typeId and its .ent placement name. crypt1.s's five
     // trapped doors are matched purely by name.
@@ -465,6 +522,9 @@ struct PickupInstance {
     float x = 0, y = 0, z = 0;
     int modelArchiveIndex = -1;
     float placementYaw = 0.0f;  // real .ent heading, radians
+    // M71: see DoorInstance's identical trio.
+    float rotA = 0.0f, rotB = 0.0f;
+    float scale = 1.0f;
     // M30: true for a container/loot category (8/12) rather than a
     // directly-collectable world item -- its OnUse() opens a real loot
     // menu instead of transferring itself. Kept explicitly rather than
@@ -3175,14 +3235,14 @@ int main(int argc, char** argv) {
                     // which is what makes broken1.s's `0 + 512` and
                     // erthcave's -7686 behave; kept literal.
                     gameCamera.z = static_cast<float>(static_cast<int16_t>(cameraStart.z & 0xffff));
-                    gameCamera.yaw = CameraAngleRadians(cameraStart.yaw);
-                    gameCamera.pitch = CameraAngleRadians(cameraStart.pitch);
+                    gameCamera.yaw = CameraYawRadians(cameraStart.yaw);
+                    gameCamera.pitch = CameraPitchRadians(cameraStart.pitch);
                 } else {
                     gameCamera.x = static_cast<float>(gameZone->playerStartX);
                     gameCamera.y = static_cast<float>(gameZone->playerStartY);
                     gameCamera.z = static_cast<float>(gameZone->playerStartZ);
-                    gameCamera.yaw = CameraAngleRadians(gameZone->playerStartYawRaw);
-                    gameCamera.pitch = CameraAngleRadians(gameZone->playerStartPitchRaw);
+                    gameCamera.yaw = CameraYawRadians(gameZone->playerStartYawRaw);
+                    gameCamera.pitch = CameraPitchRadians(gameZone->playerStartPitchRaw);
                 }
                 // **Deliberate departure.** The real engine adds its
                 // eye-height constant (`CMap+0x1a`) only on the
@@ -3200,7 +3260,7 @@ int main(int argc, char** argv) {
                 // after its entity pass for exactly this reason: the
                 // override is for one arrival, not for every load after it.
                 stack.ClearCameraStart();
-                gameCamera.fovY = 1.2f;
+                gameCamera.fovY = sk::kEngineFovY;
                 gameVelZ = 0.0f;
                 onGround = true;
                 inGame = true;
@@ -3341,6 +3401,9 @@ int main(int argc, char** argv) {
                             door->method(skString("Init"), args, ret, callCtxt);
                             DoorInstance inst;
                             inst.placementYaw = PlacementYawRadians(e.yawRaw);
+                            inst.rotA = PlacementRotRadians(e.rotARaw);
+                            inst.rotB = PlacementRotRadians(e.rotBRaw);
+                            inst.scale = PlacementScale(e.scaleRaw);
                             inst.x = static_cast<float>(e.x);
                             inst.y = static_cast<float>(e.y);
                             inst.z = static_cast<float>(e.z);
@@ -3385,6 +3448,9 @@ int main(int argc, char** argv) {
                             item->method(skString("Init"), args, ret, callCtxt);
                             PickupInstance inst;
                             inst.placementYaw = PlacementYawRadians(e.yawRaw);
+                            inst.rotA = PlacementRotRadians(e.rotARaw);
+                            inst.rotB = PlacementRotRadians(e.rotBRaw);
+                            inst.scale = PlacementScale(e.scaleRaw);
                             inst.isContainer = IsContainerCategory(desc->category);
                             inst.x = static_cast<float>(e.x);
                             inst.y = static_cast<float>(e.y);
@@ -3435,8 +3501,15 @@ int main(int argc, char** argv) {
                             skRValue ret;
                             skExecutableContext callCtxt(&interpreter);
                             monster->method(skString("Init"), args, ret, callCtxt);
+                            // M71: step 5 of GameEngine_InitLevel's own
+                            // order -- the record's `+0x5e` scale is
+                            // written *after* Init(), so the placement wins
+                            // over whatever the script asked for at load.
+                            monster->SetPlacementScaleRaw(e.scaleRaw);
                             MonsterInstance inst;
                             inst.placementYaw = PlacementYawRadians(e.yawRaw);
+                            inst.rotA = PlacementRotRadians(e.rotARaw);
+                            inst.rotB = PlacementRotRadians(e.rotBRaw);
                             inst.facingYaw = inst.placementYaw;
                             inst.x = static_cast<float>(e.x);
                             inst.y = static_cast<float>(e.y);
@@ -3462,6 +3535,13 @@ int main(int argc, char** argv) {
                     sk::PlacedEntity prop{static_cast<float>(e.x), static_cast<float>(e.y),
                                            static_cast<float>(e.z), desc->modelArchiveIndex};
                     prop.yaw = PlacementYawRadians(e.yawRaw);
+                    // M71: and the two orientation channels and the model
+                    // scale the record has always carried and this port
+                    // has never read -- 764 scenery placements alone are
+                    // authored at something other than 1:1.
+                    prop.rotA = PlacementRotRadians(e.rotARaw);
+                    prop.rotB = PlacementRotRadians(e.rotBRaw);
+                    prop.scale = PlacementScale(e.scaleRaw);
                     gameEntities.push_back(prop);
                 }
                 // M36: opt-in test aid -- SK_DEBUG_EQUIP equips the first
@@ -5441,6 +5521,8 @@ int main(int argc, char** argv) {
                     // script (SetSkin/SetScale) -- see
                     // monster_executable.h.
                     sk::PlacedEntity pe{m.x, m.y, m.z, m.modelArchiveIndex, m.facingYaw};
+                    pe.rotA = m.rotA;  // M71
+                    pe.rotB = m.rotB;
                     pe.skinIndex = m.script->skin();
                     pe.scale = m.script->scale();
                     pe.frameIndex = AdvanceMonsterAnimation(m, modelArchive);
@@ -5473,17 +5555,33 @@ int main(int argc, char** argv) {
                     // Real wall-facing heading from the .ent placement, plus
                     // whatever the script's own AddRotationTurn() has
                     // accumulated (the 90-degree swing door.s applies on
-                    // open). Both use the same 65536-per-turn convention.
-                    frameEntities.push_back({d.x, d.y, d.z, d.modelArchiveIndex,
-                                              d.placementYaw + d.script->yawRadians()});
+                    // open).
+                    //
+                    // M71: composed in the engine's *raw* units, via the
+                    // same `headingRaw()` the tile stamp already walks,
+                    // rather than adding two radian values. The port's yaw
+                    // runs the opposite way round from a raw heading
+                    // (`yaw = pi/2 - heading`, see CameraYawRadians), so
+                    // adding a raw turn's radians to a converted heading
+                    // swung every door the wrong way -- invisible only
+                    // because the two happened to cancel for a slab.
+                    sk::PlacedEntity door{d.x, d.y, d.z, d.modelArchiveIndex,
+                                           sk_bindings::PortYawFromEngineYaw(d.script->headingRaw())};
+                    door.rotA = d.rotA;
+                    door.rotB = d.rotB;
+                    door.scale = d.scale;
+                    frameEntities.push_back(door);
                 }
                 // M19: still-in-world pickups -- gamePickups shrinks as
                 // items are actually picked up (see the Action::Use
                 // handling above), so this naturally stops drawing one the
                 // instant it's gone.
                 for (const PickupInstance& p : gamePickups) {
-                    frameEntities.push_back(
-                        {p.x, p.y, p.z, p.modelArchiveIndex, p.placementYaw});
+                    sk::PlacedEntity pickup{p.x, p.y, p.z, p.modelArchiveIndex, p.placementYaw};
+                    pickup.rotA = p.rotA;  // M71
+                    pickup.rotB = p.rotB;
+                    pickup.scale = p.scale;
+                    frameEntities.push_back(pickup);
                 }
                 // M49: arrows in flight. Unlike the spell projectile --
                 // whose `+0x134` art selector is still unidentified, so it
