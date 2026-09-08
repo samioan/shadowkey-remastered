@@ -2911,3 +2911,183 @@ walking straight).
 Health is the slow one by design: `Endurance / 25` every four seconds is
 1 or 2 points for every shipped starting character, so a full heal from
 near death takes minutes of standing still. It is a rest, not a heal.
+
+## The item type, the equip slot, and the class gate (M74)
+
+Three things an inventory item carries that nothing had read, and all three
+turn out to hang off one column of `entities.txt`.
+
+### `GetItemType()` is a stored word, not a deduction
+
+`FUN_1006d508` is the whole of it — `return entity->+0x16c` — and it is
+what sorts an inventory. The five `Display*Page` natives (Store/shop
+dispatcher `FUN_10033660`, cases 4..8) each pick a number and hand it to
+`FUN_10032f78`, whose entire filter is one line:
+
+```c
+if (FUN_1006d508(item) == page) { ...add the row... }
+```
+
+| native | page |
+| --- | ---: |
+| `DisplayMiscItemsMenu` | 0 |
+| `DisplayWeaponsPage` | 1 |
+| `DisplaySpellsPage` | 2 |
+| `DisplayArmorMenu` | 3 |
+| `DisplayConsumablesMenu` | 4 |
+
+`+0x16c` is a per-C++-class constant, written by the class's constructor,
+and the class is chosen by the **`entities.txt` category** through the
+factory `FUN_1002aa14` (the seventeen-arm table above). Eight of its arms
+are item classes:
+
+| cat | constructor | `+0x16c` | `+0x1c0` | what it is |
+| ---: | --- | ---: | ---: | --- |
+| 3 | `FUN_1002eeb8` | 0 misc | 2 none | keys, quest trinkets |
+| 4 | `FUN_1002ce9c` | 1 weapon | 1 right | `weapons\*` |
+| 5 | `FUN_10047740` | 2 spell | 1 right | `spells\*`, `blaze.s` |
+| 6 | `FUN_1002e954` | 3 armor | 2 none | `armor\*` |
+| 9 | `FUN_1002e78c` | 4 consumable | 0 left | `items\*` |
+| 14 | `FUN_1002e5ac` | 2 spell | 1 right | scrolls |
+| 15 | `FUN_1002e844` | 3 armor | 2 none | shields |
+| 16 | `FUN_10047500` | 1 weapon | 1 right | the conjured sword |
+
+Categories 14 and 16 are derived classes and inherit what they do not set:
+14 runs `FUN_10047740` first and only adds the scroll flag `+0x1d4`, 16 runs
+`FUN_1002ce9c`. The base item constructor `FUN_1006c960` writes `1`, which
+is why every other arm overwrites it a few instructions later.
+
+The shipped data agrees column for column: 80 of category 4's 83 rows are
+under `weapons\`, 28 of category 5's 31 under `spells\`, 77 of category 6's
+89 under `armor\`, 55 of category 9's 58 under `items\`, all 7 of category
+14 under `spells\`, and 9 of category 15's 10 under `armor\`.
+
+### `+0x1c0` is which hand the item wants
+
+`FUN_1002ed74` returns it: **0 = left, 1 = right, 2 = neither**. Confirmed
+by the two writers it feeds — `vtable+0x2c` and `vtable+0x30` on the stats
+block, which the Character-stats dispatcher's own `SetLeftItem` (case 0x13,
+`stats+0x48`) and `SetRightItem` (0x14, `stats+0x4c`) name.
+
+So weapons and spells are right-hand items, consumables left-hand ones, and
+armour and misc items name no hand at all.
+
+### Picking something up equips it
+
+The tail of the player's add-to-inventory slot, `vtable+0x164` =
+`FUN_1003d8e0`:
+
+```c
+if (!IsItemEnabledFor(player, item)) return;
+slot = item->+0x1c0;
+if (slot == 1) { if (stats+0x4c) return; SetRightItem(item); q = player+0xf68; }
+else if (slot == 0) { if (stats+0x48) return; SetLeftItem(item); q = player+0xf4c; }
+else return;
+appendToHandQueue(q, item);
+```
+
+An occupied hand means the item is simply not equipped — the function
+returns before it even reaches the queue. Everything funnels through this
+one slot: a loot menu's `PickupItem`, a purchase (`FUN_1003e030` →
+`FUN_10045078`, a one-line forward), and `EquipItem`.
+
+**`EquipItem(hand, item)` ignores its hand argument.** The shipped handler
+(Player case 0x54, 0x10041e9c) reads it with `SIMKIN_AtomToInt` and drops
+the result on the floor — the disassembly discards r0 immediately — then
+walks the inventory and calls `+0x164` if the item is not already in it. So
+the `0` that every one of the game's 34 `EquipItem(0, self)` call sites
+writes is decoration, and a spell still arms the right hand.
+
+### `UpdateEquipStatus`, and where the "3" comes from
+
+`FUN_10033660` case 1, which `inventory.s`'s `PerformEquipAction()` calls:
+
+```c
+if (!IsItemEnabledFor(classRow, item)) return 3;
+if (type == 3) { toggleWorn(item); }              // armour
+else {
+    if (leftHand  == item) { SetLeftItem(0);  dequeue; return 1; }
+    if (rightHand == item) { SetRightItem(0); dequeue; return 1; }
+    slot = item->+0x1c0;                          // its own hand, not a free one
+    ...
+}
+return 1;
+```
+
+Two things worth stating plainly: the **3** is the class gate and nothing
+else — no item type is ever "not equippable" — and the hand is the item's
+own, not whichever is free. Return codes are 1 (ok), 2 (the hand queue is
+full) and 3 (refused); 0 is never returned.
+
+### `FUN_1001f82c` — may this character use this item?
+
+The gate in front of all of it, and the one consumer of the three unnamed
+mask words in the class table (`FUN_1001f9ac`, the nine 0x10-byte rows).
+`param_1` is the class row as a `ushort*`, so `[0]` is `+0`, `[1]` `+2`,
+`[2]` `+4`, `[3]` the `HasMagic` byte at `+6`, `[4]` the class id at `+8`.
+
+```c
+type = item->+0x16c;
+if (type == 2) {                                    // spell
+    if (!item->+0x1d4) {                            // not a scroll
+        if (!row->hasMagic) return false;
+        mask = item->+0x1cc;                        // RestrictUse's bits
+        if (mask) return (mask & (2 << row->classId)) != 0;
+    }
+}
+else if (type < 3) {                                // weapon (or misc)
+    if (type == 1 && row->field2 != 2
+        && !(weaponClass == 0x400 && row->hasMagic)
+        && !(weaponClass == 0x800 && row->hasMagic)
+        && weaponClass != 0
+        && (row->field2 & weaponClass) == 0) return false;
+}
+else if (type == 3) {                               // armour
+    constraint = item->+0x1d4;
+    if (!item->isShield()) {                        // vtable+0x180
+        if (item->+0x1d0 == 7) return true;         // the "no slot" armour type
+        ok = row->field0 & constraint;
+    } else {
+        if (row->field4 == 4) return true;
+        if ((row->field4 & 0x18) && constraint == AR_Light) return true;
+        ok = (constraint == AR_Medium) ? ((row->field4 >> 4) & 1) : 0;
+    }
+    if (!ok) return false;
+}
+return true;
+```
+
+`RestrictUse(...)` (Spell dispatcher case 5) is what fills `+0x1cc`: one bit
+per argument, `2 << classId` (`FUN_10020904` is `(0x20000 << c) >> 16`).
+`blaze.s`'s own `RestrictUse(2, 4, 6, 7)` stores 0x1a8 — Battlemage,
+Nightblade, Spellsword, Sorcerer, which is **exactly** the four classes the
+class table independently marks `HasMagic`.
+
+Read against the class table the three masks make immediate sense:
+
+| class | `field0` armour | `field2` weapons | `field4` shields |
+| --- | --- | --- | --- |
+| Assassin | Light | (unrestricted) | none |
+| Barbarian | Light, Medium | (unrestricted) | any |
+| Battlemage | Light | (unrestricted) | Light, Medium |
+| Knight | Light, Medium, Heavy | (unrestricted) | any |
+| Nightblade | Light | a mask | Light |
+| Rogue | Light, Medium, Heavy | a mask | Light, Medium |
+| Spellsword | Light, Medium | (unrestricted) | Light, Medium |
+| Sorcerer | Light, Medium | a mask | none |
+| Thief | Light | a mask | Light |
+
+`field2 == 2` means "no weapon restriction", which is five of the nine. The
+two weapon bits exempt for any magical class are `WR_EnchantedBlade`
+(0x400) and 0x800.
+
+This is also what makes a spell script's two use texts a real fork rather
+than decoration. Every spell in the game ends its `Init()` with
+
+```
+if (GetPlayer().IsItemEnabledFor(self) = true) SetUseText(404);
+else                                           SetUseText(405);
+```
+
+and for `blaze.s` those two strings are **"Learn Blaze"** and **"Pickup
+Blaze Scroll"**.

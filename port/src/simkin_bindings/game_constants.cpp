@@ -54,4 +54,50 @@ void RegisterGameConstants(skInterpreter& interpreter) {
     interpreter.addGlobalVariable(skString("null"), skRValue());
 }
 
+// M74: the factory table's item arms -- see the header for where each
+// row comes from and how it was checked against the shipped entities.txt.
+namespace {
+
+struct ItemCategoryRow {
+    int category;
+    int itemType;
+    int equipSlot;
+};
+
+const ItemCategoryRow kItemCategories[] = {
+    {3, kItemTypeMisc, kEquipSlotNone},         // FUN_1002eeb8
+    {4, kItemTypeWeapon, kEquipSlotRight},      // FUN_1002ce9c
+    {5, kItemTypeSpell, kEquipSlotRight},       // FUN_10047740
+    {6, kItemTypeArmor, kEquipSlotNone},        // FUN_1002e954
+    {9, kItemTypeConsumable, kEquipSlotLeft},   // FUN_1002e78c
+    {14, kItemTypeSpell, kEquipSlotRight},      // FUN_1002e5ac : FUN_10047740
+    {15, kItemTypeArmor, kEquipSlotNone},       // FUN_1002e844
+    {16, kItemTypeWeapon, kEquipSlotRight},     // FUN_10047500 : FUN_1002ce9c
+};
+
+const ItemCategoryRow* FindItemCategory(int category) {
+    for (const ItemCategoryRow& row : kItemCategories) {
+        if (row.category == category) return &row;
+    }
+    return nullptr;
+}
+
+}  // namespace
+
+int ItemTypeForCategory(int entityCategory) {
+    const ItemCategoryRow* row = FindItemCategory(entityCategory);
+    // A category with no arm never reaches an item constructor at all, so
+    // it has no `+0x16c`. Misc is the honest answer for "not an item".
+    return row ? row->itemType : kItemTypeMisc;
+}
+
+int EquipSlotForCategory(int entityCategory) {
+    const ItemCategoryRow* row = FindItemCategory(entityCategory);
+    return row ? row->equipSlot : kEquipSlotNone;
+}
+
+bool IsInventoryItemCategory(int entityCategory) {
+    return FindItemCategory(entityCategory) != nullptr;
+}
+
 }  // namespace sk_bindings

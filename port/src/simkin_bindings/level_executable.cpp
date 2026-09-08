@@ -5,6 +5,7 @@
 
 #include "assets/sound_archive.h"
 #include "audio/audio_engine.h"
+#include "simkin_bindings/game_constants.h"
 #include "simkin_bindings/item_executable.h"
 #include "simkin_bindings/menu_stack.h"
 #include "simkin_bindings/monster_executable.h"
@@ -80,14 +81,22 @@ std::unique_ptr<MonsterExecutable> LevelExecutable::CreateCreature(int typeId) {
 }
 
 // M48: see the header.
+int LevelExecutable::EntityCategoryOf(int typeId) const {
+    const sk::EntityTypeDescriptor* desc = m_EntityTypes ? m_EntityTypes->Lookup(typeId) : nullptr;
+    return desc ? desc->category : -1;
+}
+
 std::unique_ptr<ItemExecutable> LevelExecutable::CreateItem(int typeId, bool requireItemCategory) {
     const sk::EntityTypeDescriptor* desc = m_EntityTypes ? m_EntityTypes->Lookup(typeId) : nullptr;
     bool isRealScript = desc && desc->name.size() > 2 &&
                          desc->name.compare(desc->name.size() - 2, 2, ".s") == 0;
     if (!isRealScript) return nullptr;
-    bool isItemCategory = desc->category == 3 || desc->category == 4 || desc->category == 5 ||
-                           desc->category == 6 || desc->category == 9;
-    if (requireItemCategory && !isItemCategory) return nullptr;
+    // M74: the category list is the factory's own item arms, not a
+    // hand-picked five. It used to omit 14 (the seven scroll spells), 15
+    // (nine of the ten shields) and 16 (the conjured Daedric sword), so
+    // `Level.CreateEntity` on any of those answered null and the caller
+    // silently got nothing.
+    if (requireItemCategory && !IsInventoryItemCategory(desc->category)) return nullptr;
     std::string relPath = desc->name;
     for (char& c : relPath) {
         if (c == '\\') c = '/';
@@ -96,12 +105,24 @@ std::unique_ptr<ItemExecutable> LevelExecutable::CreateItem(int typeId, bool req
     skExecutableContext loadCtxt(&m_Stack.interpreter());
     try {
         auto item = std::make_unique<ItemExecutable>(skString(fullPath.c_str()), loadCtxt, m_Stack);
+        // M74: the type comes from the category, and it has to be in place
+        // *before* Init() runs -- `blaze.s`'s own Init() asks
+        // `GetPlayer().IsItemEnabledFor(self)` to pick between its two use
+        // texts ("Learn Blaze" / "Take Blaze Scroll"), and that answer
+        // depends on this object already knowing it is a spell.
+        item->SetEntityCategory(desc->category);
+        // M74: and the typeId moves ahead of Init() with it. The real
+        // factory entry point is `create(category, typeId)`
+        // (`FUN_100715a8`'s `vtable+0x18` call), so `entity+0xc8` is set
+        // before the object exists as far as any script is concerned --
+        // this port set it afterwards, which left every `Init()` looking at
+        // a template id of -1.
+        item->SetTemplateId(typeId);  // M36, see ItemExecutable::templateId()
         skRValueArray initArgs;
         initArgs.append(skRValue(0));  // placeholder for Init's "(s)" parameter
         skRValue initRet;
         skExecutableContext callCtxt(&m_Stack.interpreter());
         item->method(skString("Init"), initArgs, initRet, callCtxt);
-        item->SetTemplateId(typeId);  // M36, see ItemExecutable::templateId()
         return item;
     } catch (skParseException& e) {
         std::printf("Level: CreateItem(%d) -- PARSE ERROR loading %s: %s\n", typeId,

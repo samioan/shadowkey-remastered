@@ -6468,6 +6468,92 @@ soft-fails 39 -> 39, all 14 tracked `.ppm` renders byte-identical,
   mitigation; and the whole economy run at the real 25 Hz tick -- walk to
   exhaustion, then stand and recover.
 
+- [x] **M74 -- the spell that thought it was a trinket.** Reported from
+  play: the Blaze pickup at the start of the game ("Learn Blaze" if your
+  class can cast, "Pickup Blaze Scroll" if it cannot) lands in the
+  inventory's **Miscellaneous** page instead of Spells, and cannot be
+  equipped or cast. Full write-up in docs/WORLD_MODEL.md's new "The item
+  type, the equip slot, and the class gate" section.
+
+    - **Root cause.** This port *inferred* an item's type from whichever
+      category setter its script happened to call -- `SetArmorValue` meant
+      armour, `SetDamageMin` meant a weapon, `SetUsable` meant a
+      consumable. Nothing a spell script calls implies "spell", so
+      `kItemTypeSpell` was never produced by anything at all: the constant
+      existed only in the `DisplaySpellsPage` filter it was supposed to
+      match, and **every spell in the game reported Misc**.
+
+    - **The engine does not infer.** `GetItemType()` is `FUN_1006d508`,
+      one line: `return entity->+0x16c`. That word is a per-C++-class
+      constant written by the class's constructor, and the class comes from
+      the `entities.txt` **category** column through the factory
+      `FUN_1002aa14` -- the same seventeen-arm table M72 read for creature
+      heights. Eight of its arms are item classes (3 misc, 4 weapon,
+      **5 spell**, 6 armour, 9 consumable, 14 scroll, 15 shield, 16
+      weapon), and the shipped data agrees column for column: 80 of
+      category 4's 83 rows live under `weapons\`, 28 of category 5's 31
+      under `spells\`, 77 of category 6's 89 under `armor\`, 55 of
+      category 9's 58 under `items\`. `blaze.s` is typeId 50, category 5.
+
+    - **`+0x1c0` is which hand an item wants** -- 0 left, 1 right, 2
+      neither, confirmed against the stats block's own `SetLeftItem`
+      (`stats+0x48`) and `SetRightItem` (`+0x4c`). Weapons and spells are
+      right-hand items, consumables left-hand ones, armour and misc neither.
+
+    - **Picking something up equips it**, which is the second half of the
+      report. The tail of the player's add-to-inventory slot `+0x164`
+      (`FUN_1003d8e0`) puts the item in the hand its `+0x1c0` names, if that
+      hand is empty and the class may use it. A loot menu's `PickupItem`, a
+      purchase (`FUN_1003e030` -> `FUN_10045078`, a one-line forward) and
+      `EquipItem` all funnel through it. **`EquipItem(hand, item)` ignores
+      its hand argument** -- the shipped handler reads it with
+      `SIMKIN_AtomToInt` and discards r0 -- so the `0` in all 34 shipped
+      `EquipItem(0, self)` call sites is decoration and a spell still arms
+      the right hand.
+
+    - **`UpdateEquipStatus` had two things wrong**, both of them the bug.
+      The hand is the item's own `+0x1c0`, not "whichever is free"; and the
+      **3** return that `inventory.s` reads as "cannot equip" is the *class*
+      gate and nothing else -- this port answered 3 for anything that was
+      neither armour nor a weapon, which is why Blaze stayed unequippable
+      even once it was on the right page. The real codes are 1 (ok), 2
+      (hand queue full) and 3 (refused); 0 is never returned.
+
+    - **`IsItemEnabledFor` is real now**, and it turns out to be the one
+      consumer of the three unnamed mask words M64 transcribed verbatim out
+      of the class table. `RestrictUse(...)` stores `2 << classId` per
+      argument in `spell+0x1cc`, and `blaze.s`'s own `RestrictUse(2, 4, 6,
+      7)` names **exactly** the four classes the class table independently
+      marks `HasMagic` -- two shipped tables agreeing, which is what makes
+      both readings safe. `field0` is the armour-weight mask, `field2` the
+      weapon-class mask (`== 2` meaning unrestricted, five of nine classes)
+      and `field4` the shield mask; read out, they say Knights and Rogues
+      wear heavy armour and Assassins and Sorcerers carry no shield.
+
+    - **Two more corrections found on the way.** `CreateItem`'s category
+      filter was a hand-picked five and omitted 14, 15 and 16, so
+      `Level.CreateEntity` answered null for all seven scroll spells, nine
+      of the ten shields and the conjured Daedric sword. And the player
+      constructor `FUN_1003d670` -- the same one M64 read the ability ranks
+      from -- writes `+0xf3c = 5` and `+0xf38 = 2`, so a character who has
+      never been through creation is a **Nord Battlemage**, not the 0/0
+      Argonian Assassin this port defaulted to. Cosmetic until this
+      milestone; load-bearing now that the class row gates every equip.
+
+  **Verification.** New `m74_item_category_smoke` (30 checks, suite
+  **65/65 -> 66/66**): the eight factory arms; the table against the real
+  `entities.txt` with the script directory of all 278 item rows as an
+  independent witness; Blaze built through the real
+  `Level.CreateEntity(50)` and landing on the real `inventory.s` **Spells**
+  page and not the Misc one; `RestrictUse`'s bitmask against
+  `ClassHasMagic` class by class; the armour arm splitting the nine class
+  rows on a real `armor\Chain_Coif.s`; the two use texts resolved through
+  the real string table ("Learn Blaze" / "Pickup Blaze Scroll"); and the
+  pickup and equip paths for a caster and a non-caster each. Three existing
+  tests moved with the behaviour (m10, m22, m60). Verified live as well: a
+  Battlemage given typeId 50 in `azra` reads `Blaze  type 2  EQUIPPED` on
+  the debug inventory page, with the spell's book icon in the viewmodel.
+
 ## Next milestones (not yet started)
 
 Roughly in priority order for reaching "actually playable," not commitments:

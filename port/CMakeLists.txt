@@ -566,6 +566,14 @@ target_link_libraries(autoaim_smoke PRIVATE sk_render3d sk_entity_types)
 add_executable(vitals_smoke src/tests/m73_vitals_smoke.cpp)
 target_link_libraries(vitals_smoke PRIVATE sk_bindings sk_entity_types)
 
+# Where an item's type comes from: the entities.txt category -> C++ class ->
+# `+0x16c` chain, checked against every item row in the shipped data, plus
+# the class-restriction gate, the two use texts a spell picks between, and
+# the pickup/equip paths that follow from the preferred hand `+0x1c0`.
+# See src/tests/m74_item_category_smoke.cpp.
+add_executable(item_category_smoke src/tests/m74_item_category_smoke.cpp)
+target_link_libraries(item_category_smoke PRIVATE sk_bindings sk_entity_types)
+
 # The developer debug suite: the console's parsing/history/completion, the
 # metrics sink and its mark/diff, the overlay's layout, and a full pass over
 # every command against a fake DebugHost -- which is why the whole suite is

@@ -32,6 +32,25 @@ ItemExecutable::ItemExecutable(const skString& filename, skExecutableContext& ct
     }
 }
 
+// M74: the real source of the item type -- the entities.txt category the
+// factory picked this object's C++ class from. See game_constants.h.
+void ItemExecutable::SetEntityCategory(int category) {
+    m_EntityCategory = category;
+    m_ItemType = ItemTypeForCategory(category);
+    m_EquipSlot = EquipSlotForCategory(category);
+}
+
+void ItemExecutable::InferItemType(int type) {
+    if (m_EntityCategory >= 0) return;  // the engine already answered
+    m_ItemType = type;
+    switch (type) {
+        case kItemTypeWeapon:
+        case kItemTypeSpell: m_EquipSlot = kEquipSlotRight; break;
+        case kItemTypeConsumable: m_EquipSlot = kEquipSlotLeft; break;
+        default: m_EquipSlot = kEquipSlotNone; break;
+    }
+}
+
 int ItemExecutable::spellTypeId() const {
     // M48. The same resolution statusEffect() has used since M43 -- a
     // script's own SetSpellType() first, then the typeId
@@ -252,37 +271,37 @@ bool ItemExecutable::method(const skString& methodName, skRValueArray& args,
     }
     if (methodName == skString("SetUsable") && args.entries() == 1) {
         m_Usable = args[0].boolValue();
-        if (m_Usable) m_ItemType = kItemTypeConsumable;
+        if (m_Usable) InferItemType(kItemTypeConsumable);
         return true;
     }
     if (methodName == skString("SetArmorValue") && args.entries() == 1) {
         m_ArmorValue = args[0].intValue();
-        m_ItemType = kItemTypeArmor;
+        InferItemType(kItemTypeArmor);
         return true;
     }
     if (methodName == skString("SetArmorType") && args.entries() == 1) {
         m_ArmorType = args[0].intValue();
-        m_ItemType = kItemTypeArmor;
+        InferItemType(kItemTypeArmor);
         return true;
     }
     if (methodName == skString("SetArmorConstraint") && args.entries() == 1) {
         m_ArmorConstraint = args[0].intValue();
-        m_ItemType = kItemTypeArmor;
+        InferItemType(kItemTypeArmor);
         return true;
     }
     if (methodName == skString("SetDamageMin") && args.entries() == 1) {
         m_DamageMin = args[0].intValue();
-        m_ItemType = kItemTypeWeapon;
+        InferItemType(kItemTypeWeapon);
         return true;
     }
     if (methodName == skString("SetDamageMax") && args.entries() == 1) {
         m_DamageMax = args[0].intValue();
-        m_ItemType = kItemTypeWeapon;
+        InferItemType(kItemTypeWeapon);
         return true;
     }
     if (methodName == skString("SetWeaponSprite") && args.entries() == 1) {
         m_WeaponSprite = args[0].intValue();
-        m_ItemType = kItemTypeWeapon;
+        InferItemType(kItemTypeWeapon);
         return true;
     }
     if (methodName == skString("SetAnimationFrames") && args.entries() == 1) {
@@ -291,12 +310,12 @@ bool ItemExecutable::method(const skString& methodName, skRValueArray& args,
     }
     if (methodName == skString("SetRange") && args.entries() == 1) {
         m_Range = args[0].intValue();
-        m_ItemType = kItemTypeWeapon;
+        InferItemType(kItemTypeWeapon);
         return true;
     }
     if (methodName == skString("SetWeaponType") && args.entries() == 1) {
         m_WeaponType = args[0].intValue();
-        m_ItemType = kItemTypeWeapon;
+        InferItemType(kItemTypeWeapon);
         return true;
     }
     // M20: real ranged-weapon markers -- SetClipSize/SetFireRate/
@@ -314,13 +333,13 @@ bool ItemExecutable::method(const skString& methodName, skRValueArray& args,
          methodName == skString("SetIsLaunched")) &&
         args.entries() == 1) {
         m_Launched = args[0].boolValue();
-        m_ItemType = kItemTypeWeapon;
+        InferItemType(kItemTypeWeapon);
         return true;
     }
     if ((methodName == skString("SetThrowingWeapon") || methodName == skString("SetIsThrown")) &&
         args.entries() == 1) {
         m_Thrown = args[0].boolValue();
-        m_ItemType = kItemTypeWeapon;
+        InferItemType(kItemTypeWeapon);
         return true;
     }
     if (methodName == skString("SetRating") && args.entries() == 1) {
@@ -338,6 +357,10 @@ bool ItemExecutable::method(const skString& methodName, skRValueArray& args,
         // statement of "which spell is this" -- and the shipped scroll
         // wrappers are the scripts that carry it.
         m_SpellType = args[0].intValue();
+        // M74: the other half of the path-loaded spell signal -- see
+        // RestrictUse below. Exactly the seven scroll wrappers call this,
+        // and nothing else in the corpus does.
+        InferItemType(kItemTypeSpell);
         return true;
     }
     if (methodName == skString("SetLevel") && args.entries() == 1) {
@@ -374,11 +397,30 @@ bool ItemExecutable::method(const skString& methodName, skRValueArray& args,
         return true;
     }
     if (methodName == skString("RestrictUse")) {
-        // M22: a real class/race restriction list, never read back by any
-        // script and with no restriction system in this port to apply it
-        // to (PlayerExecutable::IsItemEnabledFor()'s own comment) --
-        // accepted as a no-op so its 100+ real call sites don't log soft-
-        // fail noise.
+        // M74: no longer a no-op. The real handler (Spell dispatcher case
+        // 5) ORs one bit per argument into `spell+0x1cc`:
+        //
+        //     for each arg: mask |= FUN_10020904(FUN_100207ec(arg))
+        //
+        // where the inner call is the identity for a class id 0..8 (and 0
+        // for anything else) and the outer one is `(0x20000 << c) >> 16`,
+        // i.e. **`2 << classId`**. `blaze.s`'s `RestrictUse(2, 4, 6, 7)`
+        // therefore stores 0x1a8 -- Battlemage, Nightblade, Spellsword,
+        // Sorcerer. PlayerExecutable::IsItemEnabledFor() reads it back.
+        for (int i = 0; i < args.entries(); ++i) {
+            int classId = args[i].intValue();
+            if (classId < 0 || classId > 8) classId = 0;  // FUN_100207ec's default
+            m_RestrictUseMask |= (2 << classId) & 0xffff;
+        }
+        // ...and it doubles as the spell signal the M10 inference never
+        // had. `RestrictUse` is a **Spell**-class binding, and a census of
+        // the shipped corpus finds it in exactly 29 scripts -- the 27 under
+        // `spells\` plus `blaze.s` and `healwound.s` at the root -- and
+        // nowhere else at all. Together with SetSpellType below (the other
+        // seven, the scroll wrappers) that is every spell script in the
+        // game and nothing that is not one. Only matters for an object
+        // built from a script path, where no category was available.
+        InferItemType(kItemTypeSpell);
         return true;
     }
     if (methodName == skString("DoAttackRoll") && args.entries() >= 1) {

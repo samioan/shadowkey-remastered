@@ -3454,6 +3454,13 @@ int main(int argc, char** argv) {
                         try {
                             auto item = std::make_unique<sk_bindings::ItemExecutable>(
                                 skString(fullPath.c_str()), loadCtxt, stack);
+                            // M74: this placement's own entities.txt
+                            // category is what gives the object its item
+                            // type and its preferred hand -- and, like the
+                            // position below, the engine has both before
+                            // Init() runs. See game_constants.h.
+                            item->SetEntityCategory(desc->category);
+                            item->SetTemplateId(e.typeId);
                             // M62: the engine sets a placement's position
                             // (vtable +0x18) *before* calling its Init()
                             // (vtable +0x10) -- see ZONE_FORMAT.md's step

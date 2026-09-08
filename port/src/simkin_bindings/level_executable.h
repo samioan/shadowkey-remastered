@@ -124,6 +124,12 @@ public:
     // M21: must be called once entities.txt is loaded (main.cpp) before
     // CreateEntity() can resolve anything -- see this class's comment.
     void SetEntityTypes(const sk::EntityTypeTable* entityTypes) { m_EntityTypes = entityTypes; }
+    // M74: an entity's `entities.txt` category, which is what decides its
+    // C++ class and therefore its item type (game_constants.h). -1 when the
+    // table is not loaded or the typeId is not in it. Used by the save
+    // loader, which rebuilds inventory children from a stored script path
+    // and so does not go through CreateItem().
+    int EntityCategoryOf(int typeId) const;
 
     // M21: CreateEntity()'s handler allocates the real ItemExecutable and
     // holds it here (a one-slot pending holder, same shape

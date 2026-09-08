@@ -23,6 +23,7 @@
 #include <string>
 
 #include "assets/string_table.h"
+#include "simkin_bindings/game_constants.h"
 #include "simkin_bindings/item_executable.h"
 #include "simkin_bindings/menu_stack.h"
 #include "simkin_bindings/monster_executable.h"
@@ -83,11 +84,27 @@ int main(int argc, char** argv) {
     if (!ratingOk) ok = false;
 
     // --- Part 2: real OnUse() -> GetPlayer().EquipItem(0, self) ---
+    //
+    // M74: two things changed here and both are the engine's. A spell is a
+    // **right**-hand item (`+0x1c0 == 1`), and `EquipItem`'s hand argument
+    // is read and discarded by the shipped handler -- so the `0` every
+    // spell script writes is decoration and the spell arms the right hand.
+    // And picking it up is already enough: `AddItem` is `FUN_1003d8e0`,
+    // whose tail equips into the preferred hand, so this is now true
+    // *before* OnUse() runs and OnUse() is a no-op on top of it.
     sk_bindings::ItemExecutable* blindRaw = blind.get();
+    bool spellTypeOk = blindRaw->itemType() == sk_bindings::kItemTypeSpell;
+    std::printf("spells/blind.s itemType(): %d (expected %d = IPT_Spell) %s\n",
+                blindRaw->itemType(), sk_bindings::kItemTypeSpell, spellTypeOk ? "OK" : "FAILED");
+    if (!spellTypeOk) ok = false;
     stack.player().AddItem(std::move(blind));  // matches how a spell would already be owned
+    bool armedOnPickup = stack.player().rightItem() == blindRaw;
+    std::printf("picking the spell up arms the right hand on its own: %s %s\n",
+                armedOnPickup ? "yes" : "no", armedOnPickup ? "OK" : "FAILED");
+    if (!armedOnPickup) ok = false;
     blindRaw->InvokeOnUse();
-    bool equippedOk = stack.player().leftItem() == blindRaw;
-    std::printf("player.leftItem() after blind.s's real OnUse() (EquipItem(0,self)): %s %s\n",
+    bool equippedOk = stack.player().rightItem() == blindRaw;
+    std::printf("player.rightItem() after blind.s's real OnUse() (EquipItem(0,self)): %s %s\n",
                 equippedOk ? "matches" : "does not match", equippedOk ? "OK" : "FAILED");
     if (!equippedOk) ok = false;
 

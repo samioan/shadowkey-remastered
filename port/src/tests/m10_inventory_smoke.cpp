@@ -11,6 +11,7 @@
 #include <cstdio>
 
 #include "assets/string_table.h"
+#include "simkin_bindings/character_progression.h"
 #include "simkin_bindings/game_constants.h"
 #include "simkin_bindings/item_executable.h"
 #include "simkin_bindings/menu_executable.h"
@@ -194,6 +195,32 @@ int main(int argc, char** argv) {
         // --- Real equip: toggling the armor item through the same
         // UpdateEquipStatus() entry point inventory.s's
         // PerformEquipAction() calls should change GetArmorRating(). ---
+        //
+        // M74: every equip now goes through the real class gate first
+        // (`FUN_1001f82c`), and `armor/chain_coif.s`'s own
+        // `SetArmorConstraint(AR_Medium)` is not something every class may
+        // wear. A default player object is a Battlemage, whose class row
+        // allows AR_Light only, so it is *correctly* refused -- check that
+        // first, then switch to a Knight (the row with all three weight
+        // bits) for the rest of the equip exercise.
+        {
+            sk_bindings::ItemExecutable* coif = nullptr;
+            for (const auto& item : stack.player().inventory()) {
+                if (item->itemType() == sk_bindings::kItemTypeArmor) coif = item.get();
+            }
+            const int refused = coif ? stack.player().UpdateEquipStatus(coif, true) : -1;
+            std::printf("\na Battlemage equipping AR_Medium armour: ret=%d (expect 3) %s\n",
+                        refused, refused == 3 ? "OK" : "FAILED");
+            if (refused != 3) {
+                std::printf("m10_inventory_smoke: FAILED the class armour gate did not refuse\n");
+                return 1;
+            }
+            skRValueArray classArgs;
+            classArgs.append(skRValue(sk_bindings::kClassKnight));
+            skRValue classRet;
+            skExecutableContext classCtxt(&interpreter);
+            stack.player().method(skString("ChooseCharacter"), classArgs, classRet, classCtxt);
+        }
         sk_bindings::ItemExecutable* armor = nullptr;
         for (const auto& item : stack.player().inventory()) {
             if (item->itemType() == sk_bindings::kItemTypeArmor) armor = item.get();
@@ -221,7 +248,9 @@ int main(int argc, char** argv) {
             stack.player().method(skString("GetArmorRating"), args, ret, ctxt);
             std::printf("UpdateEquipStatus(equip)=%d, armor rating after equip: %d\n", ret2,
                         ret.intValue());
-            if (ret2 != 0 || ret.intValue() != armor->armorValue()) {
+            // M74: the real success code is 1, not 0 -- see
+            // PlayerExecutable::UpdateEquipStatus()'s own comment.
+            if (ret2 != 1 || ret.intValue() != armor->armorValue()) {
                 std::printf("m10_inventory_smoke: FAILED equip didn't change armor rating\n");
                 return 1;
             }
@@ -269,7 +298,10 @@ int main(int argc, char** argv) {
             "GetAttack() %d -> %d\n",
             ret3, handEmptyBefore ? "true" : "false", handFilledAfter ? "true" : "false",
             attackBefore, attackAfter);
-        if (ret3 != 0 || !handEmptyBefore || !handFilledAfter || attackAfter <= attackBefore) {
+        // M74: 1 is the real "ok", and the hand a weapon lands in is its
+        // own `+0x1c0` -- the right one -- not "whichever was free".
+        if (ret3 != 1 || !handEmptyBefore || !handFilledAfter ||
+            stack.player().rightItem() != weapon || attackAfter <= attackBefore) {
             std::printf(
                 "m10_inventory_smoke: FAILED weapon equip didn't fill a hand or change GetAttack()"
                 "\n");

@@ -87,7 +87,40 @@ void PlayerExecutable::AddItem(std::unique_ptr<ItemExecutable> item) {
     // is what the original does too: GiveItem(), a world pickup and a
     // loot bag all funnel through this one vtable slot.
     if (item) m_KeyItemFlags.OnItemAcquired(item->templateId());
+    ItemExecutable* added = item.get();
     m_Inventory.push_back(std::move(item));
+    if (!added) return;
+
+    // M74: and the rest of `FUN_1003d8e0`, which this port had stopped
+    // short of -- **picking something up equips it**. The tail of the real
+    // function is:
+    //
+    //     if (!IsItemEnabledFor(player, item)) return;
+    //     slot = item->+0x1c0;
+    //     if (slot == 1) { if (stats+0x4c) return; SetRightItem(item); }
+    //     else if (slot == 0) { if (stats+0x48) return; SetLeftItem(item); }
+    //     else return;
+    //     appendToHandQueue(...);
+    //
+    // -- so a weapon or a spell goes straight into the right hand and a
+    // consumable into the left, provided that hand is empty and the
+    // character's class may use the thing at all. That is exactly the
+    // reported behaviour: take Blaze as a caster and it is armed and
+    // castable on the spot, take it as a Barbarian and it is only a scroll
+    // in your bag. Armour and misc items name no hand and are unaffected.
+    if (!IsItemEnabledFor(*added)) return;
+    switch (added->equipSlot()) {
+        case kEquipSlotRight:
+            if (m_RightItem) return;
+            m_RightItem = added;
+            break;
+        case kEquipSlotLeft:
+            if (m_LeftItem) return;
+            m_LeftItem = added;
+            break;
+        default: return;
+    }
+    added->SetEquipped(true);
 }
 
 ItemExecutable* PlayerExecutable::FindInventoryById(const std::string& id) const {
@@ -476,42 +509,102 @@ int PlayerExecutable::spellResistance() const {
     return SpellResistance(m_MagicResistance, m_Will);
 }
 
+// M74: `FUN_1001f82c`. See the header for the whole shape; the field
+// names are character_progression.h's.
+bool PlayerExecutable::IsItemEnabledFor(const ItemExecutable& item) const {
+    const ClassRow* row = FindClassRow(m_CharacterClass);
+    if (!row) return true;  // the real lookup's null row, read through
+
+    const int type = item.itemType();
+    if (type == kItemTypeSpell) {
+        // A scroll skips the whole test -- which is what makes
+        // `blaze.s`'s two use texts a real fork rather than decoration:
+        // "Learn Blaze" for a caster, "Take Blaze Scroll" for everyone
+        // else, and the scroll they take is readable by anyone.
+        if (item.scroll()) return true;
+        if (!row->hasMagic) return false;
+        const int mask = item.restrictUseMask();
+        if (mask != 0) return (mask & (2 << row->classId)) != 0;
+        return true;
+    }
+    if (type == kItemTypeWeapon) {
+        const int weaponClass = item.weaponType();
+        // Read in the shipped order, including the two blanket exemptions
+        // a magic class gets. `field2 == 2` is "no weapon restriction at
+        // all" and covers Assassin, Barbarian, Battlemage, Knight and
+        // Spellsword.
+        if (row->field2 == 2) return true;
+        if (weaponClass == 0x400 && row->hasMagic) return true;  // WR_EnchantedBlade
+        if (weaponClass == 0x800 && row->hasMagic) return true;
+        if (weaponClass == 0) return true;  // a weapon that named no class
+        return (row->field2 & weaponClass) != 0;
+    }
+    if (type == kItemTypeArmor) {
+        const int constraint = item.armorConstraint();
+        if (item.isShield()) {
+            if (row->field4 == 4) return true;  // Barbarian, Knight: any shield
+            if ((row->field4 & 0x18) != 0 && constraint == 2) return true;  // AR_Light
+            if (constraint == 4) return ((row->field4 >> 4) & 1) != 0;      // AR_Medium
+            return false;
+        }
+        // Armour type 7 has no equipment slot of its own (GetArmorText
+        // returns nothing for it) and is never refused.
+        if (item.armorType() == 7) return true;
+        return (row->field0 & constraint) != 0;
+    }
+    return true;  // misc and consumables have no arm
+}
+
+// M74: `FUN_10033660` case 1, the real `UpdateEquipStatus`.
+//
+// Two things this had wrong, and both are the reported bug. The **3**
+// return -- "cannot equip, close the popup silently", which `inventory.s`
+// branches on -- comes only from the class gate, never from the item's
+// type; and everything that is not armour is put in the hand its own
+// `+0x1c0` names, not "whichever hand is free". A spell is a right-hand
+// item, so it equips exactly like a sword.
 int PlayerExecutable::UpdateEquipStatus(ItemExecutable* item, bool equipping) {
     if (!item) return 3;
+    if (!IsItemEnabledFor(*item)) return 3;
+
     if (item->itemType() == kItemTypeArmor) {
+        // The real arm calls FUN_1003dbdc, which toggles the worn flag and
+        // applies/removes that specific item's stat bonuses. This port has
+        // the toggle; the per-item bonus table is a separate, unmodelled
+        // function (see armorRating(), which sums the worn items instead).
         item->SetEquipped(equipping);
-        return 0;
+        return 1;
     }
-    if (item->itemType() == kItemTypeWeapon) {
-        if (equipping) {
-            // Decompiled real behavior (see player_executable.h's comment):
-            // unequip-toggle if already worn in either hand, else fill
-            // whichever hand is currently empty (left first), else -- both
-            // hands full -- a no-op success (the item would join the real
-            // engine's invisible per-hand queue; this port doesn't model
-            // that queue, see ShowActionQueue()'s comment).
-            if (m_LeftItem == item) {
-                m_LeftItem = nullptr;
-                item->SetEquipped(false);
-            } else if (m_RightItem == item) {
-                m_RightItem = nullptr;
-                item->SetEquipped(false);
-            } else if (!m_LeftItem) {
-                m_LeftItem = item;
-                item->SetEquipped(true);
-            } else if (!m_RightItem) {
-                m_RightItem = item;
-                item->SetEquipped(true);
-            }
-            // else: both hands occupied -- no visible change, still "ok".
-        } else {
-            if (m_LeftItem == item) m_LeftItem = nullptr;
-            if (m_RightItem == item) m_RightItem = nullptr;
-            item->SetEquipped(false);
-        }
-        return 0;
+
+    // Already in a hand: taking it out is unconditional, and the real code
+    // returns before it ever looks at the preferred slot.
+    if (m_LeftItem == item) {
+        m_LeftItem = nullptr;
+        item->SetEquipped(false);
+        return 1;
     }
-    return 3;  // consumables/misc items aren't equippable
+    if (m_RightItem == item) {
+        m_RightItem = nullptr;
+        item->SetEquipped(false);
+        return 1;
+    }
+
+    // Otherwise it goes in its own hand -- and only if that hand is empty.
+    // The real function then appends to that hand's queue whether or not
+    // the slot was free, which is the invisible waitlist this port does
+    // not model (see the header's UpdateEquipStatus comment); a full hand
+    // is therefore a no-op success here, exactly as before.
+    ItemExecutable** slot = nullptr;
+    switch (item->equipSlot()) {
+        case kEquipSlotLeft: slot = &m_LeftItem; break;
+        case kEquipSlotRight: slot = &m_RightItem; break;
+        default: break;  // kEquipSlotNone: armour and misc, handled above
+    }
+    if (slot && equipping && *slot == nullptr) {
+        *slot = item;
+        item->SetEquipped(true);
+    }
+    return 1;
 }
 
 bool PlayerExecutable::method(const skString& methodName, skRValueArray& args,
@@ -1333,37 +1426,55 @@ bool PlayerExecutable::method(const skString& methodName, skRValueArray& args,
         return true;
     }
     if (methodName == skString("EquipItem") && args.entries() == 2) {
-        // M22: a direct hand assignment -- distinct from UpdateEquipStatus
-        // ()'s empty-hand-first auto-fill/toggle (inventory.s's own equip
-        // flow); this is what real spell scripts' OnUse() (`GetPlayer().
-        // EquipItem(0, self)`, every one of them, always hand 0) and a
-        // handful of key-item scripts call directly. Hand 0 -> left, else
-        // -> right -- unconfirmed which physical hand 0 really is (no
-        // script ever reads it back to check), same "arbitrary but
-        // internally consistent" footing as game_constants.h's AR_*/WR_*
-        // placeholders; picked so casting a spell (always hand 0) maps to
-        // UseLeftAction, matching the real default control scheme's own
-        // Key7/Key5 left/right split main.cpp's combat loop already uses.
-        ItemExecutable* item = static_cast<ItemExecutable*>(args[1].obj());
-        if (item) {
-            if (args[0].intValue() == 0) {
-                m_LeftItem = item;
-            } else {
-                m_RightItem = item;
+        // M22 read this as a direct hand assignment and had to guess which
+        // hand `0` meant. **M74: the hand argument is not used at all.**
+        // The shipped handler (Player case 0x54, 0x10041e9c) reads it with
+        // `SIMKIN_AtomToInt` and throws the result away -- the disassembly
+        // discards r0 immediately -- then walks the inventory and, only if
+        // the item is not already in it, calls the player's own
+        // add-to-inventory slot `+0x164` (`FUN_1003d8e0`). Which hand the
+        // item lands in comes from the item's own `+0x1c0`, exactly as it
+        // does for a world pickup or a purchase.
+        //
+        // That is why every spell in the game writes `EquipItem(0, self)`
+        // in its `OnUse()` and yet a spell is a *right*-hand item: the 0 is
+        // decoration. Reproduced, argument and all.
+        //
+        // The one deviation is the inventory half: this port's AddItem()
+        // takes ownership, and a script reaching here holds a raw pointer
+        // to an object something else already owns (`self` is an inventory
+        // entry by construction), so only the equip tail runs.
+        ItemExecutable* item = dynamic_cast<ItemExecutable*>(args[1].obj());
+        if (item && IsItemEnabledFor(*item)) {
+            switch (item->equipSlot()) {
+                case kEquipSlotRight:
+                    if (!m_RightItem) {
+                        m_RightItem = item;
+                        item->SetEquipped(true);
+                    }
+                    break;
+                case kEquipSlotLeft:
+                    if (!m_LeftItem) {
+                        m_LeftItem = item;
+                        item->SetEquipped(true);
+                    }
+                    break;
+                default: break;
             }
-            item->SetEquipped(true);
         }
         return true;
     }
     if (methodName == skString("IsItemEnabledFor") && args.entries() == 1) {
-        // M22: real signature is IsItemEnabledFor(item) -- gates a class/
-        // race restriction (RestrictUse()'s own argument list) this port
-        // never modeled (M5's character creation only covers race/
-        // portrait/name, no class system at all) -- always true, the more
-        // permissive default when no real restriction system exists, same
-        // spirit as CanDrop()'s own "every real, owned item can be
-        // dropped" simplification (ItemExecutable).
-        returnValue = skRValue(true);
+        // M74: real, at last. M22 answered a flat `true` because "M5's
+        // character creation only covers race/portrait/name, no class
+        // system at all" -- M64 built that class system, and `FUN_1001f82c`
+        // turns out to be the one consumer of the three unnamed mask words
+        // in its class table. See IsItemEnabledFor() above.
+        //
+        // A non-item argument (a table cell, a null) keeps the permissive
+        // answer, which is also what the real function does with a null row.
+        const ItemExecutable* item = dynamic_cast<const ItemExecutable*>(args[0].obj());
+        returnValue = skRValue(item ? IsItemEnabledFor(*item) : true);
         return true;
     }
     if (methodName == skString("ResetQueue") && args.entries() == 1) {

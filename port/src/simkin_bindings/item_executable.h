@@ -229,6 +229,26 @@ public:
     // merchant pays for the item -- see PlayerExecutable::SellItem.
     int marketValue() const { return m_MarketValue; }
     int armorValue() const { return m_ArmorValue; }
+    // M74: the three restriction inputs PlayerExecutable::IsItemEnabledFor()
+    // tests, all of them fields real scripts have always been setting and
+    // nothing had ever read back.
+    //
+    //   `SetArmorType(n)`       -> armor `+0x1d0`; 7 is the "no slot" type
+    //                              GetArmorText has no string for, and is
+    //                              never refused.
+    //   `SetArmorConstraint(AR_*)` -> armor `+0x1d4`, an AR_ bit.
+    //   `SetWeaponType(WR_*)`   -> weapon `+0x1d0`, a WR_ bit -- despite the
+    //                              name it is the weapon *class*, which is
+    //                              why it takes WR_Blunt and not a damage
+    //                              type.
+    int armorType() const { return m_ArmorType; }
+    int armorConstraint() const { return m_ArmorConstraint; }
+    int weaponType() const { return m_WeaponType; }
+    // Shields are their own C++ class (entities.txt category 15), and the
+    // only thing that separates them from ordinary armour is a vtable slot:
+    // `+0x180` returns 1 for `FUN_1002e844`'s class and 0 for
+    // `FUN_1002e954`'s. All ten shipped shields are category 15.
+    bool isShield() const { return m_EntityCategory == 15; }
     int damageMin() const { return m_DamageMin; }
     int damageMax() const { return m_DamageMax; }
     bool equipped() const { return m_Equipped; }
@@ -316,6 +336,33 @@ public:
     int templateId() const { return m_TemplateId; }
     void SetTemplateId(int typeId) { m_TemplateId = typeId; }
 
+    // ---- M74: the item type, from where the engine actually gets it ----
+    //
+    // `entity+0x16c` and `entity+0x1c0` are per-C++-class constants, and
+    // the class is chosen by the `entities.txt` **category** column -- see
+    // the table in game_constants.h. Every item the engine ever puts in an
+    // inventory is built by that factory, so every one of them has a real
+    // type; this port builds some items straight from a script path
+    // instead (the starting kit, a loot bag's own script, a save's
+    // inventory children), and those keep the M10 setter inference below
+    // as a fallback.
+    //
+    // Call this with the descriptor's own category as soon as the object
+    // exists. It wins over the inference permanently -- a spell script
+    // that happens to call `SetRating` must not be re-typed by it.
+    void SetEntityCategory(int category);
+    int entityCategory() const { return m_EntityCategory; }
+    // `entity+0x1c0`: kEquipSlotLeft / kEquipSlotRight / kEquipSlotNone.
+    int equipSlot() const { return m_EquipSlot; }
+
+    // `spell+0x1cc`, the bitmask `RestrictUse(...)` ORs its arguments into
+    // -- one bit per character class, `2 << classId` (`FUN_10020904`).
+    // `blaze.s`'s own `RestrictUse(2, 4, 6, 7)` is Battlemage, Nightblade,
+    // Spellsword and Sorcerer, which is exactly the four classes the class
+    // table marks `HasMagic`. Read by
+    // PlayerExecutable::IsItemEnabledFor().
+    int restrictUseMask() const { return m_RestrictUseMask; }
+
     // M39: a real script's own SetID() (e.g. "stooth") -- the key
     // PlayerExecutable::CountInventory() matches on.
     const std::string& id() const { return m_Id; }
@@ -359,13 +406,30 @@ public:
     const ScriptDelay& delay() const { return m_Delay; }
 
 private:
+    // M74: the M10 setter inference, demoted to a fallback. It runs only
+    // for an object built straight from a script path, where no
+    // entities.txt category was ever available -- once SetEntityCategory()
+    // has spoken, the type is the engine's and nothing re-derives it.
+    //
+    // It sets the preferred hand too, from the same type-to-slot pairing
+    // the category table has (weapons and spells are right-hand items,
+    // consumables left, armour and misc neither) -- otherwise a
+    // path-loaded weapon would report "no slot" and never equip.
+    void InferItemType(int type);
+
     ScriptDelay m_Delay;  // M53
     // M38: object-valued script fields -- see setValue() above.
     std::map<std::string, skRValue> m_ObjectFields;
     std::string m_ScriptPath;  // M32: see scriptPath()/statusEffect()
     MenuStack& m_Stack;
     skInterpreter* m_Interpreter;
-    int m_ItemType = 0;  // kItemTypeMisc until a category setter fires
+    int m_ItemType = 0;  // +0x16c -- kItemTypeMisc until the category, or a
+                         // setter, says otherwise (see SetEntityCategory)
+    // M74. -1 = built from a script path, so no category was ever
+    // available and the setter inference is live for this object.
+    int m_EntityCategory = -1;
+    int m_EquipSlot = 2;        // +0x1c0, kEquipSlotNone
+    int m_RestrictUseMask = 0;  // +0x1cc, RestrictUse's OR'd class bits
     int m_NameId = -1;
     int m_ShortNameId = -1;
     int m_DescriptionId = -1;

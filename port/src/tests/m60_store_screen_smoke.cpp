@@ -420,18 +420,22 @@ int main(int argc, char** argv) {
             Check(cell && call0(cell, "GetAssociatedObject").obj() == name->item,
                   "cell.GetAssociatedObject() now hands back the item SellItem() takes");
 
-            // Equip the bought weapon and the buy page's comparison
-            // columns come alive -- every shelf line is now measured
-            // against it, which is the whole point of those two 10px
-            // columns.
+            // The bought weapon is already equipped, and the buy page's
+            // comparison columns come alive against it -- every shelf line
+            // is now measured against what the player is holding, which is
+            // the whole point of those two 10px columns.
+            //
+            // M74: the purchase itself is what equips it. `FUN_1003e030`
+            // hands each new item to `FUN_10045078`, which is a one-line
+            // forward to the player's own add-to-inventory slot `+0x164`
+            // (`FUN_1003d8e0`) -- and that function's tail puts the item in
+            // the hand its `+0x1c0` names. A weapon names the **right**
+            // hand, so this test no longer equips it by hand, and it is the
+            // right-hand column that is live.
             using Compare = sk_b::TableExecutable::CellCompare;
             sk_b::ItemExecutable* worn = name->item;
-            skRValueArray equip;
-            equip.append(skRValue(static_cast<skiExecutable*>(worn), false));
-            equip.append(skRValue(true));
-            call(sellScreen, "UpdateEquipStatus", equip);
-            Check(worn->equipped() && player.leftItem() == worn,
-                  "the bought weapon goes into a hand");
+            Check(worn->equipped() && player.rightItem() == worn,
+                  "buying a weapon equips it into the right hand, unasked");
 
             call0(&player, "BuyFromMerchant");
             sk_b::MenuExecutable* buyScreen = stack.currentMenu();
@@ -440,7 +444,7 @@ int main(int argc, char** argv) {
             int better = 0, worse = 0, equal = 0, none = 0;
             for (int r = 0; buyTable && r < buyTable->rowCount(); ++r) {
                 const sk_b::TableCell* shelf = buyTable->PeekCell(r, 0);
-                const Compare got = buyTable->CompareCell(r, 2);  // the left hand
+                const Compare got = buyTable->CompareCell(r, 3);  // the right hand
                 if (!shelf || !shelf->product) { ++none; continue; }
                 const int shelfRating = shelf->product->rating;
                 const bool ok = shelfRating > worn->rating()  ? got == Compare::Better
@@ -456,10 +460,10 @@ int main(int argc, char** argv) {
             Check(better + worse + equal == (buyTable ? buyTable->rowCount() : 0) &&
                       equal >= 1,
                   "...and the line the player just bought reads Equal against itself");
-            // The right hand is still empty, so its column stays blank --
+            // The left hand is still empty, so its column stays blank --
             // the two columns really are independent.
-            Check(buyTable && buyTable->CompareCell(0, 3) == Compare::None,
-                  "the right-hand column is still blank, because that hand is empty");
+            Check(buyTable && buyTable->CompareCell(0, 2) == Compare::None,
+                  "the left-hand column is still blank, because that hand is empty");
         }
 
         // The plain inventory page is the third branch: no cost column at

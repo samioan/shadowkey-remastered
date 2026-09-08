@@ -179,10 +179,48 @@ public:
     // comment for why: the screen that would let a player browse it,
     // actionqueue.s, is confirmed non-functional in the real shipped
     // game), so here that same case is just a no-op return-success:
-    // nothing visibly changes. Returns the same ret-code convention the
-    // script branches on: 0 = ok, 3 = not equippable (silently closes the
-    // action popup).
+    // nothing visibly changes.
+    //
+    // M74 corrects two things. The hand is the item's **own** preferred
+    // slot (`+0x1c0`, ItemExecutable::equipSlot()), not "whichever one is
+    // free" -- which is what lets a spell equip at all, since a spell is a
+    // right-hand item exactly like a sword. And the "3" return is the
+    // *class* gate (IsItemEnabledFor below), never the item's type; this
+    // port answered 3 for anything that was not armour or a weapon, which
+    // is why the Blaze spell stayed unequippable even once it was on the
+    // right page. The codes are now the real ones -- **1 = ok**, 2 = the
+    // hand queue is full (unreachable here), 3 = refused, and 0 is never
+    // returned -- rather than the 0-for-success this port had used.
+    // `inventory.s` only ever tests for 2 and 3, so the change is
+    // invisible to every shipped script.
     int UpdateEquipStatus(ItemExecutable* item, bool equipping);
+
+    // ---- M74: `FUN_1001f82c` -- "may this character use this item?" ----
+    //
+    // The one gate in front of every equip and every auto-equip, and what
+    // `IsItemEnabledFor(item)` answers for a script. It is a switch on the
+    // item's type against the player's class row (character_progression.h,
+    // whose three otherwise-unexplained `field0`/`field2`/`field4` words
+    // turn out to be exactly the three masks it tests):
+    //
+    //   * **Spell** (type 2). A scroll is readable by anyone. Otherwise the
+    //     class must have magic *and*, if the spell set a `RestrictUse`
+    //     mask, that mask must name the class (`2 << classId`).
+    //   * **Weapon** (type 1). Unrestricted when the class's own
+    //     `field2` is 2 -- five of the nine classes -- and otherwise the
+    //     weapon's `SetWeaponType` bit must be in it. Two weapon bits are
+    //     exempt for any magic class: `WR_EnchantedBlade` (0x400) and
+    //     0x800.
+    //   * **Armor** (type 3). Armour type 7 is always allowed. A shield
+    //     (the separate category-15 class, whose `vtable+0x180` returns 1
+    //     where ordinary armour's returns 0) is tested against `field4`;
+    //     everything else is `field0 & SetArmorConstraint`.
+    //   * Misc and consumables have no arm, so they are always allowed.
+    //
+    // Returns true when nothing objects, which is also what an unknown
+    // class id gets -- the real lookup returns a null row for one, and the
+    // shipped code then reads through it rather than refusing.
+    bool IsItemEnabledFor(const ItemExecutable& item) const;
 
     // ---- M59: the merchant the player is currently trading with ----
     //
@@ -528,14 +566,22 @@ private:
     std::string m_Name;
     std::string m_CharNameBuffer;
     int m_Sex = 0;
-    int m_Race = 0;
+    // M74: the real constructor's own defaults. `FUN_1003d670` -- the
+    // player class's constructor, the same one M64 read the two ability
+    // ranks out of -- writes `+0xf3c = 5` and `+0xf38 = 2` before anything
+    // else touches them, i.e. a player object that has never been through
+    // character creation is a **Nord Battlemage**, not the 0/0 Argonian
+    // Assassin this port had been defaulting to. That stopped being
+    // cosmetic in M74, when the class row became the input to every
+    // equip check.
+    int m_Race = 5;      // +0xf3c, kRaceNord
     int m_PortraitId = 0;
     int m_Gold = 0;
     int m_Temp = 0;
     // M56: player+0xf38, the field GetCharacter() reads -- a separate
     // field from m_Temp in the real engine, which is why sharing the
     // scratch field would have been wrong here.
-    int m_CharacterClass = 0;
+    int m_CharacterClass = 2;  // +0xf38, kClassBattlemage -- see m_Race
     bool m_HasCreatedCharacter = false;
 
     // Vitals (M10) -- fixed baseline defaults, see class comment.

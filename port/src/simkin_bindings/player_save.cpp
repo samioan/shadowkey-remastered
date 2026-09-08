@@ -17,6 +17,7 @@
 #include <cstdio>
 
 #include "simkin_bindings/item_executable.h"
+#include "simkin_bindings/level_executable.h"
 #include "simkin_bindings/menu_stack.h"
 #include "simkin_bindings/player_executable.h"
 #include "skExecutableContext.h"
@@ -270,6 +271,13 @@ void PlayerExecutable::ApplySaveRecord(const sk::SavedEntity& record, MenuStack&
         skExecutableContext loadCtxt(&stack.interpreter());
         try {
             auto item = std::make_unique<ItemExecutable>(skString(path.c_str()), loadCtxt, stack);
+            // M74: a restored item is the same object the factory would
+            // have built, so it gets the same category-derived type -- and
+            // both it and the typeId land before Init(), the order
+            // CreateItem() now uses too.
+            const int category = stack.level().EntityCategoryOf(child.typeId);
+            if (category >= 0) item->SetEntityCategory(category);
+            item->SetTemplateId(child.typeId);
             skRValueArray args;
             args.append(skRValue(0));
             skRValue ret;
@@ -278,7 +286,6 @@ void PlayerExecutable::ApplySaveRecord(const sk::SavedEntity& record, MenuStack&
             const int quantity = child.kind == sk::SavedEntityKind::Weapon
                                      ? child.weapon.quantity
                                      : child.stackable.quantity;
-            item->SetTemplateId(child.typeId);
             if (quantity > 0) item->SetQuantity(quantity);
             m_Inventory.push_back(std::move(item));
         } catch (skParseException& e) {

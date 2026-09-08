@@ -18,15 +18,12 @@
 // branch, "type = 0", gated on CanTravel()) rather than confirmed the same
 // way.
 //
-// The AR_*/WR_* per-category sub-constants (armor weight class, weapon
-// damage type) were never cross-referenced against real data the way the
-// IPT_* set was -- their exact values are a deliberate, documented
-// placeholder (arbitrary but internally consistent small ints), same as
-// this project's other "known unconfirmed, not worth blocking on"
-// decisions (e.g. render3d/camera.h's kEyeHeightOffset). Nothing in this
-// port's own logic reads them back, so any distinct values would behave
-// identically -- they only need to *exist* so scripts that reference them
-// don't throw.
+// The AR_*/SR_*/WR_* per-category sub-constants (armor weight class,
+// weapon class) were placeholders until M58 read the real global bootstrap
+// out of the binary: they are **bit flags**, and every one of them is now
+// the shipped value (simkin_bindings/effects.cpp's table). M74 is the first
+// thing that reads them back -- PlayerExecutable::IsItemEnabledFor()'s
+// armour and weapon arms test them against the class table's own masks.
 
 class skInterpreter;
 
@@ -37,6 +34,64 @@ constexpr int kItemTypeWeapon = 1;
 constexpr int kItemTypeSpell = 2;
 constexpr int kItemTypeArmor = 3;
 constexpr int kItemTypeConsumable = 4;
+
+// ---- M74: where an item's type actually comes from ----
+//
+// It is **not** inferred. `GetItemType()` reads one stored word,
+// `entity+0x16c` (`FUN_1006d508`), and so does everything that sorts an
+// inventory: the five `Display*Page` natives all funnel into
+// `FUN_10032f78`, whose entire filter is `FUN_1006d508(item) == page`.
+//
+// That word is a per-C++-class constant written by the class's own
+// constructor, and the class is chosen by the **`entities.txt` category
+// column** through the factory `FUN_1002aa14` (the seventeen-arm table in
+// docs/ZONE_FORMAT.md). So the category *is* the item type, one step
+// removed:
+//
+//   | cat | constructor    | `+0x16c` | `+0x1c0` | what it is           |
+//   |-----|----------------|----------|----------|----------------------|
+//   |  3  | `FUN_1002eeb8` | 0 misc   | 2 none   | keys, quest trinkets |
+//   |  4  | `FUN_1002ce9c` | 1 weapon | 1 right  | `weapons\*`          |
+//   |  5  | `FUN_10047740` | 2 spell  | 1 right  | `spells\*`, blaze.s  |
+//   |  6  | `FUN_1002e954` | 3 armor  | 2 none   | `armor\*`            |
+//   |  9  | `FUN_1002e78c` | 4 consum | 0 left   | `items\*`            |
+//   | 14  | `FUN_1002e5ac` | 2 spell  | 1 right  | scrolls (see below)  |
+//   | 15  | `FUN_1002e844` | 3 armor  | 2 none   | shields              |
+//   | 16  | `FUN_10047500` | 1 weapon | 1 right  | the conjured sword   |
+//
+// Two of those arms are derived classes and inherit the value they do not
+// set: 14 runs `FUN_10047740` first (hence spell) and only adds the scroll
+// flag `+0x1d4`, and 16 runs `FUN_1002ce9c` (hence weapon). The base item
+// constructor `FUN_1006c960` writes `1`, which is why every arm that wants
+// something else overwrites it a few instructions later.
+//
+// Verified against the shipped `entities.txt`: 80 of category 4's 83 rows
+// are under `weapons\`, 28 of category 5's 31 under `spells\`, 77 of
+// category 6's 89 under `armor\`, 55 of category 9's 58 under `items\`,
+// and all 7 of category 14 and 9 of category 15's 10 under `spells\` and
+// `armor\` respectively.
+//
+// This port used to *infer* the type from whichever category setter a
+// script happened to call (`SetArmorValue` -> armor, `SetDamageMin` ->
+// weapon, `SetUsable` -> consumable). Nothing a spell script calls implies
+// "spell", so `kItemTypeSpell` was never produced by anything and every
+// spell in the game reported Misc -- which is the whole of M74's bug.
+int ItemTypeForCategory(int entityCategory);
+
+// `entity+0x1c0`, from the same constructors -- which hand an item wants
+// when it is picked up (`FUN_1003d8e0`) or equipped
+// (`FUN_10033660` case 1). Not a preference the engine can be talked out
+// of: an item whose slot is `kEquipSlotNone` is never put in a hand at
+// all, and one whose slot is taken is simply not equipped.
+constexpr int kEquipSlotLeft = 0;
+constexpr int kEquipSlotRight = 1;
+constexpr int kEquipSlotNone = 2;
+int EquipSlotForCategory(int entityCategory);
+
+// Does this `entities.txt` category name one of the eight item classes
+// above? Categories outside the table are creatures, doors, triggers and
+// the rest of the world, which never enter an inventory.
+bool IsInventoryItemCategory(int entityCategory);
 
 // M60: the two labels the store/sell table's cost column is built from.
 // They are stringtable ids in the engine's own code (`stringTable[0x2f7c/4]`
