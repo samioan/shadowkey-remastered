@@ -6378,6 +6378,96 @@ soft-fails 39 -> 39, all 14 tracked `.ppm` renders byte-identical,
   ease converges without overshoot in 18 ticks, and that the decay levels
   the camera only while moving.
 
+- [x] **M73 -- the three bars finally move both ways.** Reported from play:
+  the stamina bar only ever moved when jumping, and none of the three pools
+  ever refilled. Both halves were simply missing rather than wrong -- M51
+  implemented the jump's cost and nothing had gone looking for the other
+  five functions. Full write-up in docs/WORLD_MODEL.md's new "The vitals
+  economy" section; the constants and the derivation live in
+  `simkin_bindings/vitals.h`.
+
+    - **What spends fatigue**, four functions, all on the player's own
+      vtable: **jump** `FUN_10044400` (+0x234) spends 5 and refuses unless
+      `fatigue > 5`; **attack** `FUN_100425bc` (+0x288) spends 4; **cast**
+      `FUN_10042394` case 2 (+0x280) spends 3; **move** `FUN_10045228`
+      (+0x1dc) spends 2 every `0xc4` delta units. The port had only the
+      first of the four.
+
+    - **Three details that are visible in play, and are reproduced.** The
+      attack's 4 is spent *up front* -- before the target search, before the
+      melee/ranged split, before any to-hit roll -- so a whiff, a
+      bare-fisted swing and a connecting blow all cost the same, and a bow
+      costs it too. The cast's 3 is spent *last*, only after both the refire
+      gate and the cast itself succeeded, so a cast refused for want of
+      magicka is free; and spells never reach `FUN_100425bc`, so the two
+      costs never stack. And the move cost is a **time drain on a hook**,
+      not a per-key charge: slot `+0x1dc` is called by each of the four base
+      move functions, so holding forward *and* a strafe genuinely drains
+      twice as fast, and it fires whether or not the step is then blocked.
+
+    - **What an empty pool costs.** `FUN_100445d4` shifts the per-frame step
+      one extra bit right while `fatigue < 1` -- exactly half movement speed
+      -- and `FUN_100425bc`'s melee branch halves the damage roll on the
+      same test, ahead of the defender's mitigation. The ranged branch has
+      already returned by then, so **an arrow is not weakened by
+      exhaustion**; only a swing is. Both ported; `RollDamage` grew the
+      `halveRoll` argument so the halving lands where the engine puts it.
+
+    - **Regeneration** is `FUN_10049b64`, called from the player tick
+      `FUN_10045294` right after the status-effect tick. It has **exactly
+      one call site in the binary**, so regeneration is the player's alone
+      -- a wounded creature stays wounded. Three accumulators on the stats
+      block (`+0x3c`/`+0x3e`/`+0x40`), three periods, three
+      attribute-derived amounts, each written through the ordinary clamp and
+      each gated on the pool being below its own maximum:
+      **health `Endurance / 25` every 4 s**, **magicka `Willpower / 15`
+      every 2 s**, **fatigue `(Strength + Willpower) / 15` every 2 s**.
+
+    - **Neither divisor is a literal**, and that is where this milestone
+      could most easily have gone silently wrong. `/25` is `0x51eb851f` with
+      `smull` + `asr #3` on the high word, and `0x51eb851f` reads like the
+      reciprocal of *100* at a glance; `/15` is `0x88888889` used signed
+      with the `add`-then-`asr #3` correction. Both were read off the
+      disassembly, and the smoke test reproduces both instruction sequences
+      and compares them against plain division over -2000..5000 rather than
+      asserting the constant.
+
+    - **Three modifiers, and one that was compiled away.** A **High Elf**
+      adds `raceAbility * 5` to the willpower term before the divide, a
+      **Breton** the same to strength+willpower, and carrying
+      `items\azras_bandage.s` (typeId **4702**, confirmed against the real
+      `entities.txt`) adds a flat +3 to the health tick. The fourth is a
+      **shipped dead branch**: at 0x10049c1c the health arm loads the
+      owner's race, compares it against 7 (Wood Elf) and never reads the
+      flags -- both paths fall into the same multiplier load. A Wood Elf
+      health bonus was written and compiled out; the port has none either.
+      It is invisible in the decompiler's C, which renders the dead compare
+      as a discarded call.
+
+    - **The surprising result.** Both rates are fixed by the periods, so at
+      25 Hz they are flat numbers: walking straight drains **2.50/s**,
+      walking diagonally **5.00/s**, and a 50-strength / 50-willpower
+      character regenerates **2.88/s**. So a starting character **cannot
+      walk themselves tired in a straight line** -- regeneration is very
+      slightly ahead. Hold a strafe as well and the pool empties in about 45
+      seconds. Fatigue in this game is spent by fighting and jumping;
+      walking only bleeds it when you are also sidestepping, or when the two
+      attributes are low. The first draft of the smoke test asserted the
+      opposite and failed, which is how this was found.
+
+  **Verification.** New `m73_vitals_smoke` (46 checks, suite **64/64 ->
+  65/65**): the four costs; the drain's period, its reset-not-subtract, the
+  strict `>` on the comparison and the per-direction doubling; both divisors
+  reproduced instruction for instruction; the three amounts run against all
+  sixteen rows of the **real race/sex attribute table** (which is the check
+  that a 4x divisor error would fail, since `/100` gives zero for every
+  shipped character); the two racial modifiers proven to belong to exactly
+  one race each; typeId 4702 resolved through the real `entities.txt` and
+  the bandage equipped on a real `PlayerExecutable` through a real created
+  item; the two exhaustion penalties including that the halving precedes
+  mitigation; and the whole economy run at the real 25 Hz tick -- walk to
+  exhaustion, then stand and recover.
+
 ## Next milestones (not yet started)
 
 Roughly in priority order for reaching "actually playable," not commitments:

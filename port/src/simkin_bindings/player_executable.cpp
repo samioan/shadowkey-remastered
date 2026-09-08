@@ -15,6 +15,7 @@
 #include "simkin_bindings/menu_stack.h"
 #include "simkin_bindings/monster_executable.h"
 #include "simkin_bindings/native_binding_common.h"
+#include "simkin_bindings/vitals.h"
 #include "skInterpreter.h"
 #include "skParseException.h"
 #include "skRValue.h"
@@ -260,6 +261,41 @@ void PlayerExecutable::TickStatusEffects(int deltaUnits) {
                 SetHealth(m_Health + m_Level);
             }
         });
+}
+
+// M73: FUN_10049b64. Three independent accumulators, three periods, three
+// attribute-derived amounts -- see vitals.h for the whole derivation. The
+// order here is the real one (health, then magicka, then fatigue), which
+// matters only in that all three share one frame delta.
+void PlayerExecutable::TickVitalRegeneration(int deltaUnits) {
+    if (RegenPeriodElapsed(m_Stats.healthRegenAccum(), kHealthRegenPeriod, deltaUnits) &&
+        m_Health < m_MaxHealth) {
+        SetHealth(m_Health + HealthRegenAmount(m_Endurance,
+                                                HasEquippedTemplate(kAzraBandageTypeId)));
+    }
+    if (RegenPeriodElapsed(m_Stats.magickaRegenAccum(), kMagickaRegenPeriod, deltaUnits) &&
+        m_Magicka < m_MaxMagicka) {
+        SetActorMagicka(m_Magicka + MagickaRegenAmount(m_Will, m_Race, m_RaceAbility));
+    }
+    if (RegenPeriodElapsed(m_Stats.fatigueRegenAccum(), kFatigueRegenPeriod, deltaUnits) &&
+        m_Fatigue < m_MaxFatigue) {
+        SetActorFatigue(m_Fatigue +
+                         FatigueRegenAmount(m_Strength, m_Will, m_Race, m_RaceAbility));
+    }
+}
+
+bool PlayerExecutable::HasEquippedTemplate(int typeId) const {
+    const ItemExecutable* hands[] = {m_LeftItem, m_RightItem};
+    for (const ItemExecutable* item : hands) {
+        if (item && !item->markedForRemoval() && item->templateId() == typeId) return true;
+    }
+    for (const std::unique_ptr<ItemExecutable>& item : m_Inventory) {
+        if (item && !item->markedForRemoval() && item->equipped() &&
+            item->templateId() == typeId) {
+            return true;
+        }
+    }
+    return false;
 }
 
 bool PlayerExecutable::HasItemOfTemplate(int typeId) const {

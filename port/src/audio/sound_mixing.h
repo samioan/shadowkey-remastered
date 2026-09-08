@@ -192,9 +192,9 @@ constexpr int kSoundMenuSelect = 100;    // menu1.wav
 constexpr int kSoundMenuMusic = 0x46;    // 70, battle3.ogg
 constexpr const char* kMenuSoundCategory = "menu";
 
-// A jump costs this much fatigue and is refused below it (FUN_10044400
-// tests `> 5` before spending).
-constexpr int kJumpFatigueCost = 5;
+// M73: the jump's fatigue cost used to live here, because the jump also
+// picks between the two sounds above. It is one of four action costs now,
+// so it moved to simkin_bindings/vitals.h with the rest of them.
 
 // The default third and fourth `PlaySound` arguments, from the
 // dispatcher's own skRValue defaults: volume 100, no directional

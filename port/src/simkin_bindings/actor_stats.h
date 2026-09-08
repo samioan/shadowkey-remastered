@@ -244,6 +244,18 @@ public:
         return total;
     }
 
+    // ---- M73: the three regeneration accumulators (vitals.h) ----
+    //
+    // `stats+0x3c`, `+0x3e` and `+0x40`, sitting just past the level at
+    // `+0x34`. They live here because that is where the engine keeps them,
+    // not because anything but the player uses them: `FUN_10049b64`, the
+    // only function that touches all three, has exactly one call site and
+    // it is the player's own tick. The policy that reads them needs the
+    // owner's race and equipment, so it lives on PlayerExecutable.
+    int& healthRegenAccum() { return m_HealthRegenAccum; }
+    int& magickaRegenAccum() { return m_MagickaRegenAccum; }
+    int& fatigueRegenAccum() { return m_FatigueRegenAccum; }
+
     bool blinded() const { return (m_EffectFlags & kEffectFlagBlind) != 0; }
     bool poisoned() const { return (m_EffectFlags & kEffectFlagPoison) != 0; }
     bool burning() const { return m_BurnTimer > 0 && m_BurnKind == kPeriodicBurn; }
@@ -393,6 +405,10 @@ private:
     int m_BurnAccumulator = 0;  // +0x7a
     int m_BurnKind = kPeriodicNone;  // +0x7c
     int m_ParalysisTimer = 0;   // a monster's own +0x294
+    // M73: see healthRegenAccum() above.
+    int m_HealthRegenAccum = 0;   // +0x3c
+    int m_MagickaRegenAccum = 0;  // +0x3e
+    int m_FatigueRegenAccum = 0;  // +0x40
 };
 
 }  // namespace sk_bindings

@@ -55,7 +55,15 @@ bool RollMeleeHit(int attackerAttack, int defenderDefense);
 // subtracted, with a fully-absorbed hit dealing literally nothing rather
 // than a courtesy 1. Returns 0 for a miss and for an absorbed hit alike --
 // which is what the real code does too, since both skip the DoDamage call.
-int RollDamage(int attackerAttack, int defenderDefense, int defenderArmor, int dmgMin, int dmgMax);
+//
+// M73: `halveRoll` is `FUN_100425bc`'s exhaustion penalty -- the player's
+// own melee branch follows its damage roll with `if (fatigue < 1) damage
+// >>= 1`, on the raw roll and before the defender's mitigation comes off,
+// which is exactly where this applies it. Only the player's *melee* path
+// passes true: the ranged branch has already returned by then, and a
+// creature has no fatigue pool to empty. See vitals.h.
+int RollDamage(int attackerAttack, int defenderDefense, int defenderArmor, int dmgMin, int dmgMax,
+                bool halveRoll = false);
 
 // M20 (ranged weapons): true if (targetX,targetY) is within `range` world
 // units of (attackerX,attackerY) and inside a 60-degree forward-facing

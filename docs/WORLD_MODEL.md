@@ -2738,3 +2738,176 @@ and shifting down 8. The billboard spans `±halfWidth` horizontally about
 `+0xbc` and runs *upward* from `+0xbe` by `2 * halfHeight`, so it is
 **bottom-anchored** at the entity's own z — the same anchoring M62's floor
 snap assumes for an actor.
+
+## The vitals economy: what spends the three pools, and what refills them (M73)
+
+The HUD's three bars have been drawn since M10 and the stats block behind
+them decoded since M43, but nothing had traced what *moves* them outside a
+spell. The answer is six small functions, five of them hanging off the
+player's own vtable, and one of them the reason the bars are not a one-way
+ratchet.
+
+### The stats-block fields
+
+Everything here indexes the shared stats block (`player+0x3ac`), whose
+field map is pinned by the Character-stats dispatcher `FUN_10048244` — its
+`param_1` is a `short*`, so `param_1[n]` in the decompiler's C is byte
+offset `2n`, and the dispatcher's own `GetStrength`/`GetMaxHealth`/... arms
+name each one:
+
+| offset | field | | offset | field |
+| --- | --- | --- | --- | --- |
+| `+0x14` | Strength | | `+0x24` | max health |
+| `+0x16` | Intelligence | | `+0x26` | max fatigue |
+| `+0x18` | Agility | | `+0x28` | max magicka |
+| `+0x1a` | Willpower | | `+0x2a` | health |
+| `+0x1c` | Speed | | `+0x2c` | fatigue |
+| `+0x1e` | Endurance | | `+0x2e` | magicka |
+| `+0x20` | Personality | | `+0x34` | level |
+| `+0x22` | Luck | | `+0x3c`/`+0x3e`/`+0x40` | the three regen accumulators |
+
+The last row is new this milestone. `+0x2c` being fatigue and `+0x2e`
+magicka was already established (M48); the three accumulators sit just past
+the level and are touched by exactly one function.
+
+### The four things that spend fatigue
+
+| what | function | vtable slot | cost |
+| --- | --- | --- | --- |
+| jump | `FUN_10044400` | `+0x234` | 5, and refused unless `fatigue > 5` |
+| attack | `FUN_100425bc` | `+0x288` | 4 |
+| cast | `FUN_10042394` case 2 | `+0x280` | 3 |
+| move | `FUN_10045228` | `+0x1dc` | 2 per `0xc4` delta units |
+
+Three details are worth stating because each is visible in play.
+
+**The attack's 4 is spent up front.** It is the first thing `FUN_100425bc`
+does after its two cooldown gates — before the target search, before the
+melee/ranged split, before any to-hit roll. A whiff, a bare-fisted swing
+and a connecting sword blow all cost the same, and a bow costs it too.
+
+**The cast's 3 is spent last.** `FUN_10042394`'s case 2 charges it only
+after both the refire gate `FUN_10046680` and the cast `FUN_10046764` have
+returned success, so a cast refused for want of magicka is free. Spells
+never reach `FUN_100425bc` at all — the use-item dispatcher is a different
+vtable slot — which is why the two costs do not stack.
+
+**The move cost is a time drain on a hook, not a per-key charge.**
+`FUN_10045228` is the whole of it:
+
+```c
+player->moveAccum += frameDelta;          // player+0xb30
+if (player->moveAccum > 0xc4) {
+    SetFatigue(fatigue - 2);
+    player->moveAccum = 0;
+}
+```
+
+Slot `+0x1dc` is a hook the *base* actor movement calls: `FUN_100063f0`
+(forward), `FUN_10006480` (back), `FUN_10006510` (strafe left) and
+`FUN_100065b4` (strafe right) each end by invoking it, and the player's own
+overrides (`FUN_1001f2b4`..`FUN_1001f338`) are each two calls — the base
+move, then a second hook. So the drain fires **once per direction actually
+moved this frame**: holding forward and a strafe together genuinely drains
+twice as fast. It also fires whether or not the step is then blocked,
+because the base move writes the position unconditionally and collision
+resolves afterwards in `FUN_100017c8`.
+
+There is no walk/run distinction to key any of this off. The engine has one
+movement speed, and the one thing that looks like a sprint —
+`engine+0xbe0c`, which doubles the step — is written to 0 in the engine
+constructor and never written again.
+
+### The two things an empty pool costs
+
+**Half movement speed.** `FUN_100445d4` (slot `+0x1e4`) is the per-frame
+step length every move slot is handed:
+
+```c
+step = Speed << 8;
+step >>= (fatigue < 1) ? 2 : 1;
+if (step > 0x3fff) step = 0x4000;
+```
+
+— one extra bit of right shift, i.e. exactly half.
+
+**Half melee damage.** In `FUN_100425bc`'s melee branch, immediately after
+the weapon's own `RandomRange(damageMin, damageMax)`: `if (fatigue < 1)
+damage >>= 1`. It lands on the raw roll, ahead of the defender's
+mitigation. The ranged branch has already returned by that point, so **an
+arrow is not weakened by exhaustion** — only a swing is.
+
+### Regeneration
+
+`FUN_10049b64`, called from the player's own per-frame tick
+`FUN_10045294` immediately after the status-effect tick `FUN_10049780`. It
+has **exactly one call site in the binary** and that is it, so regeneration
+is the player's alone: a wounded creature stays wounded.
+
+Three independent accumulators, each `+= frameDelta` every frame, each with
+its own period; whichever passes its period resets to 0 and — only if that
+pool is below its own maximum — adds an attribute-derived amount through
+the same clamp the ordinary setters use:
+
+| pool | accumulator | period | amount |
+| --- | --- | --- | --- |
+| health | `+0x3c` | `> 0x400` (4 s) | `Endurance / 25` |
+| magicka | `+0x3e` | `> 0x200` (2 s) | `Willpower / 15` |
+| fatigue | `+0x40` | `> 0x200` (2 s) | `(Strength + Willpower) / 15` |
+
+Neither divisor is a literal in the shipped code. `/25` is
+`0x51eb851f` with `smull` + `asr #3` on the high word (0x10049c28); `/15`
+is `0x88888889` used *signed*, with the `add r2, r2, r5` correction before
+the same `asr #3` (0x10049d34 and 0x10049e1c). Both were read off the
+disassembly rather than trusted from the decompiler, because `0x51eb851f`
+reads like the reciprocal of 100 at a glance and is not.
+
+Three modifiers ride on top, all gated on the owner being the player (the
+function reaches back through `stats+0x50` and calls its `vtable+0xcc`
+predicate first):
+
+* a **High Elf** (race 3) adds `raceAbility * 5` to the willpower term,
+  before the divide;
+* a **Breton** (race 1) adds the same to the strength+willpower term;
+* carrying **`items\azras_bandage.s`** (entities.txt typeId 4702) adds a
+  flat +3 to the health tick, tested with `FUN_10045474`, which walks the
+  two hand slots (`stats+0x48`/`+0x4c`) and the eight equipment slots at
+  `player+0xf8c`.
+
+And one that does not ride on top. At 0x10049c1c the health branch loads
+the owner's race and compares it against 7 (Wood Elf) — and then never
+reads the flags:
+
+```
+10049c1c  ldr   r3, [r4, #0x50]
+10049c20  ldr   r2, [r3, #0xf3c]
+10049c24  cmp   r2, #7
+10049c28  ldr   r3, [pc, #0x238]     ; the /25 multiplier -- both paths land here
+```
+
+A Wood Elf health bonus was written and compiled away. The shipped game has
+none. It is invisible in the decompiler's C, which renders the dead compare
+as a discarded call.
+
+### What the numbers actually mean
+
+Both rates are fixed by the periods, so at the engine's own 25 Hz they come
+out as flat figures:
+
+```
+drain, walking straight    2 per 20 ticks   = 2.50 fatigue/s
+drain, walking diagonally  4 per 20 ticks   = 5.00 fatigue/s
+regen, 50 Str / 50 Wil     6 per 52 ticks   = 2.88 fatigue/s
+```
+
+which means **a starting character cannot walk themselves tired in a
+straight line** — regeneration is very slightly ahead of the drain. Hold a
+strafe as well and the pool empties in about 45 seconds. Fatigue in this
+game is spent by fighting and jumping; walking only bleeds it when you are
+also sidestepping, or when strength and willpower are low (a Dark Elf,
+High Elf, Khajiit or Wood Elf starts at 4 per 2 s and loses ground even
+walking straight).
+
+Health is the slow one by design: `Endurance / 25` every four seconds is
+1 or 2 points for every shipped starting character, so a full heal from
+near death takes minutes of standing still. It is a rest, not a heal.

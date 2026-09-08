@@ -55,8 +55,8 @@ bool RollMeleeHit(int attackerAttack, int defenderDefense) {
     return (std::rand() % 0x100) <= MeleeHitChance(attackerAttack, defenderDefense);
 }
 
-int RollDamage(int attackerAttack, int defenderDefense, int defenderArmor, int dmgMin,
-                int dmgMax) {
+int RollDamage(int attackerAttack, int defenderDefense, int defenderArmor, int dmgMin, int dmgMax,
+                bool halveRoll) {
     if (!RollMeleeHit(attackerAttack, defenderDefense)) return 0;  // miss
 
     int lo = (std::min)(dmgMin, dmgMax);
@@ -67,6 +67,9 @@ int RollDamage(int attackerAttack, int defenderDefense, int defenderArmor, int d
     int span = hi - lo;
     if (span < 1) span = 1;
     int raw = lo + std::rand() % span;
+    // M73: the exhaustion penalty lands here, on the roll itself, exactly
+    // as FUN_100425bc applies it -- before mitigation, not after.
+    if (halveRoll) raw >>= 1;
     // ...and the full armour rating comes off, not half of it, with a
     // blocked hit dealing literally nothing (`if (0 < damage) DoDamage`).
     int mitigated = raw - defenderArmor;

@@ -558,6 +558,14 @@ target_link_libraries(placement_smoke PRIVATE sk_render3d sk_bindings)
 add_executable(autoaim_smoke src/tests/m72_autoaim_smoke.cpp)
 target_link_libraries(autoaim_smoke PRIVATE sk_render3d sk_entity_types)
 
+# The vitals economy: the four fatigue costs, the movement drain's period,
+# both regeneration divisors reproduced from the shipped magic-number
+# division, the amounts against the real race/sex attribute table, and the
+# whole loop run at 25Hz on a real PlayerExecutable.
+# See src/tests/m73_vitals_smoke.cpp.
+add_executable(vitals_smoke src/tests/m73_vitals_smoke.cpp)
+target_link_libraries(vitals_smoke PRIVATE sk_bindings sk_entity_types)
+
 # The developer debug suite: the console's parsing/history/completion, the
 # metrics sink and its mark/diff, the overlay's layout, and a full pass over
 # every command against a fake DebugHost -- which is why the whole suite is

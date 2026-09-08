@@ -59,6 +59,7 @@
 #include "simkin_bindings/spell_projectile.h"
 #include "simkin_bindings/table_executable.h"
 #include "simkin_bindings/text_area_executable.h"
+#include "simkin_bindings/vitals.h"
 #include "simkin_bindings/weapon_viewmodel.h"
 #include "simkin_bindings/zone_script_executable.h"
 #include "skExecutableContext.h"
@@ -2849,6 +2850,12 @@ int main(int argc, char** argv) {
     // decay toward the horizon. So a pan held after a fight stays held
     // until the player walks.
     bool gamePitchHeld = false;
+    // M73: `player+0xb30`, the movement fatigue accumulator `FUN_10045228`
+    // owns. It is per-actor state on the player object in the real engine,
+    // so it lives beside the camera here rather than inside the movement
+    // block -- it has to survive across frames for a period to elapse at
+    // all. See simkin_bindings/vitals.h.
+    int gameMoveFatigueAccum = 0;
     // M51: the other way -- `FUN_1001b198` takes a real world position and
     // attenuates by distance from the listener before playing. The curve
     // is linear in *squared* distance, so its 512 hardcodes an audible
@@ -3096,6 +3103,7 @@ int main(int argc, char** argv) {
             // FUN_1002fca4 zeroes the script clock whenever the level goes.
             stack.gameClock().Reset();
             gameCastCooldown = sk_bindings::SpellCastCooldown{};
+            gameMoveFatigueAccum = 0;
             gameClockUnits = 0;
             gamePlayerPeriodicKind = 0;
             gameWeaponViewmodel = sk_bindings::WeaponViewmodel{};
@@ -3806,12 +3814,20 @@ int main(int argc, char** argv) {
                 // did the player's position actually change this tick.
                 const float preMoveCamX = gameCamera.x;
                 const float preMoveCamY = gameCamera.y;
-                float dx = std::cos(gameCamera.yaw) * kMoveSpeed;
-                float dy = std::sin(gameCamera.yaw) * kMoveSpeed;
+                // M73: `FUN_100445d4`, the per-frame step every move slot
+                // is handed, shifts one extra bit right while the fatigue
+                // pool is empty -- exactly half speed. The engine's step is
+                // in a fixed-point unit this port's float movement does not
+                // share (see vitals.h), so only the ratio carries over.
+                const float moveSpeed =
+                    kMoveSpeed *
+                    sk_bindings::ExhaustedSpeedScale(stack.player().actorFatigue());
+                float dx = std::cos(gameCamera.yaw) * moveSpeed;
+                float dy = std::sin(gameCamera.yaw) * moveSpeed;
                 // right = (sinYaw, -cosYaw), matching zone_renderer.cpp's
                 // own forward/right basis comment -- used for strafing.
-                float rx = std::sin(gameCamera.yaw) * kMoveSpeed;
-                float ry = -std::cos(gameCamera.yaw) * kMoveSpeed;
+                float rx = std::sin(gameCamera.yaw) * moveSpeed;
+                float ry = -std::cos(gameCamera.yaw) * moveSpeed;
                 // Axis-separated collision (try X, then Y, independently)
                 // gives a simple wall-slide instead of a hard stop the
                 // instant either component would clip a wall.
@@ -3918,6 +3934,21 @@ int main(int argc, char** argv) {
                 // is what lets you slide along a table instead of sticking
                 // to it.
                 auto tryMove = [&](float mx, float my) {
+                    // M73: the movement fatigue drain, `FUN_10045228`. The
+                    // real engine hangs it off player vtable slot +0x1dc,
+                    // which all four base move functions call at the end of
+                    // their own body -- so it fires once per direction
+                    // moved, and holding forward while strafing really does
+                    // drain twice as fast. It also fires whether or not the
+                    // step is then blocked, because the base move updates
+                    // the position unconditionally and collision resolves
+                    // afterwards (FUN_100017c8). Both reproduced by putting
+                    // it here, at the top, rather than behind the tests.
+                    const int drain = sk_bindings::MovementFatigueDrain(
+                        gameMoveFatigueAccum, sk_bindings::kAiFrameDeltaUnits);
+                    if (drain > 0) {
+                        stack.player().SetActorFatigue(stack.player().actorFatigue() - drain);
+                    }
 #if SK_DEBUG_SUITE
                     // SK_DEBUG_SUITE (M68): noclip. The single most useful
                     // toggle for a bug like M67's -- being able to walk
@@ -4237,9 +4268,9 @@ int main(int argc, char** argv) {
                     // pl_jump_male.wav (92) chosen on player+0xfac -- the
                     // field SetSex writes (M50). So slot 91 is what a
                     // character with sex 0 uses, which makes 0 female.
-                    if (stack.player().actorFatigue() > sk::kJumpFatigueCost) {
+                    if (stack.player().actorFatigue() > sk_bindings::kJumpFatigueCost) {
                         stack.player().SetActorFatigue(stack.player().actorFatigue() -
-                                                        sk::kJumpFatigueCost);
+                                                        sk_bindings::kJumpFatigueCost);
                         playPlayerSound(stack.player().sex() == 0 ? sk::kSoundJumpFemale
                                                                   : sk::kSoundJumpMale);
                         gameVelZ = kJumpSpeed;
@@ -4415,6 +4446,12 @@ int main(int argc, char** argv) {
                 // actually do something to the player rather than land and
                 // vanish.
                 stack.player().TickStatusEffects(sk_bindings::kAiFrameDeltaUnits);
+                // M73: the other half of the real player tick
+                // (`FUN_10045294` runs the two back to back, in this
+                // order) -- the slow refill of health, magicka and fatigue.
+                // Without it the three HUD bars were a one-way ratchet.
+                // See simkin_bindings/vitals.h.
+                stack.player().TickVitalRegeneration(sk_bindings::kAiFrameDeltaUnits);
 
                 // M63: the scripted sprite effects a zone placed in its
                 // own Init() -- frame advance, lifetime and scale
@@ -4516,6 +4553,15 @@ int main(int argc, char** argv) {
                     if (!cast.cast) return false;
                     if (caster->isPlayerActor()) {
                         sk_bindings::NoteSpellCast(gameCastCooldown, gameClockUnits);
+                        // M73: a cast costs fatigue as well as magicka.
+                        // `FUN_10042394` case 2 spends 3 -- but only here,
+                        // after both the refire gate and the cast itself
+                        // have succeeded, so a cast refused for want of
+                        // magicka is free. Player-only: the creature cast
+                        // goes through a different dispatcher that has no
+                        // such line. See vitals.h.
+                        caster->SetActorFatigue(caster->actorFatigue() -
+                                                 sk_bindings::kCastFatigueCost);
                     }
                     applyCastResult(spell, caster, cast, castX, castY, castZ, castYaw, castPitch);
                     return true;
@@ -5225,6 +5271,20 @@ int main(int argc, char** argv) {
                                       gameCamera.z, gameCamera.yaw, gameCamera.pitch);
                         return;
                     }
+                    // M73: `FUN_100425bc` spends 4 fatigue on its third
+                    // instruction, before the ranged/melee split, before
+                    // the target search and before any to-hit roll -- so a
+                    // whiff, a bare-fisted swing and a connecting sword
+                    // blow all cost the same, and a bow costs it too. The
+                    // spell path above never reaches this function in the
+                    // engine either (it is a different vtable slot), which
+                    // is why the cast's own 3 is charged separately.
+                    stack.player().SetActorFatigue(stack.player().actorFatigue() -
+                                                    sk_bindings::kAttackFatigueCost);
+                    // Read after the spend: the halving test below is on
+                    // the post-cost pool, exactly as the real order has it.
+                    const bool exhausted =
+                        sk_bindings::ExhaustedMeleeHalvesDamage(stack.player().actorFatigue());
                     // M49: a ranged weapon leaves here too, for the same
                     // reason a spell does -- `FUN_100425bc`'s ranged branch
                     // never aims at anything. It plays the bow sound, rolls
@@ -5315,10 +5375,13 @@ int main(int argc, char** argv) {
                         // Drain, Weaken, FeebleBlade, Disease or Blind the
                         // player now, and every one of those is a timed
                         // modifier on the player's own attack stat.
+                        // M73: `exhausted` is the fatigue penalty -- see
+                        // where it is computed above, and RollDamage's own
+                        // comment for where in the roll it lands.
                         int dmg = sk_bindings::RollDamage(stack.player().attack(),
                                                            target->script->defense(),
                                                            target->script->armorValue(), dmgMin,
-                                                           dmgMax);
+                                                           dmgMax, exhausted);
 #if SK_DEBUG_SUITE
                         // SK_DEBUG_SUITE (M68)
                         sk_debug::Count("combat.damage_dealt", dmg);

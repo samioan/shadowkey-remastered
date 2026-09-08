@@ -417,6 +417,24 @@ public:
     // tick with the same kAiFrameDeltaUnits every creature uses.
     void TickStatusEffects(int deltaUnits);
 
+    // M73: `FUN_10049b64` -- the slow refill of all three pools, and the
+    // other half of the player tick `FUN_10045294` runs. It sits directly
+    // after TickStatusEffects there, and main.cpp calls it in the same
+    // order for the same reason: a poison tick that lands this frame should
+    // be what regeneration then works against.
+    //
+    // Player-only, and that is the engine's own arrangement rather than a
+    // simplification -- see vitals.h.
+    void TickVitalRegeneration(int deltaUnits);
+
+    // `FUN_10045474`: is an entity of this typeId equipped? The real walk
+    // covers the two hand slots (`stats+0x48`/`+0x4c`) and the eight
+    // equipment slots at `player+0xf8c`; this port has the two hands and a
+    // per-item `equipped()` flag instead of numbered armour slots, so it
+    // checks those. Same set for every case that matters -- an item has to
+    // be worn or held to be found either way.
+    bool HasEquippedTemplate(int typeId) const;
+
     bool paralyzed() const { return m_Stats.paralyzed(); }
     bool blinded() const { return m_Stats.blinded(); }
     bool poisoned() const { return m_Stats.poisoned(); }
