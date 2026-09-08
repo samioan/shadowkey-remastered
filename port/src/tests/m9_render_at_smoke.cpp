@@ -55,8 +55,8 @@ int main(int argc, char** argv) {
     std::printf("tile (%d,%d): lightLevel=%u brightness=%.2f isWall=%d isSource=%d\n", tx, ty,
                 cell.lightLevel, sk::LightLevelToBrightness(cell.lightLevel), cell.IsWall(),
                 cell.IsLightSource());
-    if (const sk::Model* room = zone.RoomMesh()) {
-        std::printf("room mesh: %zu vertices, %zu faces, skinCount=%d %dx%d\n",
+    if (const sk::Model* room = zone.SkyMesh()) {
+        std::printf("skybox mesh: %zu vertices, %zu faces, skinCount=%d %dx%d\n",
                     room->vertices.size(), room->faces.size(), room->skinCount, room->width,
                     room->height);
         int16_t minX = 32767, maxX = -32768, minY = 32767, maxY = -32768, minZ = 32767, maxZ = -32768;
@@ -65,11 +65,11 @@ int main(int argc, char** argv) {
             minY = std::min(minY, v.y); maxY = std::max(maxY, v.y);
             minZ = std::min(minZ, v.z); maxZ = std::max(maxZ, v.z);
         }
-        std::printf("room mesh local bbox: x[%d,%d] y[%d,%d] z[%d,%d] -> world tile x[%.1f,%.1f] tile y[%.1f,%.1f]\n",
+        std::printf("skybox mesh local bbox: x[%d,%d] y[%d,%d] z[%d,%d] -> world tile x[%.1f,%.1f] tile y[%.1f,%.1f]\n",
                     minX, maxX, minY, maxY, minZ, maxZ, minX / sk::kTileScale, maxX / sk::kTileScale,
                     minZ / sk::kTileScale, maxZ / sk::kTileScale);
     } else {
-        std::printf("room mesh: none\n");
+        std::printf("skybox mesh: none\n");
     }
 
     // Use this *tile's own* floor height (not the zone's global player-

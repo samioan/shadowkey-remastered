@@ -6,8 +6,8 @@
 // docs/RENDERER_3D.md's "The tile-grid wall/surface-face renderer"
 // section, plus (M9) the Bullseye per-cell lighting bake (docs/
 // ZONE_FORMAT.md's "Bullseye subsystem" -- Bullseye_BakeLighting/
-// Bullseye_PropagateLight), plus (M11) the .zsk-baked whole-room static
-// mesh (see RoomMesh() below). Explicitly still out of scope: the .zfg
+// Bullseye_PropagateLight), plus the zone's .zsk skybox mesh (see
+// SkyMesh() below). Explicitly still out of scope: the .zfg
 // fog LUT (a separate, distance-driven effect layered on top of this
 // per-cell bake in the real engine, not reproduced here).
 
@@ -438,23 +438,28 @@ public:
     // the arena it appears in.
     void LightRect(int x0, int y0, int x1, int y1, int level);
 
-    // M11: the room's own static mesh baked into <zone>.zsk -- a real,
-    // separate render step in the original engine
-    // (`RoomGeometry_TransformAndSort`, docs/RENDERER_3D.md's "Open
-    // follow-ups") alongside the tile-grid wall/surface pipeline above,
-    // not a replacement for it. `.zsk` decompresses (via
-    // LoadCompressedZoneFile, same as every other per-zone file) into an
-    // ordinary MODEL_FORMAT.md resource -- confirmed against real
-    // azra.zsk this session (its header decodes exactly per that spec,
-    // including the H5==H2*3 invariant). Positioned directly in the
-    // zone's own world-unit frame with no per-instance offset (unlike
-    // .ent-placed entities' world/entity_types.h chain) -- **unconfirmed**,
-    // see render3d/zone_renderer.h's fuller M11 writeup on why this is
-    // plausible but not independently verified against a real screenshot.
-    // Returns nullptr if the zone has no .zsk or it failed to parse --
-    // not fatal to Load() either way, since not every zone necessarily
-    // has one.
-    const Model* RoomMesh() const { return roomMeshValid_ ? &roomMesh_ : nullptr; }
+    // The zone's **skybox** mesh, from <zone>.zsk (M70, correcting M11's
+    // "the zone's own baked room geometry" reading -- see
+    // render3d/zone_renderer.h and docs/ZONE_FORMAT.md).
+    //
+    // The engine's own name for it: the debug markers bracketing this
+    // file's load in the zone loader read `"InitLevel Pre skybox load"` /
+    // `"InitLevel Post skybox load"`, and the object the loaded resource is
+    // stored on (`engine+0x62c`) is built by a line traced as
+    // `"Bullseye constructer Post newing Skybox"`. `.zsk` = "zone skybox".
+    //
+    // It decompresses (via LoadCompressedZoneFile, same as every other
+    // per-zone file) into an ordinary MODEL_FORMAT.md resource -- header,
+    // H5==H2*3 invariant and all -- but its texture is read with the
+    // engine's fixed 256x256 skybox addressing rather than from that
+    // header, which is what ParseSkyboxResource() exists for.
+    //
+    // Returns nullptr if the zone has no .zsk or it failed to parse. Not
+    // fatal to Load() either way, and it is the real engine's own fallback
+    // too: a failed load clears `engine+0xbe0e`, and Render3DScene then
+    // flat-fills the frame with a background colour instead of drawing
+    // this mesh.
+    const Model* SkyMesh() const { return skyMeshValid_ ? &skyMesh_ : nullptr; }
 
     // 128x128 8bpp-palettized texel at (x,y) within .ztx's texture slot
     // `surfaceTextureIndex` (0x4000 bytes = 128*128 -- confirmed: every
@@ -733,8 +738,8 @@ private:
     std::vector<EntPlacement> entities_;
     std::vector<Region> regions_;        // M44: parsed <zone>.zon, see regions()
     std::vector<TileChange> tileChanges_;  // M44: see tileChanges()
-    Model roomMesh_;         // M11: parsed <zone>.zsk, see RoomMesh() above
-    bool roomMeshValid_ = false;
+    Model skyMesh_;          // parsed <zone>.zsk, see SkyMesh() above
+    bool skyMeshValid_ = false;
 
     // M44: the shared tail of LockRegion/UnlockRegion -- write the cell's
     // second byte and record the change in the journal.

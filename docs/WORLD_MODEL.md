@@ -222,9 +222,13 @@ first-person rasterizer/raycaster still not located" below): it's not a
 single dedicated raycaster — it's `TileGrid_RaycastVisibility` (what's
 *visible*) feeding `SurfaceFace_BuildAndProject`/`SurfaceFace_
 ClipAndDispatch`/`SurfaceFace_RasterizeTextured_v0..v3` (how it gets
-*drawn*), on top of the `.zsk`-baked whole-room mesh for the parts that
-don't need per-tile dynamic faces. See `RENDERER_3D.md`'s "The tile-grid
-wall/surface-face renderer" section for the drawing half of this.
+*drawn*), over the `.zsk` **skybox**, which is what the frame starts as
+before any of those faces are drawn (M70 — this line previously called
+that mesh "the zone's baked room geometry"; see `ZONE_FORMAT.md`'s `.zsk`
+section). So the walls, floors and ceilings the player walks around are
+entirely the tile-grid pipeline's; nothing else contributes world
+geometry. See `RENDERER_3D.md`'s "The tile-grid wall/surface-face
+renderer" section for the drawing half of this.
 
 ## Labels applied
 

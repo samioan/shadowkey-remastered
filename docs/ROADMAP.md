@@ -325,9 +325,13 @@ Prioritization, driven by the port goal rather than raw coverage:
       **`<zone>.zsk`**, not `.zon` as first written — verified by
       decompressing a real `azra.zsk` and confirming its header decodes
       exactly per `MODEL_FORMAT.md`'s spec (`H0=7`, `H6=1`, `H5==H2*3`).
-      So the zone's actual walkable dungeon geometry is an ordinary
-      `MODEL_FORMAT.md`-format model, just zlib-compressed and loaded
-      directly per-zone instead of through the `models.idx` archive. Also
+      So that mesh is an ordinary `MODEL_FORMAT.md`-format model, just
+      zlib-compressed and loaded directly per-zone instead of through the
+      `models.idx` archive. (**Corrected later**: this entry called it "the
+      zone's actual walkable dungeon geometry". It is the zone's
+      **skybox** — the engine's own debug strings name it, and the walkable
+      geometry is entirely the tile-grid pipeline's. See
+      [`ZONE_FORMAT.md`](ZONE_FORMAT.md)'s `.zsk` section.) Also
       found `.zfg` (→ `engine+0x5c4`, resolving the fade-LUT open item) and
       traced a "bullseye" AI-navigation-looking subsystem
       (`Bullseye_Init`/`Bullseye_InitMap`/`.zcp`/`calc_lights`) along the
@@ -432,7 +436,7 @@ Prioritization, driven by the port goal rather than raw coverage:
 - [x] Resolved `.ztx`/`.zlu`/`.sur` by finding their real consumer — a
       previously-unknown **third 3D rendering pipeline**: a tile-grid
       wall/surface-face renderer inside `Render3DScene`, parallel to the
-      actor pipeline and the `.zsk`-baked room mesh, reusing the same
+      actor pipeline and the `.zsk` skybox, reusing the same
       `Poly3D_ClipAgainstPlane` clip core and near-clip/fade dispatch axes.
       `.sur` is a per-face material record (UV scale/offset, flags, a
       texture index) — its 8-byte layout is now fully decoded. `.ztx` is a

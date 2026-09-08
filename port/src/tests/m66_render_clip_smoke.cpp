@@ -53,6 +53,7 @@
 #include <string>
 #include <vector>
 
+#include "assets/zone_file.h"
 #include "graphics/backbuffer.h"
 #include "render3d/camera.h"
 #include "render3d/zone_renderer.h"
@@ -428,30 +429,51 @@ int main(int argc, char** argv) {
     std::printf("[%.1fs]\n", phaseSeconds());
     std::printf("\n=== Part 3: sweeping real zones through ZoneRenderer::Render ===\n");
 
-    // The second crash's precondition, taken straight off the loaded
-    // resources: a model whose declared skin has no area. Every such model
-    // used to hand `std::clamp(v, 0, width - 1)` an inverted range in
+    // The second crash's precondition, taken straight off the shipped
+    // bytes: a texture header declaring a skin with no area. Every such
+    // model used to hand `std::clamp(v, 0, width - 1)` an inverted range in
     // RasterizeModelTriangle, which a Debug MSVC STL turns into abort().
-    int zonesWithSkinlessRoomMesh = 0, skinlessEntityModels = 0;
+    //
+    // M70 moved where this shows up. Those nine headers still say
+    // `256 x 256 x 0`, but `.zsk` no longer goes through the header at all
+    // -- Zone::SkyMesh() reads the fixed 256x256 skin the engine's own
+    // skybox rasterizer reads (world/model_archive.h's ParseSkyboxResource),
+    // so the loaded models are no longer skinless. The census below is
+    // therefore taken from the raw file the way M66 took it, which keeps
+    // M66's evidence checkable, and a second check states the M70
+    // consequence: nothing reaches the rasterizer's guard by this route any
+    // more.
+    int zonesWithSkinlessHeader = 0, zonesWithSkinlessLoadedSky = 0, skinlessEntityModels = 0;
     for (size_t z = 0; z < zones.size(); ++z) {
-        const sk::Model* room = zones[z].RoomMesh();
-        bool skinless = room && (room->width <= 0 || room->height <= 0 || room->skinCount <= 0);
-        if (skinless) {
-            ++zonesWithSkinlessRoomMesh;
-            std::printf("  %-13s room mesh has no drawable skin: %dx%d, skinCount=%d, %zu faces\n",
-                        zoneNames[z].c_str(), room->width, room->height, room->skinCount,
-                        room->faces.size());
+        sk::Model headerRead;
+        std::vector<uint8_t> zsk =
+            sk::LoadCompressedZoneFile(std::string(kScriptRoot) + "/" + zoneNames[z] + ".zsk");
+        if (!zsk.empty() && sk::ParseModelResource(zsk.data(), zsk.size(), headerRead) &&
+            (headerRead.width <= 0 || headerRead.height <= 0 || headerRead.skinCount <= 0)) {
+            ++zonesWithSkinlessHeader;
+            std::printf("  %-13s .zsk texture header declares no drawable skin: %dx%d,"
+                        " skinCount=%d, %zu faces\n",
+                        zoneNames[z].c_str(), headerRead.width, headerRead.height,
+                        headerRead.skinCount, headerRead.faces.size());
+        }
+        const sk::Model* sky = zones[z].SkyMesh();
+        if (sky && (sky->width <= 0 || sky->height <= 0 || sky->skinCount <= 0)) {
+            ++zonesWithSkinlessLoadedSky;
         }
         for (const auto& pe : ResolveEntities(zones[z], types)) {
             const sk::Model* m = models.GetModel(pe.modelArchiveIndex);
             if (m && (m->width <= 0 || m->height <= 0 || m->skinCount <= 0)) ++skinlessEntityModels;
         }
     }
-    std::printf("  %d of %zu zones ship a skinless room mesh; %d skinless entity placements\n",
-                zonesWithSkinlessRoomMesh, zones.size(), skinlessEntityModels);
+    std::printf("  %d of %zu zones ship a .zsk whose header declares no skin (%d still load that"
+                " way); %d skinless entity placements\n",
+                zonesWithSkinlessHeader, zones.size(), zonesWithSkinlessLoadedSky,
+                skinlessEntityModels);
     if (!onlyZone) {
-        Check(zonesWithSkinlessRoomMesh == 9,
-              "nine shipped zones load a room mesh with a zero-area skin (see the M66 entry)");
+        Check(zonesWithSkinlessHeader == 9,
+              "nine shipped zones' .zsk texture headers declare a zero-area skin (the M66 crash)");
+        Check(zonesWithSkinlessLoadedSky == 0,
+              "and none of them loads that way any more (M70's ParseSkyboxResource)");
     }
 
     sk::Backbuffer backbuffer;

@@ -6092,6 +6092,108 @@ clicks and one `Q` registered as `combat.swings +3` in `diff`. Suite 61/61,
 soft-fails 39 -> 39, all 14 tracked `.ppm` renders byte-identical,
 `debug_suite_smoke` 70 -> 87 checks.
 
+- [x] **M70 -- what a `.zsk` actually is: the zone's skybox.** M66's last
+  finding, left open deliberately: all 21 zones ship only three distinct
+  `.zsk` meshes between them, nine of them byte-identical, and M11's
+  reading of `.zsk` as *this zone's* baked room geometry -- verified
+  against `azra` alone -- cannot survive nine zones sharing one file.
+  It is the **skybox**, and nothing about it was a judgement call.
+
+    - **The engine says the word.** Grepping `6r51.app`'s strings for sky
+      terms lands on `"InitLevel Pre skybox load"` /
+      `"InitLevel Post skybox load"` and
+      `"Bullseye constructer Post newing Skybox"` (plus `"Skybox"` on its
+      own in dozens of assert/debug sites). Chasing the first two through
+      their literal-pool references (`0x10026618`/`0x10026620`) lands
+      inside `GameEngine_InitLevel` on exactly the `WholeFile_Load` call
+      whose result becomes `(*(engine+0x62c))+0x54` -- the `.zsk` load this
+      project has been tracing since M11, now with the engine's own name
+      attached to it. `.zsk` is "zone sky", the same naming as `.ztx`
+      (texture), `.zlu` (LUT), `.zfg` (fog).
+
+    - **The shipped data says it too, and answers the nine-zone puzzle.**
+      Three meshes but **six distinct skins**: what varies per zone is the
+      picture, not the geometry -- the shape of a shared sky asset, not of
+      per-zone rooms. Dumped as images, eight of those skins are
+      unmistakable: `azra` is a night sky with **Masser and Secunda**,
+      `drgnfld`/`ghstpass`/`snowline`/`stouttp` share a blue day sky,
+      `glaciercrawl` a grey blizzard, `dstar_e`/`dstar_w` a hazy overcast.
+      The other thirteen are black, and the split against the shipped
+      display names is exact: every open-air zone has a picture, every
+      interior (the three Crypts of Hearts, Earthtear/Fearfrost/Loth'Na
+      Caverns, both Broken Wings, Twilight Temple, Delfran's Hideout,
+      Lakvan's Stronghold, Raider's Nest, the arena) has black. The
+      30-vertex mesh is a closed dome -- four rings of shrinking radius
+      (254 → 236 → 181 → 91) around a single apex -- and that apex maps to
+      texel **(127,129)**, the centre of the 256x256 skin. The skin is a
+      fisheye projection and the apex is the zenith.
+
+    - **The draw path says it a third time.** In `Render3DScene` the mesh
+      is not one more thing drawn into the scene: it is *the alternative to
+      clearing the frame*. `if (!engine+0xbe0e || !skybox->model) { fill
+      all 0x8f00 = 176*208 scene words with bgColour | 0x7fff0000 } else {
+      RoomGeometry_TransformAndSort(); }` -- before any wall or actor. And
+      `RoomFace_RasterizeTextured`, the single rasterizer that path uses,
+      writes `texel | 0x7fff0000` per pixel: the same far-depth word the
+      flat fill writes, with no depth test, no light term and no
+      chroma-key cutout. It paints background.
+
+    - **The port now draws it as one** (`render3d/zone_renderer.cpp`):
+      first, anchored to the camera (turning with the view, never
+      translating with it), unlit, and without touching the depth buffer,
+      so every wall and actor drawn afterwards is in front of it. The two
+      placement constants are transcribed, not tuned: the fixed
+      `(0, 270, 0)` translation already decompiled in the post-M11 pass,
+      and a **2x** scale -- `skybox+0x5e = 0x200`, which the zone loader
+      writes on every single load. That last one closes
+      `docs/RENDERER_3D.md`'s open question about whether that scale byte
+      is ever non-identity: it is never anything *but* 2x. The same
+      loader block zeroes the object's pitch, roll and yaw, leaving the
+      transform's own fixed `-0x4000` quarter turn as the only rotation --
+      the one constant here whose effect (which compass bearing azra's
+      moons sit over) can't be checked against a device, so it is
+      transcribed from the code and flagged as such in
+      `zone_renderer.h`'s `kSkyboxYaw`.
+
+    - **The nine impossible texture headers, explained rather than
+      guarded.** They read `skinCount=256, width=256, height=0` -- zero
+      pixels by their own arithmetic, which is what aborted a Debug build
+      before M66. The engine never reads that header for a `.zsk`:
+      `RoomFace_RasterizeTextured` addresses its texel with a hardcoded
+      256-wide stride (`(v & 0xff00) + ((u >> 8) & 0xff)`) where the actor
+      pipeline derives a shift from the header's width. Every one of the 21
+      files physically carries the 131072-byte skin at the fixed offset,
+      so on real hardware those nine draw a **black dome** -- an interior's
+      blank sky -- and the port now does the same via a new
+      `ParseSkyboxResource()` (`world/model_archive.h`) next to
+      `ParseModelResource()`. M66's rasterizer guard stays; nothing reaches
+      it by this route any more, which `render_clip_smoke` now checks
+      explicitly alongside M66's original nine-zone census (re-taken from
+      the raw file, so that evidence stays checkable).
+
+    - **Also renamed for what it is**: `Zone::RoomMesh()` ->
+      `Zone::SkyMesh()`, and `ZoneRenderer` gained `drawSkybox` -- which is
+      the real `engine+0xbe0e`, the flag the loader sets on a successful
+      `.zsk` load and clears on a failed one, and the flag
+      `Render3DScene` picks its two arms on. The three `Room*` Ghidra
+      labels are left alone for continuity with every earlier note, with a
+      correction recorded next to them in `docs/RENDERER_3D.md`.
+
+  **Verification.** New `m70_skybox_smoke` (31 checks, suite **61/61 ->
+  62/62**) carries the census over all 21 real files, both readings of the
+  texture header compared byte-for-byte, and three behavioural checks
+  against the real `ZoneRenderer::Render`: turning the sky on changes
+  **only** pixels that were bare background (so it occludes nothing);
+  walking three tiles moves it by **zero** pixels out of 23,114 shared open
+  sky; turning 34 degrees moves 21,064 of 22,834. Of the fourteen tracked
+  `.ppm` dumps, seven changed and seven are byte-identical -- and **every
+  one of the 32,736 changed pixels across all seven was previously the flat
+  background fill**, which is the same claim as the first behavioural check
+  made against dumps that existed before this milestone. Two new dumps
+  (`skybox_azra.ppm`, `skybox_drgnfld.ppm`) are tracked from here on: the
+  Dragonfields one is a blue sky with clouds over the terrain, and the
+  azra one has both moons in it.
+
 ## Next milestones (not yet started)
 
 Roughly in priority order for reaching "actually playable," not commitments:
@@ -6155,24 +6257,15 @@ evidence is elsewhere: a reproduction harness, a census over the shipped
 before and after the change. Do not reach for the coverage tool to justify
 work below the script layer.
 
-**The bullet list below is empty for the first time.** Every item that was
-in it -- merchants, the store screen, `SetCameraStart`, `Level.CreateEffect`,
-the `levelup.s` cluster, the `TestX` rolls, and the `ZoneRenderer::Render`
-crash -- is done (M59-M66). Re-run
-`shadowkey/ghidra/scripts/analyze_port_native_coverage.py` to repopulate it
-from real call-site counts rather than adding guesses here. The one item
-this pass deliberately left open:
+M70 is another one -- no natives, both measures flat -- and its evidence is
+a census, a decompiled draw path, and a set of `.ppm` dumps.
 
-- **What a `.zsk` actually is** (M66's last finding). All 21 zones ship
-  only **three distinct** `.zsk` meshes between them -- nine zones share
-  one byte-identical file, eleven share another, raiders has a variant --
-  and the nine-zone one carries a 128 KB texture block that is entirely
-  zeros behind a header reading `skinCount=256, width=256, height=0`. M11
-  read `.zsk` as the zone's own baked room mesh, verified against `azra`
-  alone; that reading does not survive nine zones sharing one file. The
-  renderer no longer crashes on them either way (M66), so this is a
-  correctness question about `world/zone.cpp` + `ParseModelResource` and
-  about what the real engine does with the resource, not a stability one.
+**The bullet list below is empty.** Every item that was in it -- merchants,
+the store screen, `SetCameraStart`, `Level.CreateEffect`, the `levelup.s`
+cluster, the `TestX` rolls, the `ZoneRenderer::Render` crash, and "what a
+`.zsk` actually is" -- is done (M59-M70). Re-run
+`shadowkey/ghidra/scripts/analyze_port_native_coverage.py` to repopulate it
+from real call-site counts rather than adding guesses here.
 
 
 ## Verification approach

@@ -533,6 +533,13 @@ target_link_libraries(attribute_check_smoke PRIVATE sk_bindings sk_world)
 add_executable(render_clip_smoke src/tests/m66_render_clip_smoke.cpp)
 target_link_libraries(render_clip_smoke PRIVATE sk_render3d)
 
+# What a `.zsk` actually is: the census over all 21 shipped files, the
+# texture header the engine ignores, and the three renderer behaviours that
+# make the mesh a skybox rather than room geometry.
+# See src/tests/m70_skybox_smoke.cpp.
+add_executable(skybox_smoke src/tests/m70_skybox_smoke.cpp)
+target_link_libraries(skybox_smoke PRIVATE sk_render3d)
+
 add_executable(door_stamp_smoke src/tests/m67_door_stamp_smoke.cpp)
 target_link_libraries(door_stamp_smoke PRIVATE sk_render3d sk_bindings)
 

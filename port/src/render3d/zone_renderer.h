@@ -102,7 +102,7 @@
 // documented per-vertex scalar clamp) already keeps fully-unlit geometry
 // visible without a separate stylized floor.
 //
-// M11 -- second wall band + .zsk room mesh. Two pieces:
+// M11 -- second wall band + the .zsk mesh. Two pieces:
 //
 // 1. The wall "upper band" (docs/ZONE_FORMAT.md: each wall direction can
 //    fire up to two stacked draws, a floor-anchored "lower band" and a
@@ -120,42 +120,14 @@
 //    nothing extra. Tiles whose neighbor is a genuine wall/out-of-bounds
 //    are unchanged (single full-span wall, as before).
 //
-// 2. `.zsk`-baked whole-room static mesh (docs/RENDERER_3D.md's
-//    `RoomGeometry_TransformAndSort` writeup) -- a real, separate render
-//    step in the original engine alongside the tile-grid pipeline above,
-//    not a replacement for it. `world/zone.h`'s `Zone::RoomMesh()`
-//    decompresses `<zone>.zsk` and parses it as an ordinary
-//    `MODEL_FORMAT.md` resource (the same parser M8's entities use,
-//    factored into `world/model_archive.h`'s free `ParseModelResource()`
-//    -- confirmed against real `azra.zsk`, whose header decodes exactly
-//    per that spec including the `H5==H2*3` invariant). Drawn here with
-//    no per-instance offset (its own vertices already sit in the zone's
-//    world-unit frame, unlike `.ent`-placed entities, the simplest
-//    hypothesis absent contrary evidence -- same reasoning M8 applied to
-//    entity scale), via the same `SubmitModel()` helper M8's entity loop
-//    was refactored to share. Same simplifications as M8: skin 0/frame 0
-//    only, unlit.
-//
-//    `azra.zsk` is a small mesh (30 vertices/56 faces) whose local
-//    bounding box sits almost symmetric around its own origin
-//    (`x[-252,254] y[-290,40] z[-254,252]` raw units, i.e. roughly a
-//    2x2-tile footprint centered on tile-grid coordinate (0,0)) -- too
-//    small to be a "whole room" in the sense of covering the explorable
-//    dungeon; more likely a single architectural set-piece.
-//
-//    **Resolved this session (decompiled `RoomGeometry_TransformAndSort`,
-//    0x10057890, in full)**: drawing it at raw local origin with no
-//    per-instance offset is confirmed correct -- the real function has
-//    no per-room world-position field at all (only an optional scale and
-//    rotation angles); its per-vertex translation comes from a single
-//    fixed `(0, 270, 0)` constant, identical for every room, rotated
-//    through the camera's own orientation. See docs/RENDERER_3D.md's
-//    "`.zsk` room-mesh world position -- decompiled" section for the
-//    full trace, including two smaller loose ends left unresolved (a
-//    possible non-identity per-room scale byte this port doesn't apply,
-//    and how camera *position* -- not just rotation -- factors into this
-//    path at all, which bears on whether this mesh is genuinely
-//    walk-around-able or a camera-relative decorative piece).
+// 2. The `<zone>.zsk` mesh, drawn via the same `SubmitModel()` helper M8's
+//    entity loop was refactored to share. **M11 read this as the zone's own
+//    baked room geometry and M70 corrected it: it is the zone's skybox**
+//    (see the M70 block at the bottom of this comment, and
+//    docs/ZONE_FORMAT.md). Everything M11 established about the *format*
+//    stands -- it is an ordinary `MODEL_FORMAT.md` resource, `H5==H2*3`
+//    invariant and all; only what the mesh depicts, and therefore where it
+//    is drawn, changed.
 //
 // M66 -- the crash this file carried since M56, and one behind it. Two
 // corrections, both in zone_renderer.cpp with the full reasoning:
@@ -172,12 +144,53 @@
 //    exactly and clips the geometry that actually gets rasterized.
 //
 //  * A model whose skin has no area is skipped rather than clamped
-//    against an inverted range. Nine of the 21 zones load a `.zsk` room
-//    mesh declaring `height = 0`, which aborted a Debug build on the
-//    first frame of each of them. What those nine `.zsk` files really are
-//    is an open question -- see the M66 entry in docs/PORT_ROADMAP.md;
-//    the note above about `.zsk` being *this zone's* room mesh should be
-//    read with that open.
+//    against an inverted range. Nine of the 21 zones load a `.zsk`
+//    declaring `height = 0`, which aborted a Debug build on the first frame
+//    of each of them. (M70 answers *why* those nine say that, and stops
+//    them reaching this guard: see ParseSkyboxResource. The guard stays --
+//    it is about the rasterizer's own precondition, not about `.zsk`.)
+//
+// M70 -- `.zsk` is the zone's **skybox**, not its room geometry.
+//
+// The evidence, in the order it settles the question:
+//
+//  * **The engine says so.** The zone loader's debug markers around this
+//    file's `WholeFile_Load` read `"InitLevel Pre skybox load"` /
+//    `"InitLevel Post skybox load"`, and the object it stores the resource
+//    on (`engine+0x62c`, whose `+0x54` is the model pointer) is created by
+//    a line whose marker is `"Bullseye constructer Post newing Skybox"`.
+//
+//  * **The data says so.** Twelve of the 21 zones' skins are a fisheye sky
+//    -- azra's is a night sky with two moons, drgnfld/ghstpass/snowline/
+//    stouttp share a blue day sky, glaciercrawl a grey blizzard one -- and
+//    the mesh is a closed 30-vertex dome (four shrinking rings around a
+//    single apex) whose apex vertex maps to texel (127,129), the exact
+//    centre of the 256x256 skin. The apex is the zenith.
+//
+//  * **The draw order says so.** In `Render3DScene` this mesh is not one
+//    more thing drawn into the scene: it is the *alternative to clearing
+//    the frame*. `if (!engine+0xbe0e || !skybox->model) { fill all
+//    176*208 words with bgColour | 0x7fff0000 } else {
+//    RoomGeometry_TransformAndSort(); }`, before any wall or actor.
+//
+//  * **The rasterizer says so.** `RoomFace_RasterizeTextured` writes
+//    `texel | 0x7fff0000` -- the same far-depth word that flat fill writes
+//    -- with no depth test, no depth compare, no lighting term and no
+//    chroma-key cutout. It paints background.
+//
+// So this port draws it first, anchored to the camera (rotating with the
+// view, never translating with it), unlit, and without touching the depth
+// buffer, so every wall and actor drawn afterwards is in front of it. The
+// two placement constants come from the decompiled transform: a fixed
+// `+270` raw units along the model's up axis (the `(0, 270, 0)` in
+// `BuildRotationMatrix3x4`) and a `0x200`/8.8 = **2x** scale, which the
+// zone loader writes to `skybox+0x5e` on every load -- answering the one
+// open question docs/RENDERER_3D.md left about that field.
+//
+// M11's "no per-instance world offset" conclusion was right about the
+// original having no such field and wrong about what follows from it: with
+// no world position, the mesh does not sit *anywhere* in the zone. It sits
+// on the camera.
 
 #include <vector>
 
@@ -205,7 +218,7 @@ struct PlacedEntity {
     // SetSkin()/SetScale() (simkin_bindings/monster_executable.h) -- both
     // were soft-failed and unused before, so every creature drew as skin 0
     // at 1:1. Defaults keep every other placement (props, doors, pickups,
-    // the room mesh) rendering exactly as before.
+    // the skybox) rendering exactly as before.
     int skinIndex = 0;
     float scale = 1.0f;
     // M28: which of the model's animation frames to draw. 0 (the resting
@@ -254,11 +267,57 @@ struct PlacedEntity {
 // component 3 grows *toward* the camera. Everything else stands.
 constexpr float kModelForwardYawOffset = 1.57079632679f;  // +pi/2
 
+// M70 -- the skybox's placement, all three values read straight out of
+// `RoomGeometry_TransformAndSort` (0x10057890) and the zone loader.
+//
+// The engine's transform is
+//
+//     view = R_camera * (R_skybox * (vertex * scale) + (0, 270, 0))
+//
+// with **no camera position term anywhere**: the mesh turns with the view
+// and never translates with it, which is the whole of what makes it a
+// skybox rather than a piece of the world.
+//
+// * `kSkyboxUpOffset` is that literal `(0, 270, 0)` (`0x10e`), applied
+//   along the model's own up axis -- local +Y, which the shipped mesh
+//   confirms is the zenith: its apex vertex is the one that maps to the
+//   centre of the sky texture.
+// * `kSkyboxScale` is `skybox+0x5e`, which the zone loader sets to `0x200`
+//   -- 2.0 in the field's 8.8 units -- immediately after every successful
+//   `.zsk` load. This resolves docs/RENDERER_3D.md's open question about
+//   whether that scale byte is ever non-identity: it is never anything
+//   *but* 2x.
+// * `kSkyboxYaw` is the fixed `-0x4000` (a quarter turn) that the same
+//   function subtracts from the skybox object's own yaw -- which the
+//   loader zeroes, along with its pitch and roll, on every load. This is
+//   the one constant here with a purely cosmetic effect (it spins the sky
+//   about the vertical axis, moving azra's moons to a different compass
+//   bearing) and the one that can't be checked against a device screenshot,
+//   so it is transcribed from the code rather than tuned.
+constexpr float kSkyboxUpOffset = 270.0f;
+constexpr float kSkyboxScale = 2.0f;
+constexpr float kSkyboxYaw = -1.57079632679f;  // -pi/2, i.e. -0x4000
+
+// The flat background the frame starts as -- `Render3DScene`'s
+// `engine+0x630`, the colour it fills all 176*208 scene words with when
+// there is no skybox to draw. The engine's own value was never traced;
+// this is the port's, in the backbuffer's RGB565. Named so a test can ask
+// "is this pixel still bare background?" without hardcoding it twice.
+constexpr uint16_t kBackgroundFill = PackRGB565(8, 8, 16);
+
 class ZoneRenderer {
 public:
     // Tile radius (in tiles) around the camera to scan for faces to
     // draw -- a stand-in for the real TileGrid_RaycastVisibility.
     int renderRadius = 20;
+
+    // Draw the zone's skybox, or flat-fill the frame with a background
+    // colour instead. This is the real `engine+0xbe0e`: the zone loader
+    // sets it when `<zone>.zsk` loads and clears it when the load fails,
+    // and `Render3DScene` picks between exactly these two arms on it.
+    // Left on, like the original's, for every zone that has a `.zsk`;
+    // m70_skybox_smoke turns it off to measure what the sky contributes.
+    bool drawSkybox = true;
 
     // `entities`/`models` are optional (default: none drawn) so M6/M7
     // call sites and smoke tests that only care about tile-grid geometry

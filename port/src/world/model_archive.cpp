@@ -22,6 +22,12 @@ bool ReadWholeFile(const std::string& path, std::vector<uint8_t>& out) {
     return true;
 }
 
+// The shared body of ParseModelResource/ParseSkyboxResource. `pixStartOut`,
+// when non-null, receives the byte offset of the first texel -- the one
+// thing the skybox variant needs that the header's own fields don't give
+// it (see ParseSkyboxResource).
+bool ParseModelResourceImpl(const uint8_t* blob, size_t size, Model& out, size_t* pixStartOut);
+
 }  // namespace
 
 bool ModelArchive::Load(const std::string& scriptRoot) {
@@ -70,6 +76,31 @@ const Model* ModelArchive::GetModel(int archiveIndex) {
 }
 
 bool ParseModelResource(const uint8_t* blob, size_t size, Model& out) {
+    return ParseModelResourceImpl(blob, size, out, nullptr);
+}
+
+bool ParseSkyboxResource(const uint8_t* blob, size_t size, Model& out) {
+    size_t pixStart = 0;
+    if (!ParseModelResourceImpl(blob, size, out, &pixStart)) return false;
+
+    // Take the texture the way RoomFace_RasterizeTextured takes it: one
+    // 256x256 skin starting where the header ends, header fields ignored.
+    // See kSkyboxSkinWidth's comment in the header for the decompiled
+    // addressing this mirrors and for why the nine interior zones need it.
+    constexpr size_t kTexels =
+        static_cast<size_t>(kSkyboxSkinWidth) * static_cast<size_t>(kSkyboxSkinHeight);
+    if (pixStart + kTexels * 2 > size) return false;
+    out.skinCount = 1;
+    out.width = kSkyboxSkinWidth;
+    out.height = kSkyboxSkinHeight;
+    out.pixels.resize(kTexels);
+    for (size_t i = 0; i < kTexels; ++i) out.pixels[i] = ReadU16(blob + pixStart + i * 2);
+    return true;
+}
+
+namespace {
+
+bool ParseModelResourceImpl(const uint8_t* blob, size_t size, Model& out, size_t* pixStartOut) {
     if (size < 14) return false;
 
     int16_t h0 = ReadI16(blob + 0x00);
@@ -96,6 +127,7 @@ bool ParseModelResource(const uint8_t* blob, size_t size, Model& out) {
     size_t pixStart = texHdrByte + 8;
     size_t pixTotal = static_cast<size_t>(skinCount) * width * height * 2;
     if (pixStart + pixTotal > size) return false;
+    if (pixStartOut) *pixStartOut = pixStart;
 
     out.skinCount = skinCount;
     out.width = width;
@@ -198,6 +230,8 @@ bool ParseModelResource(const uint8_t* blob, size_t size, Model& out) {
 
     return true;
 }
+
+}  // namespace
 
 const ModelVertex& Model::VertexAt(int frameIndex, int vertexIndex) const {
     static const ModelVertex kZero{};

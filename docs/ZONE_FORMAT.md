@@ -507,7 +507,7 @@ just the first):
 | `.zlu`  | `engine+0x36c/0x370/0x374/0x378` (4×512-byte chunks of one 2048-byte blob); forwarded to `engine+0x6b24..+0x6b30` | **decoded**: 4 selectable 256-color palettes (512 bytes = 256×2-byte entries) that convert `.ztx`'s indexed wall texels into real 16bpp color, selected per-face by 2 bits of a material byte. **This is what the `"InitLevel Pre/Post LUA"` debug markers actually bracket** — "LUA" is short for `.zlu`, not the Lua scripting language (see correction below). See "The tile-grid wall/surface-face renderer", `RENDERER_3D.md`. **Two corrections (port scaffold session)**: (1) a real `azra.zlu` decompresses to 131072 bytes = **64** 2048-byte blobs, not one — `Bullseye_Init`'s 4 forwarded chunk pointers are one fixed set stashed once at zone load (matching this doc's description), but the port's own renderer, needing a *per-surface* palette instead, empirically picks the blob at `(surfaceTextureIndex % 64) * 2048` and always its chunk 0; this works well against real data (see below) but isn't independently confirmed to be the original's exact per-face selection rule. (2) each 16-bit palette entry is **4-bit-per-channel** (`0x0RGB`, matching `GRAPHICS_FORMAT.md`'s framebuffer format exactly — confirmed by real `.zlu` bytes: `0xfff`/white, `0xf0f`/magenta chroma-key literal present in every chunk), not RGB565 as this doc's "256×2-byte entries" phrasing could be misread to imply — an RGB565 read of real data produces garish cyan/blue nonsense, an RGB444 read of the exact same bytes against a real `.ztx` texture produces an unmistakable, correctly-shaded wood-plank floor texture. |
 | `.zfg`  | `engine+0x5c4`                | the fog/fade lookup table `CompositeSceneBufferToScreen` reads when `engine+0xbe0f` is set (`RENDERER_3D.md`'s fade-LUT open item) — "zfg" = "zone fog" |
 | `.zcp`  | `engine+0x32c`                | a small indexed table of per-cell light-level deltas for the lighting bake — **decoded**, see "The 'bullseye' subsystem" below. **Correction (port scaffold session)**: its entry count is a `u32`, not the `u8` originally guessed — see the full note where `ZcpFile`/`ZcpEntry` are defined below. |
-| **`.zsk`** | **`(*(engine+0x62c))+0x54`** | **the current room's actual 3D model — see below, this is the important one** |
+| **`.zsk`** | **`(*(engine+0x62c))+0x54`** | **the zone's skybox mesh — see below. ("zone sky", and the engine's own word: `engine+0x62c` is its Skybox object.)** |
 
 ### `.zon`'s room record, fully decoded
 
@@ -570,29 +570,117 @@ script file gets run for a given zone, beyond just "scripts exist".
 record conversion above — so whatever `zmpTotal` counts, it's shared
 between the pathfinding system and the room list.
 
-### `.zsk` is the room/dungeon geometry itself, in `MODEL_FORMAT.md`'s format
+### `.zsk` is the zone's **skybox**, in `MODEL_FORMAT.md`'s format
 
-**This corrects an error in the first version of this doc** (and the
-matching `RENDERER_3D.md` note), which said the `engine+0x62c` room-render
-object's fields get set from `<zone>.zon`. That was wrong — caught by
-re-tracing which `sprintf`-built path actually feeds the `FUN_1002778c`
-call whose result lands in `(*(engine+0x62c))+0x54`. It's `.zsk`, not
-`.zon`. `.zon` only ever populates the separate `engine+0x5464` room-*list*
-array (positions/names for up to 40 room slots, see below); `.zsk` is a
-one-per-zone file that supplies the actual model `RoomGeometry_
-TransformAndSort` renders.
+**Two corrections live in this section.** The first version of this doc
+(and the matching `RENDERER_3D.md` note) said the `engine+0x62c` object's
+fields get set from `<zone>.zon`. That was wrong — caught by re-tracing
+which `sprintf`-built path actually feeds the `FUN_1002778c` call whose
+result lands in `(*(engine+0x62c))+0x54`. It's `.zsk`, not `.zon`. `.zon`
+only ever populates the separate `engine+0x5464` room-*list* array
+(positions/names for up to 40 room slots, see below).
 
-**Verified directly against real game data**: decompressing `azra.zsk`
-(4-byte size header + zlib, per above) and reading its first 14 bytes as
-`MODEL_FORMAT.md`'s 7×`int16` header gives `(7, 1, 30, 168, 56, 90, 1)` —
-`H0=7` ✓, `H6=1` ✓ (both format constants), and `H5==H2*3` (`90==30*3`) ✓,
-exactly the invariant verified across all 226 `models.idx` entries. So the
-zone's big walkable dungeon geometry is stored as an ordinary
-`MODEL_FORMAT.md`-format model resource, just zlib-compressed and loaded
-directly per-zone rather than referenced through the `models.idx` archive
-— unlike every placed `.ent` object, which *does* go through the archive.
-`H1=1` (one frame, i.e. static, no vertex animation) makes sense for room
-geometry.
+The second correction is what that mesh **is**. This section previously
+read it as the zone's own baked room/dungeon geometry, verified against
+`azra` alone. It is the zone's **skybox**, and `engine+0x62c` is a Skybox
+object.
+
+**The engine's own name for it.** Three debug strings, all present in
+`6r51.app`:
+
+- `"InitLevel Pre skybox load"` / `"InitLevel Post skybox load"` — the
+  marker pair bracketing exactly this file's `WholeFile_Load` call in
+  `GameEngine_InitLevel` (`0x10024dec`; literal-pool references at
+  `0x10026618`/`0x10026620`).
+- `"Bullseye constructer Post newing Skybox"` — the marker at the line
+  that constructs the object, and the string `"Skybox"` on its own appears
+  dozens of times more in the binary's debug/assert text.
+
+So `.zsk` is "zone sky", the same `z`-prefixed naming as `.ztx` (zone
+texture), `.zlu` (zone LUT), `.zfg` (zone fog).
+
+**The format is still an ordinary model resource.** Decompressing
+`azra.zsk` (4-byte size header + zlib, per above) and reading its first 14
+bytes as `MODEL_FORMAT.md`'s 7×`int16` header gives
+`(7, 1, 30, 168, 56, 90, 1)` — `H0=7` ✓, `H6=1` ✓ (both format constants),
+and `H5==H2*3` (`90==30*3`) ✓, exactly the invariant verified across all
+226 `models.idx` entries. `H1=1` (one static frame) is right for a sky.
+It is zlib-compressed and loaded per-zone rather than referenced through
+the `models.idx` archive, unlike every placed `.ent` object.
+
+**What the 21 shipped files actually contain** (census:
+`port/src/tests/m70_skybox_smoke.cpp`, run over the real files):
+
+- **Three distinct meshes, six distinct skins.** Eleven zones share a
+  30-vertex/56-face mesh, nine share a 98-vertex/192-face one, `raiders`
+  has a variant of the first. What varies per zone is the *picture*, not
+  the geometry — which is the shape of a shared sky asset, and not of
+  per-zone room geometry. (This is the observation that reopened the
+  question: nine zones cannot each have the other's room geometry.)
+- **The 30-vertex mesh is a dome, and its skin is a fisheye sky.** Four
+  rings of eight/eight/eight/four vertices whose radius shrinks as local
+  `+Y` grows (254 → 236 → 181 → 91), closed by a single apex vertex at
+  the top and one more underneath. The apex's UV is texel **(127, 129)**
+  — the exact centre of the 256×256 skin. So the skin is an azimuthal
+  projection with the zenith at the middle, and the eight zones that carry
+  a real picture are unmistakable when dumped: `azra` is a night sky with
+  Masser and Secunda, `drgnfld`/`ghstpass`/`snowline`/`stouttp` share a
+  blue day sky, `glaciercrawl` a grey blizzard one, `dstar_e`/`dstar_w` a
+  hazy overcast.
+- **Thirteen zones' skins are black**, and the split against the shipped
+  display names is exact: every open-air zone has a picture, every
+  interior (Crypt of Hearts I–III, Earthtear/Fearfrost/Loth'Na Caverns,
+  Broken Wing I–II, Twilight Temple, Delfran's Hideout, Lakvan's
+  Stronghold, Raider's Nest, the arena) has black.
+- **The nine-zone file's texture header is nonsense and the engine does
+  not care.** It reads `skinCount=256, width=256, height=0` — zero pixels
+  by its own arithmetic — and its trailer is 4 bytes where a well-formed
+  clip record is 6. The 131072 texel bytes are present in the file all the
+  same, all zero. See the addressing note below for why none of that
+  reaches the renderer.
+
+**How the skybox is drawn** (full trace in `RENDERER_3D.md`): it is not
+one more thing rendered into the scene, it is *the alternative to clearing
+the frame*. `Render3DScene` runs, before any wall or actor:
+
+```c
+if (engine[0xbe0e] == 0 || ((Skybox*)engine[0x62c])->model == 0) {
+    for (i = 0; i < 0x8f00; ++i)             // 176*208, the whole scene buffer
+        sceneBuffer[i] = engine[0x630] | 0x7fff0000;   // colour | far depth
+} else {
+    RoomGeometry_TransformAndSort(engine);   // i.e. draw the skybox
+}
+```
+
+and `RoomFace_RasterizeTextured`, the one rasterizer that path uses,
+writes `texel | 0x7fff0000` per pixel — the same far-depth word, with no
+depth test, no light term and no chroma-key cutout.
+
+**Its texture addressing is hardcoded, not read from the header.** That
+rasterizer indexes its texel as
+
+```c
+texel = *(u16*)(pixels + (((v & 0xff00) + ((u >> 8) & 0xff)) * 2));
+```
+
+— a fixed 256-wide row stride and an 8-bit row mask, where the *actor*
+pipeline derives a shift from the texture header's width
+(`Actor3D_TransformAndSubmitModel`'s `log2(width)` size class,
+`MODEL_FORMAT.md`). So a `.zsk` always yields one 256×256 skin at the
+fixed offset after the 8-byte header, whatever the header says, which is
+exactly why the nine interior zones' impossible header does no harm on
+real hardware: they draw a black dome, which is what an interior wants.
+
+**Load-time state** (`GameEngine_InitLevel`, the `else` branch after a
+successful `WholeFile_Load`), which is where the placement constants come
+from:
+
+| write | meaning |
+|---|---|
+| `skybox+0x54 = model` | the loaded `.zsk` resource |
+| `skybox+0x5e = 0x200` | scale, 8.8 → **2×**, every zone, every load |
+| `skybox+0xa8 = 0`, `+0xb2 = 0`, `+0xb6 = 0` | pitch/roll/yaw all zeroed |
+| `engine+0xbe0e = 1` | "there is a skybox" — cleared instead if the load fails, which is what selects the flat fill above |
 
 ### The "bullseye" subsystem: a load-time light-propagation bake, not AI pathfinding
 

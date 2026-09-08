@@ -202,6 +202,12 @@ evidence that the game is rendered in 2D (see that doc's correction note).
   face table strides, texture block) as plate-comment addenda on
   `Actor3D_TransformAndSubmitModel` and `RoomGeometry_TransformAndSort`; see
   [`../docs/MODEL_FORMAT.md`](../docs/MODEL_FORMAT.md).
+- `shadowkey/ghidra/scripts/pyghidra_label_skybox.py` — labels the three
+  `"...skybox load"`/`"...newing Skybox"` debug strings and records, on the
+  four functions of that pipeline, that `engine+0x62c` is a **Skybox** and
+  `<zone>.zsk` is the zone's sky rather than its room geometry (the `Room*`
+  function names are deliberately left alone); see
+  [`../docs/ZONE_FORMAT.md`](../docs/ZONE_FORMAT.md).
 
 - `shadowkey/ghidra/scripts/pyghidra_find_zone_loader.py` — finds the
   zone/level loading function by locating xrefs to debug strings like

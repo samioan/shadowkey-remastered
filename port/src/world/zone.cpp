@@ -173,13 +173,15 @@ bool Zone::Load(const std::string& scriptRoot, const std::string& zoneName) {
         return false;
     }
 
-    // --- .zsk: whole-room static mesh (M11), see zone.h's RoomMesh()
-    // comment -- an ordinary MODEL_FORMAT.md resource once decompressed.
-    // Not fatal if missing/unparsed: falls back to no room mesh drawn.
+    // --- .zsk: the zone's skybox mesh (M70), see zone.h's SkyMesh()
+    // comment -- an ordinary MODEL_FORMAT.md resource once decompressed,
+    // with the engine's fixed 256x256 skin addressing. Not fatal if
+    // missing/unparsed: the frame falls back to a flat background fill,
+    // which is the real engine's own fallback (engine+0xbe0e).
     std::vector<uint8_t> zsk = LoadCompressedZoneFile(base + ".zsk");
-    roomMeshValid_ = !zsk.empty() && ParseModelResource(zsk.data(), zsk.size(), roomMesh_);
-    if (!roomMeshValid_) {
-        std::printf("Zone: %s.zsk missing or unparsed -- no room mesh\n", zoneName.c_str());
+    skyMeshValid_ = !zsk.empty() && ParseSkyboxResource(zsk.data(), zsk.size(), skyMesh_);
+    if (!skyMeshValid_) {
+        std::printf("Zone: %s.zsk missing or unparsed -- no skybox\n", zoneName.c_str());
     }
 
     // --- .ent: find the player start record (typeId == 1) ---

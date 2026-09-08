@@ -142,6 +142,17 @@ lands exactly on the start of a `width*height*2`-byte block, verified across
 at `actor+0xca`; rooms always read variant `0` (no per-instance selector is
 added in `RoomGeometry_TransformAndSort`'s call).
 
+> **The skybox path ignores the width field entirely.** The size class
+> above is an *actor*-pipeline thing. `RoomFace_RasterizeTextured`
+> (0x10055f38), the one rasterizer the `RoomGeometry_TransformAndSort` path
+> uses — which is the **skybox**, `ZONE_FORMAT.md`'s `.zsk` — computes its
+> texel address as `((v & 0xff00) + ((u >> 8) & 0xff)) * 2`: a hardcoded
+> 256-wide stride and an 8-bit row mask, with no shift taken from the
+> resource. So a `.zsk` always yields one 256×256 skin at the fixed offset,
+> whatever its header says — which matters, because nine shipped `.zsk`
+> headers say `skinCount=256, width=256, height=0`, i.e. zero pixels, while
+> physically carrying the full 131072-byte block.
+
 ## The trailer
 
 After `skinCount` back-to-back `width*height*2`-byte pixel blocks, the

@@ -303,6 +303,43 @@ other caller, `FUN_10057890`.
   table size/exact indexing range not pinned down) — confirming the
   torchlight/distance-fog guess.
 
+### The `engine+0x62c` mesh is the zone's **skybox** (M70)
+
+**This renames the subject of the two sections that follow.** They call
+`engine+0x62c` "the room" and its `.zsk` mesh "room geometry"; both are
+`Skybox`. What they say about the *mechanism* is unaffected and was in
+fact the first hint — a mesh with no world position, whose transform
+consumes camera angles but never camera position, is a skybox.
+
+The engine names it in three debug strings: `"InitLevel Pre skybox load"`
+and `"InitLevel Post skybox load"` bracket exactly the `WholeFile_Load`
+call that fills `(*(engine+0x62c))+0x54`, and the object is constructed at
+`"Bullseye constructer Post newing Skybox"`. `ZONE_FORMAT.md`'s `.zsk`
+section carries the full evidence — the shipped skins (a night sky with
+both moons for `azra`, a blue day sky shared by four zones, black for
+every interior), the dome geometry whose apex maps to the centre texel,
+and the load-time field writes. The two facts that matter for *this* doc:
+
+1. **`RoomGeometry_TransformAndSort` is the frame clear.** In
+   `Render3DScene` it is one arm of an `if` whose other arm fills all
+   `0x8f00` (176×208) scene-buffer words with `engine[0x630] | 0x7fff0000`,
+   selected on `engine+0xbe0e` (set when `.zsk` loads, cleared when it
+   fails) — and it runs before any wall or actor.
+2. **`RoomFace_RasterizeTextured` paints background.** Its inner loop is a
+   single store of `texel | 0x7fff0000`: the same far-depth word the flat
+   fill writes, with no depth compare, no depth write of any other value,
+   no light term and no chroma-key test. It also addresses its texel with
+   a hardcoded 256-wide stride (`(v & 0xff00) + ((u >> 8) & 0xff)`) rather
+   than the size class the actor pipeline derives from the texture
+   header — so a `.zsk` skin is always 256×256 whatever its header claims.
+
+The two loose ends the next section leaves open are both closed by the
+loader's own writes (`GameEngine_InitLevel`, `0x10024dec`): the scale byte
+pair `+0x5e` is set to `0x200` — **2×**, on every load, so it is never
+identity — and the camera's *position* factors into this path not at all,
+because it is a skybox: it turns with the view and never translates with
+it.
+
 ### `.zsk` room-mesh world position -- decompiled (PC port session)
 
 `RoomGeometry_TransformAndSort` itself decompiled and read in full to settle
@@ -351,10 +388,12 @@ to be `matA`'s translation vector rotated through `matB`'s rotation -- i.e.
 the room's final per-vertex offset is exactly that fixed `(0,270,0)`
 constant rotated by the camera's current orientation, nothing else.
 
-**Conclusion**: the PC port's existing choice to draw `.zsk` room meshes at
-raw local-vertex-space with no added per-instance world offset is confirmed
-correct by this decompile -- there is no missing per-zone translation to
-find. Two smaller, lower-priority loose ends this pass didn't chase further:
+**Conclusion** (as written at the time; **superseded by M70's section
+above** -- there is indeed no per-zone translation to find, but the reason
+is that the mesh is a skybox anchored to the camera, not a piece of the
+world drawn at the origin, and the port now draws it that way). Two
+smaller loose ends this pass didn't chase further -- **both since closed by
+the loader's own field writes, see the M70 section**:
 whether `room+0x5e/0x5f`'s scale is ever non-identity (0x100) for a real
 zone like azra (not traced -- would need the room object's own construction
 site, likely assembled from `.sta`/zone metadata this project hasn't fully
@@ -371,7 +410,7 @@ observation already on record below, but not confirmed.
 core** (`BuildRotationMatrix3x4`, `ComposeTransform3x4`, `Poly3D_ClipAgainstPlane`)
 shared by three renderers built on top of it — an actor renderer (immediate
 per-face dispatch, 10 rasterizer variants split by near-clip/fog/stencil-ID
-needs), a room renderer (whole-model transform + depth-bucket sort, one
+needs), a **skybox** renderer (whole-model transform + depth-bucket sort, one
 rasterizer variant), and a tile-grid wall/surface-face renderer (see below,
 4 more rasterizer variants) — all writing into one shared intermediate
 buffer that gets composited to the screen once per frame.
@@ -384,6 +423,12 @@ buffer that gets composited to the screen once per frame.
 - `RoomFace_RasterizeTextured` (0x10055f38)
 - `CompositeSceneBufferToScreen` (0x1005dfe0)
 
+The three `Room*` names above are M70 misnomers kept for continuity with
+every earlier note and script that uses them: all three are the **skybox**
+pipeline, and the engine's own word for their subject is `Skybox`. Read
+them as `Skybox_TransformAndSort` / `SkyboxFace_ClipAndDispatch` /
+`SkyboxFace_RasterizeTextured`.
+
 ## The tile-grid wall/surface-face renderer: a third pipeline
 
 Found while chasing what `.ztx`/`.zlu` (`ZONE_FORMAT.md`) actually contain.
@@ -391,7 +436,7 @@ Found while chasing what `.ztx`/`.zlu` (`ZONE_FORMAT.md`) actually contain.
 that walks the level's tile grid (the same 2D grid `Map_GetTileAt`
 indexes, per `WORLD_MODEL.md`) looking for tile-adjacent faces that need
 their own draw call — distinct from both the actor pipeline above and the
-`.zsk`-baked whole-room mesh (`RoomGeometry_TransformAndSort`). Each such
+`.zsk` skybox (`RoomGeometry_TransformAndSort`). Each such
 face is drawn by a **third, parallel rasterizer family** that reuses the
 same clip core but has its own dispatcher and its own texture/color
 scheme:
@@ -549,7 +594,9 @@ position.
   second, unconditional write into `engine+0x5b4`.
 - ~~What sets `engine+0x62c` (current room pointer) on room/level
   transitions~~ — **resolved**: nothing "sets" it on transitions at all.
-  `engine+0x62c` is a single 0x160/352-byte room-render-state object,
+  (M70: `engine+0x62c` is the **Skybox** object, not a "current room" —
+  see the section above. The mechanism below is unchanged.)
+  `engine+0x62c` is a single 0x160/352-byte render-state object,
   allocated exactly **once** in `GameEngine_ctor` (`new(0x160)` +
   constructor call at 0x10067898) and never reassigned again. Room
   transitions instead **overwrite its fields in place** — `GameEngine_

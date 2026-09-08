@@ -500,9 +500,22 @@ void RasterizeTriangle(Backbuffer& backbuffer, std::vector<float>& depthBuffer,
 // 0..1 UVs (docs/MODEL_FORMAT.md's UV table is itself an 8.8-ish
 // fixed-point pixel coordinate, so no extra *width/*height scale is
 // needed here, just a clamp).
+// `asSkybox` (M70) switches this to the behaviour of the engine's separate
+// skybox rasterizer, `RoomFace_RasterizeTextured` (0x10055f38), whose whole
+// inner loop is one store:
+//
+//     *dst = texel | 0x7fff0000;
+//
+// -- the same far-depth word `Render3DScene`'s flat background fill writes.
+// No depth compare, no depth write, no light term, no chroma-key cutout.
+// Here that means: don't read or write depthBuffer (so every wall and actor
+// drawn afterwards passes its own test over the sky), and don't scale by
+// the M35 light/fog factor. Skipping the cutout is faithful rather than
+// load-bearing -- no shipped `.zsk` skin contains a single 0x0f0f texel.
 void RasterizeModelTriangle(Backbuffer& backbuffer, std::vector<float>& depthBuffer,
                              const ProjectedVertex& a, const ProjectedVertex& b,
-                             const ProjectedVertex& c, const Model& model, int skinIndex) {
+                             const ProjectedVertex& c, const Model& model, int skinIndex,
+                             bool asSkybox = false) {
     // M66: a model with no skin pixels has nothing to sample. Every texel
     // would come back as the chroma key anyway (Model::TexelAt returns
     // 0x0f0f for any out-of-range coordinate), so this changes nothing
@@ -513,10 +526,11 @@ void RasterizeModelTriangle(Backbuffer& backbuffer, std::vector<float>& depthBuf
     //
     // This is not hypothetical: nine of the twenty-one shipped zones --
     // broken1, broken2, crypt1, crypt2, crypt3, erthcave, ffarena,
-    // lothcav and twilite -- load a `.zsk` room mesh whose texture header
-    // reads skinCount=256, width=256, **height=0**, so entering any of
-    // them killed a Debug build on the first frame. See the M66 entry in
-    // docs/PORT_ROADMAP.md for what that `.zsk` actually turns out to be.
+    // lothcav and twilite -- ship a `.zsk` whose texture header reads
+    // skinCount=256, width=256, **height=0**, so entering any of them killed
+    // a Debug build on the first frame. M70 answers why those nine say that
+    // and stops them arriving here at all (ParseSkyboxResource); this guard
+    // stays because it is about the rasterizer's own precondition.
     if (model.width <= 0 || model.height <= 0 || model.skinCount <= 0) return;
 
     float area = (b.sx - a.sx) * (c.sy - a.sy) - (b.sy - a.sy) * (c.sx - a.sx);
@@ -544,7 +558,9 @@ void RasterizeModelTriangle(Backbuffer& backbuffer, std::vector<float>& depthBuf
             float invW = l0 * a.invW + l1 * b.invW + l2 * c.invW;
             if (invW <= 0.0f) continue;
             int depthIndex = py * Backbuffer::kWidth + px;
-            if (invW <= depthBuffer[static_cast<size_t>(depthIndex)]) continue;  // farther, skip
+            if (!asSkybox && invW <= depthBuffer[static_cast<size_t>(depthIndex)]) {
+                continue;  // farther, skip
+            }
 
             float u = (l0 * a.u + l1 * b.u + l2 * c.u) / invW;
             float v = (l0 * a.v + l1 * b.v + l2 * c.v) / invW;
@@ -552,6 +568,10 @@ void RasterizeModelTriangle(Backbuffer& backbuffer, std::vector<float>& depthBuf
             int ty = std::clamp(static_cast<int>(v), 0, model.height - 1);
 
             uint16_t raw444 = model.TexelAt(skinIndex, tx, ty);
+            if (asSkybox) {
+                backbuffer.SetPixel(px, py, ExpandRGB444(raw444, 1.0f));
+                continue;
+            }
             if (raw444 == 0x0f0f) continue;  // chroma-key cutout
 
             depthBuffer[static_cast<size_t>(depthIndex)] = invW;
@@ -586,25 +606,34 @@ void RasterizeModelTriangle(Backbuffer& backbuffer, std::vector<float>& depthBuf
 
 // Transforms and rasterizes every face of one model instance, positioned
 // by a tile-space X/Y offset plus a raw-world-unit Z offset -- shared by
-// M8's per-entity placement loop and M11's whole-room `.zsk` mesh (which
-// simply passes a zero offset, see this file's header comment). See
-// RasterizeModelTriangle's own header comment for the local-axis/scale
+// M8's per-entity placement loop and M70's skybox (which passes the
+// camera's own position as its offset -- see the skybox block at the top of
+// ZoneRenderer::Render, and zone_renderer.h's header comment for why).
+// See RasterizeModelTriangle's own header comment for the local-axis/scale
 // assumptions baked into the per-vertex transform below.
+// asSkybox (M70): draw with the engine's skybox rasterizer semantics --
+// unlit, and neither tested against nor written into the depth buffer.
+// The per-vertex cell-light lookup is skipped with it, since a skybox
+// vertex has no meaningful tile to stand on.
 // entityYaw (M15): local rotation around the vertical axis, radians --
 // applied to each vertex's local X/Z before the camera transform, so a
 // door instance (see zone_renderer.h's PlacedEntity::yaw) visibly swings
-// open. Zero for every caller before M15 (room mesh, and every entity
+// open. Zero for every caller before M15 (the skybox, and every entity
 // but a live door), so this is purely additive -- cosEntityYaw=1/
 // sinEntityYaw=0 reduces the new rotation to a no-op.
 void SubmitModel(Backbuffer& backbuffer, std::vector<float>& depthBuffer, const Zone& zone,
                   const Model& model, int skinIndex, float offsetTileX, float offsetTileY,
                   float offsetZ, float camX, float camY, float camZ, float cosYaw, float sinYaw,
                   float cosPitch, float sinPitch, float focalX, float focalY,
-                  float entityYaw = 0.0f, float scale = 1.0f, int frameIndex = 0) {
+                  float entityYaw = 0.0f, float scale = 1.0f, int frameIndex = 0,
+                  bool asSkybox = false) {
     // M35: see kModelForwardYawOffset -- a model's forward is its local
     // +Z, so a heading measured from world +X needs a quarter turn taken
     // out of it before it can be used as a rotation of the local axes.
-    float modelYaw = entityYaw + kModelForwardYawOffset;
+    // M70: the skybox's rotation isn't a heading at all -- it is the fixed
+    // -0x4000 the engine hands its own transform (see kSkyboxYaw), applied
+    // in the same place a placed entity's converted heading lands.
+    float modelYaw = asSkybox ? kSkyboxYaw : entityYaw + kModelForwardYawOffset;
     float cosEntityYaw = std::cos(modelYaw), sinEntityYaw = std::sin(modelYaw);
     for (const ModelFace& face : model.faces) {
         if (face.vA < 0 || face.vB < 0 || face.vC < 0 ||
@@ -650,6 +679,11 @@ void SubmitModel(Backbuffer& backbuffer, std::vector<float>& depthBuffer, const 
             vv3[i].u = uv[i]->u / 256.0f;
             vv3[i].v = uv[i]->v / 256.0f;
 
+            if (asSkybox) {
+                vv3[i].light = static_cast<float>(kMaxLightLevel);
+                continue;
+            }
+
             // M35: the same per-vertex light the tile-grid pipeline uses
             // (its own comment has the decompiled formula) -- the cell's
             // baked light where this vertex stands, less half the view
@@ -685,7 +719,7 @@ void SubmitModel(Backbuffer& backbuffer, std::vector<float>& depthBuffer, const 
         }
         for (int i = 1; i + 1 < clippedCount; ++i) {
             RasterizeModelTriangle(backbuffer, depthBuffer, pvc[0], pvc[i], pvc[i + 1], model,
-                                    skinIndex);
+                                    skinIndex, asSkybox);
         }
     }
 }
@@ -694,7 +728,13 @@ void SubmitModel(Backbuffer& backbuffer, std::vector<float>& depthBuffer, const 
 
 void ZoneRenderer::Render(Backbuffer& backbuffer, const Zone& zone, const Camera& camera,
                            const std::vector<PlacedEntity>& entities, ModelArchive* models) const {
-    backbuffer.Fill(PackRGB565(8, 8, 16));
+    // The engine's flat background fill: `Render3DScene` writes
+    // `engine+0x630 | 0x7fff0000` into all 176*208 scene words when there
+    // is no skybox to draw. Here it also backstops the skybox itself, which
+    // in practice covers the frame -- the mesh is a closed dome around the
+    // camera. (The colour is this port's own; `engine+0x630`'s value was
+    // never traced.)
+    backbuffer.Fill(kBackgroundFill);
     std::vector<float> depthBuffer(static_cast<size_t>(Backbuffer::kWidth) * Backbuffer::kHeight,
                                     0.0f);
 
@@ -715,6 +755,29 @@ void ZoneRenderer::Render(Backbuffer& backbuffer, const Zone& zone, const Camera
     float focalY = (Backbuffer::kHeight * 0.5f) / std::tan(camera.fovY * 0.5f);
     float focalX = focalY;  // square-ish texel assumption; aspect handled via screen center only
     (void)aspect;
+
+    // M70: the skybox (<zone>.zsk), first and underneath everything.
+    //
+    // In `Render3DScene` this draw and the flat background fill above are
+    // the two arms of one `if` -- the sky *is* the frame clear -- so it runs
+    // before any wall or actor, writes no depth, and takes no light term.
+    // zone_renderer.h's M70 block has the four independent lines of
+    // evidence that `.zsk` is a skybox, and its kSkyboxScale block the three
+    // placement constants.
+    //
+    // Anchoring it to the camera is the entire behavioural difference from
+    // M11, and it is a translation the port has to write explicitly because
+    // it transforms world-space vertices, where the original transforms
+    // camera-space ones and simply never adds a camera position: passing the
+    // camera's own X/Y/Z as the instance offset makes every sky vertex
+    // camera-relative, which is the same thing.
+    const Model* sky = drawSkybox ? zone.SkyMesh() : nullptr;
+    if (sky) {
+        SubmitModel(backbuffer, depthBuffer, zone, *sky, /*skinIndex=*/0, camX, camY,
+                    camera.z + kSkyboxUpOffset, camX, camY, camZ, cosYaw, sinYaw, cosPitch,
+                    sinPitch, focalX, focalY, /*entityYaw=*/0.0f, kSkyboxScale, /*frameIndex=*/0,
+                    /*asSkybox=*/true);
+    }
 
     for (const Face& face : faces) {
         const SurfaceRecord& sur = zone.surface(face.surIndex);
@@ -866,19 +929,6 @@ void ZoneRenderer::Render(Backbuffer& backbuffer, const Zone& zone, const Camera
                         camX, camY, camZ, cosYaw, sinYaw, cosPitch, sinPitch, focalX, focalY,
                         pe.yaw, pe.scale, pe.frameIndex);
         }
-    }
-
-    // M11: the room's own static mesh baked into <zone>.zsk -- a real,
-    // separate render step in the original engine alongside the
-    // tile-grid pipeline above, not a replacement for it (see
-    // world/zone.h's RoomMesh() comment). No per-instance offset (unlike
-    // .ent-placed entities): the mesh's own vertex coordinates already
-    // sit in the zone's world-unit frame. Same simplifications as M8's
-    // entities: skin 0 only. (M35: no longer unlit -- SubmitModel now
-    // applies the same per-vertex light/fog term the tile grid does.)
-    if (const Model* room = zone.RoomMesh()) {
-        SubmitModel(backbuffer, depthBuffer, zone, *room, 0, 0.0f, 0.0f, 0.0f, camX, camY, camZ,
-                    cosYaw, sinYaw, cosPitch, sinPitch, focalX, focalY);
     }
 }
 

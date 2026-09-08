@@ -157,12 +157,40 @@ private:
 
 // Parses one already-decompressed MODEL_FORMAT.md resource blob into
 // `out` -- the same per-resource logic ModelArchive::GetModel() uses for
-// a models.huge slot, factored out so world/zone.h's M11 room-mesh
-// loader (a whole decompressed .zsk file, confirmed to be an ordinary
-// resource of this same format, docs/ZONE_FORMAT.md) can reuse it
-// without going through the archive's offset/size index. Returns false
-// (state of `out` unspecified) if `blob`/`size` don't parse as a valid
-// resource.
+// a models.huge slot, factored out so world/zone.h's skybox loader (a
+// whole decompressed .zsk file, an ordinary resource of this same format,
+// docs/ZONE_FORMAT.md) can reuse it without going through the archive's
+// offset/size index. Returns false (state of `out` unspecified) if
+// `blob`/`size` don't parse as a valid resource.
 bool ParseModelResource(const uint8_t* blob, size_t size, Model& out);
+
+// The skybox texture's fixed dimensions. `RoomFace_RasterizeTextured`
+// (0x10055f38), the *only* rasterizer the skybox pipeline uses, addresses
+// its texel with a hardcoded 256-wide row stride and an 8-bit row mask:
+//
+//     texel = *(u16*)(pixels + (((v & 0xff00) + ((u >> 8) & 0xff)) * 2))
+//
+// -- no shift/size class taken from the resource's texture header, unlike
+// the actor pipeline (`Actor3D_TransformAndSubmitModel` derives one as
+// log2(width), docs/MODEL_FORMAT.md). So for a `.zsk` the engine reads a
+// single 256x256 skin regardless of what the header says, and every one of
+// the 21 shipped files physically carries exactly that: 131072 bytes of
+// texels between the 8-byte texture header and the 6-byte clip trailer.
+constexpr int kSkyboxSkinWidth = 256;
+constexpr int kSkyboxSkinHeight = 256;
+
+// Parses a decompressed `<zone>.zsk` skybox resource (M70). Identical to
+// ParseModelResource except that the texture is taken the way the engine's
+// skybox rasterizer takes it -- one 256x256 skin at the fixed offset above
+// -- instead of from the resource's own texture header.
+//
+// This is not pedantry: nine of the 21 zones (the interior ones -- see
+// docs/ZONE_FORMAT.md) ship a `.zsk` whose texture header reads
+// `skinCount=256, width=256, height=0`, which by the header's own arithmetic
+// describes *zero* pixels. Reading it that way makes the port draw nothing
+// where the real engine draws a 256x256 skin of solid black texels, i.e. an
+// interior's deliberately blank sky. The bytes are there in the file either
+// way; only the header disagrees with them.
+bool ParseSkyboxResource(const uint8_t* blob, size_t size, Model& out);
 
 }  // namespace sk
