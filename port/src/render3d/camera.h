@@ -77,33 +77,71 @@ constexpr float kMaxCameraPitch = 0.85f;  // radians, ~49 degrees
 // may simply be 0 -- i.e. the real game's camera might render from
 // literal floor height, not human eye height. Unconfirmed either way.
 //
-// This value (800) is a deliberate, documented **deviation** from that
-// uncertain original, not a recovered constant: calibrated from two
-// independent real 3D-model measurements (a real door model's local-
-// space height span is ~1036 raw units, a real barrel's ~373 -- both
-// consistent with a person roughly 800-900 raw units tall) to give a
-// conventional, comfortable first-person camera height for the port,
-// since a literal 0 offset -- while possibly more original-accurate --
-// would put the camera awkwardly at floor level for a modern control
-// scheme. Real .zcp floor/ceiling height data confirms this doesn't
-// matter for *room* proportions either way: room heights of several
-// thousand raw units are the norm across a whole zone (median ~6800,
-// ~27 tile-widths) -- verified structurally that X/Y/Z share one uniform
-// scale via SurfaceFace_BuildAndProject's rotation-matrix code, so
-// that's real level geometry, not a units bug.
+// Until M84 this was **800**, a deliberate documented deviation from
+// that uncertain original rather than a recovered constant: calibrated by
+// eye off two real 3D-model spans (a door's ~1036 raw units, a barrel's
+// ~373) to give a conventional first-person camera height, since a
+// literal 0 -- while possibly more original-accurate -- would render from
+// floor level. Real .zcp data confirms the choice never mattered for
+// *room* proportions either way: room heights of several thousand raw
+// units are the norm across a whole zone (median ~6800, ~27 tile-widths),
+// and X/Y/Z were verified to share one uniform scale via
+// SurfaceFace_BuildAndProject's rotation-matrix code, so that is real
+// level geometry and not a units bug. What it did matter for is how big
+// the thing standing in front of you looks, which is the report below.
 //
-// M72 narrows what the field *is* without settling its value. The
-// player-side actor classes override entity `Height()` (vtable slot
-// 0x108) with 0x10006230, a switch on the actor's stance byte `+0x1e1`
-// that returns `CMap+0x18`, `+0x1a` or `+0x1c` -- so `CMap+0x1a` is not a
-// camera constant at all, it is the *standing collision height* of a
-// person, which the engine then reuses as the eye offset. That makes a
-// literal 0 much less likely than the note above assumed (a zero-height
-// collision cylinder for every humanoid), but the write still has not been
-// found, so 800 stays a calibrated stand-in. Note this is a separate
-// number from the per-creature `MonsterCollisionHeight` table in
-// world/entity_types.h: creatures are a different class with a different
-// Height() override.
-constexpr float kEyeHeightOffset = 800.0f;
+// M84 -- **settled, and the value changed.** Reported: enemies are too
+// small, you have to walk almost into one to attack it, and the auto-aim
+// pan misbehaves when you do. The model transform is not the cause --
+// `Actor3D_TransformAndSubmitModel` scales a creature by `actor+0x5e`
+// and nothing else, that field is 0x100 for 1500 of the 1532 shipped
+// creature placements, and this port already reproduces both. The cause
+// is this constant, and 800 is too tall by half a creature.
+//
+// A shipped humanoid model is ~668 raw units from sole to crown
+// (Bandit_Thug 668, Skelos_Undriel 668, Penelope 666 -- measured off the
+// real models.huge). With the eye at 800 the player stands taller than
+// every humanoid in the game and looks down on the top of its head: at
+// 384 units -- the reach this port used -- a bandit's crown projects to
+// screen y 157 and its feet to y 338, so **51 of its 181 pixels are on
+// screen**, jammed into the bottom quarter of the frame. That is the
+// "enemies are too small" report exactly, and it is also why the auto-aim
+// pan gives up: centring that target needs a 66-degree downward pitch and
+// camera.h's own kMaxCameraPitch stops at 49.
+//
+// The value is 0x200 = 512, derived twice and neither derivation is a
+// preference:
+//
+//   1. **The creature height table.** `0x1008679c` (docs/ZONE_FORMAT.md)
+//      returns 0x200 for every humanoid model in the game and 0x100 only
+//      for the five short families (rats, spiders, wormmouths, stingers,
+//      wolves). The player-side override `0x10006230` returns
+//      `CMap+0x18`/`+0x1a`/`+0x1c` by stance byte, and the standing one is
+//      the field `GameEngine_InitLevel` adds to the player's feet to get
+//      its eye. The player is built on the same 144-frame humanoid rig as
+//      Bandit_Thug, so its standing height is the same quantity that table
+//      spells out for that body type.
+//
+//   2. **The melee target probes**, which are geometry, not opinion.
+//      `FUN_100425bc` picks its target out of the object-ID buffer at
+//      screen (88, 104), (88, 124), (88, 144), (88, 164) and (88, 184) --
+//      the exact vertical centre and four points below it, never one
+//      above. At this projection a probe at screen y sees world height
+//      `eye - (y - 104)/104 * distance`. For all five to land on a
+//      humanoid at melee distance the eye has to sit inside the creature's
+//      own height band, in its upper half: at 512 and 400 units away the
+//      five probes read z 512 down to 204 of a 0..604 body, every one of
+//      them on the target. At 800 the centre probe -- the one that matters
+//      most -- is above the creature's head at every distance. At 0 (the
+//      "CMap+0x1a is never written, so EKA1 zeroing makes it 0" hypothesis
+//      the note above floated) every probe is below the creature's feet
+//      and melee could never acquire anything at all, which **disproves
+//      that hypothesis outright.**
+//
+// So this is still not a constant read out of the binary -- the write to
+// `CMap+0x1a` has never been found and this milestone did not find it
+// either -- but it is no longer calibrated by eye. Two independent
+// consequences of the shipped code both land on 0x200.
+constexpr float kEyeHeightOffset = 512.0f;
 
 }  // namespace sk

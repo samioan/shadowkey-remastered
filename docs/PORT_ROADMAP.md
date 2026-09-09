@@ -7603,6 +7603,74 @@ soft-fails 39 -> 39, all 14 tracked `.ppm` renders byte-identical,
   alongside it during the investigation, `pre=(30346.0, 11904.0)` ->
   `now=(30371.4, 11873.1)`, a single step.
 
+- [x] **M84 -- how big an enemy looks. The camera was standing on a box.**
+      Reported: "enemies are not scaled correctly compared to the original
+      game, they're supposed to be larger. As a result, I have to move
+      really close to attack them properly, which breaks the automatic
+      camera pan system as well." Three symptoms, and the first two have
+      different causes; this entry is the first, M85 the second.
+
+    - **Nothing in the game scales a creature, and the port already had
+      that right.** `Actor3D_TransformAndSubmitModel` multiplies each
+      vertex by `actor+0x5e` and by nothing else -- there is no per-model
+      table, no category factor, no distance term. `+0x5e` is 0x100 (1:1)
+      for **1500 of the 1532 creature placements** across all 21 zones;
+      the 32 exceptions are 15 at 0.5x, 16 around 0.7x and exactly one
+      above 1:1. Only 25 `SetScale` calls exist in the whole `.s` corpus.
+      So no reading of the shipped data could make creatures bigger, and
+      the report is not about the model transform at all.
+
+    - **It is about where the camera stands.** A shipped humanoid model is
+      ~668 raw units from sole to crown (Bandit_Thug 668, Skelos_Undriel
+      668, Penelope 666, measured off the real `models.huge`). This port's
+      `kEyeHeightOffset` was **800** -- so the player stood taller than
+      every humanoid in the game and looked down on the top of its head.
+      At 384 units, the reach the port allowed, a bandit's crown projects
+      to screen row 157 and its feet to row 338: **51 of its 181 pixels
+      are on screen**, crammed into the bottom quarter of a 208-row frame.
+      That is "enemies are too small" exactly. And it is also the third
+      symptom: centring that target needs a 66-degree downward pitch, and
+      `kMaxCameraPitch` stops at 49 -- the auto-aim pan cannot reach it,
+      so it visibly gives up.
+
+    - **The value is 0x200 = 512, derived twice.** camera.h had carried
+      800 since M11 as an admitted invention, with a standing hypothesis
+      that the real `CMap+0x1a` is never written and so might be 0. Both
+      are now settled without finding the write:
+
+      1. *The creature height table.* `0x1008679c` (ZONE_FORMAT.md, M72)
+         returns **0x200 for every humanoid model** and 0x100 only for the
+         five short families. The player-side override `0x10006230`
+         returns `CMap+0x18`/`+0x1a`/`+0x1c` by stance byte, and
+         `GameEngine_InitLevel` reuses the standing one as the eye offset
+         (`player+0x224 = player+0xa4 + CMap+0x1a`). The player is built
+         on the same 144-frame humanoid rig as Bandit_Thug, so its
+         standing height is the quantity that table spells out for that
+         body type.
+
+      2. *The melee probe layout*, which is geometry rather than
+         inference. `FUN_100425bc` reads the object-ID buffer at screen
+         (88, 104), (88, 124), (88, 144), (88, 164) and (88, 184) -- the
+         exact vertical centre and four points below it, never one above.
+         A probe at row `y` sees world height `eye - (y - 104)/104 * d`.
+         At eye 512 and 400 units all five land on a humanoid, reading z
+         512 down to 204 of a 0..604 body. At 800 the *centre* probe --
+         the one read first -- is above the creature's head at every
+         distance, wasting the most important of the five. **At 0 no probe
+         ever sees higher than ground level at all**, so not one of them
+         could reach a creature's torso, which disproves the zero
+         hypothesis outright.
+
+      512 is also the middle of a broad plateau (every eye height from
+      about 380 to 660 puts all five probes on the body), so this is not a
+      brittle fit. It is still not a constant read out of the binary --
+      the write to `CMap+0x1a` was not found and this milestone did not
+      look for it again -- but it is no longer calibrated by eye.
+
+    - **The tracked `.ppm` reference renders all move**, because every one
+      of them is taken from a camera that is now 288 units lower. That is
+      the change, not a regression.
+
 ## Next milestones (not yet started)
 
 Roughly in priority order for reaching "actually playable," not commitments:
