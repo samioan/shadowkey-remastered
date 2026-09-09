@@ -7543,6 +7543,66 @@ soft-fails 39 -> 39, all 14 tracked `.ppm` renders byte-identical,
   take its row -- `picked up 10 gold (total 10)` in the log and
   `gold = 10` from the console.
 
+- [x] **M83 -- the tutorial popup that greeted you before you had moved.**
+      Found while setting up M82's live repro, and confirmed against the
+      original by the reporter: azra's first tutorial appears a few paces
+      into the game, not the instant the zone finishes loading. The port
+      opened it during the zone-load tick.
+
+    - **The region walk only runs on a tick the player actually moved.**
+      The real one lives in the actor tick `FUN_1001c9c0`, and its
+      40-slot loop over the `.zon` rooms (`engine+0x5464`, stride 0x84,
+      the array M44 decoded) is wrapped in
+      `if (player->+0x98 != 0 || player->+0xa0 != 0)`. Those are the two
+      fields either side of the position words `+0x94`/`+0x9c`, and they
+      are this tick's movement delta -- the collision code a few hundred
+      lines up computes `pos - delta` for its lookahead and, on a hit,
+      zeroes the delta and snaps the position back, so walking into a
+      wall reads as not moving. They are the same pair M72 already
+      identified for the camera-pitch drift. Standing still, the engine
+      never even asks which room it is in, so the per-room "inside" flags
+      at `engine+0x54e4` simply keep their previous values -- which is
+      why the port now skips the block outright rather than only
+      suppressing the fire.
+
+    - **M44 had this backwards in as many words**, and the comment said
+      so: "a fresh zone starts with nobody inside any region, so the
+      first tick fires EnterZone for wherever the player spawns -- which
+      is what azra's `start`/`help1` regions are for". It does not, and
+      it must not. **Twelve of the 21 zones spawn the player inside one
+      of their own regions** -- M44's own smoke test already asserted
+      that number without drawing the conclusion, and ZONE_FORMAT.md's
+      inclusive-containment note lists them. azra is one: its `start`
+      region is x 118..121, y 42..46 and its player start is exactly
+      (118, 46), on the far corner. So the port ran those handlers before
+      the player had done anything at all, and in azra that handler is
+      `GetPlayer().OpenMenu("starthelp")` -- the corpus's only call site
+      for it. Because a paused menu sets `inGame = false`, a fresh
+      session opened with the world inert behind a popup nobody had
+      triggered, which is also what made every world-changing debug
+      command answer "not in a zone" until it was dismissed.
+
+    - **The fix reuses what M72 already had.** `preMoveCamX`/`preMoveCamY`
+      are captured a few hundred lines above the region walk and the
+      movement is applied in between, so `gameCamera.x != preMoveCamX ||
+      gameCamera.y != preMoveCamY` is the same stand-in for that velocity
+      pair M72 is already using for the pitch. One condition, no new
+      state.
+
+  **Verification.** `m44_zone_region_smoke` gains a sixth part that
+  models the gate directly (suite still **74/74**): azra's player start
+  really is inside its own `start` region; arriving there and standing
+  still for 100 ticks fires nothing; and the very first step fires
+  `start` exactly once, while still inside the region the player spawned
+  in. The pre-existing 12-of-21 assertion is what makes the case general.
+
+  Confirmed in the running game, through a real New Game rather than the
+  console's `zone` command: after the zone finishes loading the log holds
+  no `entered zone region` line, still none after six seconds standing
+  still, and one appears on walking -- with the movement delta printed
+  alongside it during the investigation, `pre=(30346.0, 11904.0)` ->
+  `now=(30371.4, 11873.1)`, a single step.
+
 ## Next milestones (not yet started)
 
 Roughly in priority order for reaching "actually playable," not commitments:

@@ -3314,10 +3314,13 @@ int main(int argc, char** argv) {
                 // on every zone load.
                 gameZoneRegions.SetZone(gameZone.get());
                 gameTileStamp.SetZone(gameZone.get());
-                // M44: a fresh zone starts with nobody inside any region,
-                // so the first tick fires EnterZone for wherever the
-                // player spawns -- which is what azra's "start"/"help1"
-                // regions are for.
+                // M44/M83: a fresh zone starts with nobody recorded inside
+                // any region. That does *not* make the first tick fire
+                // EnterZone for wherever the player spawns, which is what
+                // this comment used to claim: the walk itself only runs on
+                // a tick the player moved (see its own comment below), so
+                // the region you arrive standing in fires on your first
+                // step, not on arrival.
                 gameRegionsOccupied.clear();
                 // M61: `GameEngine_InitLevel`'s `typeId == 1` branch, both
                 // halves of it. The zone's own player-start record is the
@@ -4381,7 +4384,43 @@ int main(int argc, char** argv) {
                 // room pointer. Leaving a region is deliberately silent --
                 // the engine has no ExitZone, and no shipped script has a
                 // handler for one.
-                if (gameZone && gameZoneScript && !gameZone->regions().empty()) {
+                //
+                // M83: **the whole walk only runs on a tick the player
+                // actually moved.** The real one lives in the actor tick
+                // `FUN_1001c9c0`, and wraps its 40-slot loop in
+                // `if (player->+0x98 != 0 || player->+0xa0 != 0)` -- the two
+                // fields either side of the position words `+0x94`/`+0x9c`,
+                // and the same pair M72 already identified as this tick's
+                // movement delta (the collision code zeroes one of them and
+                // snaps the matching position back, so a walk into a wall
+                // reads as not moving). Standing still, the engine never
+                // even asks which room it is in, so the per-room "inside"
+                // flags at `engine+0x54e4` keep their previous values --
+                // which is why this skips the block outright rather than
+                // only suppressing the fire.
+                //
+                // M44 had this backwards, and said so in as many words: "a
+                // fresh zone starts with nobody inside any region, so the
+                // first tick fires EnterZone for wherever the player
+                // spawns". It does not, and it must not. Twelve of the 21
+                // zones spawn the player *inside* one of their own regions
+                // (docs/ZONE_FORMAT.md's inclusive-containment note lists
+                // them -- azra's `start` is x 118..121, y 42..46 and its
+                // player start is exactly (118, 46), on the far edge), so
+                // this port fired those handlers during the zone-load tick,
+                // before the player had done anything at all. In azra that
+                // is `starthelp`, the game's first tutorial popup, which in
+                // the original appears only once you have walked a few
+                // steps -- and while it was up `inGame` was false, so a
+                // fresh session opened with the world inert behind a popup
+                // nobody had triggered.
+                //
+                // Reusing preMoveCamX/preMoveCamY costs nothing and is the
+                // same stand-in for that velocity pair M72 already uses.
+                const bool playerMovedThisTick =
+                    gameCamera.x != preMoveCamX || gameCamera.y != preMoveCamY;
+                if (gameZone && gameZoneScript && !gameZone->regions().empty() &&
+                    playerMovedThisTick) {
                     const int playerTx = static_cast<int>(std::floor(gameCamera.x / sk::kTileScale));
                     const int playerTy = static_cast<int>(std::floor(gameCamera.y / sk::kTileScale));
                     std::set<size_t> nowOccupied;

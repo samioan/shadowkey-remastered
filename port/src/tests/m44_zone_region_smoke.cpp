@@ -380,7 +380,68 @@ int main(int argc, char** argv) {
         // Standing still must never re-fire it.
         std::map<std::string, int> still = fireCount(azra, 119, 119, 44);
         Check(still["start"] == 1,
-              "...and entering it fires once even when the walk starts inside");
+              "...and the diff itself fires once per crossing, wherever the walk began");
+    }
+
+    // ---- 6. M83: the walk only runs on a tick the player actually moved ----
+    //
+    // The real region test lives in the actor tick `FUN_1001c9c0`, and its
+    // 40-slot loop is wrapped in `if (player->+0x98 != 0 || player->+0xa0 != 0)`
+    // -- the two fields either side of the position words `+0x94`/`+0x9c`,
+    // i.e. this tick's movement delta. Standing still, the engine never even
+    // asks which room it is in, so the per-room "inside" flags at
+    // `engine+0x54e4` keep their previous values; the loop is skipped
+    // outright rather than merely suppressing the fire.
+    //
+    // Part 3 above is why that decides anything: **12 of the 21 zones spawn
+    // the player inside one of their own regions.** azra is one of them --
+    // its player start is (118, 46) and its "start" region is x 118..121,
+    // y 42..46, so the spawn sits exactly on the far corner -- and azra's
+    // EnterZone opens `starthelp` for it, the game's first tutorial popup.
+    // Without the gate the port fired that during the zone-load tick, before
+    // the player had done anything, and because the popup sets inGame=false
+    // a fresh session opened with the world inert behind it. In the original
+    // it appears a few paces in.
+    {
+        // One entry per tick: which tile the player is on, and whether the
+        // player moved onto it this tick. Arrival is (spawn, false).
+        struct Tick {
+            int x;
+            bool moved;
+        };
+        auto fireCountGated = [&](const sk::Zone& zone, const std::vector<Tick>& ticks, int y) {
+            std::map<std::string, int> fires;
+            std::set<size_t> occupied;
+            for (const Tick& t : ticks) {
+                if (!t.moved) continue;  // the engine skips the whole loop
+                std::set<size_t> now;
+                for (size_t i = 0; i < zone.regions().size(); ++i) {
+                    if (!zone.regions()[i].Contains(t.x, y)) continue;
+                    now.insert(i);
+                    if (!occupied.count(i)) ++fires[zone.regions()[i].name];
+                }
+                occupied.swap(now);
+            }
+            return fires;
+        };
+        const int spawnX = azra.playerStartX >> 8;
+        const int spawnY = azra.playerStartY >> 8;
+        const sk::Zone::Region* start = FindRegion(azra, "start");
+        Check(start && start->Contains(spawnX, spawnY),
+              "azra's player start really is inside its own \"start\" region -- the case the gate "
+              "exists for");
+
+        std::vector<Tick> standing(100, Tick{spawnX, false});
+        Check(fireCountGated(azra, standing, spawnY).empty(),
+              "arriving inside a region and standing still fires nothing, however long you stand "
+              "-- so a fresh azra no longer opens starthelp before the player has moved");
+
+        std::vector<Tick> oneStep = standing;
+        oneStep.push_back(Tick{spawnX + 1, true});
+        std::map<std::string, int> afterStep = fireCountGated(azra, oneStep, spawnY);
+        Check(afterStep["start"] == 1,
+              "...and the very first step fires it exactly once, while still inside the region the "
+              "player spawned in -- the popup arrives a few paces in, as it does in the original");
     }
 
     std::printf("\nm44_zone_region_smoke: %s\n", g_failures ? "FAILED" : "PASSED (all checks)");
