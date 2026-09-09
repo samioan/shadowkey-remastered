@@ -102,7 +102,19 @@ int main(int argc, char** argv) {
     sk_bindings::MenuStack stack(scriptRoot, interpreter, &strings);
     stack.level().SetEntityTypes(&entityTypes);
 
+    // M79: through the real creation path -- `Level.CreateEntity`'s own --
+    // rather than straight from a script path. The entities.txt category is
+    // what picks an item's C++ class, and the class constructor is where
+    // `+0x184` (a weapon's 0x300 swing-drain scale) and a spell's `+0x19c` /
+    // `+0x180` come from. Loading by path skips all of it, which is exactly
+    // the hole this milestone closed; a test that loaded by path would go on
+    // measuring the wrong machine.
     auto loadItem = [&](const std::string& rel) -> std::unique_ptr<Item> {
+        const int typeId = stack.level().TypeIdForScript(rel);
+        if (typeId >= 0) {
+            std::unique_ptr<Item> made = stack.level().CreateItem(typeId, true);
+            if (made) return made;
+        }
         skExecutableContext loadCtxt(&interpreter);
         try {
             auto it = std::make_unique<Item>(
@@ -127,8 +139,10 @@ int main(int argc, char** argv) {
     std::unique_ptr<Item> club = loadItem("weapons/club.s");
     std::unique_ptr<Item> bow = loadItem("weapons/bandit_longbow.s");
     std::unique_ptr<Item> spell = loadItem("spells/blind.s");
-    Check(club && bow && spell, "weapons/club.s, weapons/bandit_longbow.s, spells/blind.s load");
-    if (!club || !bow || !spell) {
+    std::unique_ptr<Item> armour = loadItem("armor/chain_coif.s");
+    Check(club && bow && spell && armour,
+          "weapons/club.s, weapons/bandit_longbow.s, spells/blind.s, armor/chain_coif.s load");
+    if (!club || !bow || !spell || !armour) {
         std::printf("\nm47_weapon_swing_smoke: FAILED\n");
         return 1;
     }
@@ -140,8 +154,15 @@ int main(int argc, char** argv) {
     {
         VM vm;
         Check(!sk_bindings::StartWeaponSwing(vm, nullptr), "no item: no swing");
-        Check(!sk_bindings::StartWeaponSwing(vm, spell.get()),
-              "a real spell (no SetWeaponSprite) cannot swing");
+        // M79: a spell has a viewmodel after all (the Spell constructor's
+        // slot 152 and five frames), so this gate no longer stops one --
+        // and never did in the engine, whose only test here is
+        // `weapon->+0x180 != 0`. What keeps a spell out of the *melee*
+        // swing is one level up: FUN_10042394 sends type 2 to the cast,
+        // and only type 1 reaches FUN_100425bc. Armour, which really does
+        // leave both fields zero, is what this line checks now.
+        Check(!sk_bindings::StartWeaponSwing(vm, armour.get()),
+              "an item with no animation frames cannot swing");
         Check(sk_bindings::StartWeaponSwing(vm, club.get()), "a real club can");
         Check(!sk_bindings::StartWeaponSwing(vm, club.get()),
               "...and cannot be re-triggered while its own swing is running");

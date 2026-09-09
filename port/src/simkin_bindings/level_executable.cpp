@@ -1,6 +1,7 @@
 #include "simkin_bindings/level_executable.h"
 
 #include <algorithm>
+#include <cctype>
 #include <cstdio>
 
 #include "assets/sound_archive.h"
@@ -85,6 +86,19 @@ std::unique_ptr<MonsterExecutable> LevelExecutable::CreateCreature(int typeId) {
 int LevelExecutable::EntityCategoryOf(int typeId) const {
     const sk::EntityTypeDescriptor* desc = m_EntityTypes ? m_EntityTypes->Lookup(typeId) : nullptr;
     return desc ? desc->category : -1;
+}
+
+int LevelExecutable::TypeIdForScript(const std::string& relPath) const {
+    if (!m_EntityTypes) return -1;
+    for (const auto& entry : m_EntityTypes->all()) {
+        std::string name = entry.second.name;
+        for (char& c : name) {
+            if (c == '\\') c = '/';
+            c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        }
+        if (name == relPath) return entry.first;
+    }
+    return -1;
 }
 
 std::unique_ptr<ItemExecutable> LevelExecutable::CreateItem(int typeId, bool requireItemCategory) {

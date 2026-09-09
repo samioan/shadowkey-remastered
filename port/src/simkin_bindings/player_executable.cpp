@@ -53,6 +53,23 @@ void PlayerExecutable::LoadStartingInventory(MenuStack& stack) {
         "items/bread.s",
     };
     for (const char* relPath : kStartingItems) {
+        // M79: through the real creation path first. An item built straight
+        // from a script path never learns its entities.txt category, and the
+        // category is what picks its C++ class -- so it gets none of that
+        // class's constructor defaults. For the starting club that meant
+        // `+0x184` staying at the base item's `0x100` instead of the Weapon
+        // constructor's `0x300`, i.e. a swing animation three times too
+        // slow. See game_constants.h's M79 table.
+        const int typeId = stack.level().TypeIdForScript(relPath);
+        if (typeId >= 0) {
+            std::unique_ptr<ItemExecutable> item = stack.level().CreateItem(typeId, true);
+            if (item) {
+                std::printf("PlayerExecutable: starting item '%s' -> \"%s\" (type=%d)\n", relPath,
+                            item->name().c_str(), item->itemType());
+                m_Inventory.push_back(std::move(item));
+                continue;
+            }
+        }
         std::string fullPath = stack.scriptRoot() + "/" + relPath;
         skExecutableContext loadCtxt(&stack.interpreter());
         try {

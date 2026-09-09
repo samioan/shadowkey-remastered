@@ -238,6 +238,56 @@ struct PlacedEntity {
     int frameIndex = 0;
 };
 
+// ---- M79: the sprite billboard, `FUN_1008b25c` + `FUN_1004f91c` ----
+//
+// The second thing this pipeline draws that is not a mesh. The engine's
+// animated-sprite entity class -- spell projectiles
+// (simkin_bindings/spell_projectile.h) and scripted effects
+// (simkin_bindings/effect_entity.h) are both instances of it -- has its own
+// draw that submits a `global.spr` slot as a screen-aligned quad rather
+// than any geometry, and this port carried the state for both since M48 and
+// M63 while drawing neither. "The fireball that comes out" is that gap.
+//
+// `FUN_1008b25c` builds the quad in **camera space** and hands it to
+// `FUN_1004f91c`:
+//
+//     halfW = ((i16)(sizeX * spriteW) * spriteW) >> 8      // both twice
+//     halfH = ((i16)(sizeY * spriteH) * spriteH) >> 8
+//     draw(x0 = cx - halfW, y0 = cy + 2*halfH,
+//          x1 = cx + halfW, y1 = cy, depth = cz, ...)
+//
+// -- so a billboard is **bottom-anchored** at the entity's own Z and
+// symmetric about it horizontally. `FUN_1004f91c` then projects the two
+// corners with exactly the projection camera.h already recovered
+// (`0x5800 + x*0x5800/z`, `0x6800 - y*0x6800/z`, with `engine+0x608`'s
+// aspect prescale making both focal lengths 104) and culls at `depth < 5`.
+//
+// **The blend, and an M63 correction.** `FUN_1004f218`'s last two arguments
+// are the entity's `+0x58` and `+0x138`, and Ghidra mis-typed
+// `FUN_1004f91c`'s parameter list by one, which is how M63 came to read
+// `+0x138` as a *size* scale. It is not: `+0x58` selects the blit mode (0 =
+// straight copy, 1 = blend) and `+0x138` is the **blend level**, quantised
+// by `(level + 0x1f) >> 6` into 0 = draw nothing, 1 = 25% source, 2 = 50%,
+// 3 = 75%, 4 = fully opaque. So a scripted effect's "scale ramp" from
+// `scaleStart` to `scaleEnd` is a **fade**, and the engine's blood spurt
+// ramping `0x100 -> 0x40` fades from solid to a quarter rather than
+// shrinking. A spell projectile passes `+0x58 = 0`, so a fireball is drawn
+// opaque and its `0x80` never matters.
+struct SpriteBillboard {
+    float x = 0, y = 0, z = 0;      // world units; the quad's bottom centre
+    const Sprite* sprite = nullptr;  // a decoded global.spr slot
+    // `FUN_1008b25c`'s two half-extents, in world units. Computed by the
+    // owning entity (simkin_bindings/effect_entity.h's EffectHalfWidth /
+    // EffectHalfHeight) because the doubled sprite-dimension multiply is
+    // part of that class, not of the renderer.
+    int halfWidth = 0, halfHeight = 0;
+    int blendMode = 0;    // entity+0x58
+    int blendLevel = 0x100;  // entity+0x138
+};
+
+// `FUN_1004f91c`'s own `if ((int)depth < 5) return;`, in raw world units.
+constexpr float kBillboardNearDepth = 5.0f;
+
 // M35: a model's own forward axis is its **local +Z**, and this is the
 // offset that reconciles that with `PlacedEntity::yaw`, which (like every
 // other heading in this port) measures from world +X.
@@ -355,7 +405,8 @@ public:
     // don't need to change. `models` is non-const because Model parsing
     // is lazy/cached (world/model_archive.h).
     void Render(Backbuffer& backbuffer, const Zone& zone, const Camera& camera,
-                const std::vector<PlacedEntity>& entities = {}, ModelArchive* models = nullptr) const;
+                const std::vector<PlacedEntity>& entities = {}, ModelArchive* models = nullptr,
+                const std::vector<SpriteBillboard>& billboards = {}) const;
 };
 
 }  // namespace sk

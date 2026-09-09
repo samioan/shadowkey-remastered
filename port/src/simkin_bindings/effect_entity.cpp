@@ -72,14 +72,17 @@ void TickEffect(EffectEntity& effect, int frameDelta, int gravityUnits) {
     }
 }
 
+int SpriteHalfExtent(int sizeScalar, int spritePixels) {
+    auto stored = static_cast<int16_t>((sizeScalar * spritePixels) & 0xffff);
+    return (stored * spritePixels) >> 8;
+}
+
 int EffectHalfWidth(const EffectEntity& effect, int spriteWidth) {
-    auto stored = static_cast<int16_t>((effect.sizeX * spriteWidth) & 0xffff);
-    return (stored * spriteWidth) >> 8;
+    return SpriteHalfExtent(effect.sizeX, spriteWidth);
 }
 
 int EffectHalfHeight(const EffectEntity& effect, int spriteHeight) {
-    auto stored = static_cast<int16_t>((effect.sizeY * spriteHeight) & 0xffff);
-    return (stored * spriteHeight) >> 8;
+    return SpriteHalfExtent(effect.sizeY, spriteHeight);
 }
 
 void PruneEffects(std::vector<EffectEntity>& effects) {

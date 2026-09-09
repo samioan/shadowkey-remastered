@@ -41,9 +41,9 @@
 // twelve-tick life is a hard twelve-tile range, and it is the *only* range
 // a spell has. There is no SetRange on the spell side.
 //
-// ---- What this port does not reproduce ----
+// ---- The art ----
 //
-// The art -- **identified in M63, still not drawn.** `+0x134` is 2 for
+// Identified in M63, **drawn since M79.** `+0x134` is 2 for
 // blaze/Blind/DoomHammer and 5 for every other projectile spell, and it
 // seeds a one-frame animation range as well as being stored directly. It
 // is not a models.txt index (2 is lantern.bin and 5 is sbarrel.bin); it is
@@ -51,9 +51,8 @@
 // sprite table at `engine+0x4460` by the sprite entity's own draw
 // (`FUN_1008b25c`). Both slots are real 32x32 sprites -- slot 2 is a
 // gold-orange fireball. See simkin_bindings/effect_entity.h, which shares
-// this entity class and has the whole writeup. This port still carries the
-// number without drawing anything (`render3d/zone_renderer.h` has no
-// billboard pass), so the projectile is simulated, not visible.
+// this entity class, and render3d/zone_renderer.h's SpriteBillboard for
+// the quad the draw builds.
 //
 // Also not reproduced: the multiplayer mirror of the spawn. The blaze-only
 // impact effect above is `Level.CreateEffect`, which M63 implemented --
@@ -74,6 +73,17 @@ namespace sk_bindings {
 // axes, in world units -- so a fireball is 400 units wide, a tile and a
 // half.
 constexpr int kProjectileRadius = 200;
+
+// M79 -- what the projectile is *drawn* at, which is not its collision box.
+// `FUN_1008b420` leaves `+0x12c`/`+0x130` at 8 and `FUN_1005f0b4` does not
+// touch them, so the quad's half-extents are
+// `SpriteHalfExtent(8, 32) == 32` on both axes for a 32x32 sprite: 64 world
+// units across, a quarter tile, against a collision box six times wider.
+// The spawn passes `+0x58 = 0`, so it is an opaque blit and the `0x80` the
+// constructor writes into `+0x138` never reaches a blend.
+constexpr int kProjectileDrawSize = 8;
+constexpr int kProjectileBlendMode = 0;
+constexpr int kProjectileBlendLevel = 0x80;
 
 // FUN_1005f928's `if (age < 0xd)`. The counter is incremented before the
 // test, so a projectile gets twelve ticks of collision and dies on the

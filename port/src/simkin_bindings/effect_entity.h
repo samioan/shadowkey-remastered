@@ -79,10 +79,21 @@
 // 240 units, 24 ticks, 0.94 s), so `lifetime` is in sixteenths of a
 // second, near enough.
 //
-// `+0x152` also gates the scale ramp, `+0x138 = scaleStart + progress *
-// (scaleEnd - scaleStart)`. The constructor leaves both ends at 0x80, so a
-// scripted effect renders at a constant half scale and only an
-// engine-spawned one (the blood spurt ramps 0x100 -> 0x40) ever changes.
+// `+0x152` also gates the ramp, `+0x138 = start + progress * (end -
+// start)`. The constructor leaves both ends at 0x80, so a scripted effect
+// holds one value the whole way and only an engine-spawned one (the blood
+// spurt, 0x100 -> 0x40) ever changes.
+//
+// **CORRECTED (M79): `+0x138` is an opacity, not a size scale.** M63 read
+// it as one because Ghidra mis-typed `FUN_1004f91c`'s parameter list by one
+// -- the draw passes it fifteen arguments against fourteen declared, so
+// `+0x58` and `+0x138` both land a slot early. Following the *call* instead,
+// `FUN_1004f218`'s last two arguments are `+0x58` (0 = straight copy, 1 =
+// blend) and `+0x138` (the blend level, quantised `(v + 0x1f) >> 6` into
+// 0 = draw nothing, 1 = 25% source, 2 = 50%, 3 = 75%, 4 = fully opaque).
+// Nothing about the drawn *size* passes through it at all. So the blood
+// spurt fades from solid to a quarter rather than shrinking, and a scripted
+// effect draws at a flat 50% blend. See render3d/zone_renderer.h.
 //
 // ---- `sizeX`/`sizeY` are not a radius ----
 //
@@ -118,13 +129,11 @@
 //
 // ---- What this port does and does not do ----
 //
-// Simulated, not drawn -- the same position M48's spell projectile is in,
-// and for the same reason: `render3d/zone_renderer.h` draws models.idx
-// meshes and has no billboard pass, so adding one is its own milestone
-// rather than a rider on this one. Everything an eventual billboard pass
-// needs is here and is real: the current `global.spr` slot every tick, the
-// world position, the camera-space half-extents through
-// EffectHalfWidth()/EffectHalfHeight(), and the scale. main.cpp already
+// **Drawn since M79.** `render3d/zone_renderer.h`'s SpriteBillboard is the
+// billboard pass this file's note used to say was owed, and main.cpp feeds
+// it every live effect and every spell projectile each frame: the current
+// `global.spr` slot, the world position, the half-extents through
+// EffectHalfWidth()/EffectHalfHeight(), and the blend. main.cpp already
 // loads the active zone's `<zone>_sprites.txt` category, so the art is in
 // memory when a zone's effects exist.
 //
@@ -179,9 +188,9 @@ struct EffectEntity {
     bool gravity = false;   // +0x150 -- only the engine's blood spurt sets it
 
     // +0x58, the constructor's fifth argument. `CreateEffect`'s third
-    // script argument lands here and every shipped call passes 1; the
-    // draw hands it to the blit as its own argument. Carried, not acted
-    // on -- see the header note on not drawing.
+    // script argument lands here and every shipped call passes 1, so every
+    // scripted effect is **blended**; a spell projectile passes 0 and is
+    // drawn opaque. M79 feeds it to the billboard pass as its blend mode.
     int drawFlags = 0;
 
     bool alive = true;  // FUN_1001b484's deferred destroy
@@ -202,6 +211,10 @@ void TickEffect(EffectEntity& effect, int frameDelta, int gravityUnits = 0);
 // `FUN_1008b25c`'s two half-extents, in camera-space world units, given
 // the drawn sprite's own pixel dimensions. The intermediate is truncated
 // to a signed 16-bit field in the real code and is reproduced that way.
+// M79: the shared form, because a spell projectile is the same entity
+// class and reaches the same two instructions with its own `+0x12c`/
+// `+0x130` (both 8, from `FUN_1008b420`).
+int SpriteHalfExtent(int sizeScalar, int spritePixels);
 int EffectHalfWidth(const EffectEntity& effect, int spriteWidth);
 int EffectHalfHeight(const EffectEntity& effect, int spriteHeight);
 

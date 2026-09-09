@@ -769,10 +769,110 @@ void SubmitModel(Backbuffer& backbuffer, std::vector<float>& depthBuffer, const 
     }
 }
 
+// M79 -- `FUN_1008b25c` + `FUN_1004f91c` + `FUN_1004f218`'s blit, for one
+// screen-aligned `global.spr` quad. See zone_renderer.h's SpriteBillboard
+// block for where every constant here comes from.
+//
+// Depth: the engine's framebuffer word packs the quad's depth into its high
+// half and the blit's per-pixel test is `myDepth < storedDepth`, writing the
+// whole word on success -- i.e. it both tests and writes, like the mesh
+// pipeline. Reproduced with this port's own `invW` convention (larger is
+// nearer), which makes the test the same comparison the model rasteriser
+// already uses.
+void SubmitBillboard(Backbuffer& backbuffer, std::vector<float>& depthBuffer,
+                      const SpriteBillboard& bb, float camX, float camY, float camZ,
+                      float cosYaw, float sinYaw, float cosPitch, float sinPitch, float focalX,
+                      float focalY) {
+    const Sprite* sprite = bb.sprite;
+    if (!sprite || sprite->width <= 0 || sprite->height <= 0) return;
+
+    // `FUN_1004f218`'s opening: the blend level decides whether there is
+    // anything to draw at all, and a level of 4 collapses back to the plain
+    // copy. The rounding (`+ 0x1f`, or `+ 0x5e` when negative) is the
+    // engine's own.
+    int blendMode = bb.blendMode;
+    int level = bb.blendLevel;
+    if (blendMode == 1) {
+        int rounded = level + 0x1f;
+        if (rounded < 0) rounded = level + 0x5e;
+        level = rounded >> 6;
+        if (level == 0) return;
+        if (level == 4) blendMode = 0;
+    }
+
+    // Camera space, in the tile units the rest of this file works in.
+    const float rx = bb.x / kTileScale - camX;
+    const float ry = bb.y / kTileScale - camY;
+    const float rz = bb.z / kTileScale - camZ;
+    const float right = rx * sinYaw - ry * cosYaw;
+    const float flatForward = rx * cosYaw + ry * sinYaw;
+    const float forward = flatForward * cosPitch - rz * sinPitch;
+    const float up = rz * cosPitch + flatForward * sinPitch;
+    const float depthWorld = forward * kTileScale;
+    if (depthWorld < kBillboardNearDepth) return;  // FUN_1004f91c's own cull
+
+    const float halfW = static_cast<float>(bb.halfWidth) / kTileScale;
+    const float halfH = static_cast<float>(bb.halfHeight) / kTileScale;
+    const float invW = 1.0f / forward;
+    // The two corners the engine projects, and only those two: a billboard
+    // is axis-aligned on screen, so everything between them is a stretch.
+    const float x0 = Backbuffer::kWidth * 0.5f + (right - halfW) * focalX * invW;
+    const float x1 = Backbuffer::kWidth * 0.5f + (right + halfW) * focalX * invW;
+    const float y1 = Backbuffer::kHeight * 0.5f - up * focalY * invW;  // bottom
+    const float y0 = Backbuffer::kHeight * 0.5f - (up + 2.0f * halfH) * focalY * invW;  // top
+    const float spanX = x1 - x0, spanY = y1 - y0;
+    if (spanX <= 0.0f || spanY <= 0.0f) return;
+
+    const int px0 = std::max(0, static_cast<int>(std::floor(x0)));
+    const int px1 = std::min(Backbuffer::kWidth, static_cast<int>(std::ceil(x1)));
+    const int py0 = std::max(0, static_cast<int>(std::floor(y0)));
+    const int py1 = std::min(Backbuffer::kHeight, static_cast<int>(std::ceil(y1)));
+
+    for (int py = py0; py < py1; ++py) {
+        const int sy = static_cast<int>((static_cast<float>(py) + 0.5f - y0) / spanY *
+                                         static_cast<float>(sprite->height));
+        if (sy < 0 || sy >= sprite->height) continue;
+        uint16_t* row = backbuffer.Row(py);
+        for (int px = px0; px < px1; ++px) {
+            const int sx = static_cast<int>((static_cast<float>(px) + 0.5f - x0) / spanX *
+                                             static_cast<float>(sprite->width));
+            if (sx < 0 || sx >= sprite->width) continue;
+            const size_t si = static_cast<size_t>(sy) * static_cast<size_t>(sprite->width) +
+                              static_cast<size_t>(sx);
+            // The real blit's own colour-key test (`!= 0x0f0f`), which the
+            // decoder already turned into this mask.
+            if (!sprite->opaque[si]) continue;
+            const size_t di = static_cast<size_t>(py) * Backbuffer::kWidth + static_cast<size_t>(px);
+            if (invW <= depthBuffer[di]) continue;  // something nearer is already there
+            const uint16_t src = sprite->pixels[si];
+            uint16_t out = src;
+            if (blendMode == 1) {
+                // `(src >> k & mask) + (dst >> k & mask)` on 4-bit channels
+                // in the original; the same weights on this port's RGB565.
+                const uint16_t dst = row[px];
+                auto mix = [&](int shift, int mask) {
+                    const int s = (src >> shift) & mask;
+                    const int d = (dst >> shift) & mask;
+                    int v = 0;
+                    if (level == 1) v = (s + 3 * d) / 4;
+                    else if (level == 2) v = (s + d) / 2;
+                    else v = (3 * s + d) / 4;
+                    return v > mask ? mask : v;
+                };
+                out = static_cast<uint16_t>((mix(11, 0x1f) << 11) | (mix(5, 0x3f) << 5) |
+                                             mix(0, 0x1f));
+            }
+            row[px] = out;
+            depthBuffer[di] = invW;
+        }
+    }
+}
+
 }  // namespace
 
 void ZoneRenderer::Render(Backbuffer& backbuffer, const Zone& zone, const Camera& camera,
-                           const std::vector<PlacedEntity>& entities, ModelArchive* models) const {
+                           const std::vector<PlacedEntity>& entities, ModelArchive* models,
+                           const std::vector<SpriteBillboard>& billboards) const {
     // The engine's flat background fill: `Render3DScene` writes
     // `engine+0x630 | 0x7fff0000` into all 176*208 scene words when there
     // is no skybox to draw. Here it also backstops the skybox itself, which
@@ -985,6 +1085,14 @@ void ZoneRenderer::Render(Backbuffer& backbuffer, const Zone& zone, const Camera
                         camX, camY, camZ, cosYaw, sinYaw, cosPitch, sinPitch, focalX, focalY,
                         pe.yaw, pe.scale, pe.frameIndex, /*asSkybox=*/false, pe.rotA, pe.rotB);
         }
+    }
+
+    // M79: the animated-sprite entities -- spell projectiles and scripted
+    // effects. Last, like the engine's own draw order, and depth-tested
+    // against everything above.
+    for (const SpriteBillboard& bb : billboards) {
+        SubmitBillboard(backbuffer, depthBuffer, bb, camX, camY, camZ, cosYaw, sinYaw, cosPitch,
+                        sinPitch, focalX, focalY);
     }
 }
 

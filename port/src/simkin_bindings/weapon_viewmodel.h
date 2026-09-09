@@ -68,6 +68,7 @@
 
 #include <cstdint>
 
+#include "simkin_bindings/game_constants.h"
 #include "simkin_bindings/item_executable.h"
 
 namespace sk_bindings {
@@ -185,6 +186,14 @@ PlayerAttackGate CheckPlayerAttackGate(WeaponViewmodel& vm, const ItemExecutable
 // swap transition only when the resolved sprite actually differs, which is
 // what keeps re-equipping the same weapon from flickering.
 void NotifyWeaponChanged(WeaponViewmodel& vm, ItemExecutable* item);
+
+// `FUN_1002b1b0`'s own two lines for how fast a swing's accumulator drains:
+// four times the engine frame delta, scaled by the item's `+0x184`
+// (SetReloadSpeed) when that is not the 8.8 identity. It is never the
+// identity for a weapon -- the Weapon constructor writes `0x300` -- so a
+// weapon drains at 120 a tick and a spell, which keeps the base item
+// default, at 40. Exposed so a test can ask without running a tick.
+int SwingDrainPerFrame(const ItemExecutable* item);
 
 // The state half of `FUN_1002b1b0`, plus `FUN_1001f230`'s phase. `speed`
 // is the player's current movement speed in the same 8.8 world units the

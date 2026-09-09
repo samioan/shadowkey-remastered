@@ -78,6 +78,44 @@ constexpr int kItemTypeConsumable = 4;
 // spell in the game reported Misc -- which is the whole of M74's bug.
 int ItemTypeForCategory(int entityCategory);
 
+// ---- M79: the rest of what those constructors write ----
+//
+// The table above stopped at `+0x16c` and `+0x1c0` because those are the
+// two fields M74 needed. Three more of the same writes decide what a held
+// item *looks like*, and the port had none of them -- which is the whole of
+// "the sprite that shows my hands reading the spell is missing".
+//
+// | class | ctor | `+0x19c` sprite | `+0x180` frames | `+0x184` scale |
+// |-------|------|-----------------|-----------------|----------------|
+// | base item | `FUN_1006c960` | 0 | 0 | `0x100` |
+// | weapon (4, 16) | `FUN_1002ce9c` | -- | -- | **`0x300`** |
+// | spell (5, 14) | `FUN_10047740` | **`0x98`** | **5** | -- |
+//
+// Both non-default rows are single `mov`/`str` pairs read straight out of
+// the disassembly (`1002cf7c: mov r3, #0x300; str r3, [r4, #0x184]` and
+// `10047768: mov r2, #0x98; str r2, [r4, #0x19c]` / `10047774: mov r3, #5;
+// strb r3, [r4, r1]`), not decompiler output.
+//
+// So **every spell in the game already has a viewmodel** -- global.spr slot
+// 152 plus a five-frame animation -- without a single spell script calling
+// SetWeaponSprite. The slot is real and it is exactly where a spell belongs:
+// the five melee weapon strips are 16 slots each at 72/88/104/120/136,
+// 136 + 16 == 152, and slots 152..159 in the shipped global.spr are all
+// full-screen 176x208 viewmodel frames (152 the smallest, i.e. the idle
+// pose, 153..157 the cast).
+constexpr int kSpellViewmodelSprite = 0x98;   // 152
+constexpr int kSpellAnimationFrames = 5;
+
+// `item+0x184`, the 8.8 scale on the swing accumulator's drain rate
+// (weapon_viewmodel.h). M78 read the **base item** constructor's `0x100`
+// and concluded the scale was the identity for every weapon in the game.
+// It is not: the Weapon class constructor runs after the base one and
+// overwrites it with `0x300`, so a real weapon's swing drains **three times
+// as fast** as the raw `frameDelta * 4`. A spell keeps the identity, which
+// is why a cast animation is a good deal slower than a sword swing.
+constexpr int kDefaultReloadSpeed = 0x100;
+constexpr int kWeaponReloadSpeed = 0x300;
+
 // `entity+0x1c0`, from the same constructors -- which hand an item wants
 // when it is picked up (`FUN_1003d8e0`) or equipped
 // (`FUN_10033660` case 1). Not a preference the engine can be talked out

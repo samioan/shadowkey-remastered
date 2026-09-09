@@ -48,6 +48,17 @@ void ItemExecutable::SetEntityCategory(int category) {
     // the C++ class in the first place, and (like the item type above) it
     // arrives before the script's Init() runs. See use_prompt.h.
     m_Usable = StartsUsable(category);
+    // M79: and the three appearance fields the same constructors write.
+    // See game_constants.h's M79 table -- these are class constants, not
+    // script settings, which is why no spell script calls SetWeaponSprite
+    // and every spell still draws a pair of hands.
+    if (m_ItemType == kItemTypeWeapon) {
+        m_ReloadSpeed = kWeaponReloadSpeed;
+    }
+    if (m_ItemType == kItemTypeSpell) {
+        m_WeaponSprite = kSpellViewmodelSprite;
+        m_AnimationFrames = kSpellAnimationFrames;
+    }
 }
 
 void ItemExecutable::InferItemType(int type) {

@@ -1896,6 +1896,14 @@ void RenderWeaponViewmodel(sk::Backbuffer& backbuffer, const sk_bindings::Weapon
                             sk::SpriteArchive& sprites) {
     sk_bindings::ViewmodelDraw draw = sk_bindings::ResolveViewmodelDraw(vm);
     if (!draw.visible || draw.spriteSlot < 0) return;
+#if SK_DEBUG_SUITE
+    // SK_DEBUG_SUITE (M79): one counter per global.spr slot the viewmodel
+    // actually draws, so `diff` says which weapon (or which cast frame) was
+    // on screen -- 88..103 for a club, 152..157 for a spell. The only way
+    // to see the viewmodel from a console, and the check that found the
+    // spell drawing nothing at all.
+    sk_debug::Count("viewmodel.slot." + std::to_string(draw.spriteSlot));
+#endif
     const sk::Sprite* sprite = sprites.GetSprite(draw.spriteSlot);
     // A strip slot the per-zone sprite manifest didn't pull in falls back
     // to the weapon's own base frame rather than blinking out.
@@ -5725,11 +5733,6 @@ int main(int argc, char** argv) {
                             sk_bindings::ActorStats::kPeriodicSanctuaryTimer) {
                             return;
                         }
-                        // `player+0x204 = item` -- FUN_10042e44, player
-                        // vtable +0x274, which the input handler calls one
-                        // line before the attack. It is what makes the
-                        // viewmodel show the hand you are actually using.
-                        gameActiveHandItem = handItem;
                         playerAttack(handItem);
                         return;
                     }
@@ -5779,8 +5782,41 @@ int main(int argc, char** argv) {
                 // the next menu that opens.
                 input.ConsumeBoundJustPressed(sk::Action::UseRightAction);
                 input.ConsumeBoundJustPressed(sk::Action::UseLeftAction);
-                if (useRightHeld) useHandItem(stack.player().rightItem());
-                if (useLeftHeld) useHandItem(stack.player().leftItem());
+                // `FUN_10042e44`, player vtable **+0x274** -- the line the
+                // real handler runs immediately before each hand's use, and
+                // the whole of what puts art on screen for the hand you are
+                // pressing:
+                //
+                //     if (item && (type == 1 || type == 2)) {
+                //         player->+0x22c = item->+0x19c;   // its sprite
+                //         player->+0x204 = item;
+                //     } else {
+                //         player->+0x22c = -1;
+                //         player->+0x204 = 0;
+                //     }
+                //
+                // M79: **a spell takes the same arm as a weapon.** The port
+                // set the active item only inside the weapon branch of
+                // FUN_10042394, one level down, so a spell in hand never
+                // became `player+0x204` -- which is why a cast drew nothing
+                // and re-armed nothing. Everything that is not a weapon or a
+                // spell (a consumable in the left hand, say) clears it, so
+                // the viewmodel goes empty rather than keeping the last
+                // weapon.
+                auto setActiveHandItem = [&](sk_bindings::ItemExecutable* handItem) {
+                    const bool drawable =
+                        handItem != nullptr && (handItem->itemType() == sk_bindings::kItemTypeWeapon ||
+                                                handItem->itemType() == sk_bindings::kItemTypeSpell);
+                    gameActiveHandItem = drawable ? handItem : nullptr;
+                };
+                if (useRightHeld) {
+                    setActiveHandItem(stack.player().rightItem());
+                    useHandItem(stack.player().rightItem());
+                }
+                if (useLeftHeld) {
+                    setActiveHandItem(stack.player().leftItem());
+                    useHandItem(stack.player().leftItem());
+                }
                 // M30: the viewmodel now shows the equipped weapon *all
                 // the time*, not only for the moment after an attack key.
                 // Before this, `vm.item` was assigned solely inside
@@ -6162,13 +6198,13 @@ int main(int argc, char** argv) {
                     pickup.scale = p.scale;
                     frameEntities.push_back(pickup);
                 }
-                // M49: arrows in flight. Unlike the spell projectile --
-                // whose `+0x134` art selector is still unidentified, so it
-                // is simulated invisibly -- an arrow's model is completely
-                // pinned down: entities.txt maps its typeId 599/598 to
+                // M49: arrows in flight. An arrow is a *model*, not a
+                // billboard -- entities.txt maps its typeId 599/598 to
                 // models.idx 175/176, which models.txt names arrow.bin and
-                // throw_dagger.bin. The heading is converted back from the
-                // engine's own convention (zero along +y) to this port's.
+                // throw_dagger.bin -- which is what puts it in this list and
+                // a fireball in the billboard one below. The heading is
+                // converted back from the engine's own convention (zero
+                // along +y) to this port's.
                 for (const sk_bindings::ArrowProjectile& shot : gameArrows) {
                     if (shot.modelIndex < 0) continue;
                     frameEntities.push_back(
@@ -6176,22 +6212,84 @@ int main(int argc, char** argv) {
                           static_cast<float>(shot.z), shot.modelIndex,
                           sk_bindings::PortYawFromEngineYaw(shot.yaw)});
                 }
+                // M79: the animated-sprite entities. Spell projectiles and
+                // scripted effects are one C++ class in the engine
+                // (simkin_bindings/effect_entity.h) with one draw
+                // (`FUN_1008b25c`), so they build one list here; the
+                // per-entity half-extents come from that class's own doubled
+                // sprite-dimension multiply, which is why the sprite has to
+                // be resolved before the quad can be sized.
+                std::vector<sk::SpriteBillboard> frameBillboards;
+                for (const sk_bindings::SpellProjectile& shot : gameProjectiles) {
+                    const sk::Sprite* art = spriteArchive.GetSprite(shot.sprite);
+                    if (!art) continue;
+                    sk::SpriteBillboard bb;
+                    bb.x = static_cast<float>(shot.x);
+                    bb.y = static_cast<float>(shot.y);
+                    bb.z = static_cast<float>(shot.z);
+                    bb.sprite = art;
+                    bb.halfWidth =
+                        sk_bindings::SpriteHalfExtent(sk_bindings::kProjectileDrawSize, art->width);
+                    bb.halfHeight =
+                        sk_bindings::SpriteHalfExtent(sk_bindings::kProjectileDrawSize, art->height);
+                    bb.blendMode = sk_bindings::kProjectileBlendMode;
+                    bb.blendLevel = sk_bindings::kProjectileBlendLevel;
+                    frameBillboards.push_back(bb);
+                }
+                for (const sk_bindings::EffectEntity& fx : stack.level().effects()) {
+                    if (!fx.alive) continue;
+                    const sk::Sprite* art = spriteArchive.GetSprite(fx.sprite);
+                    if (!art) continue;
+                    sk::SpriteBillboard bb;
+                    bb.x = static_cast<float>(fx.x);
+                    bb.y = static_cast<float>(fx.y);
+                    bb.z = static_cast<float>(fx.z);
+                    bb.sprite = art;
+                    bb.halfWidth = sk_bindings::EffectHalfWidth(fx, art->width);
+                    bb.halfHeight = sk_bindings::EffectHalfHeight(fx, art->height);
+                    bb.blendMode = fx.drawFlags;
+                    bb.blendLevel = fx.scale;
+                    frameBillboards.push_back(bb);
+                }
 #if SK_DEBUG_SUITE
                 // SK_DEBUG_SUITE (M68): two counters and a timer around the
                 // 3D pass. Cheap enough to leave on -- one clock read either
                 // side and an integer add.
                 sk_debug::Count("render.entities", static_cast<long long>(frameEntities.size()));
+                sk_debug::Count("render.billboards",
+                                static_cast<long long>(frameBillboards.size()));
                 sk_debug::Count("render.frames");
                 {
                     sk_debug::ScopedTimer renderTimer("render3d");
                     zoneRenderer.Render(backbuffer, *gameZone, gameCamera, frameEntities,
-                                         &modelArchive);
+                                         &modelArchive, frameBillboards);
                 }
 #else
-                zoneRenderer.Render(backbuffer, *gameZone, gameCamera, frameEntities, &modelArchive);
+                zoneRenderer.Render(backbuffer, *gameZone, gameCamera, frameEntities, &modelArchive,
+                                     frameBillboards);
 #endif
-                RenderHud(backbuffer, stack.player(), spriteArchive, gameCamera.yaw);
+                // M79: **the viewmodel goes under the HUD, not over it.**
+                // `FUN_10029cb0`'s in-game arm draws them in one fixed
+                // order, and the viewmodel is first:
+                //
+                //     if (player->+0x204) FUN_1002b1b0(this);  // viewmodel
+                //     FUN_1002acd4(this);
+                //     if (screenMode == 5) {
+                //         FUN_1002ae88(this);   // the three vitals bars
+                //         FUN_1002ba64(this);   // the compass banner
+                //         FUN_1002bb54(this);   // the hand icons
+                //     }
+                //     if (player->+0x3a4) FUN_1002b430(this);   // the map
+                //
+                // This port drew the HUD first and the viewmodel over it,
+                // which nothing noticed while every viewmodel was a weapon
+                // held bottom-right. A spell's is a pair of hands that
+                // reaches across the bottom of the frame, so it covered the
+                // vitals bars -- reported the moment spells got their art.
+                // The same `if (player->+0x204)` guard is why the draw can
+                // dereference the active item without a null check.
                 RenderWeaponViewmodel(backbuffer, gameWeaponViewmodel, spriteArchive);
+                RenderHud(backbuffer, stack.player(), spriteArchive, gameCamera.yaw);
                 // M57: last, over everything -- the map is an overlay, and
                 // the game underneath it keeps running.
                 if (gameMapOpen) {
@@ -6277,8 +6375,10 @@ int main(int argc, char** argv) {
             gamePausedForMenu = false;
             inGame = true;
             zoneRenderer.Render(backbuffer, *gameZone, gameCamera, gameEntities, &modelArchive);
-            RenderHud(backbuffer, stack.player(), spriteArchive, gameCamera.yaw);
+            // M79: the viewmodel under the HUD here too -- see the main
+            // in-game draw above for FUN_10029cb0's own order.
             RenderWeaponViewmodel(backbuffer, gameWeaponViewmodel, spriteArchive);
+            RenderHud(backbuffer, stack.player(), spriteArchive, gameCamera.yaw);
             window.Present(backbuffer);
             return;
         }

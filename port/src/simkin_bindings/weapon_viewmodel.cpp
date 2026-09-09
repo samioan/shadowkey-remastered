@@ -12,19 +12,28 @@ namespace {
 //   delta = frameDelta * 4;
 //   if (weapon->0x184 != 0x100) delta = weapon->0x184 * delta >> 8;
 //
-// **No shipped script calls SetReloadSpeed**, and M78 closed the gap M47
-// left here by reading the constructor instead of inferring it: the Weapon
-// class's own `FUN_1006c960` writes `+0x184 = 0x100` (next to `+0x180 = 0`
-// and `+0x1a7 = 0`), so the scale really is the identity for every weapon
-// in the game and the unscaled path is the only one the shipped corpus can
-// take.
+// **CORRECTED IN M79, and this is the reported "the swinging animation is
+// really slow".** No shipped script calls SetReloadSpeed, so the value is
+// whatever the constructor left -- and M78 read the wrong constructor. The
+// *base item* one, `FUN_1006c960`, does write `+0x184 = 0x100`; the **Weapon
+// class** constructor `FUN_1002ce9c` runs immediately after it and
+// overwrites that with `0x300` (`1002cf7c: mov r3, #0x300; str r3, [r4,
+// #0x184]`, read off the disassembly rather than the decompiler). Every
+// weapon in the game is built by that constructor or by the conjured
+// sword's, which derives from it, so **the scaled path is the only one a
+// weapon ever takes** and a swing drains three times as fast as this
+// constant alone says.
 //
-// So a swing drains at exactly four times the frame delta, which makes its
-// length a wall-clock constant rather than a frame count: a five-frame
-// melee weapon seeds `(5 + 2) << 8` = 1792 and drains 1024 units a second,
-// i.e. **1.75 seconds**, of which the last half second draws nothing at
-// all (see ResolveViewmodelDraw). That is the player's real melee attack
-// rate, and at this port's fixed 25Hz it is 45 ticks.
+// The scale is a per-item field, so the answer differs by class:
+//
+//   weapon  0x300  ->  120/tick, (5+2)<<8 = 1792 units in **15 ticks, 0.6s**
+//   spell   0x100  ->   40/tick, the same 1792 units in **45 ticks, 1.8s**
+//
+// Both are wall-clock constants rather than frame counts, because the drain
+// is a multiple of the measured frame delta. A weapon's last ~3 ticks and a
+// spell's last 13 draw nothing at all (see ResolveViewmodelDraw), and it is
+// the accumulator reaching zero -- not the last drawn frame -- that lets the
+// next attack through.
 constexpr int kSwingDeltaPerFrame = kViewmodelFrameDeltaUnits * 4;  // 40
 
 // The swap transition's own rate is this port's choice, and the one number
@@ -149,9 +158,21 @@ void NotifyWeaponChanged(WeaponViewmodel& vm, ItemExecutable* item) {
     vm.swayPhase = 0;
 }
 
+int SwingDrainPerFrame(const ItemExecutable* item) {
+    // `if (weapon->+0x184 != 0x100) delta = weapon->+0x184 * delta >> 8;`
+    // -- the engine's own test, including the fact that it reads the field
+    // off `player+0x204` without a null check. Here a null item keeps the
+    // unscaled rate rather than dereferencing nothing.
+    int delta = kSwingDeltaPerFrame;
+    if (item == nullptr) return delta;
+    const int scale = item->reloadSpeed();
+    if (scale != kDefaultReloadSpeed) delta = (scale * delta) >> 8;
+    return delta;
+}
+
 void TickWeaponViewmodel(WeaponViewmodel& vm, int speed) {
     if (vm.swingAccum != 0) {
-        vm.swingAccum -= kSwingDeltaPerFrame;
+        vm.swingAccum -= SwingDrainPerFrame(vm.item);
         if (vm.swingAccum < 0) vm.swingAccum = 0;
         vm.swayPhase = 0;
         return;
@@ -199,16 +220,23 @@ ViewmodelDraw ResolveViewmodelDraw(const WeaponViewmodel& vm) {
         // `a = frames + variant + 1`, so it reaches `a` -- one slot past
         // the variant's own last frame -- at exactly `acc == 0x200` and
         // nowhere else. On the device the drain is the *measured* frame
-        // delta (`app+0xd4`, clamped to 4..0x40) times four, so landing on
-        // that single value is a coin toss; here the delta is a fixed 10
-        // and a five-frame melee weapon's 1792 - 512 = 1280 is exactly 32
-        // drains of 40, so the port hit it on **every** melee swing. What
-        // it drew is a real sprite from the *next* weapon's strip: a melee
-        // weapon owns 16 consecutive slots (bases 72/88/104/120/136), the
-        // variant-10 run ends at base+15, and the overrun frame is
-        // base+16. That is the reported "different weapon equipped on the
-        // last frame", and it is why this is a `<=` and not a clamp -- one
-        // unit earlier, every variant plays exactly its own five frames.
+        // delta (`app+0xd4`, clamped to 4..0x40) times its scale, so
+        // landing on that single value is a coin toss. What it draws is a
+        // real sprite from the *next* weapon's strip: a melee weapon owns
+        // 16 consecutive slots (bases 72/88/104/120/136), the variant-10
+        // run ends at base+15, and the overrun frame is base+16. That is
+        // the reported "different weapon equipped on the last frame", and
+        // it is why this is a `<=` and not a clamp -- one unit earlier,
+        // every variant plays exactly its own frames.
+        //
+        // M79: which items can land on it moved when the drain rate did.
+        // At a fixed frame delta the question is whether `1792 - 512 =
+        // 1280` is a whole number of drains: it is for a **spell** (1280 /
+        // 40 = 32 exactly, so every cast would show slot 158, the frame
+        // after the spell strip's own five) and it is not for a weapon
+        // (1280 / 120 is not an integer). So the guard's beneficiary is now
+        // the cast animation rather than the sword swing -- it was needed
+        // both times, for the same reason.
         if (vm.swingAccum <= kSwingAccumFloor) {
             draw.visible = false;
             return draw;

@@ -7061,6 +7061,149 @@ soft-fails 39 -> 39, all 14 tracked `.ppm` renders byte-identical,
   about one every 1.9 seconds -- and holding the *left*-hand key with an
   empty left hand for the same 12 seconds reports nothing at all.
 
+- [x] **M79 -- the spell's hands, its cast, and the fireball.** Reported:
+  equipping the Blaze spell shows no hands holding it, no casting animation
+  and no fireball, where equipping a weapon shows all three. Everything
+  below is one C++ class constructor this port never ran, plus the draw it
+  never had. Write-up in docs/WORLD_MODEL.md's "The weapon swing" section
+  ("The spell's own viewmodel") and render3d/zone_renderer.h.
+
+    - **A spell's viewmodel comes from its constructor, not its script.**
+      M74 established that an item's class is picked by its `entities.txt`
+      category and read `+0x16c` (the item type) and `+0x1c0` (the hand)
+      out of the eight constructors. It stopped there. Three more of the
+      same writes decide what a held item *looks like*:
+
+      | class | ctor | `+0x19c` sprite | `+0x180` frames | `+0x184` scale |
+      |-------|------|-----------------|-----------------|----------------|
+      | base item | `FUN_1006c960` | 0 | 0 | `0x100` |
+      | weapon (cat 4, 16) | `FUN_1002ce9c` | -- | -- | **`0x300`** |
+      | spell (cat 5, 14) | `FUN_10047740` | **`0x98`** | **5** | -- |
+
+      Both non-default rows are single `mov`/`str` pairs read off the
+      disassembly rather than the decompiler (`10047768: mov r2, #0x98;
+      str r2, [r4, #0x19c]` and `1002cf7c: mov r3, #0x300; str r3, [r4,
+      #0x184]`). So **every spell in the game already owns `global.spr`
+      slot 152 and a five-frame animation** without a single spell script
+      calling `SetWeaponSprite` -- which is why this port, which only ever
+      took those fields from a script setter, concluded for eight
+      milestones that a spell had no viewmodel at all.
+
+      The slot is exactly where a spell belongs. The five melee weapon
+      strips are 16 slots each at 72/88/104/120/136, `136 + 16 == 152`, and
+      slots 152..159 of the shipped `global.spr` are all full-screen
+      176x208 viewmodel frames -- 152 the smallest (the idle "holding a
+      spell" pose) and 153..157 the cast.
+
+    - **And a spell is drawn like a weapon, one level up.**
+      `FUN_10042e44` (player vtable +0x274), the line the input handler
+      runs immediately before each hand's use, sets `player+0x204` for item
+      type 1 **and type 2** and clears it for everything else. This port
+      set the active item only inside the weapon branch of `FUN_10042394`,
+      so a spell in hand never became `player+0x204` -- and since
+      `FUN_10042394` case 2 re-arms the swing from `player+0x204`, a cast
+      drew nothing and animated nothing even after the sprite was there.
+
+    - **CORRECTED (M78's `+0x184`): a weapon's swing is three times
+      faster.** This is the *other* reported symptom, "the weapon swinging
+      animation is really slow", coming back with a real cause. M78 closed
+      M47's inference here by reading a constructor -- and read the wrong
+      one. `FUN_1006c960` really does write `+0x184 = 0x100`, but it is the
+      **base item** constructor; the Weapon class constructor calls it
+      first and then overwrites the field with `0x300`. Nothing in the
+      corpus calls `SetReloadSpeed`, so that value stands for every weapon
+      in the game, and the swing accumulator drains at 120 a tick, not 40:
+
+      | item | `+0x184` | drain | 1792 units last |
+      |---|---|---|---|
+      | weapon | `0x300` | 120/tick | **15 ticks, 0.6s** (11 drawn, 4 blank) |
+      | spell | `0x100` | 40/tick | **45 ticks, 1.8s** (32 drawn, 13 blank) |
+
+      With the Speed-50 cadence that puts a held melee attack at one swing
+      every **18 ticks (0.72s)**, where M78 measured 48. A cast is slower
+      than a sword swing, which reads oddly and is what the code says.
+
+      It also moved which item can hit M78's `acc == 0x200` overrun frame:
+      at a fixed frame delta the question is whether `1792 - 512 = 1280` is
+      a whole number of drains, and it is for a spell (1280/40 = 32, so
+      every cast would have shown slot 158) and is not for a weapon
+      (1280/120 is not an integer). The `<=` guard was needed both times.
+
+    - **The fireball: a billboard pass.** A spell projectile
+      (simkin_bindings/spell_projectile.h) and a scripted effect
+      (simkin_bindings/effect_entity.h) are one engine class with one draw,
+      `FUN_1008b25c`, and it submits a `global.spr` slot as a
+      screen-aligned quad rather than any geometry. M48 and M63 carried all
+      of that state and drew none of it, because `render3d/zone_renderer.h`
+      had no billboard pass. It has one now
+      (`sk::SpriteBillboard`), fed every live projectile and every live
+      effect each frame. The quad is built in camera space --
+
+          halfW = ((i16)(sizeX * spriteW) * spriteW) >> 8    // both twice
+          draw(x0 = cx - halfW, y0 = cy + 2*halfH,
+               x1 = cx + halfW, y1 = cy, depth = cz)
+
+      -- so a billboard is bottom-anchored at the entity's Z, and
+      `FUN_1004f91c` projects the two corners with exactly the projection
+      M71 recovered (`0x5800 + x*0x5800/z`, `0x6800 - y*0x6800/z`, aspect
+      prescale making both focal lengths 104) and culls at `depth < 5`.
+      A projectile keeps `FUN_1008b420`'s `+0x12c`/`+0x130` of 8, so
+      blaze's 32x32 fireball is 64 world units across -- a quarter tile,
+      against a collision box six times wider.
+
+    - **CORRECTED (M63): `+0x138` is an opacity, not a size scale.** Ghidra
+      mis-types `FUN_1004f91c`'s parameter list by one -- the draw passes it
+      fifteen arguments against fourteen declared -- so `+0x58` and `+0x138`
+      both land a slot early and M63 read the blend level as a scale.
+      Following the *call* instead, `FUN_1004f218`'s last two arguments are
+      `+0x58` (0 = straight copy, 1 = blend) and `+0x138` (the level,
+      quantised `(v + 0x1f) >> 6` into 0 = draw nothing, 1 = 25% source,
+      2 = 50%, 3 = 75%, 4 = fully opaque). Nothing about the drawn size
+      passes through it. So a scripted effect's "scale ramp" is a **fade**,
+      the engine's blood spurt fades from solid to a quarter rather than
+      shrinking, and a spell projectile (`+0x58 = 0`) is an opaque blit.
+
+    - **The HUD goes over the viewmodel, not under it.** Reported the
+      moment spells got their art: the casting hands drew across the vitals
+      bars in the bottom-left corner. `FUN_10029cb0`'s in-game arm draws
+      them in one fixed order and the viewmodel is **first** --
+      `if (player->+0x204) FUN_1002b1b0(this)`, then `FUN_1002ae88` (the
+      three vitals bars), `FUN_1002ba64` (the compass) and `FUN_1002bb54`
+      (the hand icons), with `FUN_1002b430` (the map) last. This port drew
+      the HUD first and the viewmodel over it, which nothing noticed while
+      every viewmodel was a weapon held bottom-right. That leading
+      `if (player->+0x204)` is also why the draw can dereference the active
+      item with no null check.
+
+    - **The starting kit goes through the real creation path now.** An item
+      built straight from a script path never learns its `entities.txt`
+      category, and the category is what picks the C++ class -- so it gets
+      none of the constructor defaults above. `LoadStartingInventory` built
+      its three items that way, which left the starting club's `+0x184` at
+      `0x100`: the one weapon a new player actually holds was the one
+      swinging at a third of the right rate. `LevelExecutable::
+      TypeIdForScript()` reads `entities.txt` the other way round for it.
+
+  **Verification.** New `m79_spell_viewmodel_smoke` (27 checks, suite
+  **70/70 -> 71/71**): every constructor default for all four item classes;
+  the drain rate for each; the cast drawing 153..157 and stopping short of
+  158; a cast running 45 ticks against a club's 15; the club still drawing
+  89..93 at the faster rate; the half-extent formula for a fireball and for
+  crypt1's flame; and the billboard rendered for real through `ZoneRenderer`
+  against azra -- it draws, at the width the projection gives it, nothing
+  behind the camera, and nothing at blend level 0. `m25_weapon_viewmodel_
+  smoke`, `m47_weapon_swing_smoke` and `m78_player_attack_smoke` were moved
+  onto the real creation path too (a test that loads by script path measures
+  the wrong machine) and their timings corrected: 45 ticks -> 15, 48 ->
+  18, 32 drawn frames -> 11.
+
+  Confirmed in the running game, with Blaze in hand and the attack key held
+  for 10 seconds: `viewmodel.slot.152 +185` (the idle hands),
+  `viewmodel.slot.153..157 +24/+18/+21/+18/+18` (the five cast frames, in
+  proportion) and `render.billboards +36` -- three casts, each a five-frame
+  animation and a twelve-tick fireball. A new `viewmodel.slot.<n>` debug
+  counter is what makes the first two visible from a console.
+
 ## Next milestones (not yet started)
 
 Roughly in priority order for reaching "actually playable," not commitments:

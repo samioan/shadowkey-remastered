@@ -18,6 +18,7 @@
 
 #include "assets/sprite_archive.h"
 #include "assets/string_table.h"
+#include "simkin_bindings/level_executable.h"
 #include "simkin_bindings/item_executable.h"
 #include "simkin_bindings/menu_stack.h"
 #include "simkin_bindings/weapon_viewmodel.h"
@@ -27,12 +28,23 @@
 #include "skRValue.h"
 #include "skRValueArray.h"
 #include "skRuntimeException.h"
+#include "world/entity_types.h"
 
 namespace {
 
-std::unique_ptr<sk_bindings::ItemExecutable> LoadAndInit(const std::string& fullPath,
+// M79: the real creation path first -- an item built straight from a script
+// path never learns its entities.txt category, and the category is what
+// picks the C++ class whose constructor writes a weapon's `+0x184` and a
+// spell's `+0x19c`/`+0x180`. See simkin_bindings/game_constants.h.
+std::unique_ptr<sk_bindings::ItemExecutable> LoadAndInit(const std::string& relPath,
                                                            skInterpreter& interpreter,
                                                            sk_bindings::MenuStack& stack) {
+    const int typeId = stack.level().TypeIdForScript(relPath);
+    if (typeId >= 0) {
+        std::unique_ptr<sk_bindings::ItemExecutable> made = stack.level().CreateItem(typeId, true);
+        if (made) return made;
+    }
+    const std::string fullPath = stack.scriptRoot() + "/" + relPath;
     skExecutableContext loadCtxt(&interpreter);
     auto obj =
         std::make_unique<sk_bindings::ItemExecutable>(skString(fullPath.c_str()), loadCtxt, stack);
@@ -58,16 +70,24 @@ int main(int argc, char** argv) {
         return 1;
     }
 
+    sk::EntityTypeTable entityTypes;
+    if (!entityTypes.Load(scriptRoot)) {
+        std::printf("m25_weapon_viewmodel_smoke: FAILED to load entities.txt\n");
+        return 1;
+    }
+
     skInterpreter interpreter;
     sk_bindings::MenuStack stack(scriptRoot, interpreter, &strings);
+    stack.level().SetEntityTypes(&entityTypes);
     bool ok = true;
 
     // --- Part 1: real Init() values ---
-    std::unique_ptr<sk_bindings::ItemExecutable> club, bow, spell;
+    std::unique_ptr<sk_bindings::ItemExecutable> club, bow, spell, armour;
     try {
-        club = LoadAndInit(std::string(scriptRoot) + "/weapons/club.s", interpreter, stack);
-        bow = LoadAndInit(std::string(scriptRoot) + "/weapons/bandit_longbow.s", interpreter, stack);
-        spell = LoadAndInit(std::string(scriptRoot) + "/spells/blind.s", interpreter, stack);
+        club = LoadAndInit("weapons/club.s", interpreter, stack);
+        bow = LoadAndInit("weapons/bandit_longbow.s", interpreter, stack);
+        spell = LoadAndInit("spells/blind.s", interpreter, stack);
+        armour = LoadAndInit("armor/chain_coif.s", interpreter, stack);
     } catch (skParseException& e) {
         std::printf("m25_weapon_viewmodel_smoke: FAILED -- PARSE ERROR: %s\n", e.toString().ptr());
         return 1;
@@ -85,18 +105,26 @@ int main(int argc, char** argv) {
     checkInt("club.s animationFrames()", club->animationFrames(), 5);
     checkInt("bandit_longbow.s weaponSprite()", bow->weaponSprite(), 175);
     checkInt("bandit_longbow.s animationFrames()", bow->animationFrames(), 4);
-    bool spellNoSprite = spell->weaponSprite() < 0;
-    std::printf("spells/blind.s weaponSprite() (never set by a real spell): %d (expected < 0) %s\n",
-                spell->weaponSprite(), spellNoSprite ? "OK" : "FAILED");
-    if (!spellNoSprite) ok = false;
+    // M79: a spell *does* have a viewmodel, and this line used to assert
+    // the opposite. No spell script calls SetWeaponSprite -- but the Spell
+    // class constructor `FUN_10047740` writes slot 152 and five frames
+    // before Init() ever runs, which is why a cast shows a pair of hands.
+    checkInt("spells/blind.s weaponSprite() (the Spell ctor's 0x98)", spell->weaponSprite(), 152);
+    checkInt("spells/blind.s animationFrames() (the Spell ctor's 5)", spell->animationFrames(), 5);
+    checkInt("club.s reloadSpeed() (the Weapon ctor's 0x300)", club->reloadSpeed(), 0x300);
+    checkInt("spells/blind.s reloadSpeed() (the base ctor's 0x100)", spell->reloadSpeed(), 0x100);
 
-    // --- Part 2: StartWeaponSwing() no-ops for a non-weapon item ---
+    // --- Part 2: StartWeaponSwing() no-ops for an item with no viewmodel ---
+    //
+    // Armour, not a spell: `FUN_1002e954` leaves `+0x19c`/`+0x180` at the
+    // base item constructor's zeros, so there is nothing to animate. (This
+    // check used a spell until M79, when spells turned out to have art.)
     sk_bindings::WeaponViewmodel vm;
-    sk_bindings::StartWeaponSwing(vm, spell.get());
-    bool spellSwingNoOp = vm.item == nullptr;
-    std::printf("StartWeaponSwing(spell): vm.item still null -- %s %s\n",
-                spellSwingNoOp ? "true" : "false", spellSwingNoOp ? "OK" : "FAILED");
-    if (!spellSwingNoOp) ok = false;
+    sk_bindings::StartWeaponSwing(vm, armour.get());
+    bool armourSwingNoOp = vm.item == nullptr;
+    std::printf("StartWeaponSwing(chain_coif): vm.item still null -- %s %s\n",
+                armourSwingNoOp ? "true" : "false", armourSwingNoOp ? "OK" : "FAILED");
+    if (!armourSwingNoOp) ok = false;
 
     // --- Part 3: a real club.s swing runs the state machine to
     // completion. ---
@@ -124,12 +152,18 @@ int main(int argc, char** argv) {
         sk_bindings::TickWeaponViewmodel(vm, 0);
         ++swingTicks;
     }
-    // (5+2)*256 = 1792, falling by 40 a tick: 32 ticks of visible frames,
-    // then 13 more before the accumulator reaches 0 and the next attack is
-    // allowed. 45 ticks is 1.8s at 25Hz, and 1792/1024 = 1.75s of engine
-    // clock -- the player's real melee attack rate.
-    bool swingRan = swingTicks == 45;
-    std::printf("the club's swing locks out %d ticks (1.75s of engine clock) -- %s\n", swingTicks,
+    // (5+2)*256 = 1792, falling by 120 a tick -- the frame delta times
+    // four, times the Weapon constructor's `+0x184 = 0x300`. That is 11
+    // ticks of visible frames and 4 more before the accumulator reaches 0
+    // and the next attack is allowed: 15 ticks, 0.6s at 25Hz.
+    //
+    // **M79 corrected this from 45.** M78 read the base item constructor's
+    // `+0x184 = 0x100` and missed the Weapon class constructor overwriting
+    // it three instructions later, so every swing in this port ran at a
+    // third of its real speed -- the reported "the weapon swinging
+    // animation is really slow".
+    bool swingRan = swingTicks == 15;
+    std::printf("the club's swing locks out %d ticks (0.6s of engine clock) -- %s\n", swingTicks,
                 swingRan ? "OK" : "FAILED");
     if (!swingRan) ok = false;
 

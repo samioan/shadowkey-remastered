@@ -132,6 +132,17 @@ public:
     // and so does not go through CreateItem().
     int EntityCategoryOf(int typeId) const;
 
+    // M79: entities.txt read the other way round -- the typeId whose row
+    // names this script, or -1. The engine never needs this (nothing in it
+    // creates an item from a path), but this port has one caller that does:
+    // the curated starting kit, which used to build its items straight from
+    // a script path and so skipped the category entirely. Without a
+    // category an item gets none of its C++ class's constructor defaults --
+    // the club's `+0x184` reload speed among them -- so the starting weapon
+    // swung at a third of the right rate. `relPath` is slash-separated and
+    // lowercase, the same shape ItemExecutable::scriptPath() stores.
+    int TypeIdForScript(const std::string& relPath) const;
+
     // M21: CreateEntity()'s handler allocates the real ItemExecutable and
     // holds it here (a one-slot pending holder, same shape
     // PlayerExecutable::TakePendingPickupItem() already established for a

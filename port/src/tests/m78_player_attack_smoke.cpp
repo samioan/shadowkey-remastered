@@ -104,7 +104,19 @@ int main(int argc, char** argv) {
     sk_bindings::MenuStack stack(scriptRoot, interpreter, &strings);
     stack.level().SetEntityTypes(&entityTypes);
 
+    // M79: through the real creation path -- `Level.CreateEntity`'s own --
+    // rather than straight from a script path. The entities.txt category is
+    // what picks an item's C++ class, and the class constructor is where
+    // `+0x184` (a weapon's 0x300 swing-drain scale) and a spell's `+0x19c` /
+    // `+0x180` come from. Loading by path skips all of it, which is exactly
+    // the hole this milestone closed; a test that loaded by path would go on
+    // measuring the wrong machine.
     auto loadItem = [&](const std::string& rel) -> std::unique_ptr<Item> {
+        const int typeId = stack.level().TypeIdForScript(rel);
+        if (typeId >= 0) {
+            std::unique_ptr<Item> made = stack.level().CreateItem(typeId, true);
+            if (made) return made;
+        }
         skExecutableContext loadCtxt(&interpreter);
         try {
             auto it = std::make_unique<Item>(
@@ -214,17 +226,19 @@ int main(int argc, char** argv) {
             }
         }
         bool spaced = !gaps.empty();
-        for (int g : gaps) spaced = spaced && g == 48;
-        Check(spaced, "holding attack with a club: one swing every 48 ticks (got " + Join(gaps) +
+        for (int g : gaps) spaced = spaced && g == 18;
+        Check(spaced, "holding attack with a club: one swing every 18 ticks (got " + Join(gaps) +
                           ")");
-        // 45 ticks of swing (1792 / 40, rounded up), rounded up again to
-        // the next multiple of the cadence: the re-seed sits *above* the
-        // swing test, so every sixth tick spent waiting on the swing puts
-        // another Speed's worth of cooldown back on the clock, and the
-        // first tick that finds an empty accumulator has just re-armed it.
-        // 6 * 8 = 48, or 1.92 seconds -- the player's real melee rate with
-        // Speed 50.
-        Check(gaps.size() == 6, "...6 swings in 12 seconds");
+        // **M79 corrected this from 48.** 15 ticks of swing (1792 / 120 --
+        // the frame delta times four, times the Weapon constructor's
+        // `+0x184 = 0x300`, which M78 had as the base item's 0x100 and so
+        // ran three times too slow), rounded up to the next multiple of the
+        // cadence: the re-seed sits *above* the swing test, so every sixth
+        // tick spent waiting on the swing puts another Speed's worth of
+        // cooldown back on the clock, and the first tick that finds an
+        // empty accumulator has just re-armed it. 6 * 3 = 18, or 0.72
+        // seconds -- the player's real melee rate with Speed 50.
+        Check(gaps.size() == 16, "...16 swings in 12 seconds");
     }
     {
         // A bow's swing is only 1024 units (13 ticks of drawing, 26 to
@@ -256,8 +270,8 @@ int main(int argc, char** argv) {
             sk_bindings::TickWeaponViewmodel(vm, 0);
             ++running;
         }
-        Check(running == 45, "a five-frame melee swing locks the attack out for 45 ticks");
-        Check(drawn == 32, "...of which 32 draw a swing frame and the last 13 draw nothing");
+        Check(running == 15, "a five-frame melee swing locks the attack out for 15 ticks");
+        Check(drawn == 11, "...of which 11 draw a swing frame and the last 4 draw nothing");
         Check(!vm.swingVisible() && !vm.swinging(), "both queries agree once it has run out");
     }
 
@@ -300,15 +314,28 @@ int main(int argc, char** argv) {
               "weapons/club.s reports kItemTypeWeapon -- the only type that attacks");
         Check(spell->itemType() != sk_bindings::kItemTypeWeapon && spell->spellTypeId() != 0,
               "spells/blind.s is not a weapon and does have a spell type -- it casts instead");
-        Check(spell->weaponSprite() < 0 && !sk_bindings::StartWeaponSwing(VM(), spell.get()),
-              "...and has no viewmodel art, so it cannot swing");
+        // M79: a spell has art of its own -- the Spell constructor's slot
+        // 152 and five frames, which is the pair of hands a cast shows.
+        // What keeps it out of the melee swing is the type switch above,
+        // not a missing sprite.
+        Check(spell->weaponSprite() == sk_bindings::kSpellViewmodelSprite &&
+                  spell->animationFrames() == sk_bindings::kSpellAnimationFrames,
+              "...and carries its own viewmodel: global.spr 152, five frames");
     }
     {
         // The cast's own swing (`FUN_10042394` case 2): the melee seed,
         // from whatever weapon is on screen, with no gate in front of it.
         VM vm;
         sk_bindings::StartSpellSwing(vm);
-        Check(vm.swingAccum == 0, "a cast with no weapon on screen starts no swing");
+        Check(vm.swingAccum == 0, "a cast with nothing on screen starts no swing");
+        // M79: what is normally on screen when you cast is the **spell**,
+        // because FUN_10042e44 writes `player+0x204` from the pressed hand
+        // and takes type 2 down the same arm as type 1.
+        vm.item = spell.get();
+        sk_bindings::StartSpellSwing(vm);
+        Check(vm.swingAccum == ((spell->animationFrames() + 2) << 8),
+              "a cast with the spell on screen animates it -- (5+2)<<8, the same seed");
+        vm.swingAccum = 0;
         vm.item = club.get();
         sk_bindings::StartSpellSwing(vm);
         Check(vm.swingAccum == ((club->animationFrames() + 2) << 8),
@@ -328,14 +355,14 @@ int main(int argc, char** argv) {
         VM vm;
         int fatigue = 100;
         int attacks = 0;
-        for (int tick = 0; tick < 49; ++tick) {
+        for (int tick = 0; tick < 19; ++tick) {
             if (HeldAttackTick(vm, club.get(), 50)) {
                 ++attacks;
                 fatigue -= sk_bindings::kAttackFatigueCost;
             }
         }
         Check(attacks == 2 && fatigue == 92,
-              "holding attack for 49 ticks swings twice and costs 8 fatigue, not 196");
+              "holding attack for 19 ticks swings twice and costs 8 fatigue, not 76");
     }
 
     std::printf("\nm78_player_attack_smoke: %s (%d failure(s))\n", g_failures == 0 ? "OK" : "FAILED",

@@ -265,8 +265,18 @@ public:
     // PORT_ROADMAP.md's M25 entry). -1/0 (never set -- every real spell
     // script, none of which call SetWeaponSprite) means "no viewmodel to
     // draw for this item."
+    // M79: both are also **class constructor defaults**, not only script
+    // settings. A spell (entities.txt category 5 or 14) is constructed with
+    // sprite 152 and 5 frames by `FUN_10047740` before its Init() runs --
+    // see game_constants.h -- so "no spell script calls SetWeaponSprite"
+    // never meant "a spell has no viewmodel".
     int weaponSprite() const { return m_WeaponSprite; }
     int animationFrames() const { return m_AnimationFrames; }
+    // `item+0x184`, SetReloadSpeed: the 8.8 scale on how fast a swing's
+    // accumulator drains (weapon_viewmodel.h). `0x100` from the base item
+    // constructor, `0x300` for anything the Weapon class built -- which is
+    // every weapon in the game, and three times the speed M78 assumed.
+    int reloadSpeed() const { return m_ReloadSpeed; }
     // M20: a real weapon script's own SetRange() -- previously stored
     // (just to flag kItemTypeWeapon) but never read back by anything.
     // Corpus-verified bimodal: every melee weapon uses exactly 384, every
@@ -451,6 +461,10 @@ private:
     int m_DamageMax = 0;
     int m_WeaponSprite = -1;
     int m_AnimationFrames = 0;
+    // +0x184. The engine's base-item default; SetEntityCategory() raises it
+    // to kWeaponReloadSpeed for a weapon, exactly as the Weapon constructor
+    // does. No shipped script calls SetReloadSpeed, so nothing else moves it.
+    int m_ReloadSpeed = 0x100;
     int m_Range = 0;
     // M49: split out of M20's single m_Ranged -- see launched()/thrown().
     bool m_Launched = false;  // +0x17a: SetBow / SetCrossbow / SetIsLaunched

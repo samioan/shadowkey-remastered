@@ -1355,7 +1355,7 @@ buffer and sleeps 10 ms without retrying.
 
 ---
 
-## The weapon swing (M47, wired to the attack in M78)
+## The weapon swing (M47, wired to the attack in M78, timed right in M79)
 
 M25 decompiled the first-person viewmodel's draw function in full but
 could not find what starts a swing, and recorded that as an exhaustive
@@ -1484,6 +1484,69 @@ if (param_2 != 0) {                                  // the WHOLE function
 }
 ```
 
+### The spell's own viewmodel (M79)
+
+Case 2 above re-arms the swing from `player+0x204`, and `player+0x204` is
+written one line earlier by `FUN_10042e44` (vtable +0x274) from the hand
+whose key is down. That function takes **weapons and spells down the same
+arm**:
+
+```c
+if (item == 0 || GetItemType(item) != 1) {
+    if (item != 0) {
+        if (GetItemType(item) != 2) {          // not a weapon, not a spell
+            player->+0x22c = -1; player->+0x204 = 0; goto tail;
+        }
+        goto sameAsWeapon;                     // a spell IS drawn
+    }
+    sprite = -1;                               // empty hand
+} else {
+sameAsWeapon:
+    sprite = item->+0x19c;
+}
+player->+0x22c = sprite;
+player->+0x204 = item;
+```
+
+So a spell is drawn exactly like a weapon — and it has art to draw, from
+its class constructor rather than from its script. `FUN_10047740`, the
+Spell class constructor (entities.txt categories 5 and 14):
+
+    10047768  mov r2, #0x98      ;  +0x19c = 152, the SetWeaponSprite slot
+    1004776c  str r2, [r4, #0x19c]
+    10047770  mov r1, #0x180
+    10047774  mov r3, #5         ;  +0x180 = 5 animation frames
+    10047778  strb r3, [r4, r1]
+
+**No spell script calls `SetWeaponSprite`**, which is why this port
+concluded for eight milestones that a spell had no viewmodel. The slot is
+exactly where a spell belongs: the five melee weapon strips are 16 slots
+each at 72/88/104/120/136, `136 + 16 == 152`, and slots 152..159 of the
+shipped `global.spr` are all full-screen 176×208 viewmodel frames — 152 the
+smallest (the idle "holding a spell" pose) and 153..157 the cast. Since
+`+0x184` stays at the base item's `0x100` for a spell, a cast runs the full
+45 ticks.
+
+The draw order matters and this port had it backwards. `FUN_10029cb0`'s
+in-game arm is
+
+```c
+if (player->+0x204) FUN_1002b1b0(this);   // the viewmodel, FIRST
+FUN_1002acd4(this);
+if (screenMode == 5) {
+    FUN_1002ae88(this);                   // the three vitals bars
+    FUN_1002ba64(this);                   // the compass banner
+    FUN_1002bb54(this);                   // the hand icons
+}
+if (player->+0x3a4) FUN_1002b430(this);   // the map, last
+```
+
+— the HUD is drawn **over** the viewmodel, always. Nothing noticed while
+every viewmodel was a weapon held bottom-right; a spell's is a pair of hands
+that reaches across the bottom of the frame, and it covered the vitals bars
+the moment spells got their art. That leading `if (player->+0x204)` is also
+why `FUN_1002b1b0` can dereference the active item with no null check.
+
 **There is no bare-handed attack in this game.** An empty hand reaches the
 `if (param_2 != 0)` and stops — no swing, no target search, no miss sound.
 The port's fists (1–3 damage at an invented reach) were invented, and are
@@ -1531,11 +1594,20 @@ is what the **16-slot spacing between weapon sprite bases** (72, 88, 104,
 is a visibly different swing (an overhead chop, a low sweep, a backhand),
 and 88 is the weapon simply held.
 
-A swing therefore **draws** for 32 ticks — but the accumulator is what the
-attack gate tests, and it keeps draining past the last frame to zero: 1792
-units at 1024 a second is **1.75 seconds**, of which the last half second
-draws no weapon at all. That is a wall-clock constant rather than a frame
-count, because the drain is four times the measured frame delta.
+A swing's length is set by how fast that accumulator drains, and the drain
+is `frameDelta * 4` scaled by the item's own `+0x184` — which is **not** the
+identity for a weapon. See the SetReloadSpeed paragraph below: the Weapon
+class constructor writes `0x300`, so a weapon drains at three times the base
+rate. A five-frame melee weapon's 1792 units therefore last
+
+    1792 / (4 * frameDelta * 3)  =  ~15 ticks, **0.6 seconds**
+
+of which the first 11 draw a frame and the last 4 draw nothing. It is the
+accumulator reaching zero, not the last drawn frame, that the attack gate
+waits for. A **spell** takes the same 1792 seed at the unscaled rate, so a
+cast animation runs 45 ticks, 1.8 seconds — three times a sword swing. Both
+are wall-clock constants rather than frame counts, because the drain is a
+multiple of the measured frame delta.
 
 One detail reproduced, one corrected:
 
@@ -1543,15 +1615,17 @@ One detail reproduced, one corrected:
   `frames + variant + 1` — one slot past this variant's last frame — at
   exactly `acc == 0x200`, which the engine's `< 0x200` test lets through.
   On the device the drain is the *measured* delta (`app+0xd4`, clamped to
-  4..0x40) times four and landing on that one value is a coin toss; at a
-  fixed delta of 10 a five-frame melee weapon's 1792 − 512 = 1280 is
-  exactly 32 drains of 40, so this port hit it on **every** melee swing.
-  What it drew is a real sprite from the *next weapon's* strip — the
+  4..0x40) times its scale, and landing on that one value is a coin toss.
+  What it draws is a real sprite from the *next weapon's* strip — the
   variant-10 run ends at base+15 and the overrun frame is base+16, which
   for the club is 104, another weapon's base. That is the reported
   "different weapon equipped on the last frame"; the port's floor test is
   `<=` now, one unit earlier, which makes every variant play exactly its
-  own five frames and nothing else.
+  own frames and nothing else. M79 moved *which* item can land on it: at a
+  fixed delta the question is whether `1792 − 512 = 1280` is a whole number
+  of drains, which it is for a spell (1280/40 = 32, so every cast would
+  have shown slot 158) and is not for a weapon (1280/120 is not an
+  integer). The guard was needed both times, for the same reason.
 - **A ranged weapon starts two frames in.** Without the `+2`,
   `weapons/bandit_longbow.s` (base 175, 4 frames) draws only 178 and 179 —
   the last two slots of its five-slot strip. Whether that is a bug or a
@@ -1560,12 +1634,23 @@ One detail reproduced, one corrected:
   `SetCrossbow`; every other weapon in the game gets the three variants.
 
 `SetReloadSpeed` (`item+0x184`) has **zero call sites** in the corpus, so it
-always holds its constructed value — and M78 read that value rather than
-inferring it: the Weapon constructor `FUN_1006c960` writes `+0x184 = 0x100`
-outright, next to `+0x180 = 0` (no animation frames until a script sets
-them), `+0x19c = 0` and `+0x1a7 = 0`. So the scale is the identity for
-every weapon in the game and the unscaled path is the only one the shipped
-corpus can take.
+always holds its constructed value — and **which constructor writes it was
+wrong until M79.** M78 read `FUN_1006c960`, which writes `+0x184 = 0x100`
+next to `+0x180 = 0`, `+0x19c = 0` and `+0x1a7 = 0`, and concluded the scale
+was the identity for every weapon in the game. `FUN_1006c960` is the *base
+item* constructor. The **Weapon** class constructor `FUN_1002ce9c` calls it
+first and then overwrites the field three instructions from its end:
+
+    1002cf7c  mov r3, #0x300
+    1002cf80  str r3, [r4, #0x184]
+
+read off the disassembly rather than the decompiler. Every weapon in the
+game is built by that constructor (entities.txt category 4) or by the
+conjured sword's, which derives from it (category 16) — so **the scaled path
+is the only one a weapon ever takes**, and a swing runs at three times the
+speed M78 recorded. That is the reported "the weapon swinging animation is
+really slow", and it is why a constructor read is only as good as knowing
+which class's constructor you are in.
 
 `SetAnimationFrames`, `SetReloadFrames`, `SetNumClips`, `SetClipSize`,
 `SetIsAutomatic`, `SetHasZoom`, `SetScoped`: this Item class is a **leftover
