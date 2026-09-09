@@ -14,6 +14,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstdio>
+#include <cstring>
 #include <fstream>
 #include <map>
 #include <memory>
@@ -1954,9 +1955,18 @@ void RenderPopup(sk::Backbuffer& backbuffer, sk_bindings::PopupMenuExecutable& p
     }
 }
 
+// M80: `backdrop`, when non-null, is the last frame the 3D view drew
+// before a script paused the game into this menu -- 176x208 RGB565, the
+// backbuffer's own layout. `FUN_10076b64` only paints a background at all
+// `if (-1 < menu+0x50)`, i.e. when the script called MenuBackground(id);
+// with no background it draws its rows straight onto whatever the screen
+// already holds, which for an in-game popup is the world. Every full-page
+// screen in the corpus (the main menu, character creation, the character
+// manager) does set a background, so this only ever shows through for the
+// popups that are meant to float over the game.
 void RenderMenu(sk::Backbuffer& backbuffer, sk_bindings::MenuExecutable& menu,
                  sk_bindings::PlayerExecutable& player, const sk::StringTable& strings,
-                 sk::SpriteArchive& sprites) {
+                 sk::SpriteArchive& sprites, const std::vector<uint16_t>* backdrop = nullptr) {
     using RowKind = sk_bindings::MenuExecutable::RowKind;
     // Real background (docs/GRAPHICS_FORMAT.md) when the real script's
     // MenuBackground(id) call resolved to a decodable global.spr slot
@@ -1968,6 +1978,13 @@ void RenderMenu(sk::Backbuffer& backbuffer, sk_bindings::MenuExecutable& menu,
         menu.backgroundId() >= 0 ? sprites.GetSprite(menu.backgroundId()) : nullptr;
     if (background) {
         backbuffer.Blit(0, 0, *background);
+    } else if (backdrop != nullptr &&
+               backdrop->size() == static_cast<size_t>(sk::Backbuffer::kWidth) *
+                                       sk::Backbuffer::kHeight) {
+        for (int row = 0; row < sk::Backbuffer::kHeight; ++row) {
+            std::memcpy(backbuffer.Row(row), backdrop->data() + row * sk::Backbuffer::kWidth,
+                        sizeof(uint16_t) * sk::Backbuffer::kWidth);
+        }
     } else {
         backbuffer.Fill(kBackgroundColor);
     }
@@ -1988,7 +2005,18 @@ void RenderMenu(sk::Backbuffer& backbuffer, sk_bindings::MenuExecutable& menu,
     // change than any other line in this milestone. The one script that
     // overrides it is `levelup.s`, whose eleven rows need y=10.
     int y = menu.startCoord();
-    const int lineHeight = sk::BitmapFont::kGlyphHeight + 4;
+    // M80 -- the row pitch is the engine's, not a guess. `FUN_10076b64`
+    // walks the widget list with one cursor and advances it by a literal
+    // `0xc` after every text row (`uVar9 = uVar8 + 0xc`, both for a plain
+    // static item and for a menu item). This used to be kGlyphHeight + 4,
+    // i.e. 16, which is fine for a six-row menu and impossible for a
+    // wrapped message: starthelp.s's last page is twelve rows, and at 16
+    // it ran 34 pixels off the bottom of a 208px screen, taking its own
+    // "I'm on my way." button with it. At 12 it ends at y=194. Every one
+    // of the game's nine tutorial pages fits, the longest with 14 pixels
+    // to spare -- which is the cross-check that 0xc, the 0x19 wrap width
+    // and SetStartCoord's default 0x32 are all being read right.
+    const int lineHeight = sk_bindings::kMenuRowPitch;
 
     if (menu.titleTextId() >= 0) {
         sk::BitmapFont::DrawString(backbuffer, 4, y, strings.Get(menu.titleTextId()), kTitleColor);
@@ -2069,6 +2097,25 @@ void RenderMenu(sk::Backbuffer& backbuffer, sk_bindings::MenuExecutable& menu,
                     if (row.showBorder && row.w > 0 && row.h > 0) {
                         DrawRectOutline(backbuffer, row.x, row.y, row.w, row.h, kPopupBorderColor);
                     }
+                } else if (row.kind == RowKind::StaticItem && !row.centered) {
+                    // M80: `FUN_10076b64` case 0 -> `FUN_1007f49c` with
+                    // `param_7 == 0` -- the left-aligned arm, drawn at the
+                    // literal x=9 the caller passes, with a shadow copy one
+                    // pixel down and right first. That is every ordinary
+                    // AddStaticItem message; the centred arm below is what
+                    // a `-----` separator (or an explicit
+                    // `AddStaticItem(id, false)`) takes instead. Wrapping
+                    // already happened in the binding, so each row here is
+                    // one line.
+                    constexpr uint16_t kShadow = sk::PackRGB565(
+                        ((sk_bindings::kTextShadowColor444 >> 8) & 0xF) * 17,
+                        ((sk_bindings::kTextShadowColor444 >> 4) & 0xF) * 17,
+                        (sk_bindings::kTextShadowColor444 & 0xF) * 17);
+                    sk::BitmapFont::DrawString(backbuffer, sk_bindings::kStaticItemX + 1, y + 1,
+                                                label, kShadow);
+                    sk::BitmapFont::DrawString(backbuffer, sk_bindings::kStaticItemX, y, label,
+                                                color);
+                    y += lineHeight;
                 } else {
                     // Real menu item rows (mainmenu.s etc., no real x/y of
                     // their own -- AddMenuItem never takes one) are
@@ -2697,6 +2744,10 @@ int main(int argc, char** argv) {
                        L"shadowkey-port (M6: 3D zone renderer)");
 
     sk::InputState input;
+    // M80: `ParseActionText` has to name whichever key an action is bound
+    // to *now*, so the one place the bindings live has to be reachable
+    // from a menu script. See simkin_bindings/action_text.h.
+    stack.SetInput(&input);
 
 #if SK_DEBUG_SUITE
     // SK_DEBUG_SUITE (M68): declared here, before the input callbacks that
@@ -2973,6 +3024,11 @@ int main(int argc, char** argv) {
     // nested Inventory/Stats/QuestLog screen, rather than backing out one
     // level at a time).
     bool gamePausedForMenu = false;
+    // M80: the frozen world behind an in-game popup -- see RenderMenu()'s
+    // own comment for why a menu with no MenuBackground() of its own needs
+    // one. Filled from the backbuffer on the last frame the 3D view draws
+    // before the pause takes effect.
+    std::vector<uint16_t> gamePausedBackdrop;
 
 #if SK_DEBUG_SUITE
     // SK_DEBUG_SUITE (M68): now that every game local exists, point the
@@ -4307,8 +4363,41 @@ int main(int argc, char** argv) {
                         if (gameRegionsOccupied.count(i)) continue;  // already inside
                         std::printf("shadowkey-port: entered zone region \"%s\"\n",
                                     regions[i].name.c_str());
+                        // M80: **an EnterZone handler that opens a menu
+                        // has to hand the frame over to it.** This is what
+                        // the game's tutorials, its region-triggered
+                        // warnings and a good deal of its scripted story
+                        // are made of -- all 21 zone root scripts have an
+                        // EnterZone, 19 of them open a menu from inside it,
+                        // and those handlers hold 128 OpenMenu call sites
+                        // between them (azra's eight: starthelp,
+                        // daggerhelp, junction, action_queue, temple,
+                        // ratchestclue, OhNoSkelos, azra_menu_yousure;
+                        // crypt1.s has 37). The menu was already being
+                        // *built* -- OpenMenu ran, its Init() ran, its rows
+                        // existed -- and then the 3D arm below drew
+                        // straight over it and returned, so no popup ever
+                        // reached the screen.
+                        //
+                        // Same before/after currentMenu() comparison, and
+                        // the same pause, as the Use path (a door, an NPC's
+                        // conversation, a loot bag) and the OnDetect path
+                        // already use. RightSelectionKey and the script's
+                        // own Quit() both come back to gameplay through
+                        // gamePausedForMenu exactly as they do from a
+                        // conversation.
+                        sk_bindings::MenuExecutable* beforeRegionMenu = stack.currentMenu();
                         sk_bindings::EncounterExecutable* encounter =
                             gameZoneScript->EnterRegion(regions[i].name);
+                        if (stack.currentMenu() != beforeRegionMenu) {
+                            inGame = false;
+                            gamePausedForMenu = true;
+                            // Deliberately keeps walking the rest of the
+                            // region list: the set diff below has to see
+                            // every region the player stands in this tick,
+                            // or the ones not visited here fire again next
+                            // tick, on top of the menu that just opened.
+                        }
                         if (encounter) {
                             // M45: the real FUN_1002ef44 spawns the
                             // encounter here and returns without calling
@@ -6363,6 +6452,17 @@ int main(int argc, char** argv) {
                     }
                 }
                 window.Present(backbuffer);
+                // M80: something in this tick paused the game into a menu
+                // (a region's EnterZone, an NPC's OnUse, a creature's
+                // OnDetect). This is the last frame the world draws, so
+                // keep it -- the popup goes over it next frame. See
+                // RenderMenu()'s `backdrop`.
+                if (gamePausedForMenu) {
+                    gamePausedBackdrop.assign(
+                        backbuffer.Data(),
+                        backbuffer.Data() + static_cast<size_t>(sk::Backbuffer::kWidth) *
+                                                sk::Backbuffer::kHeight);
+                }
                 return;
             }
         }
@@ -6531,7 +6631,8 @@ int main(int argc, char** argv) {
         }
 
         if (menu) {
-            RenderMenu(backbuffer, *menu, stack.player(), strings, spriteArchive);
+            RenderMenu(backbuffer, *menu, stack.player(), strings, spriteArchive,
+                        gamePausedForMenu ? &gamePausedBackdrop : nullptr);
         } else {
             backbuffer.Fill(kBackgroundColor);
         }

@@ -468,7 +468,37 @@ bool ZoneScriptExecutable::setValue(const skString& fieldName, const skString& a
 
 bool ZoneScriptExecutable::getValue(const skString& fieldName, const skString& attribute, skRValue& value) {
     if (LoadScriptObjectField(m_ObjectFields, fieldName, value)) return true;
-    return skScriptedExecutable::getValue(fieldName, attribute, value);
+    // M80 -- **a zone script must not shadow the engine's globals.**
+    //
+    // `LevelExecutable::AttachZoneScript` used to hand this object
+    // `setAddIfNotPresent(true)` so that an undeclared `Level.saved_X`
+    // read back falsy instead of throwing (five shipped typos need that --
+    // see that function's own comment). But the vendored
+    // `skTreeNodeObject::getValue()` honours the flag by *creating* the
+    // missing child and returning true, and the interpreter's identifier
+    // lookup (`skInterpreter::findValue`) asks the current object before
+    // it asks the global table. So inside a zone script the bare name
+    // `Level` resolved to a freshly minted empty tree node, and every
+    // `Level.<anything>()` call in every zone root script died:
+    //
+    //     shadowkey-port: RUNTIME ERROR in zone script Init():
+    //       azra.s:Init:0-Method PlayAmbient not found
+    //
+    // That is `Level.PlayAmbient(73,100)`, azra.s's very first statement,
+    // taking the whole of azra's Init() down with it -- and, more to the
+    // point for M80, `Level.GetEntity("m1")` guards the "queue" tutorial
+    // and `Level.LoadLevel(...)` / `Level.Vignette(5)` are four more of
+    // the same script's EnterZone arms, none of which could complete.
+    //
+    // The flag is gone. This reproduces its *intent* explicitly instead,
+    // in the order the interpreter would have used had it ever got the
+    // chance: a real declared field first, then a registered global (which
+    // `false` hands back to `findValue`), and only then the
+    // read-an-undeclared-field-as-falsy tolerance.
+    if (skScriptedExecutable::getValue(fieldName, attribute, value)) return true;
+    if (m_Stack.HasGlobalVariable(fieldName)) return false;
+    value = skRValue(0);
+    return true;
 }
 
 }  // namespace sk_bindings

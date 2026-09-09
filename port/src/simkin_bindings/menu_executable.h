@@ -51,6 +51,33 @@ class MenuExecutable;
 class PopupMenuExecutable;
 class TableExecutable;
 
+// M80: `FUN_1007dca0`'s two wrap widths, the fourth argument it is called
+// with and the one it overrides that argument to. See the AddStaticItem
+// handler for how a static item picks between them.
+constexpr int kStaticItemWrapChars = 0x11;    // 17 -- AddStaticItem's default
+constexpr int kLeftAlignedWrapChars = 0x19;   // 25 -- forced for a left-aligned row
+
+// M80: `FUN_10076b64`'s own row cursor step (`uVar9 = uVar8 + 0xc`) and
+// the x it draws a left-aligned static item at (the literal 9 it passes
+// as `FUN_1007f49c`'s first argument). The shadow is that function's
+// left-aligned arm drawing the same string twice -- once at (x+1, y+1) in
+// colour 0x0b96, then again at (x, y) in the row's real colour.
+constexpr int kMenuRowPitch = 0xc;
+constexpr int kStaticItemX = 9;
+// Raw, in the engine's own RGB444 -- `FUN_1008f8a4`'s colour argument is
+// the 12-bit kind `FUN_1008f97c` unpacks explicitly (M57's note in
+// docs/GRAPHICS_FORMAT.md settled that the framebuffer carries 12 bits of
+// colour in 16). 0x0b96 is (0xb, 0x9, 0x6), a warm tan; the caller
+// converts to this port's RGB565.
+constexpr unsigned short kTextShadowColor444 = 0x0b96;
+
+// `FUN_1007dca0`'s word wrap, which builds one menu-item widget per line:
+// walk the text, and at each space whose running line length has passed
+// `maxChars`, break at the *previous* space. Text shorter than `maxChars`
+// comes back as a single line. Exposed for
+// port/src/tests/m80_tutorial_popup_smoke.cpp.
+std::vector<std::string> WrapMenuText(const std::string& text, int maxChars);
+
 // M10: AddTitle()'s return value -- inventory.s's WeaponsMenu()/
 // ArmorMenu()/etc. call .SetLocalizedText(id) on it to change the title
 // text after the fact (a single title slot, m_TitleTextId, not a row --
@@ -279,6 +306,17 @@ public:
         // reason, which this port gets for free by excluding them from
         // navigation.
         bool visible = true;
+        // M80: `AddStaticItem`'s own second argument, which decides how
+        // the engine draws the row -- **not** whether it can be selected.
+        // `FUN_10076b64`'s case 0 passes it, inverted, to `FUN_1007f49c`
+        // as that function's `param_7`: 0 takes the left-aligned arm
+        // (drawn twice, a 0x0b96 shadow at (x+1,y+1) and the real text at
+        // (9,y)), 1 takes the centred one (`FUN_1008f97c`, no x at all).
+        // `AddStaticItem(id)` with one argument defaults it to 1 --
+        // left-aligned -- except when the text starts with "---", the
+        // separator convention, which centres instead. See the
+        // AddStaticItem handler and RenderMenu().
+        bool centered = false;
     };
     const std::vector<MenuRow>& rows() const { return m_Rows; }
     int backgroundId() const { return m_BackgroundId; }

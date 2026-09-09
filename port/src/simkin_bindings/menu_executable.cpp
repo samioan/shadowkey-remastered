@@ -6,6 +6,7 @@
 
 #include "assets/string_table.h"
 #include "audio/audio_engine.h"
+#include "simkin_bindings/action_text.h"
 #include "simkin_bindings/button_executable.h"
 #include "simkin_bindings/combo_box_executable.h"
 #include "simkin_bindings/floating_sprite_executable.h"
@@ -106,6 +107,45 @@ void MenuExecutable::RunOnDisplay() {
     // loudest line in the suite's soft-fail output for a call that is
     // supposed to be absent.
     TryInvoke("OnDisplay");
+}
+
+// M80: `FUN_1007dca0`'s wrap, variable for variable. `start` is the
+// current line's first character, `lastSpace` the most recent space seen
+// (the engine's iVar4, which it also uses as the cut point), `run` its
+// iVar7 -- the count since the last cut, which is what gets compared
+// against the limit. The engine mutates the caller's buffer in place,
+// writing a NUL over each cut space; this builds substrings instead,
+// which is the same set of lines.
+std::vector<std::string> WrapMenuText(const std::string& text, int maxChars) {
+    std::vector<std::string> lines;
+    if (static_cast<int>(text.size()) < maxChars || maxChars <= 0) {
+        lines.push_back(text);
+        return lines;
+    }
+    std::size_t start = 0;
+    std::size_t lastSpace = 0;
+    int run = 0;
+    for (std::size_t i = 0; i < text.size(); ++i) {
+        std::size_t nextLastSpace = lastSpace;
+        if (text[i] == ' ') {
+            nextLastSpace = i;
+            if (run > maxChars) {
+                lines.push_back(text.substr(start, lastSpace - start));
+                start = lastSpace + 1;
+                run = static_cast<int>(i - lastSpace);
+            }
+        }
+        ++run;
+        lastSpace = nextLastSpace;
+    }
+    // The tail: one more cut if the last line is still over the limit and
+    // there was a space to cut at (`if ((param_4 < iVar7) && (iVar4 != 0))`).
+    if (run > maxChars && lastSpace != 0 && lastSpace >= start) {
+        lines.push_back(text.substr(start, lastSpace - start));
+        start = lastSpace + 1;
+    }
+    lines.push_back(text.substr(start));
+    return lines;
 }
 
 MenuExecutable::MenuRow& MenuExecutable::AddRow(RowKind kind, int textId,
@@ -694,12 +734,75 @@ bool MenuExecutable::method(const skString& methodName, skRValueArray& args,
         return true;
     }
     if (methodName == skString("AddStaticItem") && args.entries() >= 1) {
-        AddRow(RowKind::StaticItem, args[0].intValue(), "", false);
+        // M80 -- three things this had wrong, all of them from the same
+        // never-read handler (`FUN_10078de4` case 0x6c ->
+        // `FUN_1007dca0`), and all three of them are why the game's
+        // tutorial popups could not have worked:
+        //
+        //  1. **The argument is dynamically typed.** The case opens with
+        //     `if (*(char *)(arg0 + 4) == '')` -- the Simkin
+        //     string-vs-int discriminator -- and only resolves a
+        //     stringtable id down the other arm. `starthelp.s` passes
+        //     `ParseActionText(2996)`, an already-resolved string;
+        //     `.intValue()` on that is 0, i.e. the wrong row entirely.
+        //  2. **The second argument is an alignment, not "selectable".**
+        //     See MenuRow::centered. With one argument it defaults to 1
+        //     (left-aligned) unless the text is at least four characters
+        //     long and starts with "---" -- the `-----` separator id 179
+        //     that half the corpus puts between a message and its
+        //     buttons, which centres instead.
+        //  3. **A static item word-wraps into several rows.**
+        //     `FUN_1007dca0` builds one widget per line: it walks the
+        //     string, and at each space whose running line length has
+        //     passed the limit it terminates the line at the *previous*
+        //     space and starts a new widget. The limit is the call's
+        //     fourth argument (default 0x11 = 17), except that the
+        //     left-aligned arm overrides it outright --
+        //     `if (param_3 != 0) param_4 = 0x19` -- so **every ordinary
+        //     message wraps at 25 characters**. Nothing in this port
+        //     wrapped at all, so a 170-character tutorial paragraph drew
+        //     as a single line running off both edges of a 176px screen.
+        MenuRow prototype;
+        SetRowTextFromArg(prototype, args[0]);
+        std::string text = prototype.textId >= 0 && m_Stack.strings()
+                               ? m_Stack.strings()->Get(prototype.textId)
+                               : prototype.literalText;
+        bool leftAligned = true;
+        if (args.entries() >= 2) {
+            leftAligned = args[1].boolValue();
+        } else if (text.size() > 3 && text.compare(0, 3, "---") == 0) {
+            leftAligned = false;
+        }
+        int wrapChars = args.entries() >= 3 ? args[2].intValue() : kStaticItemWrapChars;
+        if (leftAligned) wrapChars = kLeftAlignedWrapChars;
+        for (const std::string& line : WrapMenuText(text, wrapChars)) {
+            // Each line carries its own already-resolved text (RowText()
+            // prefers a literal), but keeps the id it came from, so a
+            // wrapped message still reports which stringtable entry it is
+            // -- what a conversation screen's "which line did this menu
+            // open with" assertion reads, and what a script that later
+            // calls SetRowTextId() on the row would replace.
+            MenuRow& row = AddRow(RowKind::StaticItem, prototype.textId, "", false);
+            row.literalText = line;
+            row.centered = !leftAligned;
+        }
         // savegamemenu.s/loadgamemenu.s assign this to a variable used
         // later as a plain SetSelectedItem(...) argument -- no script
         // ever calls a method on it, so a plain int (1-based row index,
         // matching AddMenuItem's convention) is enough; no object needed.
+        // The real handler returns the *last* widget it made, which for a
+        // wrapped message is its final line; m_Rows.size() is already that.
         returnValue = skRValue(static_cast<int>(m_Rows.size()));
+        return true;
+    }
+    if (methodName == skString("ParseActionText") && args.entries() == 1) {
+        // M80: Menu binding 2. See simkin_bindings/action_text.h for the
+        // whole substitution and why the `[KD_n]` tokens name actions
+        // rather than keys. Previously the single loudest soft-fail in
+        // the game's opening minute -- azra's "start" region opens
+        // starthelp.s, whose every screen is built out of these.
+        returnValue = skRValue(skString(
+            ParseActionText(args[0].intValue(), m_Stack.input(), m_Stack.strings()).c_str()));
         return true;
     }
     if (methodName == skString("AddMenuItem") && (args.entries() == 2 || args.entries() == 3)) {

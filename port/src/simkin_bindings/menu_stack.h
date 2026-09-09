@@ -30,6 +30,7 @@ namespace sk {
 class StringTable;
 class SoundArchive;
 class AudioEngine;
+class InputState;
 }
 
 namespace sk_bindings {
@@ -154,6 +155,20 @@ public:
     // (charactermanager.s's GetHealthText() etc.), not just relying on a
     // row's own textId -- may be null, same caveat as the constructor.
     const sk::StringTable* strings() const { return m_Strings; }
+
+    // M80: the live control bindings, for `ParseActionText` -- the one
+    // native that has to *name* a key rather than read one
+    // (simkin_bindings/action_text.h). Null in every test that does not
+    // set one, which that function reads as "the engine defaults", the
+    // same bindings the tutorial text was written against. Set by
+    // main.cpp once, right after the InputState it points at is built.
+    void SetInput(const sk::InputState* input) { m_Input = input; }
+    const sk::InputState* input() const { return m_Input; }
+
+    // M80: does the interpreter have a global of this name? Zone scripts
+    // need this to stop shadowing `Level` -- see
+    // ZoneScriptExecutable::getValue().
+    bool HasGlobalVariable(const skString& name) const;
 
     // M59: `products.dat`, the merchant product database
     // (assets/product_database.h). It hangs off the stack for the same
@@ -398,6 +413,7 @@ private:
     std::string m_ScriptRoot;
     skInterpreter& m_Interpreter;
     const sk::StringTable* m_Strings;
+    const sk::InputState* m_Input = nullptr;  // M80, see SetInput()
     sk::SoundArchive* m_Sounds;  // M27: see sounds()/audio()'s own comment above
     sk::AudioEngine* m_Audio;
     bool m_MuteOnCall = false;  // M28: see muteOnCall() above

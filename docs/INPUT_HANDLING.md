@@ -339,6 +339,68 @@ Everything remains rebindable through `InputState::Rebind`, which is what
 `dragonstar.set`'s ACTIONMAP block), so changing the physical layout does
 not invalidate an existing settings file.
 
+### Naming a key inside a sentence: `ParseActionText` (M80)
+
+The binding table has a second consumer, found from the other end -- a
+soft-fail in the port's log the moment the player walks into Azra's first
+named region:
+
+    shadowkey-port: entered zone region "start"
+      [soft-fail] Menu: ParseActionText(2995) -- not implemented
+
+`ParseActionText` is the Menu class's binding 2 (`FUN_1003136c` case 2).
+It copies `stringTable[id]` into a 1024-wide-character scratch buffer,
+hands it to `FUN_10030250`, and returns the result as a Simkin string.
+`FUN_10030250` is the interesting half: it scans for the first `[`, then
+the first `]` after it, compares the token between them against twelve
+literals, and on a match replaces the bracketed token -- brackets
+included -- with the *name of the key that logical action is currently
+bound to*, then restarts the scan from the beginning of the rewritten
+string. On no match it stops, leaving that token and every later one in
+place.
+
+The name comes from the binding table's other half:
+`FUN_1001a578(out, input, InputState_ResolveBindingOffset(input, action))`
+-- resolve the action to a physical slot through `+0x2c`, then read that
+slot's label id out of `+0x6c` and look it up in the string table.
+
+**The tokens are named for keys, but they resolve actions**, and the two
+agree twelve times out of twelve. Each `mov r1, #N` ahead of the twelve
+`bl InputState_ResolveBindingOffset` calls names the action whose
+*default* binding is the key in the token:
+
+| token | action | index | default key |
+|---|---|---|---|
+| `[KD_0]` | Cycle Right Queue | 10 | Key 0 |
+| `[KD_1]` | Jump | 8 | Key 1 |
+| `[KD_2]` | Look Up | 4 | Key 2 |
+| `[KD_3]` | Use | 13 | Key 3 |
+| `[KD_4]` | Side Step Left | 6 | Key 4 |
+| `[KD_5]` | Use Right Action | 15 | Key 5 |
+| `[KD_6]` | Side Step Right | 7 | Key 6 |
+| `[KD_7]` | Use Left Action | 14 | Key 7 |
+| `[KD_8]` | Look Down | 5 | Key 8 |
+| `[KD_9]` | Map Toggle | 9 | Key 9 |
+| `[KD_ASTERISK]` | Cycle Left Queue | 11 | Key * |
+| `[KD_POUND]` | Character Manager | 12 | Key # |
+
+That agreement is an independent confirmation of the M57 action-index
+table above, recovered from a completely different function -- and the
+indirection is the whole point: the tutorial text was written against
+the stock keypad, and stays honest after the player uses Configure Keys.
+
+Five shipped scripts call it (`starthelp.s`, `daggerhelp.s`,
+`junction.s`, `temple.s`, `action_queue.s`) for 29 calls in total, and
+they are the game's entire tutorial. `stringtable.eng` 2995 is
+`"Press [KD_5] to continue."`; 3748, the last page of the opening
+tutorial, carries two tokens at once. The port implements this in
+`port/src/simkin_bindings/action_text.h`.
+
+Only the second `bl` in that sequence needs care when reading it in
+Ghidra: the decompiler drops that call's second argument entirely
+(`InputState_ResolveBindingOffset(iVar5)`), and the value is only in the
+disassembly (`mov r1, #8` at `0x100305dc`).
+
 ## What's still open
 
 - The exact native-code identity of `ConfigKeysMenu`/`ConfigKeysDefault`
@@ -379,6 +441,8 @@ not invalidate an existing settings file.
 - `InputState_ClearAll` (0x1001a744)
 - `InputState_RegisterBinding` (0x1001a770)
 - `InputState_InitDefaultBindings` (0x1001a064)
+- `FUN_10030250` (0x10030250) -- the `[KD_*]` substitution (M80)
+- `FUN_1001a578` (0x1001a578) -- binding offset -> key-name string id
 
 Tools: `pyghidra_label_input_handling.py`, `pyghidra_label_input_state_class.py`,
 `pyghidra_find_reads_range.py` (scans a whole contiguous offset range in one

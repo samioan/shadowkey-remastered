@@ -7204,6 +7204,123 @@ soft-fails 39 -> 39, all 14 tracked `.ppm` renders byte-identical,
   animation and a twelve-tick fireball. A new `viewmodel.slot.<n>` debug
   counter is what makes the first two visible from a console.
 
+- [x] **M80 -- the message popups.** Reported: walking around Azra never
+  produces the tutorial messages the real game shows, and that is only the
+  visible corner of a general mechanism -- an `EnterZone` handler opening a
+  menu is how the game delivers hints, warnings and a good part of its
+  story. All 21 zone root scripts have an `EnterZone`, and 19 of them open
+  a menu from inside it -- 128 `OpenMenu` call sites in those handlers
+  alone, 37 of them in crypt1.s. Write-ups in
+  docs/INPUT_HANDLING.md ("Naming a key inside a sentence") and
+  docs/GRAPHICS_FORMAT.md ("The menu list's own layout").
+
+    - **The menu was being built and then drawn over.** `OpenMenu` ran,
+      the target script's `Init()` ran, its rows existed -- and then the
+      in-game arm of the frame loop rendered the 3D view and returned,
+      because nothing told it a menu had appeared. The Use path (a door,
+      an NPC's conversation, a loot bag) and the OnDetect path already
+      compared `stack.currentMenu()` before and after invoking a script
+      handler and paused into the result; the M44 region walk never did,
+      even though its own comment named azra's `YouSure` region as the
+      reason it had to be edge-triggered. One before/after comparison, the
+      same `gamePausedForMenu` hand-off, and every one of those 19 zones'
+      popups arrives.
+
+    - **`ParseActionText`, and the twelve `[KD_*]` tokens.** The Menu
+      class's binding 2 (`FUN_1003136c` case 2), and the loudest soft-fail
+      in the game's opening minute. The shipped tutorial strings name their
+      keys with a bracketed token -- 2995 is `"Press [KD_5] to continue."`
+      -- and `FUN_10030250` rewrites each one with the name of the key that
+      *action* is bound to now, via
+      `FUN_1001a578(input, ResolveBindingOffset(input, N))`. Twelve tokens,
+      and each one's `mov r1, #N` names the action whose **default** key is
+      the one in the token -- twelve for twelve, which is an independent
+      confirmation of M57's action-index table from a function that has
+      nothing else to do with it. Unknown token, and the pass stops there
+      with that token and every later one left in the text. Five scripts,
+      29 calls, and between them they are the entire tutorial.
+
+    - **`AddStaticItem` is a four-argument native and this port was using
+      one of them.** `FUN_10078de4` case 0x6c into `FUN_1007dca0`:
+
+      | argument | default | what it does |
+      |---|---|---|
+      | text | -- | dynamically typed -- a string id *or* a resolved string |
+      | leftAligned | 1, or 0 when the text starts `"---"` | picks the draw arm |
+      | maxChars | `0x11` (17) | wrap width, forced to `0x19` (25) when left-aligned |
+      | fontOverride | `-0x2153` | rarely used |
+
+      The first of those is why `ParseActionText`'s result was landing as
+      `intValue() == 0`. The third is why a 170-character paragraph drew
+      as one line off both edges of a 176-pixel screen: **a static item
+      word-wraps into one widget per line**, and nothing in this port
+      wrapped at all. The second is not "selectable" (that is
+      `widget+0x5c`, 0 for every static item) -- `FUN_10076b64` passes it,
+      inverted, to `FUN_1007f49c`, which either draws left-aligned at the
+      literal `x = 9` with a `0x0b96` shadow copy at `(x+1, y+1)`, or
+      centres with no x at all. `0x0b96` is RGB444 like every other colour
+      constant in that code (M57), i.e. a warm tan behind the darker text.
+
+    - **The row pitch is `0xc`.** `FUN_10076b64` advances its one cursor by
+      a literal 12 pixels per text row, from a start of `menu+0x96` --
+      `SetStartCoord`'s field, constructor default `0x32` (M64). This port
+      had 16, a placeholder from before any of the draw was read. Those
+      three numbers cross-check each other: at 0x32/0xc/0x19 every one of
+      the nine shipped tutorial pages fits a 208-pixel screen and the
+      longest ends at y=194; at 16 the same page ends at 242 and loses its
+      own "continue" button off the bottom, which would make the tutorial
+      unfinishable.
+
+    - **CORRECTED: a zone script was shadowing the `Level` global.**
+      `LevelExecutable::AttachZoneScript` handed the zone script
+      `setAddIfNotPresent(true)` so that an undeclared `Level.saved_X`
+      would read falsy rather than throw (five shipped typos need that).
+      But the vendored `skTreeNodeObject::getValue()` honours that flag by
+      *creating* the missing child and returning true, and
+      `skInterpreter::findValue` asks the current object before the global
+      table -- so inside a zone script the bare name `Level` resolved to a
+      freshly minted empty tree node:
+
+          shadowkey-port: RUNTIME ERROR in zone script Init():
+            azra.s:Init:0-Method PlayAmbient not found
+
+      That is `Level.PlayAmbient(73,100)`, azra.s's first statement, taking
+      the whole of its `Init()` with it -- including the `SetZone(1, 2000)`
+      that populates the zone with 52 wandering creatures. Four of azra's
+      own `EnterZone` arms are `Level.` calls too, so `Level.GetEntity("m1")`
+      (which gates the action-queue tutorial) and three
+      `Level.LoadLevel(...)` region transitions could not complete either.
+      `ZoneScriptExecutable::getValue()` now spells the tolerance out in the
+      order the interpreter would have used: declared field, then registered
+      global, then falsy. **The existing m44 test could not have caught
+      this** -- it builds a zone script without calling `AttachZoneScript`,
+      which is exactly the arm that sets the flag.
+
+    - **An in-game popup floats over the frozen world.** `FUN_10076b64`
+      paints a background only `if (-1 < menu+0x50)`, i.e. when the script
+      called `MenuBackground(id)`; with no background it draws its rows
+      onto whatever the screen already holds. Every full-page screen in the
+      corpus sets one, so this only shows through for the popups meant to
+      float. The port keeps the last frame the 3D view drew before the
+      pause and uses it in place of the flat fill.
+
+  **Verification.** New `m80_tutorial_popup_smoke` (27 checks, suite
+  **71/71 -> 72/72**): the twelve tokens and their actions, cross-checked
+  against the default bindings; the key labels read out of the real
+  `stringtable.eng`; 2995 and 3748 substituted, and 2995 again after
+  rebinding Use Right Action to key 1; the unknown-token and unclosed-
+  bracket arms; the wrap against `FUN_1007dca0`'s arithmetic, losing
+  nothing; `starthelp.s` opened for real and walked through all six pages
+  with no `[KD_` surviving on any of them; the longest page's bottom edge;
+  azra.s's `Init()` running to the end with `Level` unshadowed, its own
+  declared fields still resolving and an undeclared one still falsy; and
+  `EnterRegion("start")` opening starthelp once and not twice.
+
+  Confirmed in the running game by screenshot: entering azra puts the
+  wrapped alarm message and "Press Key 5 to continue." over the frozen
+  first room, and the log now reads `SetZone(1, 2000) -> 52 creature(s)`
+  where it used to read a runtime error.
+
 ## Next milestones (not yet started)
 
 Roughly in priority order for reaching "actually playable," not commitments:

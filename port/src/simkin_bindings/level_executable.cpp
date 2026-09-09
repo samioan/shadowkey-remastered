@@ -412,7 +412,7 @@ bool LevelExecutable::method(const skString& methodName, skRValueArray& args,
 void LevelExecutable::AttachZoneScript(ZoneScriptExecutable* script) {
     m_ZoneScript = script;
     if (!script) return;
-    // Undeclared fields auto-create rather than raising "Cannot get
+    // Undeclared fields read back falsy rather than raising "Cannot get
     // field". 163 of the 168 `Level.<field>` names in the corpus are
     // declared at the top level of the right zone's root script and so
     // never need this; the remaining five are shipped typos that differ
@@ -423,7 +423,12 @@ void LevelExecutable::AttachZoneScript(ZoneScriptExecutable* script) {
     // over a misspelling, so they read back falsy instead -- the same
     // choice, for the same reason, that PlayerExecutable::getValue()
     // already makes for `GetPlayer().saved_X`.
-    script->setAddIfNotPresent(true);
+    //
+    // M80: this used to be `script->setAddIfNotPresent(true)`, which had
+    // the side effect of making the zone script answer to *every* name --
+    // including `Level` itself, the global every zone root script calls
+    // through. ZoneScriptExecutable::getValue() now spells the tolerance
+    // out directly; see the long comment there.
 }
 
 bool LevelExecutable::setValue(const skString& fieldName, const skString& attribute,

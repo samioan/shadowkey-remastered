@@ -180,6 +180,42 @@ public:
         bindingOffset_[static_cast<size_t>(action)] = slot;
     }
 
+    // M80: the *other* half of the binding table -- the per-slot key-name
+    // resource id (`InputState+0x6c`, 21 entries), which
+    // `InputState_InitDefaultBindings` fills in with one
+    // `InputState_RegisterBinding(this, slot, id, flag)` call per slot:
+    //
+    //     slots 0x00..0x0f -> 0xd05 + slot, flag 1  (the 16 real keys)
+    //     slot  0x10       -> 0xd15,        flag 0  ("Left Selection Key")
+    //     slot  0x11       -> 0xd16,        flag 0  ("Right Selection Key")
+    //     slot  0x12       -> 0xd15,        flag 0  (reuses the same label)
+    //     slot  0x13       -> never registered at all -- the documented gap
+    //     slot  0x14       -> 0xd15,        flag 0
+    //
+    // 0xd05 + slot lands exactly on this enum's own order, which is the
+    // engine's scan-code table order: 0xd05 "Left", 0xd06 "Right", 0xd07
+    // "Up", 0xd08 "Down", then 0xd09.."Key 1" through 0xd14 "Key #".
+    // Nothing read this before because nothing needed to *name* a key;
+    // `ParseActionText` does (simkin_bindings/action_text.h).
+    // Returns -1 for the unregistered slot 19.
+    static int slotNameStringId(ButtonSlot slot) {
+        const int i = static_cast<int>(slot);
+        if (i < 0 || i >= static_cast<int>(ButtonSlot::kCount)) return -1;
+        if (i <= 17) return 0xd05 + i;
+        if (i == 19) return -1;  // never registered
+        return 0xd15;            // slots 18 and 20 reuse "Left Selection Key"
+    }
+
+    // The name of whatever key `action` is bound to *right now* -- the
+    // engine's own `FUN_1001a578(out, input, ResolveBindingOffset(input,
+    // action))`, which resolves the action through the remappable table
+    // and then reads that physical slot's label id. -1 when unbound.
+    int bindingNameStringId(Action action) const {
+        const int slot = binding(action);
+        if (slot < 0) return -1;
+        return slotNameStringId(static_cast<ButtonSlot>(slot));
+    }
+
 private:
     void InitDefaultBindings() {
         bindingOffset_.fill(-1);

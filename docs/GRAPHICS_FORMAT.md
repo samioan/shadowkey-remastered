@@ -684,6 +684,71 @@ earlier sprite work (see above) already established. `FUN_1002c010`'s
 big single bar is now implemented too, M26 (`docs/PORT_ROADMAP.md`), as
 the real zone-transition loading screen -- see the resolved item above.
 
+## The menu list's own layout -- decoded (M80)
+
+Chased down because the game's tutorial popups had nowhere to fit: a
+single `AddStaticItem` in `starthelp.s` carries a 170-character
+paragraph, and the port was drawing it as one centred line running off
+both edges of a 176-pixel screen. Three functions answer it, and between
+them they fix every number in a menu screen's vertical layout.
+
+**`FUN_1007dca0(menu, text, flag, maxChars, fontOverride)` word-wraps
+into separate widgets.** Not into lines inside one widget -- one menu
+item per line, appended to the same list every other row goes into. Text
+shorter than `maxChars` makes one widget; otherwise it walks the string
+and, at each space whose running length has passed `maxChars`, cuts at
+the *previous* space (writing a `NUL` over it in the caller's buffer)
+and starts the next widget there.
+
+**`AddStaticItem` (`FUN_10078de4` case 0x6c) is a four-argument native,
+and the second argument is an alignment.** Its full shape:
+
+    AddStaticItem(textOrId, leftAligned = <see below>, maxChars = 0x11,
+                  fontOverride = -0x2153)
+
+  * the first argument is dynamically typed -- the case branches on the
+    Simkin string/int discriminator (`*(char *)(arg + 4) == 1`) and only
+    resolves a string-table id down the int arm. `ParseActionText`'s
+    result comes in down the other one;
+  * with only one argument the second defaults to **1**, except when the
+    text is longer than three characters and starts with `"---"`, which
+    makes it 0. That is the `-----` separator (string id 179) half the
+    corpus puts between a message and its buttons;
+  * `maxChars` defaults to `0x11` (17), **but `FUN_1007dca0` overrides it
+    to `0x19` (25) whenever the flag is set** (`if (param_3 != 0) param_4
+    = 0x19`). So every ordinary message wraps at 25 characters and only
+    an explicitly-centred one uses 17.
+
+The flag ends up at `widget+0x94`, which is *not* the focusable byte
+(that is `+0x5c`, and it is 0 for every static item and 1 for every
+`AddMenuItem`). It is an alignment, as the draw shows.
+
+**`FUN_10076b64`, the menu draw, walks the widget list with one cursor
+and advances it by a literal `0xc` per text row** (`uVar9 = uVar8 + 0xc`,
+in both the static-item and menu-item arms). The cursor starts at
+`menu+0x96`, the field `SetStartCoord` writes, whose constructor default
+is `0x32` (M64 recovered that separately).
+
+**`FUN_1007f49c(x, y, text, ..., colour, flag ^ 1, ..., font)` picks the
+alignment.** With its `param_7` zero it takes the left-aligned arm, which
+draws the string twice -- once at `(x+1, y+1)` in colour `0x0b96`, then
+at `(x, y)` in the row's own colour -- and the caller passes a literal
+`x = 9`. With `param_7` set it calls `FUN_1008f97c`, which takes no x at
+all: centred. `0x0b96` is RGB444 like every other colour constant here
+(see M57's note above), i.e. `(0xb, 0x9, 0x6)`, a warm tan behind the
+darker text.
+
+**These four numbers cross-check each other.** Start at 0x32, step 0xc,
+wrap at 0x19: every one of the nine shipped tutorial pages fits a
+208-pixel screen, and the longest -- `starthelp.s`'s last, twelve rows --
+ends at y=194. Change any one of them and that page loses its own
+"continue" button off the bottom, which would make the tutorial
+unfinishable. (The port had been using a 16-pixel step, a placeholder
+from before any of this was read; at 16 the same page ends at 242.)
+
+`AddMenuItem` (case 0x6d) does **not** wrap -- it builds one widget with
+its own x/y, whatever the text length.
+
 ## Open follow-ups
 
 - `FUN_1006bee8`/`FUN_1006be58` (rect/outline fill primitives used

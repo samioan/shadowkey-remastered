@@ -108,6 +108,7 @@ target_include_directories(sk_save PUBLIC src)
 
 add_library(sk_bindings STATIC
   src/assets/string_table.cpp
+  src/simkin_bindings/action_text.cpp
   src/simkin_bindings/button_executable.cpp
   src/simkin_bindings/character_progression.cpp
   src/simkin_bindings/combat.cpp
@@ -609,6 +610,10 @@ target_link_libraries(monster_ai_smoke PRIVATE sk_bindings sk_world)
 add_executable(player_attack_smoke src/tests/m78_player_attack_smoke.cpp)
 target_link_libraries(player_attack_smoke PRIVATE sk_bindings sk_world)
 
+# See src/tests/m80_tutorial_popup_smoke.cpp.
+add_executable(tutorial_popup_smoke src/tests/m80_tutorial_popup_smoke.cpp)
+target_link_libraries(tutorial_popup_smoke PRIVATE sk_bindings)
+
 # See src/tests/m79_spell_viewmodel_smoke.cpp.
 add_executable(spell_viewmodel_smoke src/tests/m79_spell_viewmodel_smoke.cpp
                                      src/assets/sprite_archive.cpp)

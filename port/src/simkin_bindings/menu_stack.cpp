@@ -79,6 +79,17 @@ MenuStack::MenuStack(std::string scriptRoot, skInterpreter& interpreter,
 
 MenuStack::~MenuStack() = default;
 
+bool MenuStack::HasGlobalVariable(const skString& name) const {
+    // `skInterpreter::getGlobalVariables()` is the same table
+    // `addGlobalVariable` writes into and `findValue` falls back to --
+    // `Level` (registered above) plus every scalar game constant
+    // `RegisterGameConstants` adds.
+    // `value()` is only const-qualified on the untyped base, so the
+    // typed lookup needs the cast; nothing is written.
+    skRValueTable& globals = const_cast<skRValueTable&>(m_Interpreter.getGlobalVariables());
+    return globals.value(name) != 0;
+}
+
 MenuExecutable* MenuStack::GetOrCreateMenu(const std::string& simkinPath, skiExecutable* opener,
                                            int screenMode) {
     std::string key = NormalizeKey(simkinPath);
