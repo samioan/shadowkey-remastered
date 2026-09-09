@@ -704,6 +704,25 @@ public:
         return CollisionFloorHeightAt(worldX, worldY, worldZ + 384.0f) + 128.0f;
     }
 
+    // M81: the *other* snap -- what `Level.CreateEntityScript(typeId,
+    // script, x, y, z)` does to the object it just spawned, from the Level
+    // dispatcher's case 0x21 five-argument arm:
+    //
+    //     entity->z = zcp(x, y).floorBandThreshold;   // the engine's write
+    //     entity->z = resolveSurface(x, y, entity->z + 0x180);  // FUN_100686e0
+    //
+    // Two differences from SnapActorToGround above, and both are the
+    // engine's, not simplifications. There is **no 0x80 lift** -- the
+    // object sits on the surface rather than standing on it. And the
+    // script's own `z` argument is *discarded*: the probe that picks
+    // which storey a two-storey tile resolves to is the tile's own
+    // authored floor-band threshold (`ZcpEntry::floorBandThreshold`, the
+    // `+2` field), not anything the caller passed. The five shipped
+    // callers all pass `GetPositionZ()` and so would land in the same
+    // place either way on an ordinary tile; this keeps the storey choice
+    // the engine's.
+    float SnapSpawnedObjectToGround(float worldX, float worldY) const;
+
     // M41: the real per-frame visible-tile set --
     // `TileGrid_RaycastVisibility` (`FUN_1000f694`), transcribed. This
     // replaces the renderer's fixed-radius square scan, which was M6's

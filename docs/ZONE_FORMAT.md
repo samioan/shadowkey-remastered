@@ -473,15 +473,44 @@ This lines up exactly with how the code uses it:
   case: `iVar9==5` (spell) also matches `descriptor+0x10==0xe` (14,
   scroll)** — i.e. spell scrolls count as castable spells for inventory
   lookups. Exactly what the category table above would predict.
-- `FUN_1002c3a8` (a monster's on-death handler — spawns a fixed `typeId
-  300`, which `entities.txt` line 212 confirms is `300 30 8 !bag_loot`,
-  category 8/container, at the dying actor's position) and the more
-  generic `FUN_10084438` (spawns whatever typeId is stored at the calling
-  object's `+0x2f0`) both check `descriptor+0x10 == 8` before flagging the
-  spawned object as a container (`+0x180`/`+0x181` = 1) — i.e. "loot bag
-  drops on monster death" is implemented as: spawn typeId 300, and the
-  code even re-derives "is this really a container?" from the category
-  field rather than assuming it.
+- `FUN_1002c3a8` and `FUN_10084438` both spawn a container and both check
+  `descriptor+0x10 == 8` before flagging the result as one
+  (`+0x180`/`+0x181` = 1) — i.e. the code re-derives "is this really a
+  container?" from the category field rather than assuming it. **M81
+  corrects which is which.** The first pass called `FUN_1002c3a8` "a
+  monster's on-death handler"; it is not.
+
+  - **`FUN_1002c3a8` is `DropObject(item)`** — the *inventory* drop. It
+    spawns a fixed `typeId 300` (`entities.txt` line 212, `300 30 8
+    !bag_loot`) at `item->owner`'s position minus half a tile on each
+    axis, then `FUN_10028f98` appends the item to the new bag's contents
+    list (`bag+0x164`) and backlinks it (`item+0x88 = bag`). Its callers
+    are the player dispatcher's drop-gold case (spawn typeId 0x34,
+    `SetQuantity`, drop) and the item dispatcher's drop case — never a
+    death.
+  - **`FUN_10084438` is the on-death loot drop**, called from the real
+    creature death handler `FUN_10083c04` and gated on `monster+0x2f0 !=
+    0`. `+0x2f0`/`+0x2f4` are the typeId and script-name pair the
+    creature's own `SetLoot(300, "Loot_ratseye", 1, 8)` left on it
+    (dispatcher `0x10084924` case `0xd`), and the spawn passes the name to
+    `FUN_100715a8` as a **script override** for the typeId — which is what
+    makes one container type carry 54 different bags. It positions at the
+    creature's own x/y, z + 300, floor-snaps (`FUN_100686e0`) and lifts by
+    `0x80`.
+
+  Both bags are drawn: `FUN_100715a8` sets the spawned object's `+0x54`
+  model pointer from `engine+0x6b38[descriptor->modelArchiveIndex]`
+  whichever way the script was chosen, and typeId 300's model index 30 is
+  `bag_dropped.bin` in every playable zone's `<zone>_models.txt`. The `!`
+  in `!bag_loot` marks the *name* column as a label rather than a script
+  path; it says nothing about the model column.
+
+  A third path spawns the same containers from script rather than from
+  the engine: `Level.CreateEntityScript(typeId, script, x, y, z)` (Level
+  dispatcher case `0x21`), which `monsters/arat.s` and
+  `monsters/spiderqueen.s` call from their own `OnKilled()` handlers after
+  rolling their own `Random(1,12)=12`, and `crypt1/shadowkeygate.s` uses
+  for three `typeId 301` (`301 15 8 !chest_loot`) chests.
 - `FUN_10005320`/`FUN_1003893c`/`FUN_1003b85c` all pass `descriptor+0x10`
   straight through as an argument to a virtual call at `vtable+0x18` on
   some other object (an equip/pickup dispatcher, not traced further) —

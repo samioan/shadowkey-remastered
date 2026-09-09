@@ -132,6 +132,14 @@ public:
     // and so does not go through CreateItem().
     int EntityCategoryOf(int typeId) const;
 
+    // M81: the same row's model index -- `descriptor+0xc`, the
+    // `engine+0x6b38[...]` subscript every spawned object's `+0x54` model
+    // pointer comes from (`FUN_100715a8`). -1 when the table is not loaded
+    // or the typeId is not in it. main.cpp needs it for the one entity it
+    // creates without a `.ent` placement to read it off: the loot bag a
+    // dying creature drops.
+    int EntityModelIndexOf(int typeId) const;
+
     // M79: entities.txt read the other way round -- the typeId whose row
     // names this script, or -1. The engine never needs this (nothing in it
     // creates an item from a path), but this port has one caller that does:
@@ -241,6 +249,39 @@ public:
     // is complete.
     bool TakePendingCreature(PendingCreature& out, std::unique_ptr<MonsterExecutable>& script);
 
+    // M81: `Level.CreateEntityScript(typeId, script, x, y[, z])` -- the
+    // Level dispatcher's case 0x21, and the game's *second* way to drop
+    // loot off a dead creature. `SetLoot` is the engine-driven one
+    // (docs/PORT_ROADMAP.md's M81 entry); this is the script-driven one, a
+    // creature's own `OnKilled()` rolling its own dice and placing its own
+    // bag:
+    //
+    //     monsters/arat.s        OnKilled { if (Random(1,12)=12) {
+    //         Loot = Level.CreateEntityScript(300, "Loot_ratseye",
+    //                    GetPositionX(), GetPositionY(), GetPositionZ());
+    //         Loot.SetDestroy(true); } }
+    //     monsters/spiderqueen.s the same shape, dropping "Loot_ShadowKey"
+    //     crypt1/shadowkeygate.s three typeId-301 chests at fixed x/y/z
+    //
+    // The spawn is CreateEntityWithScript() above -- the same
+    // `FUN_100715a8(level, typeId, 1, script, 0)` the death drop uses --
+    // and what is left is the world placement, which lives in main.cpp.
+    // The script object itself is built and returned immediately, because
+    // every caller calls a method on the result on the very next line;
+    // only the placement is deferred, the same split PendingCreature uses.
+    struct PendingPlacedItem {
+        int typeId = 0;
+        int x = 0, y = 0, z = 0;
+        // The four-argument form places at (x, y, 0) with no snap; the
+        // five-argument one snaps to the tile's surface
+        // (Zone::SnapSpawnedObjectToGround). Nothing in the corpus uses
+        // the two-argument form, which the real case leaves unplaced.
+        bool hasPosition = false;
+        bool snapToGround = false;
+        skiExecutable* object = nullptr;
+    };
+    bool TakePendingPlacedItem(PendingPlacedItem& out, std::unique_ptr<ItemExecutable>& script);
+
     // M45: resolve a typeId to a creature script and run its Init(), the
     // shared half of `FUN_100715a8` -- used by the four-argument
     // CreateEntity above and by the encounter spawner, which creates its
@@ -257,6 +298,37 @@ public:
     // 4037's entities.txt category is 16 rather than a weapon's usual 4
     // and the real FUN_10044e08 does no category check at all.
     std::unique_ptr<ItemExecutable> CreateItem(int typeId, bool requireItemCategory = true);
+
+    // M81: the third form of the same spawn -- `FUN_100715a8`'s
+    // `param_3 != 0` arm, which builds the object from `typeId` exactly as
+    // above (its category picks the C++ class, its descriptor supplies the
+    // model) but loads **`scriptTag`** instead of the script that typeId's
+    // own entities.txt row names. That is the only thing that makes a loot
+    // bag a loot bag: every dropped bag in the game is typeId 300, whose
+    // row is the label-only `!bag_loot` with no script at all, and the
+    // creature's own `SetLoot(300, "Loot_ratseye", 1, 8)` tag is what
+    // fills it. Its two callers in the binary are `FUN_10084438` (a
+    // creature's death drop, which is this port's caller) and
+    // `FUN_1002c3a8` (dropping an item out of the inventory).
+    //
+    // `scriptTag` is a Simkin script path in the corpus's own spelling --
+    // bare (`Loot_ratseye`), subdirectory-qualified (`broken1\loot2`,
+    // written with four backslashes in the .s source and halved twice on
+    // the way here -- once by Simkin's own `\\` string escape and once by
+    // ResolveScriptPath's repeated-separator collapse), no `.s` extension,
+    // and in whatever case the script author typed. So it goes through
+    // ResolveScriptPath() like
+    // every other scripted path in this port rather than being
+    // concatenated raw -- **the bug this fixes**: main.cpp used to build
+    // `<root>/Loot_ratseye` by hand, which is not a file, and Simkin
+    // answers a missing file with an empty parse rather than an error, so
+    // every dropped bag in the game was a live but empty ItemExecutable:
+    // no Init(), therefore no `SetUsable(true)` and no contents, and so
+    // invisible to the Use prompt as well as to the renderer.
+    //
+    // Returns null when the typeId is unknown or the script will not load.
+    std::unique_ptr<ItemExecutable> CreateEntityWithScript(int typeId,
+                                                           const std::string& scriptTag);
 
     // ---- M63: `CreateEffect(...)` ----
     //
@@ -325,6 +397,12 @@ public:
                   skRValue& value) override;
 
 private:
+    // M81: the shared tail of CreateItem()/CreateEntityWithScript() --
+    // load `fullPath`, give the object its category and typeId, run its
+    // Init(). `what` only names the caller in the two error messages.
+    std::unique_ptr<ItemExecutable> LoadItemScript(int typeId, int category,
+                                                    const std::string& fullPath, const char* what);
+
     MenuStack& m_Stack;
     std::map<std::string, skiExecutable*> m_Entities;
     const sk::EntityTypeTable* m_EntityTypes = nullptr;
@@ -335,6 +413,9 @@ private:
     PendingCreature m_PendingCreature;
     std::unique_ptr<MonsterExecutable> m_PendingCreatureScript;
     bool m_PendingCreaturePending = false;
+    PendingPlacedItem m_PendingPlacedItem;  // M81, see TakePendingPlacedItem()
+    std::unique_ptr<ItemExecutable> m_PendingPlacedItemScript;
+    bool m_PendingPlacedItemPending = false;
     std::vector<EffectEntity> m_Effects;  // M63
 
     // M75: see AttachZoneScript(). Non-owning -- main.cpp owns the zone

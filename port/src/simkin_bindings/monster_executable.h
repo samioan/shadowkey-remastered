@@ -453,16 +453,28 @@ public:
     bool invulnerable() const { return m_Invulnerable; }
 
     // M21: azra_rat.s's own `SetLoot(300, "Loot_ratseye", 1, 8)` -- the
-    // 2nd argument (only) is real, loadable data: lowercased, it's the
-    // exact real filename of a loot-bag script (`loot_ratseye.s`, this
-    // port's filesystem being case-insensitive, same convention every
-    // other path lookup here already relies on) -- see docs/
-    // PORT_ROADMAP.md's M21 entry for the full real-corpus decode. The
-    // first argument (always literally 300, entities.txt's generic "!
-    // bag_loot" container typeId) and the trailing min/max (plausibly a
-    // drop-chance roll, not confirmed by any further evidence) aren't
-    // stored -- nothing in this port's model reads them back.
+    // 2nd argument is real, loadable data: it names a loot-bag script
+    // (`loot_ratseye.s`, this port's filesystem being case-insensitive,
+    // same convention every other path lookup here already relies on) --
+    // see docs/PORT_ROADMAP.md's M21 entry for the full real-corpus
+    // decode. The trailing min/max is the drop chance (M39): rolled once
+    // here, at Init, and neither field is stored when the roll fails.
+    //
+    // M81: the **first** argument is stored too, and it is not decoration.
+    // The real handler (dispatcher case 0xd) writes it to `monster+0x2f0`,
+    // the death handler `FUN_10083c04` gates the whole drop on
+    // `+0x2f0 != 0`, and the spawn itself (`FUN_10084438`) passes it to
+    // `FUN_100715a8` as the **typeId of the thing that is created** --
+    // with the tag string as an override for the script that typeId's
+    // entities.txt row would otherwise name. So the tag says what is in
+    // the bag and the typeId says what the bag *is*: 300, `entities.txt`
+    // line 212 `300 30 8 !bag_loot`, whose category 8 makes it a container
+    // and whose model index 30 is `bag_dropped.bin` in every zone's
+    // models.txt. All 134 SetLoot call sites in the corpus pass 300;
+    // stored rather than assumed because the engine reads it back through
+    // the descriptor table rather than hardcoding either field.
     const std::string& lootTag() const { return m_LootTag; }
+    int lootTypeId() const { return m_LootTypeId; }
 
     // Runs the real script's OnUse() handler -- same host-triggered-call
     // pattern InvokeOnKilled() already establishes. For an NPC this is
@@ -859,6 +871,7 @@ private:
     int m_UseTextId = -1;
     bool m_Invulnerable = false;
     std::string m_LootTag;  // M21: see lootTag()'s comment.
+    int m_LootTypeId = 0;   // M81: `monster+0x2f0`, same comment.
     bool m_Destroyed = false;  // M23: see destroyed()'s comment.
     // M28: see PlayAttackNoise()'s comment -- -1 (SetXNoise() never
     // called, e.g. an NPC) is a real, harmless no-play case, same

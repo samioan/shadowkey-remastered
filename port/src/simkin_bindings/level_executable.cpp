@@ -101,6 +101,51 @@ int LevelExecutable::TypeIdForScript(const std::string& relPath) const {
     return -1;
 }
 
+int LevelExecutable::EntityModelIndexOf(int typeId) const {
+    const sk::EntityTypeDescriptor* desc = m_EntityTypes ? m_EntityTypes->Lookup(typeId) : nullptr;
+    return desc ? desc->modelArchiveIndex : -1;
+}
+
+// M81: the shared tail of both spawn forms -- everything `FUN_100715a8`
+// does once it has settled which script to load. Factored out so
+// CreateEntityWithScript() below is exactly CreateItem() with a different
+// answer to that one question, rather than a second copy of the
+// category/templateId/Init ordering that M74 had to correct once already.
+std::unique_ptr<ItemExecutable> LevelExecutable::LoadItemScript(int typeId, int category,
+                                                                 const std::string& fullPath,
+                                                                 const char* what) {
+    skExecutableContext loadCtxt(&m_Stack.interpreter());
+    try {
+        auto item = std::make_unique<ItemExecutable>(skString(fullPath.c_str()), loadCtxt, m_Stack);
+        // M74: the type comes from the category, and it has to be in place
+        // *before* Init() runs -- `blaze.s`'s own Init() asks
+        // `GetPlayer().IsItemEnabledFor(self)` to pick between its two use
+        // texts ("Learn Blaze" / "Take Blaze Scroll"), and that answer
+        // depends on this object already knowing it is a spell.
+        item->SetEntityCategory(category);
+        // M74: and the typeId moves ahead of Init() with it. The real
+        // factory entry point is `create(category, typeId)`
+        // (`FUN_100715a8`'s `vtable+0x18` call), so `entity+0xc8` is set
+        // before the object exists as far as any script is concerned --
+        // this port set it afterwards, which left every `Init()` looking at
+        // a template id of -1.
+        item->SetTemplateId(typeId);  // M36, see ItemExecutable::templateId()
+        skRValueArray initArgs;
+        initArgs.append(skRValue(0));  // placeholder for Init's "(s)" parameter
+        skRValue initRet;
+        skExecutableContext callCtxt(&m_Stack.interpreter());
+        item->method(skString("Init"), initArgs, initRet, callCtxt);
+        return item;
+    } catch (skParseException& e) {
+        std::printf("Level: %s(%d) -- PARSE ERROR loading %s: %s\n", what, typeId,
+                    fullPath.c_str(), e.toString().ptr());
+    } catch (skRuntimeException& e) {
+        std::printf("Level: %s(%d) -- RUNTIME ERROR loading %s: %s\n", what, typeId,
+                    fullPath.c_str(), e.toString().ptr());
+    }
+    return nullptr;
+}
+
 std::unique_ptr<ItemExecutable> LevelExecutable::CreateItem(int typeId, bool requireItemCategory) {
     const sk::EntityTypeDescriptor* desc = m_EntityTypes ? m_EntityTypes->Lookup(typeId) : nullptr;
     bool isRealScript = desc && desc->name.size() > 2 &&
@@ -116,37 +161,32 @@ std::unique_ptr<ItemExecutable> LevelExecutable::CreateItem(int typeId, bool req
     for (char& c : relPath) {
         if (c == '\\') c = '/';
     }
-    std::string fullPath = m_Stack.scriptRoot() + "/" + relPath;
-    skExecutableContext loadCtxt(&m_Stack.interpreter());
-    try {
-        auto item = std::make_unique<ItemExecutable>(skString(fullPath.c_str()), loadCtxt, m_Stack);
-        // M74: the type comes from the category, and it has to be in place
-        // *before* Init() runs -- `blaze.s`'s own Init() asks
-        // `GetPlayer().IsItemEnabledFor(self)` to pick between its two use
-        // texts ("Learn Blaze" / "Take Blaze Scroll"), and that answer
-        // depends on this object already knowing it is a spell.
-        item->SetEntityCategory(desc->category);
-        // M74: and the typeId moves ahead of Init() with it. The real
-        // factory entry point is `create(category, typeId)`
-        // (`FUN_100715a8`'s `vtable+0x18` call), so `entity+0xc8` is set
-        // before the object exists as far as any script is concerned --
-        // this port set it afterwards, which left every `Init()` looking at
-        // a template id of -1.
-        item->SetTemplateId(typeId);  // M36, see ItemExecutable::templateId()
-        skRValueArray initArgs;
-        initArgs.append(skRValue(0));  // placeholder for Init's "(s)" parameter
-        skRValue initRet;
-        skExecutableContext callCtxt(&m_Stack.interpreter());
-        item->method(skString("Init"), initArgs, initRet, callCtxt);
-        return item;
-    } catch (skParseException& e) {
-        std::printf("Level: CreateItem(%d) -- PARSE ERROR loading %s: %s\n", typeId,
-                    fullPath.c_str(), e.toString().ptr());
-    } catch (skRuntimeException& e) {
-        std::printf("Level: CreateItem(%d) -- RUNTIME ERROR loading %s: %s\n", typeId,
-                    fullPath.c_str(), e.toString().ptr());
-    }
-    return nullptr;
+    return LoadItemScript(typeId, desc->category, m_Stack.scriptRoot() + "/" + relPath,
+                          "CreateItem");
+}
+
+std::unique_ptr<ItemExecutable> LevelExecutable::CreateEntityWithScript(
+    int typeId, const std::string& scriptTag) {
+    if (scriptTag.empty()) return nullptr;
+    // The typeId still has to be a real entities.txt row -- it is what
+    // supplies the category (and, through EntityModelIndexOf() above, the
+    // model) even though its own `name` column is the label-only
+    // `!bag_loot` and is deliberately not loaded here. `FUN_100715a8`
+    // bails the same way when EntityTypeDescriptor_Lookup misses.
+    const sk::EntityTypeDescriptor* desc = m_EntityTypes ? m_EntityTypes->Lookup(typeId) : nullptr;
+    if (!desc) return nullptr;
+    return LoadItemScript(typeId, desc->category,
+                          ResolveScriptPath(m_Stack.scriptRoot(), scriptTag),
+                          "CreateEntityWithScript");
+}
+
+bool LevelExecutable::TakePendingPlacedItem(PendingPlacedItem& out,
+                                             std::unique_ptr<ItemExecutable>& script) {
+    if (!m_PendingPlacedItemPending) return false;
+    m_PendingPlacedItemPending = false;
+    out = m_PendingPlacedItem;
+    script = std::move(m_PendingPlacedItemScript);
+    return true;
 }
 
 bool LevelExecutable::TakePendingCreature(PendingCreature& out,
@@ -350,6 +390,37 @@ bool LevelExecutable::method(const skString& methodName, skRValueArray& args,
             return true;
         }
         returnValue = skRValue();  // "not found" -- see GetEntity()'s miss case
+        return true;
+    }
+    if (methodName == skString("CreateEntityScript") && args.entries() >= 2) {
+        // M81: see PendingPlacedItem's comment for the five call sites and
+        // the shape. The real case (Level dispatcher 0x21) reads the first
+        // two arguments unconditionally and then branches on the argument
+        // count for the placement: 4 places at (x, y, 0) flat, 5 places at
+        // (x, y, z) and then snaps to the tile's surface. It never rejects
+        // a short call -- a two- or three-argument form spawns the object
+        // and leaves it wherever the constructor put it -- so neither does
+        // this.
+        const int typeId = args[0].intValue();
+        std::unique_ptr<ItemExecutable> item =
+            CreateEntityWithScript(typeId, ToStdString(args[1].str()));
+        if (!item) {
+            returnValue = skRValue();  // "not found" -- see GetEntity()'s miss case
+            return true;
+        }
+        returnValue = skRValue(static_cast<skiExecutable*>(item.get()), false);
+        m_PendingPlacedItem = PendingPlacedItem{};
+        m_PendingPlacedItem.typeId = typeId;
+        m_PendingPlacedItem.object = item.get();
+        if (args.entries() >= 4) {
+            m_PendingPlacedItem.hasPosition = true;
+            m_PendingPlacedItem.x = args[2].intValue();
+            m_PendingPlacedItem.y = args[3].intValue();
+            m_PendingPlacedItem.z = args.entries() >= 5 ? args[4].intValue() : 0;
+            m_PendingPlacedItem.snapToGround = args.entries() >= 5;
+        }
+        m_PendingPlacedItemScript = std::move(item);
+        m_PendingPlacedItemPending = true;
         return true;
     }
     if (methodName == skString("CreateEntity") && args.entries() == 1) {

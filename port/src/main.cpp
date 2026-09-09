@@ -413,6 +413,18 @@ struct MonsterInstance {
     // everything placed by the zone's own `.ent`.
     sk_bindings::EncounterExecutable* encounter = nullptr;
     size_t encounterRegion = 0;
+    // M81: whether this creature's death has already been handled --
+    // OnKilled(), the loot bag, the zone's kill-count trigger, the
+    // encounter's live count. The engine has exactly one death handler
+    // (`FUN_10083c04`, the actor's own vtable slot, called from the damage
+    // path itself), so it cannot miss a death or run one twice. This port
+    // reached the same handling from the four places that damage a
+    // creature, which meant a creature killed any *other* way -- an area
+    // spell (`FUN_1004720c`, which just calls ApplyDamage on everything in
+    // range), a script's own `DoDamage`, the debug console's `killall` --
+    // died silently: no loot, no trigger, no OnKilled. The flag makes the
+    // handling idempotent so a single sweep can back-stop all of them.
+    bool deathHandled = false;
 };
 
 // M28: advances one live creature's vertex animation by a tick and
@@ -4223,6 +4235,45 @@ int main(int argc, char** argv) {
                     }
                 }
 
+                // M81: `Level.CreateEntityScript(typeId, script, x, y, z)`
+                // -- the same split, for the item form. This is the
+                // *script-driven* loot drop: `monsters/arat.s` and
+                // `monsters/spiderqueen.s` roll their own `Random(1,12)=12`
+                // inside their own OnKilled() and place their own bag with
+                // it, rather than leaving it to SetLoot; crypt1's
+                // `shadowkeygate.s` uses it for three typeId-301 chests.
+                // See LevelExecutable::PendingPlacedItem.
+                {
+                    sk_bindings::LevelExecutable::PendingPlacedItem req;
+                    std::unique_ptr<sk_bindings::ItemExecutable> script;
+                    while (stack.level().TakePendingPlacedItem(req, script)) {
+                        if (!script) continue;
+                        const sk::EntityTypeDescriptor* desc = entityTypes.Lookup(req.typeId);
+                        PickupInstance inst;
+                        inst.x = static_cast<float>(req.x);
+                        inst.y = static_cast<float>(req.y);
+                        inst.z = static_cast<float>(req.z);
+                        if (req.snapToGround && gameZone) {
+                            inst.z = gameZone->SnapSpawnedObjectToGround(inst.x, inst.y);
+                        }
+                        inst.modelArchiveIndex = desc ? desc->modelArchiveIndex : -1;
+                        inst.isContainer = desc && IsContainerCategory(desc->category);
+                        script->SetWorldPosition(static_cast<int>(inst.x),
+                                                  static_cast<int>(inst.y),
+                                                  static_cast<int>(inst.z));
+                        std::printf("shadowkey-port: CreateEntityScript(%d) spawned \"%s\" at "
+                                    "(%d, %d, %d)\n",
+                                    req.typeId, script->name().c_str(), static_cast<int>(inst.x),
+                                    static_cast<int>(inst.y), static_cast<int>(inst.z));
+#if SK_DEBUG_SUITE
+                        // SK_DEBUG_SUITE (M68)
+                        sk_debug::Count("entity.created");
+#endif
+                        inst.script = std::move(script);
+                        gamePickups.push_back(std::move(inst));
+                    }
+                }
+
                 // M45: `FUN_1008a76c` -- the encounter spawner. Placed
                 // here so it can use the same freshly-settled positions
                 // the region check below does, and so a spawn requested by
@@ -5376,73 +5427,108 @@ int main(int argc, char** argv) {
                 gameCamera.pitch =
                     std::clamp(gameCamera.pitch, -sk::kMaxCameraPitch, sk::kMaxCameraPitch);
 
-                // M21: monster-death loot-bag spawning -- see docs/
-                // PORT_ROADMAP.md's M21 entry for the full real-corpus
-                // decode. A dead monster's real SetLoot() tag string
-                // (lootTag(), MonsterExecutable) is, lowercased, a real
-                // loadable script path (this port's filesystem being
-                // case-insensitive, same convention every other path
-                // lookup in this codebase already relies on) -- resolved
-                // and loaded the same way M19's pickups are, then dropped
-                // into gamePickups at the dead monster's own position so
-                // it's immediately visible/usable, same Action::Use path
-                // pickups already go through (a loot bag's own OnUse()
-                // opens a real menu instead of directly transferring
-                // itself -- see the Action::Use handling below for how
-                // that's told apart from a direct M19-style pickup).
+                // M21/M81: monster-death loot-bag spawning -- `FUN_10084438`,
+                // the whole of it. The dying creature's own
+                // `SetLoot(300, "Loot_ratseye", 1, 8)` left two fields on it
+                // (MonsterExecutable::lootTypeId()/lootTag()), and this is
+                // where the engine reads them back: `FUN_10083c04` gates the
+                // drop on the typeId being non-zero -- which is also how a
+                // creature whose drop-chance roll failed at Init drops
+                // nothing -- and then spawns that typeId with the tag as its
+                // script override. Everything else about the bag comes from
+                // entities.txt row 212 (`300 30 8 !bag_loot`): category 8
+                // makes it a container, and model index 30 is
+                // `bag_dropped.bin` in all 21 playable zones' models.txt.
+                //
+                // M81 fixed three things here, in descending order of how
+                // completely they broke it:
+                //
+                //  1. The script path was built by hand as
+                //     `<root>/Loot_ratseye` -- **no `.s`**, so it named no
+                //     file. Simkin answers a missing file with an empty
+                //     parse rather than an error (skInputFile::open leaves
+                //     a null handle and the reader sees immediate eof), so
+                //     the bag loaded "successfully" as an empty object:
+                //     no Init(), so no `SetUsable(true)`, so
+                //     findNearbyPickup() skipped it, and no
+                //     CreateEntity/AddObject, so it was empty anyway. Every
+                //     dropped bag in the game was an invisible no-op.
+                //     LevelExecutable::CreateEntityWithScript() now does the
+                //     load through the same ResolveScriptPath() every other
+                //     scripted path in this port uses, which also fixes the
+                //     eleven `SetLoot("broken1\\loot2")`-style tags that name
+                //     a subdirectory.
+                //  2. The model index was hardcoded to -1 on the (wrong)
+                //     M21-era belief that typeId 300 had no model, because
+                //     its entities.txt *name* column is the label-only
+                //     `!bag_loot`. The model lives in the row's second
+                //     column, not its name, and it is a real one.
+                //  3. `isContainer` was never set, and the z was the
+                //     creature's own. The engine drops the bag at the
+                //     creature's x/y with `z + 300`, then floor-snaps it
+                //     (`FUN_100686e0` + the caller's `+0x80` lift), which is
+                //     exactly Zone::SnapActorToGround -- so a bag dropped by
+                //     something killed mid-air or on a slope still lands on
+                //     the floor rather than inside or above it.
+                //
+                // The constant below is `FUN_10084438`'s literal `+ 300` on
+                // the requested z: the height the floor snap probes *from*,
+                // not a final offset -- see Zone::SnapActorToGround for what
+                // the snap then does with it.
+                constexpr float kLootDropRise = 300.0f;
                 auto spawnLoot = [&](const MonsterInstance& m) {
-                    const std::string& tag = m.script->lootTag();
-                    if (tag.empty()) return;
-                    std::string relPath = tag;
-                    for (char& c : relPath) {
-                        if (c == '\\') c = '/';
-                    }
-                    std::string fullPath = std::string(scriptRoot) + "/" + relPath;
-                    skExecutableContext loadCtxt(&interpreter);
-                    try {
-                        auto bag = std::make_unique<sk_bindings::ItemExecutable>(
-                            skString(fullPath.c_str()), loadCtxt, stack);
-                        skRValueArray initArgs;
-                        initArgs.append(skRValue(0));  // placeholder for Init's "(s)" parameter
-                        skRValue initRet;
-                        skExecutableContext callCtxt(&interpreter);
-                        bag->method(skString("Init"), initArgs, initRet, callCtxt);
-                        PickupInstance inst;
-                        inst.x = m.x;
-                        inst.y = m.y;
-                        inst.z = m.z;
-                        inst.modelArchiveIndex = -1;  // no real model for a dropped loot bag found
-                                                       // yet (typeId 300's own entities.txt entry
-                                                       // is the "!bag_loot" label-only convention,
-                                                       // docs/ZONE_FORMAT.md) -- ZoneRenderer
-                                                       // already skips entities with no resolved
-                                                       // model (M8), so this just doesn't render,
-                                                       // same as any other undecoded visual.
-                        inst.script = std::move(bag);
-                        gamePickups.push_back(std::move(inst));
-                    } catch (skParseException& ex) {
-                        std::printf("shadowkey-port: PARSE ERROR loading loot bag %s: %s\n",
-                                    fullPath.c_str(), ex.toString().ptr());
-                    } catch (skRuntimeException& ex) {
-                        std::printf("shadowkey-port: RUNTIME ERROR loading loot bag %s: %s\n",
-                                    fullPath.c_str(), ex.toString().ptr());
-                    }
+                    if (m.script->lootTypeId() == 0) return;
+                    std::unique_ptr<sk_bindings::ItemExecutable> bag =
+                        stack.level().CreateEntityWithScript(m.script->lootTypeId(),
+                                                              m.script->lootTag());
+                    if (!bag) return;
+                    PickupInstance inst;
+                    inst.x = m.x;
+                    inst.y = m.y;
+                    inst.z = gameZone ? gameZone->SnapActorToGround(m.x, m.y, m.z + kLootDropRise)
+                                       : m.z;
+                    inst.modelArchiveIndex =
+                        stack.level().EntityModelIndexOf(m.script->lootTypeId());
+                    inst.isContainer =
+                        IsContainerCategory(stack.level().EntityCategoryOf(m.script->lootTypeId()));
+                    // The engine sets the spawned object's position after
+                    // its Init() rather than before (`FUN_10084438` calls
+                    // `vtable+0x14` on the returned object) -- no loot
+                    // script reads its own position in Init() either way,
+                    // but this keeps GetPositionX/Y/Z honest afterwards.
+                    bag->SetWorldPosition(static_cast<int>(inst.x), static_cast<int>(inst.y),
+                                          static_cast<int>(inst.z));
+                    inst.script = std::move(bag);
+                    gamePickups.push_back(std::move(inst));
                 };
 
-                // M34: the deaths the AI tick's damage-over-time channels
-                // caused above, given exactly the same treatment a killing
-                // blow gets below -- the creature's own OnKilled(), its
-                // loot bag, and the zone script's kill-count trigger.
-                for (size_t deadIndex : gameDiedFromEffect) {
-                    if (deadIndex >= gameMonsters.size()) continue;
-                    MonsterInstance& dead = gameMonsters[deadIndex];
+                // M81: everything a creature's death owes, in one place --
+                // `FUN_10083c04`. Idempotent (MonsterInstance::deathHandled),
+                // so the places that know they just killed something can
+                // call it immediately and the sweep below can back-stop
+                // every other way a creature can reach zero health.
+                auto handleDeath = [&](MonsterInstance& dead) {
+                    if (dead.deathHandled) return;
+                    dead.deathHandled = true;
                     dead.script->InvokeOnKilled();
                     spawnLoot(dead);
+                    // M24: a real zone-root script's own kill-count trigger
+                    // (ghstpass.s's zombieTrigger etc.) -- no-ops if this
+                    // zone's real Init() never set one up watching this
+                    // typeId.
                     if (gameZoneScript) gameZoneScript->NotifyKilled(dead.typeId);
                     // M45: the `actor+0x2e4` backlink -- see
                     // MonsterInstance::encounter.
                     if (dead.encounter) dead.encounter->NoteDied(dead.encounterRegion);
                     dead.encounter = nullptr;
+                };
+
+                // M34: the deaths the AI tick's damage-over-time channels
+                // caused above, given exactly the same treatment a killing
+                // blow gets below.
+                for (size_t deadIndex : gameDiedFromEffect) {
+                    if (deadIndex >= gameMonsters.size()) continue;
+                    handleDeath(gameMonsters[deadIndex]);
                 }
                 gameDiedFromEffect.clear();
 
@@ -5499,13 +5585,7 @@ int main(int argc, char** argv) {
                         for (MonsterInstance& victim : gameMonsters) {
                             if (victim.script.get() != impact.target) continue;
                             if (victim.script->alive()) break;
-                            victim.script->InvokeOnKilled();
-                            spawnLoot(victim);
-                            if (gameZoneScript) gameZoneScript->NotifyKilled(victim.typeId);
-                            if (victim.encounter) {
-                                victim.encounter->NoteDied(victim.encounterRegion);
-                                victim.encounter = nullptr;
-                            }
+                            handleDeath(victim);
                             break;
                         }
                     }
@@ -5548,13 +5628,7 @@ int main(int argc, char** argv) {
                         for (MonsterInstance& victim : gameMonsters) {
                             if (victim.script.get() != impact.target) continue;
                             if (victim.script->alive()) break;
-                            victim.script->InvokeOnKilled();
-                            spawnLoot(victim);
-                            if (gameZoneScript) gameZoneScript->NotifyKilled(victim.typeId);
-                            if (victim.encounter) {
-                                victim.encounter->NoteDied(victim.encounterRegion);
-                                victim.encounter = nullptr;
-                            }
+                            handleDeath(victim);
                             break;
                         }
                     }
@@ -5767,20 +5841,7 @@ int main(int argc, char** argv) {
 #endif
                         target->script->ApplyDamage(dmg);
                     }
-                    if (!target->script->alive()) {
-                        target->script->InvokeOnKilled();
-                        spawnLoot(*target);
-                        // M24: a real zone-root script's own kill-count
-                        // trigger (ghstpass.s's zombieTrigger etc.) --
-                        // no-ops if this zone's real Init() never set one
-                        // up watching this typeId.
-                        if (gameZoneScript) gameZoneScript->NotifyKilled(target->typeId);
-                        // M45: see MonsterInstance::encounter.
-                        if (target->encounter) {
-                            target->encounter->NoteDied(target->encounterRegion);
-                            target->encounter = nullptr;
-                        }
-                    }
+                    if (!target->script->alive()) handleDeath(*target);
                 };
                 // `FUN_10042394` -- the type switch that is the only way
                 // into an attack, a cast or a use.
@@ -5883,6 +5944,24 @@ int main(int argc, char** argv) {
                 if (useLeftHeld) {
                     setActiveHandItem(stack.player().leftItem());
                     useHandItem(stack.player().leftItem());
+                }
+
+                // M81: the back-stop for every other way a creature reaches
+                // zero health this tick. The engine needs none of this --
+                // its death handler is the actor's own vtable slot, reached
+                // from the damage path itself -- but this port damages
+                // creatures from several places, and three of them had no
+                // death handling at all: an area spell's own damage loop
+                // (`FUN_1004720c`, which just ApplyDamage()s everything
+                // within 12000 units and is defined too early in this
+                // function to reach handleDeath), a script's `DoDamage`
+                // native (M65, 19 real call sites), and the debug console's
+                // `killall`. A creature killed by any of those used to lie
+                // there with no OnKilled(), no loot bag and no kill-count
+                // trigger. handleDeath() is idempotent, so the four callers
+                // that already report their own kills cost nothing here.
+                for (MonsterInstance& m : gameMonsters) {
+                    if (m.script && !m.script->alive() && !m.deathHandled) handleDeath(m);
                 }
                 // M30: the viewmodel now shows the equipped weapon *all
                 // the time*, not only for the moment after an attack key.

@@ -650,6 +650,17 @@ float Zone::CeilingHeightAt(float worldX, float worldY) const {
     return BilinearCorner(t.ceilingHeight, tx - itx, ty - ity);
 }
 
+float Zone::SnapSpawnedObjectToGround(float worldX, float worldY) const {
+    // M81 -- see the header. The Level dispatcher's case 0x21 writes the
+    // tile's own authored floor-band threshold into the object's z and
+    // then runs FUN_100686e0 on it, with no trailing lift.
+    const float tx = worldX / kTileScale, ty = worldY / kTileScale;
+    const int itx = static_cast<int>(std::floor(tx)), ity = static_cast<int>(std::floor(ty));
+    if (!InBounds(itx, ity)) return 0.0f;
+    const float probe = static_cast<float>(TypeOf(CellAt(itx, ity)).floorBandThreshold);
+    return CollisionFloorHeightAt(worldX, worldY, probe + 384.0f);
+}
+
 float Zone::CollisionFloorHeightAt(float worldX, float worldY, float worldZ) const {
     float tx = worldX / kTileScale, ty = worldY / kTileScale;
     int itx = static_cast<int>(std::floor(tx)), ity = static_cast<int>(std::floor(ty));

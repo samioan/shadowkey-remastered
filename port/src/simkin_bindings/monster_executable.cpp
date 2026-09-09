@@ -183,7 +183,15 @@ void MonsterExecutable::InvokeOnKilled() {
     skRValue ret;
     skExecutableContext ctxt(m_Interpreter);
     try {
-        method(skString("OnKilled"), args, ret, ctxt);
+        // M81: the base class directly, for the reason InvokeOnUse() above
+        // already spells out. Most creature scripts define no OnKilled at
+        // all -- of the corpus's monster scripts only a handful do -- and
+        // the native dispatcher logged a bogus "OnKilled(0) -- not
+        // implemented" soft-fail for every one of the others. Invisible
+        // while only four call sites reached this; a hundred lines of noise
+        // per fight once every death did. Third instance of the same fix
+        // (M35's ItemExecutable::InvokeOnUse, M75's here).
+        skScriptedExecutable::method(skString("OnKilled"), args, ret, ctxt);
     } catch (skParseException& e) {
         std::printf("MonsterExecutable: PARSE ERROR in OnKilled(): %s\n", e.toString().ptr());
     } catch (skRuntimeException& e) {
@@ -1064,6 +1072,12 @@ bool MonsterExecutable::method(const skString& methodName, skRValueArray& args,
             int roll = hi > lo ? lo + std::rand() % (hi - lo + 1) : lo;
             if (roll != lo) return true;  // no loot on this instance
         }
+        // M81: both fields, in the order the real handler writes them --
+        // the typeId to `monster+0x2f0` (what the death handler tests, and
+        // what the spawn creates) and the tag to `monster+0x2f4` (the
+        // script that typeId's spawn loads instead of its own). See
+        // lootTypeId()'s comment.
+        m_LootTypeId = args[0].intValue();
         m_LootTag = ToStdString(args[1].str());
         return true;
     }

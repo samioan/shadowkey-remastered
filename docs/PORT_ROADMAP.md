@@ -7328,6 +7328,148 @@ soft-fails 39 -> 39, all 14 tracked `.ppm` renders byte-identical,
   first room, and the log now reads `SetZone(1, 2000) -> 52 creature(s)`
   where it used to read a runtime error.
 
+- [x] **M81 -- the loot bags enemies drop.** Reported: enemies are supposed
+      to sometimes drop loot bags with random loot to collect, and the port
+      never dropped one. Every piece of the mechanism had been in place
+      since M21 -- `SetLoot()` stored the tag, all four of main.cpp's death
+      paths called `spawnLoot()`, the bag's own `OnUse()` opened the real
+      `lootmenu.s`, and `m21_loot_smoke` passed end to end -- and not one
+      bag had ever existed in a running session.
+
+    - **The cause is a missing `.s`.** `spawnLoot()` built its script path
+      by hand as `scriptRoot + "/" + tag`, i.e. `<root>/Loot_ratseye`,
+      which is not a file. Simkin answers a file it cannot open with an
+      **empty parse rather than an error** (`skInputFile::open` leaves a
+      null handle and the reader sees immediate eof), so the bag loaded
+      "successfully" as an object with no script in it: no `Init()`, so no
+      `SetUsable(true)` -- and `findNearbyPickup()` skips anything not
+      usable -- and no `Level.CreateEntity`/`AddObject`, so it was empty
+      anyway. Combined with the `modelArchiveIndex = -1` below, every kill
+      in the game appended an invisible, unusable, empty object to
+      `gamePickups` and nothing else. **`m21_loot_smoke` could not catch
+      it**: the test appends the extension itself
+      (`scriptRoot + "/" + rat->lootTag() + ".s"`), so it exercised a path
+      `main.cpp` never built. The load now lives in
+      `LevelExecutable::CreateEntityWithScript()`, which main.cpp and the
+      test both call, and goes through the same `ResolveScriptPath()` every
+      other scripted path in this port uses -- which also fixes the eleven
+      subdirectory tags (`SetLoot(300, "broken1\\loot2")` and friends),
+      whose backslashes the hand-built concatenation left as a doubled
+      separator.
+
+    - **CORRECTED: the loot bag has a model, and always did.** M21 recorded
+      "the loot bag has no real model (`entities.txt`'s typeId 300 is
+      itself the `!bag_loot` label-only convention)" and hardcoded
+      `modelArchiveIndex = -1`. The `!` marks the **name** column as a
+      label rather than a script path; it says nothing about the model
+      column two fields to its left. Row 212 is `300 30 8 !bag_loot`, and
+      archive index **30** is `bag_dropped.bin` in all 21 playable zones'
+      `<zone>_models.txt`. `FUN_100715a8` sets a spawned object's `+0x54`
+      model pointer from `engine+0x6b38[descriptor->modelArchiveIndex]`
+      whichever way its script was chosen, so the engine draws it. The port
+      now reads the index off the descriptor, and takes `isContainer` from
+      the same row's category 8 rather than leaving it false.
+
+    - **CORRECTED: `FUN_1002c3a8` is not the on-death handler.**
+      `docs/ZONE_FORMAT.md` named it one. It is `DropObject(item)`, the
+      *inventory* drop: it spawns typeId 300 at `item->owner`'s position
+      (`+0x170`, `Item::GetOwner`) minus half a tile on each axis and puts
+      the item inside it, and its callers are the player dispatcher's
+      drop-gold case and the item dispatcher's drop case. The real death
+      drop is **`FUN_10084438`**, whose only caller is the creature death
+      handler `FUN_10083c04`, gated on `monster+0x2f0 != 0`. Both the doc
+      and the annotated dump are corrected.
+
+    - **`SetLoot` leaves two fields, not one.** Dispatcher `0x10084924`
+      case `0xd` writes the typeId to `monster+0x2f0` and the tag to
+      `+0x2f4`, *after* the `rand(min,max) != min` bail that M39 decoded --
+      so a creature that lost its drop-chance roll has neither, and
+      `+0x2f0 != 0` is exactly the test `FUN_10083c04` uses to decide
+      whether to drop at all. The port stored only the tag and keyed off
+      "tag is non-empty"; it now stores both, because the typeId is what
+      the spawn actually creates (and what supplies the category and the
+      model), with the tag as a **script override** for it. All 134
+      shipped call sites pass 300; it is read back rather than assumed,
+      which is what lets the same code serve typeId 301's chests.
+
+    - **Where the bag lands.** `FUN_10084438` places it at the creature's
+      own x/y with `z + 300`, floor-snaps (`FUN_100686e0`) and lifts by
+      `0x80` -- which together are the existing `Zone::SnapActorToGround`.
+      The port dropped it at the creature's raw z, so a bag from anything
+      killed on a slope or off the ground sat inside or above the floor.
+
+    - **Found by running it: a second, script-driven drop path that was
+      soft-failing.** With the fix in, the log filled with `[soft-fail]
+      ZoneScript: CreateEntityScript(300, Loot_ratseye, ...)`.
+      `Level.CreateEntityScript(typeId, script, x, y, z)` (Level dispatcher
+      case `0x21`) is the same spawn called from a creature's *own*
+      `OnKilled()`: `monsters/arat.s` and `monsters/spiderqueen.s` roll
+      their own `Random(1,12)=12` and place their own bag with it (the
+      spider queen's is `Loot_ShadowKey`), and `crypt1/shadowkeygate.s`
+      uses it for three typeId-301 (`301 15 8 !chest_loot`) chests. Five
+      live call sites, every one of which calls a method on the result
+      (`Loot.SetDestroy(true)`) on the next line -- so the object is built
+      and returned immediately and only the world placement is deferred,
+      the same split the four-argument `CreateEntity` has used since M44.
+      Its placement arm is *not* the death drop's: no `0x80` lift, and the
+      storey probe is the tile's own authored `ZcpEntry::floorBandThreshold`
+      rather than the caller's z (new `Zone::SnapSpawnedObjectToGround`).
+
+    - **A creature could die without its death being handled at all.** The
+      engine has one death handler, reached from the damage path itself, so
+      it cannot miss one. This port reached the same handling from the four
+      places that damage a creature, which left three real ways to die
+      silently -- no `OnKilled()`, no loot, no kill-count trigger: an area
+      spell (`FUN_1004720c` just `ApplyDamage()`s everything within 12000
+      units), a script's own `DoDamage` (M65, 19 call sites), and the debug
+      console's `killall` (whose own comment claimed otherwise). The four
+      sites now share one idempotent `handleDeath()` guarded by
+      `MonsterInstance::deathHandled`, with a sweep after the tick's attack
+      handling that back-stops every other way health reaches zero.
+
+    - **`InvokeOnKilled()` was logging a bogus soft-fail per kill.** It
+      called `this->method("OnKilled")` -- the native dispatcher -- and
+      most creature scripts define no `OnKilled` at all, so each one
+      reported `Monster: OnKilled(0) -- not implemented`. Invisible while
+      only four call sites reached it; a hundred lines of noise per fight
+      once every death did. Fixed the way M35 and M75 already fixed the
+      identical thing for `InvokeOnUse`: call `skScriptedExecutable::method`
+      directly.
+
+    - **One shipped `SetLoot` tag names nothing, and that is the game's own
+      typo.** `dstar_e/dse_skyrim_soldier.s` asks for `"Bounder_Skin"`,
+      which is the *item* (`items/bounder_skin.s`, typeId 4738) where a bag
+      wrapper belongs; that item's real wrapper exists and is called
+      `loot_sbskin.s`. The engine has no fallback either -- it sprintfs the
+      tag into a path and loads it -- so in the original this soldier drops
+      a bag that is present and drawn but unopenable, because
+      `SetUsable(true)` lives in the `Init()` that never ran. The port
+      reproduces that rather than second-guessing the data, and the test
+      pins it so nobody "fixes" it later.
+
+  **Verification.** New `m81_loot_drop_smoke` (40 checks, suite **72/72 ->
+  73/73**): entities.txt row 212 and archive index 30 resolved to
+  `bag_dropped.bin` in all 21 playable zones; the old hand-built path
+  proved to produce a non-throwing, unusable, empty object; **all 134
+  `SetLoot` call sites scanned out of the .s corpus** (with Simkin's own
+  backslash unescaping) and resolved -- 133 of 134 under the new rule and
+  **0 of 134 under the old one**, which is the measure of how completely
+  this was broken; the drop-chance roll clearing both fields together over
+  4000 fresh rats; the real bag loaded, filled, usable, opening the real
+  `LootMenu` with its real row in it; `Loot_Gold25-35` rolling a genuinely
+  different quantity per drop; `CreateEntityScript` returning its object,
+  parking its placement and accepting `SetDestroy(true)`, for both typeId
+  300 and shadowkeygate's typeId 301; and the two snaps differing by
+  exactly the `0x80` lift.
+
+  Confirmed in the running game (`port/debug/m81_loot.cfg`, a saved
+  console repro): 108 creatures killed in azra leaves 15 `container
+  Examine ... model 30` rows in `ents` where it used to leave none, one of
+  them from `arat.s`'s own `CreateEntityScript` path, and walking up to one
+  raises the real "Examine" prompt. The bags render very dark, which is the
+  model-lighting gap M71 already recorded (the `engine+0x5c4` fade table,
+  still never dumped), not new.
+
 ## Next milestones (not yet started)
 
 Roughly in priority order for reaching "actually playable," not commitments:
