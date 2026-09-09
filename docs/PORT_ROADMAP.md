@@ -7470,6 +7470,79 @@ soft-fails 39 -> 39, all 14 tracked `.ppm` renders byte-identical,
   model-lighting gap M71 already recorded (the `engine+0x5c4` fade table,
   still never dumped), not new.
 
+- [x] **M82 -- the gold a loot bag holds.** Reported straight after M81:
+      enemies now drop bags and the bags open, but "if an enemy drops gold
+      pieces these don't get added to my gold total". Every other link in
+      the chain was already there and already correct.
+
+    - **Gold is an ordinary item everywhere except one line of the
+      engine.** `entities.txt` row 46 is `52 51 3 gold.s` -- category 3,
+      the plain misc class that keys and quest trinkets use -- and
+      `gold.s` itself is two lines (`SetID("gold")`, `SetName(1580)`).
+      A loot wrapper builds one with `Level.CreateEntity(52)`, gives it
+      `SetQuantity(Random(lo, hi))` and `AddObject`s it;
+      `lootmenu.s` lists it as an ordinary row ("27 Gold Pieces") and its
+      SelectItem() runs `GetPlayer().PickupItem(Object)` then
+      `GetOpener().RemoveObject(Object)`. Nothing in the data marks it as
+      money. What does is a single hardcoded template id in
+      `FUN_1003d8e0`, the add-to-inventory path -- the player vtable's
+      `+0x164`, which a world pickup, `GiveItem` and a loot-menu
+      selection all funnel through, and which this port already
+      implements as `PlayerExecutable::AddItem`.
+
+    - **The missing branch.** Everything in `FUN_1003d8e0` after M56's
+      four key-item flag tests is wrapped in `if (item->+0xc8 != 0x34)`,
+      and the else is three instructions: `player+0x3ac+0x38 +=
+      item->+0x1c4`, then `FUN_1001b484(engine, item)` -- add the
+      quantity to the purse and queue the object for destruction. So a
+      gold object never reaches the inventory list, is never stacked, is
+      never equipped and does not survive the call. `player+0x3ac+0x38`
+      is `player+0x3e4`, the exact address `FUN_1003e030` (M59's
+      BuyProduct, ported long ago) subtracts a purchase from, so the two
+      readings confirm each other. With no id test, the port kept the
+      object: every gold drop in the game left a permanent, unusable,
+      unsellable "Gold Pieces" row in the bag while the purse never moved.
+
+    - **And the other half of the same `if`, also missing: a consumable
+      stacks.** Inside the branch, the real code walks the inventory
+      (`player+0x200`, `next` at `+0x160`) whenever the incoming item's
+      type word (`+0x16c`, `FUN_1006d508`) is 4, and on a matching
+      template id does `SetQuantity(held, held->quantity + 1)`,
+      `SetOwner(held, player)` and destroys the incoming object -- the
+      same `LAB_1003db8c` the gold branch jumps to. It adds **one**, not
+      the incoming quantity, and that is safe because nothing but gold
+      ever carries a stack size out of a script. The engine keeps a
+      *second, separate* copy of this rule inside `FUN_1003e030`, which
+      is why M59 implemented it on the buy path and this one stayed
+      missing -- so until now buying five potions in one go made five
+      inventory rows where the original makes one row of five, and two
+      healing potions out of two loot bags made two rows instead of a
+      stack. The port's one deviation is a `templateId() >= 0` guard,
+      marked as a port safety property: the engine only ever sees objects
+      from the entity factory, while this port can also build an item
+      straight from a script path (LoadStartingInventory) and spells "no
+      template" as -1.
+
+  **Verification.** New `m82_gold_pickup_smoke` (36 checks, suite
+  **73/73 -> 74/74**): entities.txt row 46 and the fact that nothing in
+  the data distinguishes gold; **all 48 `SetQuantity` call sites scanned
+  out of the .s corpus**, every one of them applied to a freshly created
+  typeId 52, across 48 distinct scripts; the purse moving by exactly the
+  quantity and the inventory not growing; the real `loot_gold25-35.s`
+  bag driven through `PickupItem` + `RemoveObject`, the two natives
+  `lootmenu.s` actually calls, leaving the bag empty so UpdateMenu takes
+  its `GetFirst() = null` branch; 400 bags rolling 25..35 over 11
+  distinct values with the purse gaining exactly their sum; three of one
+  consumable becoming one row of quantity 3 while a different consumable
+  and two identical weapons stay separate; and gold reaching neither
+  hand nor any key-item flag.
+
+  Confirmed in the running game (`port/debug/m82_gold.cfg`, a saved
+  console repro): `gold = 0`, spawn and kill 30 `bbrawler`s (a 1-in-2
+  `SetLoot(300, "Loot_Gold6-10")`), 31 bags on the floor, open one and
+  take its row -- `picked up 10 gold (total 10)` in the log and
+  `gold = 10` from the console.
+
 ## Next milestones (not yet started)
 
 Roughly in priority order for reaching "actually playable," not commitments:

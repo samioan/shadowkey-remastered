@@ -151,6 +151,21 @@ constexpr int kStoreWorseArrowSprite = 25;
 // `pl_cast_powerup.wav`.
 constexpr int kLevelUpSoundSlot = 87;
 
+// M82: `entities.txt` row 46 -- `52 51 3 gold.s`. Gold is an ordinary
+// entity template like any other: a loot bag's script builds one with
+// `Level.CreateEntity(52)`, gives it a `SetQuantity(Random(lo,hi))` and
+// `AddObject`s it, and the loot menu shows it as an ordinary row. What
+// makes it gold is a single hardcoded id in the add-to-inventory path --
+// `FUN_1003d8e0`'s `if (item->templateId != 0x34)` -- which folds the
+// quantity into the purse instead of keeping the object. Nothing in the
+// script data marks it: `gold.s` is two lines (`SetID("gold")`,
+// `SetName(1580)`) and says nothing about currency.
+//
+// All 48 `SetQuantity` call sites in the shipped corpus follow a
+// `CreateEntity(52)`, so in practice quantity *is* the gold amount and
+// nothing else in the game carries a stack size out of a script.
+constexpr int kTemplateGold = 0x34;  // 52
+
 // Registers every bare-identifier constant this port's curated starting-
 // inventory scripts (see PlayerExecutable::LoadStartingInventory) are known
 // to reference. Idempotent -- safe to call once per skInterpreter instance,

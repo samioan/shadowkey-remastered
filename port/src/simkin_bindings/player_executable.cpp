@@ -103,10 +103,74 @@ void PlayerExecutable::AddItem(std::unique_ptr<ItemExecutable> item) {
     // matching global flag bit. Doing it here rather than in each caller
     // is what the original does too: GiveItem(), a world pickup and a
     // loot bag all funnel through this one vtable slot.
-    if (item) m_KeyItemFlags.OnItemAcquired(item->templateId());
+    if (!item) return;
+    m_KeyItemFlags.OnItemAcquired(item->templateId());
+
+    // M82: **gold is not an inventory item.** The whole of `FUN_1003d8e0`
+    // after those four flag tests is wrapped in one `if (item->+0xc8 !=
+    // 0x34)`, and its else is three instructions:
+    //
+    //     *(int *)(player + 0x3ac + 0x38) += item->+0x1c4;   // purse += qty
+    //     FUN_1001b484(engine, item);                        // and destroy it
+    //
+    // -- so a gold object never reaches the inventory list, is never
+    // stacked, is never equipped, and does not survive the call. That
+    // `player + 0x3ac + 0x38` is `player + 0x3e4`, which is the exact
+    // address `FUN_1003e030` (M59's BuyProduct, already ported) subtracts
+    // a purchase from, so the two agree independently.
+    //
+    // This is the whole of "gold from a loot bag never reaches my total":
+    // the port had every other part of the chain -- `loot_gold25-35.s`
+    // built its `Level.CreateEntity(52)`, rolled `Random(25, 35)` into its
+    // quantity and put it in the bag; `lootmenu.s` listed it as "27 Gold"
+    // and its SelectItem() ran `GetPlayer().PickupItem(Object)` and
+    // `GetOpener().RemoveObject(Object)`; and RemoveObject() handed the
+    // object to this function. With no id test here it simply became an
+    // ordinary carried object: a "Gold" row sitting in the inventory
+    // forever, weightless, unusable and unsellable, while the purse never
+    // moved. Every one of the game's 48 gold drops behaved that way.
+    if (item->templateId() == kTemplateGold) {
+        m_Gold += item->quantity();
+        std::printf("PlayerExecutable: picked up %d gold (total %d)\n", item->quantity(),
+                    m_Gold);
+        return;  // the unique_ptr's own destructor is FUN_1001b484's half
+    }
+
+    // M82: and the other half of the same `if` -- **a consumable stacks
+    // onto one the player already carries.** The real loop walks the
+    // inventory (`player+0x200`, `next` at `+0x160`) whenever the incoming
+    // item's type word (`+0x16c`, `FUN_1006d508`) is 4, and on a matching
+    // template id does `SetQuantity(held, held->quantity + 1)`,
+    // `SetOwner(held, player)` and destroys the incoming object -- the
+    // same `LAB_1003db8c` the gold branch above jumps to.
+    //
+    // Note it adds **one**, not the incoming item's quantity: nothing but
+    // gold ever carries a stack size out of a script (all 48 SetQuantity
+    // call sites in the corpus are gold), so the two are never in conflict.
+    // This port already had the identical rule on the *buy* path -- the
+    // engine keeps a second, separate copy of it inside `FUN_1003e030`,
+    // which is why M59 implemented it there and this one stayed missing --
+    // so until now buying five potions in one go made five inventory rows
+    // where the original makes one row of five, and two healing potions
+    // out of two loot bags made two rows instead of a stack.
+    //
+    // The `templateId() >= 0` guard has no counterpart in the engine and
+    // needs none there: every object it ever sees came from the entity
+    // factory, so every one has a real id. This port can also build an
+    // item straight from a script path (LoadStartingInventory), and
+    // ItemExecutable spells "no template" as -1 -- which without the guard
+    // would make any two such consumables stack with each other.
+    if (item->itemType() == kItemTypeConsumable && item->templateId() >= 0) {
+        for (const std::unique_ptr<ItemExecutable>& held : m_Inventory) {
+            if (!held || held->markedForRemoval()) continue;
+            if (held->templateId() != item->templateId()) continue;
+            held->SetQuantity(held->quantity() + 1);
+            return;
+        }
+    }
+
     ItemExecutable* added = item.get();
     m_Inventory.push_back(std::move(item));
-    if (!added) return;
 
     // M74: and the rest of `FUN_1003d8e0`, which this port had stopped
     // short of -- **picking something up equips it**. The tail of the real

@@ -622,3 +622,7 @@ target_link_libraries(spell_viewmodel_smoke PRIVATE sk_bindings sk_render3d)
 # See src/tests/m81_loot_drop_smoke.cpp.
 add_executable(loot_drop_smoke src/tests/m81_loot_drop_smoke.cpp)
 target_link_libraries(loot_drop_smoke PRIVATE sk_bindings sk_world)
+
+# See src/tests/m82_gold_pickup_smoke.cpp.
+add_executable(gold_pickup_smoke src/tests/m82_gold_pickup_smoke.cpp)
+target_link_libraries(gold_pickup_smoke PRIVATE sk_bindings sk_world)
