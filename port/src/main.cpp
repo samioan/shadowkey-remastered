@@ -51,6 +51,7 @@
 #include "simkin_bindings/menu_executable.h"
 #include "simkin_bindings/menu_stack.h"
 #include "simkin_bindings/monster_executable.h"
+#include "simkin_bindings/on_detect.h"
 #include "simkin_bindings/player_executable.h"
 #include "simkin_bindings/popup_menu_executable.h"
 #include "simkin_bindings/slider_executable.h"
@@ -4375,12 +4376,18 @@ int main(int argc, char** argv) {
                 // M16: gated on the real script's own SetAggressive()
                 // flag -- gameMonsters now also holds non-hostile NPCs
                 // (monster_executable.h's class comment), whose real
-                // scripts already call SetAggressive(false) themselves;
-                // skipping this whole block for them is the direct,
-                // evidenced behavior (an NPC has no SetChaseRadius() call
-                // either, so it would default to 0 and never trigger
-                // anyway -- this makes the intent explicit rather than
-                // relying on that coincidence).
+                // scripts already call SetAggressive(false) themselves.
+                //
+                // M76: "skipping this whole block for them" turned out to
+                // be half the story. The real tick does not skip a
+                // non-aggressive creature -- it runs the identical
+                // perception test and then takes the *other* arm of
+                // `if (monster+0x2ac == 0)`, calling the script's OnDetect
+                // handler where an aggressive creature would acquire a
+                // target. That arm is now restored below (see
+                // simkin_bindings/on_detect.h); only the chase/attack tail
+                // is still aggressive-only, which is what the real branch
+                // says too.
                 // M31: aggro and stand-off distances are now the real
                 // decompiled ones -- MonsterExecutable::chaseRadius() and
                 // attackRange() convert the script's scaled-squared value
@@ -4653,9 +4660,85 @@ int main(int argc, char** argv) {
                         setAnimClip(m, m.script->deathAnimation(), true);
                         continue;
                     }
-                    if (m.script->destroyed() || !m.script->aggressive()) {
+                    if (m.script->destroyed()) {
+                        setAnimClip(m, m.script->idleAnimation(), false);
+                        continue;
+                    }
+                    if (!m.script->aggressive()) {
+                        // M76: a non-aggressive creature is not idle in the
+                        // real engine -- it runs the *same* perception test
+                        // an aggressive one runs, and where that one would
+                        // acquire a target and attack, this one runs its
+                        // script's OnDetect handler instead. The two are
+                        // the two arms of one `if (monster+0x2ac == 0)`
+                        // inside the AI tick's idle/pursue branch. See
+                        // simkin_bindings/on_detect.h for the whole
+                        // derivation; this block is that branch.
+                        //
+                        // This is the mechanism behind every NPC that
+                        // speaks first: monsters/bbrawler_talk.s opens
+                        // "Talker" on you, monsters/olpac_trailslag.s opens
+                        // ghstpass/GP_Menu3 once per save, and
+                        // erthcave/azra_zombie.s turns hostile *and* opens
+                        // EC_Menu7 in the same handler.
+                        const int pkg = m.script->aiPackage();
+                        const bool looking =
+                            pkg == sk_bindings::MonsterExecutable::kAiIdle ||
+                            pkg == sk_bindings::MonsterExecutable::kAiPursue;
+                        bool detectOpenedMenu = false;
+                        if (looking && gameZone) {
+                            float ddx = gameCamera.x - m.x, ddy = gameCamera.y - m.y;
+                            float ddist = std::sqrt(ddx * ddx + ddy * ddy);
+                            // The engine's own three conditions, in order:
+                            // inside SetChaseRadius, the perception roll,
+                            // and a line of sight capped at
+                            // `SetAttackRange >> 8` tiles. The vertical
+                            // term is this port's `sameLevel` stand-in for
+                            // the real march's z tracking (it walks the
+                            // ray's own height against each tile's floor
+                            // and ceiling, which this DDA does not).
+                            const float sightRange =
+                                static_cast<float>(sk_bindings::SightRangeTiles(
+                                    m.script->attackRangeRaw())) *
+                                sk::kTileScale;
+                            const bool sameLevel =
+                                std::fabs(gameCamera.z - (m.z + sk::kEyeHeightOffset)) <=
+                                kAggroMaxHeightDelta;
+                            if (ddist <= m.script->chaseRadius() && ddist <= sightRange &&
+                                sameLevel &&
+                                sk_bindings::DetectionNoticed(
+                                    sk_bindings::DetectMissPercent(sk_bindings::kDetectStrength,
+                                                                   stack.player().agility()),
+                                    std::rand() % 101) &&
+                                gameZone->HasLineOfSight(m.x, m.y, gameCamera.x, gameCamera.y)) {
+                                sk_bindings::MenuExecutable* beforeMenu = stack.currentMenu();
+                                if (m.script->InvokeOnDetect(
+                                        static_cast<skiExecutable*>(&stack.player()))) {
+#if SK_DEBUG_SUITE
+                                    // SK_DEBUG_SUITE (M68)
+                                    sk_debug::Count("npc.detected");
+#endif
+                                }
+                                if (stack.currentMenu() != beforeMenu) {
+                                    // Same hand-off the Use path already
+                                    // uses: a handler that opened a menu
+                                    // pauses the 3D view into it. Stop the
+                                    // AI pass here rather than ticking the
+                                    // rest of the level inside a frame the
+                                    // world is no longer running -- the
+                                    // engine pauses at frame granularity,
+                                    // so a second creature getting a turn
+                                    // after the menu is up would be this
+                                    // port's invention, not the original's.
+                                    inGame = false;
+                                    gamePausedForMenu = true;
+                                    detectOpenedMenu = true;
+                                }
+                            }
+                        }
                         // Idle NPCs and merchants still breathe.
                         setAnimClip(m, m.script->idleAnimation(), false);
+                        if (detectOpenedMenu) break;
                         continue;
                     }
                     // M32: the real AI package gates everything below.

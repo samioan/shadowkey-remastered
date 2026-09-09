@@ -590,3 +590,9 @@ endif()
 # See src/tests/m75_dialogue_smoke.cpp.
 add_executable(dialogue_smoke src/tests/m75_dialogue_smoke.cpp)
 target_link_libraries(dialogue_smoke PRIVATE sk_bindings sk_world)
+
+# The other half of it: the AI tick's OnDetect arm -- a non-aggressive
+# creature that notices the player and runs its own handler instead of
+# attacking. See src/tests/m76_detect_smoke.cpp.
+add_executable(detect_smoke src/tests/m76_detect_smoke.cpp)
+target_link_libraries(detect_smoke PRIVATE sk_bindings sk_world)

@@ -124,6 +124,32 @@ void MonsterExecutable::InvokeOnUse() {
     }
 }
 
+bool MonsterExecutable::InvokeOnDetect(skiExecutable* detected) {
+    if (!m_Interpreter) return false;
+    skRValueArray args;
+    // The real call appends exactly one argument: the detected entity,
+    // boxed as a SimKin object (0x100831ac builds it from `target + 0x14`,
+    // the skiExecutable base sub-object, and 0x10083208 appends it). Every
+    // shipped OnDetect declares the parameter and none of them reads it --
+    // they all call GetPlayer() instead -- but passing it is free and it is
+    // what the engine does.
+    args.append(detected ? skRValue(detected, false) : skRValue(0));
+    skRValue ret;
+    skExecutableContext ctxt(m_Interpreter);
+    try {
+        // Base class directly, for the same reason InvokeOnUse() does it:
+        // the great majority of creatures define no OnDetect, and routing
+        // a per-tick call through the native dispatcher would log a
+        // soft-fail 25 times a second for every one of them.
+        return skScriptedExecutable::method(skString("OnDetect"), args, ret, ctxt);
+    } catch (skParseException& e) {
+        std::printf("MonsterExecutable: PARSE ERROR in OnDetect(): %s\n", e.toString().ptr());
+    } catch (skRuntimeException& e) {
+        std::printf("MonsterExecutable: RUNTIME ERROR in OnDetect(): %s\n", e.toString().ptr());
+    }
+    return true;
+}
+
 void MonsterExecutable::InvokeOnKilled() {
     // azra_rat.s's OnKilled body: `if (GetPlayer().QuestSolved(0)) {
     // return; } else { GetPlayer().AddMonsterKilled(203); if
@@ -450,6 +476,17 @@ bool MonsterExecutable::method(const skString& methodName, skRValueArray& args,
             const int repeats = args.entries() >= 4 ? args[3].intValue() : sk::kDefaultSoundRepeats;
             if (sound) m_Stack.audio()->PlaySfx(*sound, volume, repeats);
         }
+        return true;
+    }
+    // M76: Monster(AI) bindings 4 and 3 (dispatcher cases 4 and 3),
+    // `monster+0x306` and `monster+0x307`. Both were soft-failing; both are
+    // multiplayer-only in effect. See on_detect.h.
+    if (methodName == skString("SetAlwaysOnDetect") && args.entries() == 1) {
+        m_AlwaysOnDetect = args[0].boolValue();
+        return true;
+    }
+    if (methodName == skString("DetectOnKilled") && args.entries() == 1) {
+        m_DetectOnKilled = args[0].boolValue();
         return true;
     }
     if (methodName == skString("SetAggressive") && args.entries() == 1) {

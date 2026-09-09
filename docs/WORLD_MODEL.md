@@ -3245,17 +3245,183 @@ sites read it back. Two of this port's classes were not passing it:
   the top of that same door script and calling `GetOpener().LockPicked()`
   on success.
 
-### Still open: `OnDetect`
+## The NPC that speaks first: `OnDetect` (M76)
 
-A non-aggressive creature that calls `AiDetect()` is asking to be told when
-the player comes into range, and the engine answers by running its
-`OnDetect` handler rather than attacking (the call site is 0x10083320,
-`vtable[0xa8]("OnDetect")`). 31 shipped scripts define one, and several
-start a conversation from it — `monsters/bbrawler_talk.s` opens `Talker`
-that way and then arms itself, `monsters/olpac_trailslag.s` opens
-`ghstpass/GP_Menu3`. This port's AI tick returns early for any
-non-aggressive creature, so none of it runs. That is a separate mechanism
-from the prompt — an NPC that talks to *you* — and is not implemented.
-`MenuClosed`, the hook `bbrawler_talk.s` uses to turn hostile after the
-conversation, is the other half of it and is also unimplemented (2 call
-sites, one script).
+M75's section above is the prompt you walk up to and press Use on. This is
+the other half of the same conversation system, and it lives somewhere
+completely different: inside the creature AI tick, `FUN_10082224`.
+
+### It is the other arm of the aggro branch
+
+The tick branches on the AI package (`monster+0x2a8`). The arm that
+matters is "I am looking for something":
+
+```
+else if (package == 2 /*idle*/ ||
+         (package == 3 /*pursue*/ && monster->+0x20c /*target*/ == 0))
+```
+
+and inside it, after the perception test below has passed:
+
+```
+if (monster->+0x2ac /*aggressive*/ == 0) {
+    if (target == engine->player &&
+        self->vtable[0x21c](self, target, self->+0x2dc >> 8, 1) &&
+        (self->+0x306 || !multiplayer || isHost))
+        if (self->+0x120 /*script*/)
+            self->vtable[0xa8]("OnDetect", { target }, ...);   // 0x10083320
+} else {
+    ... acquire the target, package = 3, close and swing ...
+}
+```
+
+So **`OnDetect` is what a non-aggressive creature does instead of
+attacking** — same distance, same roll, same tick, one `if` apart. Three
+consequences fall straight out of that shape, and all three are visible in
+the shipped scripts:
+
+- An NPC whose own `Init()` calls `SetAggressive(true)` takes the *other*
+  arm forever, so its `OnDetect` is dead. `delfhide/dh_guard_talk.s` ships
+  exactly that combination.
+- A creature that never calls `AiDetect()` stays in the constructor's
+  package −1 (`FUN_100815e0` writes `+0x2a8 = -1`) and the arm is never
+  entered at all. `monsters/lakvan.s` and `twilite/pergan_asuul.s` are both
+  in that state — pergan's `AiDetect()` is commented out in the shipped
+  file — and both are reachable only through the M75 use prompt instead.
+- Nothing latches "already detected". The engine re-runs the test every
+  tick; the scripts do their own latching, with `AiSleep()` (package −1,
+  which the arm no longer matches) or `SetAggressive(true)`. That is why
+  `monsters/olpac_trailslag.s` guards on its own `done_menu` field *and*
+  calls `AiSleep()`.
+
+The handler receives one argument, the detected entity: the engine boxes
+`target + 0x14` — the skiExecutable base sub-object — into an skRValue and
+appends it (0x100831ac..0x10083208). Every shipped handler declares the
+parameter and none of them reads it; they all call `GetPlayer()` instead.
+
+### The perception test
+
+Three conditions, in the engine's own order.
+
+**Distance.** `vtable[0x5c]` is `FUN_100683d4`:
+
+```
+((dy*dy) >> 8) + ((dx*dx) >> 8)          i.e. (dx^2 + dy^2) / 256
+```
+
+— the same *scaled squared* form `SetChaseRadius` stores, so the two are
+compared directly. The constructor default is `+0x2b8 = 0x7fff`.
+
+**The roll.** Shared with the attack branch: a creature that fails it does
+not aggro either.
+
+```
+detect = monster->+0x258;  if (detect == 0) detect = 1;
+agi    = playerStats->vtable[0x40]();          // the stat at stats+0x18, / 5
+r      = (detect << 16) / ((detect + agi) << 8);
+if (rand(0, 100) < (r * 100 >> 8))  noticed = false;
+```
+
+`monster+0x258` is written to 1 by the constructor and by nothing else in
+the binary — no binding, no script, no engine path — so the numerator is
+always 1 and the whole thing is "the chance of going unnoticed this tick is
+100/(1 + Agility/5) percent". `vtable[0x40]` on the stats block is
+`FUN_1004b848` for a creature and `FUN_10044b8c` for the player; both
+return the 16-bit field at `stats+0x18` divided by 5, and for the player
+(`player+0x3ac+0x18` == `player+0x3c4`) that field is **Agility**. The
+player version then adds two equipped-item bonuses (`+0xf38 == 8` adds
+`+0xfb0`, `+0xf3c == 2` adds `+0xfb4`), which can only ever make the player
+easier to notice. Running every tick is what makes the numbers behave: a
+starting Agility of 40 is an 11% miss chance per frame, so detection
+happens within a frame or two.
+
+**Sight.** `vtable[0x21c]` is `FUN_10004d70`, and it is a real ray march —
+worth spelling out, because this port had a hand-built equivalent
+(`Zone::HasLineOfSight`) that had been documented as guesswork:
+
+- start at the caller's *eye*, `(+0x94, +0x9c, +0xa4 + vtable[0x108]())`,
+  and aim at the target's eye;
+- normalise the direction to 0x100 (one tile) and halve it, so the march
+  steps half a tile at a time;
+- step through `FUN_100182d0` with flag mask 0xb, which reports a wall
+  (`.zmp` blocking bit 2 — the same flag the port's DDA tests) and tracks
+  the ray's own z against each tile's floor and ceiling;
+- a wall ends it (`if (hit & 2) return 0`); an *entity* in the way does
+  not — the caller walks that tile's entity list, returns 1 if the target
+  is in it, and otherwise resumes the march past it.
+
+The distance budget is `monster->+0x2dc >> 8` — the raw, *scaled-squared*
+`SetAttackRange` value shifted right by 8 — and `FUN_100182d0` spends it in
+**tiles** (`while (travelled < budget * 0x100)`, adding 0x80 per half-tile
+step). Mixing a squared unit with a tile count is the engine's own
+arithmetic, not a transcription slip; `+0x2dc` is compared as a squared
+distance everywhere else in the same function. The constructor default
+0x6a4 therefore buys 6 tiles of sight, and no shipped script calls
+`SetAttackRange`, so that is the number for every creature in the game.
+
+### What it is worth, in the shipped data
+
+Loading every category-2/7 placement in all 21 zones through its real
+binding class: 1539 placements have a real script, **29 of them end their
+`Init()` armed** (non-aggressive, package idle), and **28 of those 29 have
+an `OnDetect` handler**. Six distinct scripts are behind them:
+
+| script | what it does |
+| --- | --- |
+| `broken2/perosius_temp.s` | a boss: opens his conversation, then `SetAggressive(true)`, `SetUsable(false)`, `AiAttack()` |
+| `dstar_e/dse_skyrim_soldier.s`, `dse_skyrim_archer.s` | city guards that turn hostile once `GetPlayer().saved_Dstar_Pass` says you trespassed |
+| `erthcave/azra_zombie.s` | `SetAggressive(true)`, `EC_Menu7`, `AiSleep()` — both arms in one handler |
+| `monsters/olpac_trailslag.s` | opens `ghstpass/GP_Menu3`, once per save |
+| `raiders/raider_enter.s` | the arena doorman, opens `Raiders/enter` |
+
+A further **34 placements ship a handler the engine can never reach** —
+the aggressive guards, the never-`AiDetect()`ed bosses, and the ten
+`raiders/*.s` arena creatures.
+
+### `SetAlwaysOnDetect`, `DetectOnKilled`, and `MenuClosed`
+
+`SetAlwaysOnDetect(b)` is Monster(AI) binding index 4 (dispatcher case 4),
+`monster+0x306`, and it has exactly one reader in the whole binary: the
+third clause of the guard above. In singleplayer `!multiplayer` already
+satisfies that clause, so the flag changes nothing; it exists so a
+multiplayer *client* still runs `OnDetect` locally. All ten scripts that
+set it are `raiders/*.s`. `DetectOnKilled(b)` is binding 3,
+`monster+0x307`, read once inside the death path (`FUN_10083c04`) and only
+under `engine+0x5c0` — multiplayer-only in the same way.
+
+`MenuClosed` is the third piece, and **it does not work in the shipped
+game.** The notifier exists:
+
+```
+FUN_10064c60(entity):
+  if (entity != engine->player && entity->+0x120 && !entity->+0x48)
+      entity->vtable[0xa8]("MenuClosed", {}, ...);
+```
+
+and it sits at `vtable+0x3c` in all 31 entity vtables — every one of the 31
+words holding 0x10064c60 is exactly 20 slots below that same vtable's
+`SetUseText`. But nothing calls it. Those 31 vtable words are the *only*
+references to its address anywhere in the image, and of the 18 sites in the
+binary that dispatch through slot 0x3c, not one has an entity receiver:
+they are the menu manager's and the app object's own slot 0x3c, and they
+pass arguments `FUN_10064c60` does not take. So `monsters/bbrawler_talk.s`'s
+"talk to him, then kill him" never completes on the device either — its
+`MenuClosed` handler is what would re-arm the brawler. The same script is
+not placed in any of the 21 zones (only the plain
+`monsters/Bandit_Brawler.s` is), which is the same story from the other
+side: that creature did not ship.
+
+### A latent crash found on the way, not fixed
+
+Three of the 1535 shipped `.s` files raise `skTreeNodeReaderException` from
+`skScriptedExecutable`'s constructor — `crypt2/exit.s`,
+`dstar_e/thief_convoasdf.s` and `raiders/blu_spider.s`, each of which has a
+bare statement sitting outside any handler. This port catches
+`skParseException` and `skRuntimeException` at every script-loading site but
+not that one, so such a load aborts the process (in a Debug build, on
+Windows, as a modal "abort() has been called" dialog that looks exactly
+like a hang). None of the three is placed in any `.ent` or named by any
+script, so no player can reach it; it is recorded here rather than fixed
+because the fix is a sweep across ~25 catch sites, not part of this
+milestone. A corpus brace/bracket census finds 12 unbalanced files in all,
+of which only these three actually raise.

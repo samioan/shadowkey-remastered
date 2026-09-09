@@ -619,9 +619,19 @@ public:
     // (`TileGrid_RaycastVisibility`, docs/WORLD_MODEL.md -- it stamps a
     // per-cell "visible this frame" byte the surface pipeline then reads,
     // see SurfaceFace_BuildAndProject's `vertex+6` frame-stamp check), so
-    // sight-gating is a mechanism the original demonstrably has; how its
-    // *AI* consumes it was never traced, so the specific use below (gating
-    // monster aggro) is this port's own design, documented as such.
+    // sight-gating is a mechanism the original demonstrably has.
+    //
+    // M76 found how the *AI* consumes it, which this comment used to say
+    // had never been traced: `entity->vtable[0x21c]` is `FUN_10004d70`, a
+    // ray march from the caller's eye to the target's, stepping half a tile
+    // at a time, ended by a tile whose `.zmp` blocking bit 2 is set --
+    // exactly the flag tested below -- and bounded by a tile budget the
+    // caller supplies. The AI tick calls it on the OnDetect path (see
+    // simkin_bindings/on_detect.h). Two differences remain, both noted at
+    // the call sites: the real march is 3D (it tracks the ray's own height
+    // against each tile's floor and ceiling, where this port pairs a flat
+    // DDA with a separate height test), and an entity standing in the way
+    // does not block it.
     //
     // Why it matters: every real monster script in the corpus sets a
     // chase radius of 18000 raw world units (222 of the 270 SetChaseRadius

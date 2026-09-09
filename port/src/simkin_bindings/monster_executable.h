@@ -182,6 +182,12 @@ public:
     // and use exactly this).
     float attackRange() const { return ScaledSquaredToUnits(m_AttackRange); }
 
+    // M76: the same field *unconverted*. The OnDetect sightline is the one
+    // place the engine reads `+0x2dc` as something other than a squared
+    // distance -- it passes `+0x2dc >> 8` as a tile budget to the
+    // line-of-sight march. See on_detect.h's SightRangeTiles().
+    int attackRangeRaw() const { return m_AttackRange; }
+
     // M49 (`monster+0x2d8`, SetProjectile): does this creature shoot? The
     // real attack routine spawns an arrow when this is set and **skips its
     // melee resolution entirely** -- the whole melee tail sits inside
@@ -191,6 +197,14 @@ public:
     bool shootsProjectile() const { return m_ProjectileArt != -1; }
     int projectileArt() const { return m_ProjectileArt; }
     bool aggressive() const { return m_Aggressive; }
+    // M76: `monster+0x306` (SetAlwaysOnDetect) and `monster+0x307`
+    // (DetectOnKilled). Both are read exactly once in the whole binary and
+    // both readings sit behind `engine+0x5c0` (multiplayer), so neither
+    // changes anything in this singleplayer port -- they are stored so the
+    // ten `raiders/*.s` scripts that call them stop soft-failing, and so
+    // the state is there if multiplayer ever is. See on_detect.h.
+    bool alwaysOnDetect() const { return m_AlwaysOnDetect; }
+    bool detectOnKilled() const { return m_DetectOnKilled; }
     // M22: real SetMagicResistance() -- stored since M12, never read back
     // until now (spellcasting's own damage formula, ItemExecutable::
     // DoAttackRoll()).
@@ -309,7 +323,11 @@ public:
     // docs/WORLD_MODEL.md's "The monster AI" section.
     enum AiPackage {
         kAiAsleep = -1,      // the actor constructor's own initial value; AiSleep()
-        kAiIdle = 2,         // look for a target -- the post-spawn default, and AiDetect()
+        kAiIdle = 2,         // look for a target -- what AiDetect() sets, and the only
+                             // package (with kAiPursue-without-a-target) in which the
+                             // real tick evaluates perception at all. M76: that makes
+                             // AiSleep() the switch a script uses to stop its own
+                             // OnDetect from re-firing -- see on_detect.h.
         kAiPursue = 3,       // chase/attack monster+0x20c; set by the tick on acquiring a target
         kAiFlee = 4,         // run away for a limited time -- the Fear spell, see below
         kAiSpellAssist = 6,  // AiSpellAssistTarget(); **no reader anywhere in the binary**
@@ -388,6 +406,20 @@ public:
     // what actually starts its real dialogue tree (OnUse() calls
     // OpenMenu(...) -- see the class comment).
     void InvokeOnUse();
+
+    // M76: the *other* way a conversation starts -- the creature notices
+    // the player rather than the player pressing Use on the creature. Run
+    // once per tick by main.cpp's AI pass for any non-aggressive creature
+    // in the idle/pursue package that passes the real perception test; see
+    // on_detect.h for the whole derivation. `detected` is the entity the
+    // engine passes as the handler's single argument (always the player in
+    // singleplayer).
+    //
+    // Returns true if the script actually has an OnDetect handler, so the
+    // caller can tell "nothing to run" from "ran and did nothing" without
+    // logging a soft-fail for the great majority of creatures that define
+    // none (same reason InvokeOnUse() dispatches through the base class).
+    bool InvokeOnDetect(skiExecutable* detected);
 
     // M28: azra_rat.s's own SetAttackNoise(15)/SetDeathNoise(16)/
     // SetIsHitNoise(17) -- the monster's own real per-instance combat
@@ -725,6 +757,10 @@ private:
     int m_DeathAnim = -1;
     int m_CurrentAnim = -1;
     bool m_Aggressive = false;
+    // M76: real constructor defaults, both 0 (FUN_100815e0). See
+    // alwaysOnDetect()/detectOnKilled().
+    bool m_AlwaysOnDetect = false;  // monster+0x306
+    bool m_DetectOnKilled = false;  // monster+0x307
     bool m_Alive = true;
     bool m_Usable = false;
     int m_UseTextId = -1;
