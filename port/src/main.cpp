@@ -14,7 +14,6 @@
 #include <chrono>
 #include <cmath>
 #include <cstdio>
-#include <cstring>
 #include <fstream>
 #include <map>
 #include <memory>
@@ -1955,18 +1954,9 @@ void RenderPopup(sk::Backbuffer& backbuffer, sk_bindings::PopupMenuExecutable& p
     }
 }
 
-// M80: `backdrop`, when non-null, is the last frame the 3D view drew
-// before a script paused the game into this menu -- 176x208 RGB565, the
-// backbuffer's own layout. `FUN_10076b64` only paints a background at all
-// `if (-1 < menu+0x50)`, i.e. when the script called MenuBackground(id);
-// with no background it draws its rows straight onto whatever the screen
-// already holds, which for an in-game popup is the world. Every full-page
-// screen in the corpus (the main menu, character creation, the character
-// manager) does set a background, so this only ever shows through for the
-// popups that are meant to float over the game.
 void RenderMenu(sk::Backbuffer& backbuffer, sk_bindings::MenuExecutable& menu,
                  sk_bindings::PlayerExecutable& player, const sk::StringTable& strings,
-                 sk::SpriteArchive& sprites, const std::vector<uint16_t>* backdrop = nullptr) {
+                 sk::SpriteArchive& sprites) {
     using RowKind = sk_bindings::MenuExecutable::RowKind;
     // Real background (docs/GRAPHICS_FORMAT.md) when the real script's
     // MenuBackground(id) call resolved to a decodable global.spr slot
@@ -1978,13 +1968,6 @@ void RenderMenu(sk::Backbuffer& backbuffer, sk_bindings::MenuExecutable& menu,
         menu.backgroundId() >= 0 ? sprites.GetSprite(menu.backgroundId()) : nullptr;
     if (background) {
         backbuffer.Blit(0, 0, *background);
-    } else if (backdrop != nullptr &&
-               backdrop->size() == static_cast<size_t>(sk::Backbuffer::kWidth) *
-                                       sk::Backbuffer::kHeight) {
-        for (int row = 0; row < sk::Backbuffer::kHeight; ++row) {
-            std::memcpy(backbuffer.Row(row), backdrop->data() + row * sk::Backbuffer::kWidth,
-                        sizeof(uint16_t) * sk::Backbuffer::kWidth);
-        }
     } else {
         backbuffer.Fill(kBackgroundColor);
     }
@@ -3024,11 +3007,6 @@ int main(int argc, char** argv) {
     // nested Inventory/Stats/QuestLog screen, rather than backing out one
     // level at a time).
     bool gamePausedForMenu = false;
-    // M80: the frozen world behind an in-game popup -- see RenderMenu()'s
-    // own comment for why a menu with no MenuBackground() of its own needs
-    // one. Filled from the backbuffer on the last frame the 3D view draws
-    // before the pause takes effect.
-    std::vector<uint16_t> gamePausedBackdrop;
 
 #if SK_DEBUG_SUITE
     // SK_DEBUG_SUITE (M68): now that every game local exists, point the
@@ -6452,17 +6430,6 @@ int main(int argc, char** argv) {
                     }
                 }
                 window.Present(backbuffer);
-                // M80: something in this tick paused the game into a menu
-                // (a region's EnterZone, an NPC's OnUse, a creature's
-                // OnDetect). This is the last frame the world draws, so
-                // keep it -- the popup goes over it next frame. See
-                // RenderMenu()'s `backdrop`.
-                if (gamePausedForMenu) {
-                    gamePausedBackdrop.assign(
-                        backbuffer.Data(),
-                        backbuffer.Data() + static_cast<size_t>(sk::Backbuffer::kWidth) *
-                                                sk::Backbuffer::kHeight);
-                }
                 return;
             }
         }
@@ -6631,8 +6598,7 @@ int main(int argc, char** argv) {
         }
 
         if (menu) {
-            RenderMenu(backbuffer, *menu, stack.player(), strings, spriteArchive,
-                        gamePausedForMenu ? &gamePausedBackdrop : nullptr);
+            RenderMenu(backbuffer, *menu, stack.player(), strings, spriteArchive);
         } else {
             backbuffer.Fill(kBackgroundColor);
         }

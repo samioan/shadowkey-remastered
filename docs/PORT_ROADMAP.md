@@ -7296,13 +7296,20 @@ soft-fails 39 -> 39, all 14 tracked `.ppm` renders byte-identical,
       this** -- it builds a zone script without calling `AttachZoneScript`,
       which is exactly the arm that sets the flag.
 
-    - **An in-game popup floats over the frozen world.** `FUN_10076b64`
-      paints a background only `if (-1 < menu+0x50)`, i.e. when the script
-      called `MenuBackground(id)`; with no background it draws its rows
-      onto whatever the screen already holds. Every full-page screen in the
-      corpus sets one, so this only shows through for the popups meant to
-      float. The port keeps the last frame the 3D view drew before the
-      pause and uses it in place of the flat fill.
+    - **CORRECTED in the same session: every menu opened by name starts on
+      `global.spr` slot 20.** The first pass read `FUN_10076b64`'s
+      `if (-1 < menu+0x50)` background guard as "a menu with no
+      `MenuBackground(id)` draws over whatever is on screen" and gave
+      in-game popups the frozen 3D frame to sit on. The guard is real but
+      unreachable for a script-opened menu: `FUN_100779b8`, the open-by-name
+      routine behind every script-level `OpenMenu`, clears the widget list
+      and then writes `*(menu + 0x50) = 0x14` before it loads the new
+      script. The parchment is the **default**, and `MenuBackground(id)` is
+      an override the script's own `Init()` applies afterwards -- which is
+      why 66 of the corpus's 79 `MenuBackground` calls pass 20, restating a
+      default they already have. Reported as "the menus have no background
+      colour at all, the background is transparent"; the port now arms slot
+      20 in `RunInit()`, ahead of the script, exactly where the engine does.
 
   **Verification.** New `m80_tutorial_popup_smoke` (27 checks, suite
   **71/71 -> 72/72**): the twelve tokens and their actions, cross-checked

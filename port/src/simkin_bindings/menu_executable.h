@@ -71,6 +71,21 @@ constexpr int kStaticItemX = 9;
 // converts to this port's RGB565.
 constexpr unsigned short kTextShadowColor444 = 0x0b96;
 
+// Post-M80 -- **every menu opened by name starts on `global.spr` slot 20,
+// the parchment.** `FUN_100779b8`, the routine behind every script-level
+// `OpenMenu(name)`, clears the widget list and then writes
+// `*(menu + 0x50) = 0x14` before loading the new script -- so
+// `MenuBackground(id)` is an *override* of this, not the only source. The
+// corpus agrees from the other side: of 79 explicit `MenuBackground` calls
+// 66 pass 20, restating the default they already have.
+//
+// M80 read `FUN_10076b64`'s `if (-1 < menu+0x50)` guard as "a menu with no
+// background draws over whatever is on screen" and gave in-game popups the
+// frozen 3D frame. The guard is real but unreachable for a script-opened
+// menu, and the result was every background-less screen showing the world
+// through it.
+constexpr int kDefaultMenuBackground = 0x14;
+
 // `FUN_1007dca0`'s word wrap, which builds one menu-item widget per line:
 // walk the text, and at each space whose running line length has passed
 // `maxChars`, break at the *previous* space. Text shorter than `maxChars`
@@ -427,7 +442,7 @@ private:
 
     MenuStack& m_Stack;
     skiExecutable* m_Opener = nullptr;
-    int m_BackgroundId = -1;
+    int m_BackgroundId = kDefaultMenuBackground;  // see the constant's comment
     // menu+0x96, and 0x32 is what FUN_10073bd8 puts there -- see
     // startCoord() above.
     int m_StartCoord = 50;

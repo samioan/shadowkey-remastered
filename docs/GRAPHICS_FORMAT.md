@@ -749,6 +749,28 @@ from before any of this was read; at 16 the same page ends at 242.)
 `AddMenuItem` (case 0x6d) does **not** wrap -- it builds one widget with
 its own x/y, whatever the text length.
 
+### Every menu opened by name starts on slot 20 (post-M80 correction)
+
+`FUN_10076b64` paints its background only `if (-1 < menu+0x50)`, which
+reads like "a menu with no `MenuBackground(id)` draws its rows onto
+whatever is already on screen". That guard is real but **unreachable for
+a script-opened menu**: `FUN_100779b8` -- the open-by-name routine behind
+every script-level `OpenMenu`, on the Player class and the Object/Entity
+class alike -- clears the widget list and then writes
+
+    *(undefined4 *)(param_1 + 0x50) = 0x14;
+
+before it loads the new script. So the parchment, `global.spr` slot 20,
+is the **default** for every screen in the game, and `MenuBackground(id)`
+is an override applied afterwards by the script's own `Init()`. The
+corpus agrees from the other side: of 79 explicit `MenuBackground` calls
+across the shipped scripts, **66 pass 20** -- restating a default they
+already have -- 11 pass 69 (the main-menu plate) and 2 pass 174.
+
+Read the wrong way round, this makes every screen that does not name a
+background transparent onto whatever was behind it, which is what the
+first M80 pass shipped.
+
 ## Open follow-ups
 
 - `FUN_1006bee8`/`FUN_1006be58` (rect/outline fill primitives used

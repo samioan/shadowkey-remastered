@@ -196,6 +196,11 @@ int main(int argc, char** argv) {
     stack.ReopenMenu("starthelp");
     sk_b::MenuExecutable* help = stack.currentMenu();
     Check(help != nullptr && !help->rows().empty(), "OpenMenu(\"starthelp\") builds a real screen");
+    // Post-M80: `FUN_100779b8` sets `menu+0x50 = 0x14` before the script
+    // runs, so a screen that never calls MenuBackground still has the
+    // parchment -- not a transparent hole onto whatever is behind it.
+    Check(help != nullptr && help->backgroundId() == sk_b::kDefaultMenuBackground,
+          "...on global.spr slot 20, the default FUN_100779b8 arms before Init()");
     if (help) {
         const std::vector<std::string> texts = RowTexts(help, strings);
         for (const std::string& t : texts) std::printf("   | %s\n", t.c_str());

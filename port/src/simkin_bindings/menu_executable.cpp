@@ -92,6 +92,13 @@ bool MenuExecutable::getValue(const skString& fieldName, const skString& attribu
 }
 
 void MenuExecutable::RunInit() {
+    // `FUN_100779b8` sets `menu+0x50 = 0x14` on the way in, *before* the
+    // script gets to run -- so a screen that calls `MenuBackground(69)`
+    // still ends up on 69, and one that calls nothing lands on the
+    // parchment rather than on nothing at all. Re-armed here rather than
+    // only at construction because this port caches menu instances and
+    // `ReopenMenu` runs Init again on the same object.
+    m_BackgroundId = kDefaultMenuBackground;
     skRValueArray args;
     args.append(skRValue(0));  // placeholder for Init's "(s)" parameter
     skRValue ret;
