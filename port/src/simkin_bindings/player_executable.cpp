@@ -435,6 +435,15 @@ void PlayerExecutable::ApplyDamage(int amount) {
     // check because in the engine it is the whole function's `if`.
     if (m_Stats.periodicKind() == ActorStats::kPeriodicSanctuaryTimer) return;
     if (amount <= 0) return;
+    // M86: `FUN_10044814`'s other statement, and the whole of what the
+    // player sees when something lands on them -- `engine->+0x28->+0x17c
+    // = 0x40`, the hurt timer the HUD reads to draw the red slash and to
+    // redraw the vitals frame in red. It sits under the same Sanctuary
+    // gate and the same `damage != 0 && (s16)damage >= 0` test as the
+    // damage itself, which is why it is here rather than at the four
+    // call sites: unlike a creature's flash, the player has exactly one
+    // DoDamage in this port as in the engine. See main.cpp's RenderHud.
+    m_HurtTimer = kHurtTimerUnits;
     m_Health -= amount;
     if (m_Health < 0) m_Health = 0;
 }

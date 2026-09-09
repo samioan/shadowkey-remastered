@@ -626,3 +626,16 @@ target_link_libraries(loot_drop_smoke PRIVATE sk_bindings sk_world)
 # See src/tests/m82_gold_pickup_smoke.cpp.
 add_executable(gold_pickup_smoke src/tests/m82_gold_pickup_smoke.cpp)
 target_link_libraries(gold_pickup_smoke PRIVATE sk_bindings sk_world)
+
+# See src/tests/m84_melee_reach_smoke.cpp.
+add_executable(melee_reach_smoke src/tests/m84_melee_reach_smoke.cpp)
+target_link_libraries(melee_reach_smoke PRIVATE sk_bindings sk_render3d sk_world)
+
+# See src/tests/m86_hit_feedback_smoke.cpp.
+add_executable(hit_feedback_smoke src/tests/m86_hit_feedback_smoke.cpp
+                                  src/assets/sprite_archive.cpp)
+target_link_libraries(hit_feedback_smoke PRIVATE sk_bindings sk_render3d sk_world)
+
+# See src/tests/m87_player_damage_smoke.cpp.
+add_executable(player_damage_smoke src/tests/m87_player_damage_smoke.cpp)
+target_link_libraries(player_damage_smoke PRIVATE sk_bindings sk_world)

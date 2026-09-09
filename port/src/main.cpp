@@ -382,6 +382,18 @@ struct MonsterInstance {
     // is the pair below it: the AI package on the script, plus whether
     // `monster+0x20c` holds a target.
     enum class AiState { Idle, Chasing, Attacking } aiState = AiState::Idle;
+    // M85: this creature's slot in the object-ID buffer -- the real
+    // `actor+0x2d4`, the byte the stencil rasterizers stamp at every
+    // pixel of it they draw and the melee target search reads back. 0 is
+    // "not registered", which is also the engine's own "nothing here".
+    // Allocated once and kept, and released when the creature is
+    // destroyed, because the buffer the search reads was stamped by the
+    // *previous* frame -- an id that changed between the stamp and the
+    // read would point the attack at a different creature.
+    int objectId = 0;
+    // M86: the red hit flash, `FUN_10067c3c`/`FUN_10064f08`'s ramp-row
+    // oscillator. See render3d/zone_renderer.h's HitFlash.
+    sk::HitFlash flash;
     // M77: the real `monster+0x20c`, reduced to a bool because in
     // singleplayer the only candidate the tick ever considers is
     // `engine+0x618`, the player. Package 3 *without* a target is a real
@@ -2410,8 +2422,15 @@ void RenderAutomapOverlay(sk::Backbuffer& backbuffer, const sk::Zone& zone,
                        headingUnits);
 }
 
+// M86: `global.spr` slot 218 -- 176x208, 838 opaque pixels of RGB444
+// 0x0d12, one bright red diagonal stroke across the view -- and the ramp
+// row `FUN_1006a894` redraws the vitals frame through while it is up.
+// See the block inside RenderHud for the two decompiled call sites.
+constexpr int kHurtOverlaySlot = 218;
+constexpr int kHurtFrameFlashRow = 1;
+
 void RenderHud(sk::Backbuffer& backbuffer, const sk_bindings::PlayerExecutable& player,
-                sk::SpriteArchive& sprites, float cameraYaw) {
+                sk::SpriteArchive& sprites, float cameraYaw, int hurtTimer = 0) {
     const sk::Sprite* compassTape = sprites.GetSprite(0);
     const sk::Sprite* compassFrame = sprites.GetSprite(1);
     if (compassTape && compassFrame) {
@@ -2449,8 +2468,58 @@ void RenderHud(sk::Backbuffer& backbuffer, const sk_bindings::PlayerExecutable& 
     bool health = drawVitalBar(162, 182, player.health(), player.maxHealth());
     bool magicka = drawVitalBar(160, 190, player.magicka(), player.maxMagicka());
     bool fatigue = drawVitalBar(161, 196, player.fatigue(), player.maxFatigue());
+    // ---- M86: the red slash the player gets hit with ----
+    //
+    // Reported alongside the creature flash, and it is the same idea seen
+    // from the other side: the player has no model to redraw, so the
+    // engine puts the feedback on the HUD.
+    //
+    // `FUN_10044814`, the player's own DoDamage, opens with
+    //
+    //     if (stats->+0x7c != 4)                       // not in Sanctuary
+    //         if (damage != 0 && (s16)damage >= 0) {
+    //             engine->+0x28->+0x17c = 0x40;        // the hurt timer
+    //             PlaySound(0x50, ...);                // the impale hit
+    //         }
+    //
+    // and `FUN_1002ae88` -- the same function that draws the three vitals
+    // bars -- branches the frame draw on that timer:
+    //
+    //     if (hud->+0x17c < 1) {
+    //         Blit_RLESprite(slot180, 0, 0xa2, blend=0);
+    //     } else {
+    //         hud->+0x17c -= frameDelta();
+    //         FUN_1006a894(slot180, 0, 0xa2, blend=0, flashRow=1);
+    //         Blit_RLESprite(slot218, 0, 0, blend=1);
+    //     }
+    //
+    // So being hit does two things at once: the dragon-head vitals frame
+    // is redrawn **through hit-flash ramp row 1** -- the same red ramp a
+    // struck creature is drawn from, `FUN_1006a894` being Blit_RLESprite
+    // with v8's remap spliced into its inner loop -- and `global.spr`
+    // **slot 218** is blended over the whole screen at 50%.
+    //
+    // Slot 218 is 176x208, the full frame, and carries 838 opaque pixels
+    // in a single colour, RGB444 0x0d12: one bright red diagonal stroke
+    // from the upper right down across the middle of the view. That is
+    // the "red slash" exactly, and this port had neither the sprite nor
+    // the timer nor the blend mode that draws it.
+    //
+    // 0x40 is 64 units of 1/256 s, so the whole thing lasts a quarter of
+    // a second.
+    const bool hurt = hurtTimer > 0;
+    uint16_t hurtRamp[16];
+    if (hurt) {
+        for (int i = 0; i < 16; ++i) hurtRamp[i] = sk::FlashRamp565(kHurtFrameFlashRow, i);
+    }
     if (vitalsFrame && (health || magicka || fatigue)) {
-        backbuffer.Blit(0, 162, *vitalsFrame);
+        if (hurt) {
+            backbuffer.BlitRamped(0, 162, *vitalsFrame, hurtRamp);
+            const sk::Sprite* slash = sprites.GetSprite(kHurtOverlaySlot);
+            if (slash) backbuffer.BlitBlend(0, 0, *slash);
+        } else {
+            backbuffer.Blit(0, 162, *vitalsFrame);
+        }
     } else {
         // Fallback (missing asset): flat bars, same footprint the real
         // cluster occupies.
@@ -4771,6 +4840,8 @@ int main(int argc, char** argv) {
                                 static_cast<float>(sk_bindings::kAreaSpellRange)) {
                                 continue;
                             }
+                            victim.flash.Arm(sk::kFlashPeriodUnits, sk::kFlashRedMin,
+                                              sk::kFlashRedMax);  // M86
                             victim.script->ApplyDamage(cast.areaDamage);
                         }
                     }
@@ -5623,6 +5694,8 @@ int main(int argc, char** argv) {
                         // exactly the same handling a killing blow does.
                         for (MonsterInstance& victim : gameMonsters) {
                             if (victim.script.get() != impact.target) continue;
+                            victim.flash.Arm(sk::kFlashPeriodUnits, sk::kFlashRedMin,
+                                              sk::kFlashRedMax);  // M86
                             if (victim.script->alive()) break;
                             handleDeath(victim);
                             break;
@@ -5666,6 +5739,8 @@ int main(int argc, char** argv) {
                         if (!impact.hit || !impact.target) continue;
                         for (MonsterInstance& victim : gameMonsters) {
                             if (victim.script.get() != impact.target) continue;
+                            victim.flash.Arm(sk::kFlashPeriodUnits, sk::kFlashRedMin,
+                                              sk::kFlashRedMax);  // M86
                             if (victim.script->alive()) break;
                             handleDeath(victim);
                             break;
@@ -5807,38 +5882,100 @@ int main(int argc, char** argv) {
                             stack.player().attack()));
                         return;
                     }
-                    float range = static_cast<float>(weapon->range());
-                    MonsterInstance* target = nullptr;
-                    float bestDist = range + 1.0f;
-                    for (MonsterInstance& m : gameMonsters) {
-                        // M16: invulnerable() (essential quest NPCs, e.g.
-                        // Tanyin Aldwyr's real SetInvulnerable(true))
-                        // can't be targeted at all -- matches the real
-                        // script's own intent, not just a damage-application
-                        // no-op (ApplyDamage() already guards this too, but
-                        // skipping targeting means the crosshair/prompt line
-                        // never shows an NPC as attackable in the first place).
-                        if (!m.script->alive() || m.script->destroyed() || m.script->invulnerable()) {
-                            continue;
+                    // ---- M85: how a melee swing finds what it hits ----
+                    //
+                    // Reported as "I have to move really close to attack
+                    // them properly". The reach this port used was
+                    // `weapon->range()`, 384 units for every melee weapon
+                    // in the corpus -- a tile and a half -- inside a
+                    // 60-degree cone. Neither number is the engine's.
+                    //
+                    // `FUN_100425bc` does not search the world at all. It
+                    // reads the **object-ID buffer** -- `engine+0x5b8`,
+                    // the 176x208 byte plane every stencil rasterizer
+                    // stamps its actor's `+0x2d4` into as it draws -- at
+                    // five fixed screen points:
+                    //
+                    //     FUN_1001afb0(engine, 0x58, 0x68)   // (88, 104)
+                    //     FUN_1001afb0(engine, 0x58, 0x7c)   // (88, 124)
+                    //     FUN_1001afb0(engine, 0x58, 0x90)   // (88, 144)
+                    //     FUN_1001afb0(engine, 0x58, 0xa4)   // (88, 164)
+                    //     FUN_1001afb0(engine, 0x58, 0xb8)   // (88, 184)
+                    //
+                    // -- one column down the exact centre of the screen,
+                    // starting at the vertical centre and stepping 20
+                    // pixels at a time toward the bottom, taking the
+                    // **first** one that is not empty. So melee in this
+                    // game is "whatever your crosshair column is actually
+                    // pointing at", occlusion included for free: a
+                    // creature behind a wall or behind another creature
+                    // never reaches the buffer, so it can never be picked.
+                    //
+                    // Then three gates, in this order:
+                    //
+                    //     if (|(s16)target+0xa4 - (s16)player+0xa4| > 0x180) target = 0;
+                    //     ... && target->vtable[0xe4]()          // is an actor
+                    //     && target->+0x1e2 == 0                 // not invulnerable
+                    //     && target->vtable[0x5c](player) < 0x76c
+                    //
+                    // `vtable+0x5c` is the entity-to-entity distance --
+                    // the same slot the area spell's `< 12000` uses -- so
+                    // the real melee reach is **0x76c == 1900 raw units,
+                    // about seven and a half tiles**, five times what this
+                    // port allowed. The vertical gate is the same 0x180
+                    // the creature side already uses (monster_ai.h's
+                    // kAttackVerticalLimitUnits), and it does *not* fall
+                    // through to the next probe: a target picked and then
+                    // rejected on height means the swing hits nothing.
+                    //
+                    // The buffer this reads was stamped by the **previous**
+                    // frame's draw, in the engine as much as here -- the
+                    // scene is rendered after the tick in both. That is
+                    // not a defect to work around: it is why the ids have
+                    // to be stable across frames (see MonsterInstance::
+                    // objectId).
+                    //
+                    // `vtable[0xe4]` needs no port equivalent: only live
+                    // creatures are ever stamped, which is the same set
+                    // that answers it true.
+                    auto pickMeleeTarget = [&]() -> MonsterInstance* {
+                        constexpr int kProbeX = 0x58;
+                        constexpr int kProbeY[] = {0x68, 0x7c, 0x90, 0xa4, 0xb8};
+                        uint8_t id = 0;
+                        for (int probeY : kProbeY) {
+                            id = zoneRenderer.ObjectIdAt(kProbeX, probeY);
+                            if (id != 0) break;
                         }
-                        if (!sk_bindings::InAttackRange(gameCamera.x, gameCamera.y, gameCamera.yaw,
-                                                         m.x, m.y, range)) {
-                            continue;
+                        if (id == 0) return nullptr;
+                        MonsterInstance* found = nullptr;
+                        for (MonsterInstance& m : gameMonsters) {
+                            if (m.objectId == static_cast<int>(id)) {
+                                found = &m;
+                                break;
+                            }
                         }
-                        // Closes the documented M20 gap: a bow/crossbow's
-                        // real 16384-unit range (64 tiles) previously let
-                        // a shot pass straight through walls. Same tile-
-                        // grid sightline the AI now uses.
-                        if (!gameZone->HasLineOfSight(gameCamera.x, gameCamera.y, m.x, m.y)) {
-                            continue;
+                        if (!found) return nullptr;
+                        // The height gate, applied to the pick and not
+                        // used to reject-and-retry. Both z's carry the
+                        // player's eye offset on this side (see the AI
+                        // tick's identical line), so it cancels and this
+                        // is feet-to-feet, like the engine's `+0xa4` pair.
+                        if (std::fabs(gameCamera.z - (found->z + sk::kEyeHeightOffset)) >
+                            static_cast<float>(sk_bindings::kPlayerMeleeVerticalLimit)) {
+                            return nullptr;
                         }
-                        float ddx = m.x - gameCamera.x, ddy = m.y - gameCamera.y;
-                        float dist = std::sqrt(ddx * ddx + ddy * ddy);
-                        if (dist < bestDist) {
-                            bestDist = dist;
-                            target = &m;
+                        if (!found->script->alive() || found->script->destroyed() ||
+                            found->script->invulnerable()) {
+                            return nullptr;
                         }
-                    }
+                        const float ddx = found->x - gameCamera.x, ddy = found->y - gameCamera.y;
+                        if (std::sqrt(ddx * ddx + ddy * ddy) >=
+                            static_cast<float>(sk_bindings::kMeleeReachUnits)) {
+                            return nullptr;
+                        }
+                        return found;
+                    };
+                    MonsterInstance* target = pickMeleeTarget();
                     if (!target) {
                         // M51: a swing that finds nothing in range plays
                         // pl_attack_sword.wav (slot 81) and a swing that
@@ -5869,15 +6006,43 @@ int main(int argc, char** argv) {
                         // M73: `exhausted` is the fatigue penalty -- see
                         // where it is computed above, and RollDamage's own
                         // comment for where in the roll it lands.
-                        int dmg = sk_bindings::RollDamage(stack.player().attack(),
-                                                           target->script->defense(),
-                                                           target->script->armorValue(), dmgMin,
-                                                           dmgMax, exhausted);
+                        // M87: the *player's* roll, not the creature's --
+                        // `FUN_100730c8` is inclusive at the top where the
+                        // creature's `rand % span` is exclusive, and the
+                        // two hardcoded bonus arms live here too. See
+                        // simkin_bindings/combat.h.
+                        const sk_bindings::ItemExecutable::DamageBonus* spiderBonus =
+                            weapon->FindDamageBonus(
+                                sk_bindings::ItemExecutable::kSpiderBonusKey);
+                        sk_bindings::PlayerMeleeResult roll =
+                            sk_bindings::RollPlayerMeleeDamage(
+                                stack.player().attack(), target->script->defense(),
+                                target->script->armorValue(), dmgMin, dmgMax, exhausted,
+                                target->script->spider() && spiderBonus != nullptr,
+                                spiderBonus ? spiderBonus->min : 0,
+                                spiderBonus ? spiderBonus->max : 0,
+                                weapon->templateId() == sk_bindings::kTemplateMagickaEdgeAxe,
+                                stack.player().magicka());
+                        const int dmg = roll.damage;
+                        if (roll.magickaSpent > 0) {
+                            stack.player().SetActorMagicka(stack.player().magicka() -
+                                                            roll.magickaSpent);
+                        }
 #if SK_DEBUG_SUITE
                         // SK_DEBUG_SUITE (M68)
                         sk_debug::Count("combat.damage_dealt", dmg);
                         sk_debug::Count("combat.hits_by_player");
 #endif
+                        // M86: `FUN_10081844`'s own `FUN_10067c3c(self,
+                        // 8, 0, 5)`, the red rows -- armed in the take-
+                        // damage handler, next to the damage and before it
+                        // is applied, so it fires for an absorbed hit as
+                        // well as a damaging one. This port has no single
+                        // such handler (M81 hit the same problem for
+                        // deaths), so it is armed at each of the four
+                        // places an attack damages a creature.
+                        target->flash.Arm(sk::kFlashPeriodUnits, sk::kFlashRedMin,
+                                           sk::kFlashRedMax);
                         target->script->ApplyDamage(dmg);
                     }
                     if (!target->script->alive()) handleDeath(*target);
@@ -6307,6 +6472,39 @@ int main(int argc, char** argv) {
                 // death animation/pose (M8's own "frame 0/skin 0 only"
                 // simplification).
                 std::vector<sk::PlacedEntity> frameEntities = gameEntities;
+                // M85: hand every live creature its object-ID byte, the
+                // real `actor+0x2d4`. The engine allocates one per actor
+                // and registers the actor in `engine+0x14620[id]`; here
+                // the id lives on the instance and the reverse lookup is a
+                // scan, which is the same relation without a second table
+                // to keep in step. Ids are kept for the creature's whole
+                // life and only recycled once it is gone, and 0 stays
+                // reserved -- `FUN_1001afb0` answers a 0 byte with a null
+                // actor, which is exactly "nothing was drawn here".
+                //
+                // 255 live creatures is the engine's own ceiling (the
+                // stamp is a byte); past it a creature simply keeps id 0
+                // and cannot be melee-targeted, rather than stealing
+                // somebody else's slot.
+                {
+                    bool idTaken[256] = {};
+                    for (const MonsterInstance& m : gameMonsters) {
+                        if (m.objectId > 0 && !m.script->destroyed()) idTaken[m.objectId] = true;
+                    }
+                    for (MonsterInstance& m : gameMonsters) {
+                        if (m.script->destroyed()) {
+                            m.objectId = 0;
+                            continue;
+                        }
+                        if (m.objectId != 0) continue;
+                        for (int id = 1; id < 256; ++id) {
+                            if (idTaken[id]) continue;
+                            idTaken[id] = true;
+                            m.objectId = id;
+                            break;
+                        }
+                    }
+                }
                 for (MonsterInstance& m : gameMonsters) {
                     // M23: destroyed() (a real zone-root script's
                     // DestroyObjectMirror()) hides an entity from the
@@ -6317,6 +6515,42 @@ int main(int argc, char** argv) {
                     // which is also why the death clip every real monster
                     // script sets had nothing to play it.
                     if (m.script->destroyed()) continue;
+                    // M86: `FUN_10064f08`, and it lives here for the same
+                    // reason the engine puts it in `FUN_10064ffc` -- the
+                    // flash is advanced by the *draw*, not by the AI tick,
+                    // so a creature keeps flashing while `freezeai` holds
+                    // the world still and a dead one finishes its flash
+                    // over its corpse.
+                    m.flash.Tick(sk_bindings::kAiFrameDeltaUnits);
+                    // The AI tick's own arming call, `FUN_10067c3c(self,
+                    // 8, 7, 0xc)` -- the **green** rows. The engine fires
+                    // it from two conditions: any live timed stat node
+                    // that is either a negative magnitude (`node+8 < 0`)
+                    // or kind 3, and separately the burn flag `+0x308`.
+                    // So a creature under a curse or on fire pulses green
+                    // for as long as the effect lasts, re-armed every
+                    // frame, where a hit flashes red once and stops.
+                    if (m.script->alive() && !m.script->destroyed()) {
+                        bool cursed = m.script->actorStats().burning();
+                        if (!cursed) {
+                            for (const sk_bindings::Effect& e :
+                                 m.script->actorStats().timedEffects()) {
+                                if (e.remaining <= 0) continue;
+                                if (e.stored < 0 || e.op == 3) {
+                                    cursed = true;
+                                    break;
+                                }
+                            }
+                        }
+                        // Only when nothing louder is already running: the
+                        // real order arms the green rows before the red
+                        // ones can be armed by a hit, and a hit that lands
+                        // this frame overwrites them.
+                        if (cursed && !m.flash.active()) {
+                            m.flash.Arm(sk::kFlashPeriodUnits, sk::kFlashGreenMin,
+                                        sk::kFlashGreenMax);
+                        }
+                    }
                     // Real per-instance appearance from the creature's own
                     // script (SetSkin/SetScale) -- see
                     // monster_executable.h.
@@ -6326,6 +6560,14 @@ int main(int argc, char** argv) {
                     pe.skinIndex = m.script->skin();
                     pe.scale = m.script->scale();
                     pe.frameIndex = AdvanceMonsterAnimation(m, modelArchive);
+                    // M85/M86: the two parameters `FUN_10064ffc` fills in
+                    // for a creature and leaves at their defaults for
+                    // everything else -- `actor+0x2d4` as the stencil byte
+                    // and `actor+0x152` as the flash ramp row (-1 when the
+                    // flash is not running, which is what routes the draw
+                    // back to the ordinary rasterizers).
+                    pe.objectId = m.objectId;
+                    pe.flashLevel = m.flash.row;
                     frameEntities.push_back(pe);
                     // M46: the creature's SetAttachedWeapon() model, drawn
                     // as a second whole model sharing the body's transform
@@ -6348,6 +6590,14 @@ int main(int argc, char** argv) {
                         // the body's skin into the weapon's transform
                         // block either.
                         weapon.skinIndex = 0;
+                        // M85: `FUN_10083490` passes -1 as the weapon
+                        // draw's id, so an attached weapon is drawn but
+                        // never stamped -- you cannot melee-target the
+                        // sword in a bandit's hand, only the bandit. It
+                        // *does* inherit the body's flash, because the
+                        // override copies `actor+0x152` across with the
+                        // rest of the transform block.
+                        weapon.objectId = 0;
                         frameEntities.push_back(weapon);
                     }
                 }
@@ -6474,7 +6724,12 @@ int main(int argc, char** argv) {
                 // The same `if (player->+0x204)` guard is why the draw can
                 // dereference the active item without a null check.
                 RenderWeaponViewmodel(backbuffer, gameWeaponViewmodel, spriteArchive);
-                RenderHud(backbuffer, stack.player(), spriteArchive, gameCamera.yaw);
+                // M86: `FUN_1002ae88` counts the hit timer down inside the
+                // HUD draw, so this port does too -- one place, and it
+                // stops while a menu holds the world.
+                stack.player().TickHurtTimer(sk_bindings::kAiFrameDeltaUnits);
+                RenderHud(backbuffer, stack.player(), spriteArchive, gameCamera.yaw,
+                           stack.player().hurtTimer());
                 // M57: last, over everything -- the map is an overlay, and
                 // the game underneath it keeps running.
                 if (gameMapOpen) {
@@ -6563,7 +6818,8 @@ int main(int argc, char** argv) {
             // M79: the viewmodel under the HUD here too -- see the main
             // in-game draw above for FUN_10029cb0's own order.
             RenderWeaponViewmodel(backbuffer, gameWeaponViewmodel, spriteArchive);
-            RenderHud(backbuffer, stack.player(), spriteArchive, gameCamera.yaw);
+            RenderHud(backbuffer, stack.player(), spriteArchive, gameCamera.yaw,
+                       stack.player().hurtTimer());
             window.Present(backbuffer);
             return;
         }

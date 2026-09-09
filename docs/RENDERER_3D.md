@@ -279,7 +279,7 @@ decompiling and diffing all 10 against each other:
 | `_v5` | 0x10052ab8 | Y | Y | Y | |
 | `_v6` | 0x1005420c | N | Y | N | |
 | `_v7` | 0x10054704 | N | Y | Y | |
-| `_v8` | 0x10054d04 | Y | Y | N | plus an extra forwarded parameter (`Poly3D_ClipAndDispatch`'s own `param_7`, passed when it's `!= -1`) not yet deciphered |
+| `_v8` | 0x10054d04 | Y | Y | N | **RESOLVED (M86): the hit-flash rasterizer.** The extra forwarded parameter (`Poly3D_ClipAndDispatch`'s `param_7`, taken only when it is `!= -1`) is a **ramp row**, and this variant replaces every texel with a palette read instead of drawing it: `i = (flash << 5) | ((texel & 0xf00) >> 7)`, then `*dst = *(u16 *)(engine + 0x5060 + i)`. So the model is redrawn out of a 16-entry gradient keyed on its own red nibble, unlit and unfogged. `FUN_1000f4b4` fills fourteen such rows at boot through `FUN_1000f304(engine, row, r0,g0,b0, r1,g1,b1)` -- rows 0-6 red, 7-13 green -- and `FUN_10067c3c`/`FUN_10064f08` are the oscillator that walks an actor's `+0x152` up and down one of those ranges. `FUN_10081844` (take damage) arms `(8, 0, 5)`; the AI tick arms `(8, 7, 0xc)` while the creature is cursed or burning. |
 | `_v9` | 0x10055a4c | — | — | — | selected by mode-word bit 0, orthogonal to the other three. Structurally distinct: writes straight into the **real** 16bpp screen buffer (`engine+0x480`, 0x160-byte stride) with an unconditional store — no depth test, no OR'd high bits — bypassing the shared padded-buffer scheme entirely. Also unconditionally stores a raw interpolated accumulator into `engine+0x5b4` at the same slot (purpose not pinned down). Likely an always-on-top / no-occlusion draw path (candidates: player's held weapon, a UI element routed through the 3D pipeline). |
 
 Every variant (`_v9` included) treats texel value `0x0f0f` as a **chroma
@@ -287,9 +287,9 @@ key**: skip the pixel, don't draw — texture cutouts (foliage, grates, etc.),
 not real alpha blending. None of the 10 do per-pixel alpha compositing
 anywhere — "blended" was the wrong guess for what distinguishes them.
 
-Remaining open items: `_v8`'s extra parameter, and `_v9`'s second
-(unconditional, untested) write into `engine+0x5b4` — both low priority,
-the dispatch/behavior split above is otherwise fully resolved.
+Remaining open item: `_v9`'s second (unconditional, untested) write into
+`engine+0x5b4`. `_v8`'s extra parameter is resolved above (M86); the
+dispatch/behavior split is otherwise fully resolved.
 
 ## Labels applied
 
@@ -789,7 +789,7 @@ this renderer, so gate 7 stands in for it via `Zone::HasLineOfSight`.
 - ~~The other ~9 `Poly3D_RasterizeTextured` variants~~ — **resolved**, see
   "The 10 `Poly3D_RasterizeTextured` variants" above: near-clip, a
   depth-driven fog LUT, and a stencil/object-ID buffer, not blend modes.
-  Two small leftovers: `_v8`'s extra forwarded parameter, and `_v9`'s
+  One small leftover (`_v8`'s extra parameter is the M86 hit flash): `_v9`'s
   second, unconditional write into `engine+0x5b4`.
 - ~~What sets `engine+0x62c` (current room pointer) on room/level
   transitions~~ — **resolved**: nothing "sets" it on transitions at all.

@@ -236,6 +236,22 @@ struct PlacedEntity {
     // live creatures now advance it through their current clip, see
     // world/model_archive.h's AnimationClip and main.cpp's AI loop.
     int frameIndex = 0;
+    // M85: which actor this geometry belongs to, for the object-ID buffer
+    // the melee target search reads. `Actor3D_TransformAndSubmitModel`'s
+    // third parameter, which `FUN_10064ffc` fills from `actor+0x2d4` -- a
+    // byte the engine hands out per live actor and registers in
+    // `engine+0x14620[id]` -- and which every stencil-family rasterizer
+    // stamps into `engine+0x5b8` at each pixel it actually draws. 0 is the
+    // engine's own "nothing here" (FUN_1001afb0 returns null for it), so
+    // props, doors, pickups and arrows keep the default and stay
+    // unpickable, exactly as `FUN_10064ffc`'s non-actor arm leaves them.
+    int objectId = 0;
+    // M86: which row of the hit-flash ramp to redraw this model out of,
+    // or -1 for the ordinary textured draw. `Actor3D_TransformAndSubmit
+    // Model`'s last parameter (`actor+0x152`), the one whose != -1 case is
+    // the whole reason Poly3D_RasterizeTextured_v8 exists. See
+    // HitFlashRamps above.
+    int flashLevel = -1;
 };
 
 // ---- M79: the sprite billboard, `FUN_1008b25c` + `FUN_1004f91c` ----
@@ -386,6 +402,92 @@ constexpr float kSkyboxYaw = -1.57079632679f;  // -pi/2, i.e. -0x4000
 // "is this pixel still bare background?" without hardcoding it twice.
 constexpr uint16_t kBackgroundFill = PackRGB565(8, 8, 16);
 
+
+// ---- M86: the hit flash, `engine+0x5060` ----
+//
+// A damaged creature turns red for a third of a second. The port had
+// nothing at all here; the engine has a whole rasterizer for it.
+//
+// `Actor3D_TransformAndSubmitModel`'s last parameter is normally -1, and
+// `Poly3D_ClipAndDispatch` routes -1 to the ordinary stencil rasterizers.
+// When it is *not* -1 the poly goes to `Poly3D_RasterizeTextured_v8`
+// instead, whose inner loop replaces the texel with a palette read:
+//
+//     texel = *(u16 *)texAddr;
+//     if (texel != 0xf0f) {
+//         i = (flash << 5) | ((texel & 0xf00) >> 7);      // byte index
+//         *dst = *(u16 *)(engine + 0x5060 + i) | ...;
+//     }
+//
+// -- i.e. **the creature is redrawn out of a 16-entry ramp, keyed on its
+// own red nibble** (`(texel & 0xf00) >> 8` once the byte index is folded
+// back to a halfword one), with no light term and no fog. So a flashing
+// creature is a flat silhouette in one colour family that still keeps its
+// own light/dark shape, which is why it reads as a flash rather than as a
+// solid blob.
+//
+// `FUN_1000f4b4` fills fourteen of those ramps at boot through
+// `FUN_1000f304(engine, row, r0, g0, b0, r1, g1, b1)`, which walks
+// 16 steps of `(end - start)/16` and packs each as
+// `g & 0xfff0 | (r >> 4) << 8 | (b >> 4)` -- RGB444, R in bits 11..8,
+// G in 7..4, B in 3..0, the same layout ExpandRGB444 already reads.
+// Rows 0..6 are **red** and rows 7..13 **green**, each row a dark-to-full
+// ramp with a progressively brighter floor.
+struct HitFlashRamps {
+    // [row][step] in RGB444. 14 rows, matching FUN_1000f4b4 exactly.
+    uint16_t entry[14][16] = {};
+    HitFlashRamps();
+};
+const HitFlashRamps& FlashRamps();
+
+// One ramp entry already in the backbuffer's RGB565, for the callers
+// outside this file -- the HUD's own flashed frame (M86) blits through a
+// ramp row and has no business converting colour formats itself.
+uint16_t FlashRamp565(int row, int step);
+
+// `FUN_10067c3c(entity, period, min, max)` arms one. It writes the ramp
+// row bounds to `+0x150`/`+0x151`, seeds the current row at `min`, sets
+// the direction `+0x154` to +1, reloads the step timer `+0x15e` from the
+// period `+0x15c`, and sets the total `+0x158` to `(max - min) * period
+// * 2` -- one full sweep up and back. `FUN_10064f08`, called from the
+// draw path, then ticks it: both timers count down by the engine's own
+// per-frame delta, the row steps by the direction each time the step
+// timer expires, and the row reverses at each end (halving the period on
+// the way back through the minimum, so a long flash accelerates).
+//
+// Both shipped call sites are creature-side:
+//
+//   * `FUN_10081844(creature, damage, ...)` -- the creature's own take-
+//     damage handler, right before it applies the damage -- arms
+//     `(8, 0, 5)`, the red rows.
+//   * the AI tick `FUN_10082224` arms `(8, 7, 0xc)`, the green rows,
+//     while the creature carries a negative timed stat modifier or is
+//     burning (`+0x308`).
+//
+// At this port's frame delta (kAiFrameDeltaUnits, 10 units of 1/256 s)
+// a period of 8 steps the row exactly once per tick, so the damage flash
+// is 80 units == 8 ticks == **0.31 s**: 0,1,2,3,4,5 then back down.
+struct HitFlash {
+    int row = -1;      // `+0x152`, and the renderer's flashLevel. -1 = off.
+    int rowMin = 0;    // `+0x150`
+    int rowMax = 0;    // `+0x151`
+    int dir = 1;       // `+0x154`
+    int period = 0;    // `+0x15c`
+    int stepTimer = 0; // `+0x15e`
+    int total = -1;    // `+0x158`, -1 == not running
+
+    bool active() const { return total != -1 && row >= 0; }
+    // FUN_10067c3c.
+    void Arm(int periodUnits, int minRow, int maxRow);
+    // FUN_10064f08, once per frame with the engine's per-frame delta.
+    void Tick(int deltaUnits);
+};
+
+// The two shipped arming calls, named so a call site reads as what it is.
+constexpr int kFlashPeriodUnits = 8;
+constexpr int kFlashRedMin = 0, kFlashRedMax = 5;
+constexpr int kFlashGreenMin = 7, kFlashGreenMax = 0xc;
+
 class ZoneRenderer {
 public:
     // Tile radius (in tiles) around the camera to scan for faces to
@@ -407,6 +509,22 @@ public:
     void Render(Backbuffer& backbuffer, const Zone& zone, const Camera& camera,
                 const std::vector<PlacedEntity>& entities = {}, ModelArchive* models = nullptr,
                 const std::vector<SpriteBillboard>& billboards = {}) const;
+
+    // M85: `engine+0x5b8` -- the second 176x208 buffer the stencil-family
+    // rasterizers stamp an actor id into for every pixel they draw, which
+    // is how the real melee attack picks its target (see main.cpp's
+    // pickMeleeTarget). Cleared to 0 at the top of every Render, so it
+    // always describes the frame just drawn. `mutable` only so Render can
+    // stay const for the dozen smoke tests that hold the renderer by
+    // value; nothing outside Render writes it.
+    uint8_t ObjectIdAt(int x, int y) const {
+        if (x < 0 || y < 0 || x >= Backbuffer::kWidth || y >= Backbuffer::kHeight) return 0;
+        return m_ObjectIds[static_cast<size_t>(y) * Backbuffer::kWidth + x];
+    }
+
+private:
+    mutable std::vector<uint8_t> m_ObjectIds =
+        std::vector<uint8_t>(static_cast<size_t>(Backbuffer::kWidth) * Backbuffer::kHeight, 0);
 };
 
 }  // namespace sk

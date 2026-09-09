@@ -321,6 +321,21 @@ bool ItemExecutable::method(const skString& methodName, skRValueArray& args,
         InferItemType(kItemTypeWeapon);
         return true;
     }
+    // M87: `FUN_1002ebc4`, item binding 0. Four slots, appended in
+    // script order, and the real one silently overruns past the fourth
+    // rather than refusing -- capped here instead, since nothing shipped
+    // calls it more than once on one item. See item_executable.h.
+    if (methodName == skString("AddDamageBonus") && args.entries() == 3) {
+        if (static_cast<int>(m_DamageBonuses.size()) < kMaxDamageBonuses) {
+            DamageBonus bonus;
+            bonus.name = args[0].str().c_str();
+            bonus.min = args[1].intValue();
+            bonus.max = args[2].intValue();
+            m_DamageBonuses.push_back(bonus);
+        }
+        InferItemType(kItemTypeWeapon);
+        return true;
+    }
     if (methodName == skString("SetDamageMax") && args.entries() == 1) {
         m_DamageMax = args[0].intValue();
         InferItemType(kItemTypeWeapon);

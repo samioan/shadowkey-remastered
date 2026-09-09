@@ -7671,6 +7671,229 @@ soft-fails 39 -> 39, all 14 tracked `.ppm` renders byte-identical,
       of them is taken from a camera that is now 288 units lower. That is
       the change, not a regression.
 
+- [x] **M85 -- how far a swing reaches, and what it picks.** The second
+      half of the same report. The port's melee reach was
+      `weapon->range()` -- 384 units, a tile and a half, for every melee
+      weapon in the corpus -- inside an invented 60-degree cone. Neither
+      number is the engine's, and the mechanism is not a cone.
+
+    - **Melee targets what is drawn under the crosshair.**
+      `FUN_100425bc` does not search the world. It reads
+      **`engine+0x5b8`** -- a second 176x208 byte plane that every
+      stencil-family rasterizer stamps its actor's `+0x2d4` into as it
+      draws -- at five fixed points, taking the first that is not empty:
+
+          FUN_1001afb0(engine, 0x58, 0x68)   // (88, 104), the exact centre
+          FUN_1001afb0(engine, 0x58, 0x7c)   // (88, 124)
+          FUN_1001afb0(engine, 0x58, 0x90)   // (88, 144)
+          FUN_1001afb0(engine, 0x58, 0xa4)   // (88, 164)
+          FUN_1001afb0(engine, 0x58, 0xb8)   // (88, 184)
+
+      `FUN_1001afb0` is two lines: index the plane, and if the byte is
+      non-zero look the actor up in `engine+0x14620[]`. `+0x2d4` is the
+      per-actor id the engine hands out and registers in that same table.
+      This gives melee its occlusion for free -- a creature behind a wall
+      or behind another creature never reaches the buffer, so it can never
+      be picked -- and it is the same buffer the auto-aim already reads at
+      its own single centre pixel (RENDERER_3D.md's step 5).
+
+    - **The reach is 0x76c, not 384.** After the pick, three gates:
+      `|(s16)target+0xa4 - (s16)player+0xa4| > 0x180` clears the target
+      outright (and does *not* fall through to the next probe), then
+      `vtable[0xe4]` (is an actor), `+0x1e2 == 0` (not flagged out) and
+      `vtable[0x5c](player) < 0x76c`. `vtable+0x5c` is entity-to-entity
+      distance in raw world units -- the same slot the area spell compares
+      against 12000 -- so the real melee reach is **1900 units, about 7.4
+      tiles, five times what this port allowed**, and it is the same for
+      every melee weapon in the game. A weapon's own `SetRange()` never
+      enters this: the 384/16384 split only sets `item+0x1a7`, the ranged
+      flag, which picks between this arm and the arrow arm one branch
+      earlier. Reading 384 as the reach is what made a sword feel like it
+      had none.
+
+    - **The port now keeps the buffer.** `ZoneRenderer` carries a 176x208
+      id plane, cleared at the top of every `Render` the way
+      `memset(engine+0x5b8, 0, 0x8f00)` clears the real one, and written
+      at the single point where a model pixel passes the chroma key and
+      the depth test -- which is where the engine writes it, and why what
+      the buffer holds is what you can see. Ids live on the creature and
+      are only recycled when it is destroyed, because the buffer the
+      attack reads was stamped by the **previous** frame's draw in this
+      port exactly as in the engine (the scene is rendered after the tick
+      in both). An attached weapon draws with id 0 and is not pickable, as
+      `FUN_10083490`'s own -1 has it; so are props, doors and pickups,
+      matching `FUN_10064ffc`'s non-actor arm.
+
+    - **A consequence worth stating, because it looks like a bug.** A
+      creature that is not drawn cannot be hit. The debug console's
+      `spawn <script>` builds creatures that are not in entities.txt and
+      therefore have no model; before M85 the cone could still hit one,
+      and now nothing can. `port/debug/m84_reach.cfg` spawns by typeId for
+      that reason and says so.
+
+- [x] **M86 -- the two things a hit is supposed to look like.** Reported:
+      "there are some effects missing, enemies turn red briefly when hit,
+      and a red slash appears when the player is getting hit." Both are
+      real, both come out of one mechanism, and the port had neither.
+
+    - **A struck creature is redrawn out of a colour ramp.**
+      `Actor3D_TransformAndSubmitModel`'s last parameter is normally -1,
+      and `Poly3D_ClipAndDispatch` sends -1 to the ordinary rasterizers.
+      When it is anything else the poly goes to
+      **`Poly3D_RasterizeTextured_v8`** instead, whose inner loop replaces
+      the texel with a palette read: `i = (flash << 5) | ((texel & 0xf00)
+      >> 7)`, then `*dst = *(u16 *)(engine + 0x5060 + i)`. So the creature
+      is drawn from a 16-entry gradient **keyed on its own red nibble**,
+      with no light term and no fog -- which is why it reads as a flash
+      rather than a silhouette: the model keeps its own light and dark
+      shape in one colour family. This closes RENDERER_3D.md's standing
+      "`_v8`'s extra parameter, not yet deciphered".
+
+    - **The ramps.** `FUN_1000f4b4` fills fourteen rows at boot through
+      `FUN_1000f304(engine, row, r0,g0,b0, r1,g1,b1)`, which walks 16
+      steps of `(end - start)/16` and packs each as `g & 0xfff0 | (r >> 4)
+      << 8 | (b >> 4)` -- RGB444, the same layout the port's own
+      `ExpandRGB444` reads. **Rows 0-6 are red and rows 7-13 green**, four
+      copies of a dark-floored ramp followed by three with progressively
+      brighter floors.
+
+    - **The oscillator.** `FUN_10067c3c(entity, period, min, max)` arms
+      one: bounds to `+0x150`/`+0x151`, current row `+0x152` at the
+      minimum, direction `+0x154` up, step timer `+0x15e` from the period
+      `+0x15c`, and a total `+0x158` of `(max - min) * period * 2`.
+      `FUN_10064f08`, called from the **draw** path rather than the tick,
+      counts both timers down by the frame delta, steps the row, and
+      reverses at each end. Two shipped call sites: `FUN_10081844`, the
+      take-damage handler, arms `(8, 0, 5)` -- the red rows -- and the AI
+      tick `FUN_10082224` arms `(8, 7, 0xc)` -- the green ones -- while
+      the creature carries a negative timed stat modifier or is burning.
+      At this port's frame delta that is **eight ticks, 0.31 s**: exactly
+      "briefly".
+
+      A small dead branch, recorded rather than dropped: coming back
+      *through* the minimum halves the period, so a flash would
+      accelerate -- but `Arm`'s budget is exactly `2*(max-min)` steps, the
+      climb spends half and the reversal one more, so no flash the game
+      arms ever gets back to its minimum row. The line is unreachable from
+      `FUN_10067c3c`. It is transcribed anyway.
+
+    - **The player has no model, so the feedback goes on the HUD.**
+      `FUN_10044814`, the player's own DoDamage, writes `0x40` to a hurt
+      timer under the same Sanctuary gate and the same `damage != 0 &&
+      (s16)damage >= 0` test as the damage itself. `FUN_1002ae88` -- the
+      same function that draws the three vitals bars -- branches on it:
+      while it is running, the dragon-head vitals frame is redrawn through
+      **hit-flash ramp row 1** (`FUN_1006a894` being `Blit_RLESprite` with
+      v8's remap spliced into its inner loop), and `global.spr` **slot
+      218** is blended over the whole screen at 50%.
+
+      Slot 218 is 176x208 and holds **838 opaque pixels in a single
+      colour, RGB444 0x0d12** -- one bright red diagonal stroke across the
+      view. That is the reported red slash, read straight out of the
+      shipped archive. 0x40 is 64 units of 1/256 s, so it shows for a
+      quarter of a second. The port needed all three pieces: the sprite
+      was never drawn, the timer did not exist, and `Blit_RLESprite`'s
+      **blendMode 1** (`((src & 0xeee) + (dst & 0xeee)) >> 1`, done here
+      as the same average in RGB565) had been documented since M14 and
+      never implemented for want of a caller.
+
+    - **One deviation, marked.** The engine arms the creature flash inside
+      its single take-damage handler; this port has no such single point
+      (M81 hit the same problem for deaths), so it is armed at each of the
+      four places an attack damages a creature. Damage-over-time
+      deliberately does not arm it -- poison and burn reach the stats
+      block directly in the engine too, and show as the *green* pulse
+      instead.
+
+- [x] **M87 -- the player's own damage roll.** Reported: "when I do hit
+      them with my dagger, they're not taking as much damage as they would
+      in the original game."
+
+    - **This port had one melee damage function; the engine has two.**
+      `RollDamage` is the tail of `FUN_100835b8`, the **creature** attack,
+      and its spread is `span = max - min; if (span < 1) span = 1; roll =
+      min + rand % span` -- exclusive at the top. The player's arm rolls
+      through `FUN_100730c8(rng, min, max)`, which is `min + rand % (max -
+      min + 1)` -- **inclusive**. Using the creature's rule for the player
+      took the top value off every weapon in the game and half a point off
+      every swing's mean. A 4..12 axe rolled 4..11; the Magicka Edge Axe's
+      own 64 was unreachable.
+
+    - **Two hardcoded bonuses live in the same few lines, and both were
+      missing.**
+
+      - *The Spider Impaler.* `AddDamageBonus(name, min, max)` (item
+        binding 0, `FUN_1002ebc4`) appends to a four-slot named table on
+        the item; `FUN_1002eb48` looks a key up in it. `FUN_100425bc`
+        queries it with the literal string `"spiders"` and only when the
+        target's `+0x2d0` is 1 -- `SetSpider`'s own field -- then rolls
+        `min + rand % (max - min)` and adds it before armour. Its own
+        debug string names the weapon: `"attackRoll: spider impaler min %d
+        max %d rolled %d"`. The corpus has exactly one call site,
+        `weapons/spider_impaler.s`'s `AddDamageBonus("spiders", 4, 22)` on
+        a 4..12 weapon -- so against a spider it swings for 8..33 instead
+        of 4..12, and this port had none of it. The binding soft-failed.
+      - *The Magicka Edge Axe*, entities.txt typeId **573**
+        (`weapons\Magicka_edge_Axe.s`), tested by template id and nothing
+        else: `rand(0, 100) < 0x15` and more than ten magicka in the pool
+        buys ten extra damage for ten magicka, off `player+0x3ac+0x2e` --
+        the field the HUD's middle bar reads. The `10 <` is strict, so at
+        exactly ten it refuses.
+
+    - **Order matters and is preserved**: roll, then the exhaustion
+      halving on the raw roll, then the bonuses, then the defender's full
+      armour rating last, with a fully-absorbed hit dealing literally
+      nothing. The to-hit gate in front is unchanged and still lacks the
+      real function's second dodge/block test (RollMeleeHit's own note).
+
+  **Verification.** Three new suites, **74/74 -> 77/77**:
+
+  - `m84_melee_reach_smoke` (40 checks) reads every `.ent` in the game and
+    confirms 1500 of 1532 creature placements are 1:1; measures
+    Bandit_Thug out of the real `models.huge` at 668; reproduces the probe
+    projection to show 512 puts all five on the body, 800 wastes the
+    centre one at every distance and 0 never sees above ground level;
+    computes the old frame's numbers (head below centre, feet off the
+    bottom, under half on screen, and a pitch demand past
+    `kMaxCameraPitch`); and then drives the **real renderer** to show the
+    object-ID buffer working -- a creature ahead stamps 5262 pixels and
+    the probe walk finds it, id 0 stamps nothing, a creature behind the
+    camera is never picked, and with two on one line the probe returns the
+    near one.
+  - `m86_hit_feedback_smoke` (47 checks) rebuilds the fourteen ramps and
+    checks their channels, monotonicity, the four identical rows and the
+    green family mirroring the red; runs the oscillator to its 8-tick
+    length and pins the unreachable halving branch both ways; then renders
+    a real creature three times -- plain, flashed and restored -- and
+    asserts every one of its pixels is a colour from the named ramp row
+    while the walls around it are untouched. Finally it reads `global.spr`
+    slot 218 out of the shipped archive (176x208, 838 opaque pixels, one
+    colour, diagonal) and checks the 50% blend halves it over black.
+  - `m87_player_damage_smoke` (37 checks) samples both rolls to show the
+    player's has one more face and a half-point higher mean, loads the two
+    real weapons through `Level.CreateEntity`, confirms `AddDamageBonus`
+    parses off the shipped script, and measures both bonuses -- the spider
+    bonus's 8..33 range and mean, the proc's ~1-in-5 rate, its exact
+    ten-magicka cost, its strict floor, and that no other weapon procs.
+
+  Confirmed in the running game (`port/debug/m84_reach.cfg` and
+  `m84_reach_far.cfg`, two saved console repros). A Bandit Brawler spawned
+  at 900 units and engaged at **d=660** -- well past the old 384 reach --
+  takes 24 swings, 24 hits and 17 damage, going from 30/30 to **13/30**.
+  The same brawler parked at **d=2400** with `freezeai` on, past the real
+  1900, takes 25 swings and **zero** hits and stays at 30/30.
+
+  Two things that had to be worked around to get there, both worth
+  recording. `LoadStartingInventory` pushes straight into `m_Inventory`
+  and never goes through `AddItem`, so it skips M74's "picking something
+  up equips it" tail -- a console-started session has full pockets and
+  empty hands, and `FUN_10042394` does nothing for an empty hand, so the
+  repro has to `equip Club r` first. And a game process left running from
+  an earlier attempt holds `shadowkey_port.exe` open, which makes every
+  later `build.bat` link silently do nothing; the driver kills it first
+  now, because three runs were measuring stale code before that was
+  noticed.
+
 ## Next milestones (not yet started)
 
 Roughly in priority order for reaching "actually playable," not commitments:

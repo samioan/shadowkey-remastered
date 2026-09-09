@@ -38,11 +38,20 @@ public:
 
     // Straight opaque-pixel copy of a decoded assets/sprite_archive.h
     // Sprite at (x,y) -- clips against both the backbuffer and the
-    // sprite's own bounds. Only the real engine's Blit_RLESprite
-    // straight-copy mode (blendMode==0); its 50%-average-blend mode
-    // (blendMode==1, docs/GRAPHICS_FORMAT.md) has no current caller in
-    // this port and isn't implemented here.
+    // sprite's own bounds. `Blit_RLESprite`'s straight-copy mode
+    // (blendMode == 0).
     void Blit(int x, int y, const Sprite& sprite) { BlitRegion(x, y, sprite, 0, sprite.width); }
+
+    // M86: `Blit_RLESprite`'s **blendMode == 1**, the 50% average blend
+    // (docs/GRAPHICS_FORMAT.md), which had no caller in this port until
+    // the player's hit overlay needed one. The engine averages in its own
+    // RGB444 -- `((src & 0xeee) + (dst & 0xeee)) >> 1`, masking each
+    // channel's low bit off so the sum cannot carry between channels --
+    // and this is the same operation in the backbuffer's RGB565: mask
+    // 0xf7de, the low bit of all three channels at once.
+    void BlitBlend(int x, int y, const Sprite& sprite) {
+        BlitRegion(x, y, sprite, 0, sprite.width, /*blend=*/true);
+    }
 
     // Like Blit(), but only copies `srcW` source columns starting at
     // source column `srcX` -- the real HUD's own srcXOffset/clipRight
@@ -50,7 +59,31 @@ public:
     // used for the percentage-scaled vitals bar fill (srcX=0, srcW =
     // fraction*sprite.width) and the heading-scrolled compass tape
     // (srcX = heading-derived offset into a wider-than-screen strip).
-    void BlitRegion(int x, int y, const Sprite& sprite, int srcX, int srcW) {
+    // M86: `FUN_1006a894` -- Blit_RLESprite with the hit-flash remap
+    // spliced into its inner loop. Every opaque texel is replaced by
+    // `ramp565[red nibble]` instead of itself, which is the same
+    // substitution Poly3D_RasterizeTextured_v8 does for a flashing model.
+    // `ramp565` is 16 entries already in this buffer's own format (see
+    // render3d/zone_renderer.h's FlashRamp565), so nothing here needs to
+    // know about RGB444. The red nibble survives the RGB444->RGB565
+    // conversion exactly: a 4-bit r becomes the 5-bit `r<<1 | r>>3`, and
+    // shifting that back down by one recovers r for every value.
+    void BlitRamped(int x, int y, const Sprite& sprite, const uint16_t* ramp565) {
+        for (int sy = 0; sy < sprite.height; ++sy) {
+            const int dy = y + sy;
+            if (dy < 0 || dy >= kHeight) continue;
+            for (int sx = 0; sx < sprite.width; ++sx) {
+                const int dx = x + sx;
+                if (dx < 0 || dx >= kWidth) continue;
+                const size_t si = static_cast<size_t>(sy) * sprite.width + static_cast<size_t>(sx);
+                if (!sprite.opaque[si]) continue;
+                pixels_[static_cast<size_t>(dy) * kWidth + static_cast<size_t>(dx)] =
+                    ramp565[(sprite.pixels[si] >> 12) & 0xF];
+            }
+        }
+    }
+
+    void BlitRegion(int x, int y, const Sprite& sprite, int srcX, int srcW, bool blend = false) {
         for (int sy = 0; sy < sprite.height; ++sy) {
             int dy = y + sy;
             if (dy < 0 || dy >= kHeight) continue;
@@ -61,8 +94,14 @@ public:
                 if (dx < 0 || dx >= kWidth) continue;
                 size_t si = static_cast<size_t>(sy) * sprite.width + static_cast<size_t>(sx);
                 if (!sprite.opaque[si]) continue;
-                pixels_[static_cast<size_t>(dy) * kWidth + static_cast<size_t>(dx)] =
-                    sprite.pixels[si];
+                uint16_t& dst = pixels_[static_cast<size_t>(dy) * kWidth +
+                                        static_cast<size_t>(dx)];
+                if (blend) {
+                    dst = static_cast<uint16_t>(
+                        (((sprite.pixels[si] & 0xf7de) + (dst & 0xf7de)) >> 1));
+                } else {
+                    dst = sprite.pixels[si];
+                }
             }
         }
     }

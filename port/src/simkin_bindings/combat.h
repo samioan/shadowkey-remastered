@@ -65,6 +65,99 @@ bool RollMeleeHit(int attackerAttack, int defenderDefense);
 int RollDamage(int attackerAttack, int defenderDefense, int defenderArmor, int dmgMin, int dmgMax,
                 bool halveRoll = false);
 
+// ---- M85: the player's melee reach, and the height band around it ----
+//
+// `FUN_100425bc`'s melee arm, after it has picked a target out of the
+// object-ID buffer (main.cpp's pickMeleeTarget has the probe layout):
+//
+//     if (|(s16)target+0xa4 - (s16)player+0xa4| > 0x180) target = 0;
+//     if (target && target->vtable[0xe4]() &&
+//         target->+0x1e2 == 0 &&
+//         target->vtable[0x5c](player) < 0x76c) { ...swing connects... }
+//
+// `vtable+0x5c` is entity-to-entity distance in raw world units -- the
+// same slot `FUN_1004720c`'s area spell compares against 12000 -- so the
+// reach is a flat **1900 units, about 7.4 tiles**, and it is the same for
+// every melee weapon in the game. A weapon's own `SetRange()` never
+// enters this: 384 vs 16384 only decides `item+0x1a7`, the ranged flag,
+// which picks between this arm and the arrow arm one branch earlier.
+// Reading 384 as the melee reach (which this port did) makes a sword
+// reach a fifth as far as it should.
+constexpr int kMeleeReachUnits = 0x76c;
+
+// The vertical half-band around the player a melee target has to be
+// inside. Distinct from the creature side's 0x200
+// (monster_ai.h's kAttackVerticalLimitUnits) -- the player's is 0x180,
+// and the two are separate constants in separate functions.
+constexpr int kPlayerMeleeVerticalLimit = 0x180;
+
+// ---- M87: the player's melee damage, which is not the creature's ----
+//
+// RollDamage above is the tail of `FUN_100835b8`, the **creature** attack.
+// The player's melee arm lives in `FUN_100425bc` and rolls its damage a
+// different way, which this port had never noticed:
+//
+//     damage = FUN_100730c8(rng, weapon->+0x1cc, weapon->+0x1ce);
+//     if (player->+0x3d8 < 1) damage >>= 1;                  // exhausted
+//     if (target->+0x2d0 == 1 &&                             // a spider
+//         FUN_1002eb48(weapon, "spiders", &lo, &hi))
+//         damage += lo + rand % (hi - lo);
+//     ...
+//     if (weapon->+0xc8 == 0x23d) {                          // Magicka Edge
+//         roll = FUN_100730c8(rng, 0, 100);
+//         if (stats->+0x2e > 10 && roll < 0x15) {
+//             damage += 10;
+//             player->+0x3da -= 10;                          // 10 magicka
+//         }
+//     }
+//     DoDamage((s16)(damage - target->armourRating()));
+//
+// and `FUN_100730c8(rng, min, max)` is `min + rand % (max - min + 1)` --
+// **inclusive** at the top, where the creature's own `rand % (max - min)`
+// is exclusive. So a 4..12 axe rolls 4..12 in the player's hand and 4..11
+// in a bandit's, and the port was using the creature's rule for both:
+// every player swing in the game was missing its top value and averaging
+// half a point low. On a Magicka Edge Axe (6..64) that is four points of
+// mean damage, and its maximum was simply unreachable.
+//
+// The two bonus arms are both real, both hardcoded, and both were absent:
+//
+//   * **The Spider Impaler.** `weapons/spider_impaler.s` is the corpus's
+//     only `AddDamageBonus` call site (`("spiders", 4, 22)`) and
+//     `FUN_100425bc` is its only reader, keyed on the literal string and
+//     on `SetSpider`'s own creature-kind field. Against a spider it
+//     roughly triples the weapon.
+//   * **The Magicka Edge Axe**, entities.txt typeId 573
+//     (`weapons\Magicka_edge_Axe.s`), tested by template id and nothing
+//     else: a 21% chance of ten extra damage, paid for with ten magicka,
+//     and only while the player has more than ten to spend. The magicka
+//     comes off `player+0x3ac+0x2e`, the same field the HUD's middle bar
+//     reads.
+//
+// Returned together because the caller has to pay the magicka: `damage` is
+// what to hand ApplyDamage, `magickaSpent` what to take off the player.
+struct PlayerMeleeResult {
+    int damage = 0;
+    int magickaSpent = 0;
+};
+
+// `targetArmor` comes off last and can absorb the whole blow, exactly as
+// in RollDamage. `spiderBonus`/`spiderBonusMax` are the weapon's own
+// AddDamageBonus("spiders") pair, ignored unless `targetIsSpider`;
+// `weaponIsMagickaEdge` is `weapon->templateId() == kTemplateMagickaEdge`
+// and `magicka` the player's current pool.
+PlayerMeleeResult RollPlayerMeleeDamage(int attackerAttack, int defenderDefense, int defenderArmor,
+                                         int dmgMin, int dmgMax, bool halveRoll,
+                                         bool targetIsSpider, int spiderBonusMin,
+                                         int spiderBonusMax, bool weaponIsMagickaEdge, int magicka);
+
+// entities.txt row `573 30 4 weapons\Magicka_edge_Axe.s` -- the one
+// template id `FUN_100425bc` names outright.
+constexpr int kTemplateMagickaEdgeAxe = 0x23d;
+constexpr int kMagickaEdgeProcChance = 0x15;   // rand(0,100) < 21
+constexpr int kMagickaEdgeProcDamage = 10;
+constexpr int kMagickaEdgeProcCost = 10;       // magicka, and the floor to spend it
+
 // M20 (ranged weapons): true if (targetX,targetY) is within `range` world
 // units of (attackerX,attackerY) and inside a 60-degree forward-facing
 // cone given the attacker's yaw (radians) -- the same nearest-in-cone

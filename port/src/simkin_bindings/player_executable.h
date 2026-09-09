@@ -288,6 +288,16 @@ public:
     // Clamps m_Health at 0 -- mirrors MonsterExecutable::ApplyDamage().
     void ApplyDamage(int amount);
 
+    // M86: the real `+0x17c` hit timer -- see ApplyDamage's own comment
+    // and main.cpp's RenderHud. Counted down by the HUD draw, exactly
+    // where `FUN_1002ae88` counts it down.
+    static constexpr int kHurtTimerUnits = 0x40;
+    int hurtTimer() const { return m_HurtTimer; }
+    void TickHurtTimer(int deltaUnits) {
+        if (m_HurtTimer > 0) m_HurtTimer -= deltaUnits;
+        if (m_HurtTimer < 0) m_HurtTimer = 0;
+    }
+
     // M37: the caster side of the real magic to-hit model (see combat.h).
     //
     // level() is the real `magnitude` behind every status-effect branch --
@@ -593,6 +603,7 @@ private:
     // Vitals (M10) -- fixed baseline defaults, see class comment.
     int m_Health = 100, m_MaxHealth = 100;
     int m_Magicka = 50, m_MaxMagicka = 50;
+    int m_HurtTimer = 0;  // M86
     int m_Fatigue = 100, m_MaxFatigue = 100;
     int m_Level = 1;
     int m_Experience = 0;

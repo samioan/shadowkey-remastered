@@ -6,6 +6,95 @@
 
 namespace sk {
 
+// ---- M86: the hit-flash ramps and their timer ----
+//
+// `FUN_1000f304(engine, row, r0, g0, b0, r1, g1, b1)`, transcribed. The
+// real one does the interpolation in floats and truncates each channel
+// back to an int per step, which is why this does too rather than folding
+// the divide into the pack -- the two disagree by a rung at several steps.
+HitFlashRamps::HitFlashRamps() {
+    struct Row {
+        int r0, g0, b0, r1, g1, b1;
+    };
+    // `FUN_1000f4b4`, verbatim and in order: seven red rows then seven
+    // green ones, each family four copies of the same dark-floored ramp
+    // followed by three with progressively brighter floors.
+    static const Row kRows[14] = {
+        {0x40, 0, 0, 0xff, 0, 0}, {0x40, 0, 0, 0xff, 0, 0}, {0x40, 0, 0, 0xff, 0, 0},
+        {0x40, 0, 0, 0xff, 0, 0}, {0x80, 0, 0, 0xff, 0, 0}, {0xc0, 0, 0, 0xff, 0, 0},
+        {0xff, 0, 0, 0xff, 0, 0}, {0, 0x40, 0, 0, 0xff, 0}, {0, 0x40, 0, 0, 0xff, 0},
+        {0, 0x40, 0, 0, 0xff, 0}, {0, 0x40, 0, 0, 0xff, 0}, {0, 0x80, 0, 0, 0xff, 0},
+        {0, 0xc0, 0, 0, 0xff, 0}, {0, 0xff, 0, 0, 0xff, 0},
+    };
+    for (int row = 0; row < 14; ++row) {
+        const Row& d = kRows[row];
+        // The real step is `(end - start) * DAT_1000f4a0` with that
+        // constant 1/16 -- sixteen entries spanning the range exclusive of
+        // the endpoint, not fifteen steps inclusive of it.
+        const float dr = static_cast<float>(d.r1 - d.r0) / 16.0f;
+        const float dg = static_cast<float>(d.g1 - d.g0) / 16.0f;
+        const float db = static_cast<float>(d.b1 - d.b0) / 16.0f;
+        float r = static_cast<float>(d.r0), g = static_cast<float>(d.g0),
+              b = static_cast<float>(d.b0);
+        for (int i = 0; i < 16; ++i) {
+            const int ri = static_cast<int>(r), gi = static_cast<int>(g),
+                      bi = static_cast<int>(b);
+            // `uVar1 & 0xfff0 | (r >> 4) << 8 | (b >> 4)` -- green keeps
+            // its own bits 4..7 in place rather than being shifted down
+            // and back, which is the same thing for a 0..255 channel.
+            entry[row][i] = static_cast<uint16_t>((gi & 0xF0) | ((ri >> 4) << 8) | (bi >> 4));
+            r += dr;
+            g += dg;
+            b += db;
+        }
+    }
+}
+
+const HitFlashRamps& FlashRamps() {
+    static const HitFlashRamps ramps;
+    return ramps;
+}
+
+// `FUN_10067c3c`.
+void HitFlash::Arm(int periodUnits, int minRow, int maxRow) {
+    period = periodUnits;
+    rowMin = minRow;
+    rowMax = maxRow;
+    stepTimer = periodUnits;
+    total = (maxRow - minRow) * periodUnits * 2;
+    dir = 1;
+    row = minRow;
+}
+
+// `FUN_10064f08`. The real one is called from the draw path rather than
+// the tick, which is why it takes the frame delta rather than a tick
+// count; the port calls it once per world tick with the same
+// kAiFrameDeltaUnits every other engine timer in this port uses.
+void HitFlash::Tick(int deltaUnits) {
+    if (total == -1) return;
+    total -= deltaUnits;
+    if (total < 1) {
+        total = -1;
+        row = -1;
+        return;
+    }
+    stepTimer -= deltaUnits;
+    if (stepTimer >= 1) return;
+    row += dir;
+    stepTimer = period;
+    if (row > rowMax) {
+        row = rowMax;
+        dir = -1;
+    }
+    if (row < rowMin) {
+        row = rowMin;
+        dir = 1;
+        // The real line, and the reason a flash that survives a full
+        // round trip speeds up rather than repeating at one rate.
+        period >>= 1;
+    }
+}
+
 namespace {
 
 struct Vec3 {
@@ -515,7 +604,8 @@ void RasterizeTriangle(Backbuffer& backbuffer, std::vector<float>& depthBuffer,
 void RasterizeModelTriangle(Backbuffer& backbuffer, std::vector<float>& depthBuffer,
                              const ProjectedVertex& a, const ProjectedVertex& b,
                              const ProjectedVertex& c, const Model& model, int skinIndex,
-                             bool asSkybox = false) {
+                             bool asSkybox = false, uint8_t* objectIds = nullptr,
+                             uint8_t objectId = 0, int flashLevel = -1) {
     // M66: a model with no skin pixels has nothing to sample. Every texel
     // would come back as the chroma key anyway (Model::TexelAt returns
     // 0x0f0f for any out-of-range coordinate), so this changes nothing
@@ -597,6 +687,27 @@ void RasterizeModelTriangle(Backbuffer& backbuffer, std::vector<float>& depthBuf
             // RGB444 skin rather than indexing a .zlu palette rung.
             // Approximation in the mapping, right in the behaviour: the
             // two pipelines now agree about distance.
+            // M85: the stencil half of the real actor rasterizers --
+            // `*(u8 *)(engine + 0x5b8 + x + y * 0xb0) = objectId`, at
+            // every pixel actually drawn, after the chroma-key cutout and
+            // after the depth test, which is where the engine has it too.
+            // That ordering is the whole point: what the buffer holds is
+            // what you can *see*, so a creature behind a wall or behind
+            // another creature cannot be the one the melee search finds.
+            if (objectIds != nullptr && objectId != 0) {
+                objectIds[static_cast<size_t>(depthIndex)] = objectId;
+            }
+            // M86: `Poly3D_RasterizeTextured_v8`'s replacement for the
+            // texel -- a read out of the ramp row `flashLevel`, indexed by
+            // the texel's own red nibble, with no light term (v8 is one of
+            // the fade=N variants). See zone_renderer.h's HitFlashRamps.
+            if (flashLevel >= 0) {
+                const HitFlashRamps& ramps = FlashRamps();
+                const int row = std::clamp(flashLevel, 0, 13);
+                const int step = (raw444 >> 8) & 0xF;
+                backbuffer.SetPixel(px, py, ExpandRGB444(ramps.entry[row][step], 1.0f));
+                continue;
+            }
             float lightF = l0 * a.light + l1 * b.light + l2 * c.light;
             float brightness = std::clamp(lightF / static_cast<float>(kMaxLightLevel), 0.0f, 1.0f);
             backbuffer.SetPixel(px, py, ExpandRGB444(raw444, brightness));
@@ -626,7 +737,8 @@ void SubmitModel(Backbuffer& backbuffer, std::vector<float>& depthBuffer, const 
                   float offsetZ, float camX, float camY, float camZ, float cosYaw, float sinYaw,
                   float cosPitch, float sinPitch, float focalX, float focalY,
                   float entityYaw = 0.0f, float scale = 1.0f, int frameIndex = 0,
-                  bool asSkybox = false, float rotA = 0.0f, float rotB = 0.0f) {
+                  bool asSkybox = false, float rotA = 0.0f, float rotB = 0.0f,
+                  uint8_t* objectIds = nullptr, uint8_t objectId = 0, int flashLevel = -1) {
     // M35: see kModelForwardYawOffset -- a model's forward is its local
     // +Z, so a heading measured from world +X needs a quarter turn taken
     // out of it before it can be used as a rotation of the local axes.
@@ -764,7 +876,7 @@ void SubmitModel(Backbuffer& backbuffer, std::vector<float>& depthBuffer, const 
         }
         for (int i = 1; i + 1 < clippedCount; ++i) {
             RasterizeModelTriangle(backbuffer, depthBuffer, pvc[0], pvc[i], pvc[i + 1], model,
-                                    skinIndex, asSkybox);
+                                    skinIndex, asSkybox, objectIds, objectId, flashLevel);
         }
     }
 }
@@ -880,6 +992,10 @@ void ZoneRenderer::Render(Backbuffer& backbuffer, const Zone& zone, const Camera
     // camera. (The colour is this port's own; `engine+0x630`'s value was
     // never traced.)
     backbuffer.Fill(kBackgroundFill);
+    // M85: the object-ID buffer starts every frame empty, the way
+    // `FUN_10015354`'s `memset(engine+0x5b8, 0, 0x8f00)` clears the real
+    // one (0x8f00 == 176 * 208) before the scene is drawn.
+    std::fill(m_ObjectIds.begin(), m_ObjectIds.end(), static_cast<uint8_t>(0));
     std::vector<float> depthBuffer(static_cast<size_t>(Backbuffer::kWidth) * Backbuffer::kHeight,
                                     0.0f);
 
@@ -1083,7 +1199,9 @@ void ZoneRenderer::Render(Backbuffer& backbuffer, const Zone& zone, const Camera
             int skin = (pe.skinIndex >= 0 && pe.skinIndex < model->skinCount) ? pe.skinIndex : 0;
             SubmitModel(backbuffer, depthBuffer, zone, *model, skin, baseTileX, baseTileY, baseZ,
                         camX, camY, camZ, cosYaw, sinYaw, cosPitch, sinPitch, focalX, focalY,
-                        pe.yaw, pe.scale, pe.frameIndex, /*asSkybox=*/false, pe.rotA, pe.rotB);
+                        pe.yaw, pe.scale, pe.frameIndex, /*asSkybox=*/false, pe.rotA, pe.rotB,
+                        m_ObjectIds.data(), static_cast<uint8_t>(pe.objectId & 0xFF),
+                        pe.flashLevel);
         }
     }
 
@@ -1094,6 +1212,12 @@ void ZoneRenderer::Render(Backbuffer& backbuffer, const Zone& zone, const Camera
         SubmitBillboard(backbuffer, depthBuffer, bb, camX, camY, camZ, cosYaw, sinYaw, cosPitch,
                         sinPitch, focalX, focalY);
     }
+}
+
+uint16_t FlashRamp565(int row, int step) {
+    const int r = std::clamp(row, 0, 13);
+    const int i = std::clamp(step, 0, 15);
+    return ExpandRGB444(FlashRamps().entry[r][i], 1.0f);
 }
 
 }  // namespace sk

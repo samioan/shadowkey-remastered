@@ -76,6 +76,50 @@ int RollDamage(int attackerAttack, int defenderDefense, int defenderArmor, int d
     return (std::max)(0, mitigated);
 }
 
+// M87: `FUN_100425bc`'s melee tail. See combat.h for the transcription and
+// for why it is a separate function from RollDamage rather than a flag on
+// it -- the roll itself is a different one.
+PlayerMeleeResult RollPlayerMeleeDamage(int attackerAttack, int defenderDefense, int defenderArmor,
+                                         int dmgMin, int dmgMax, bool halveRoll,
+                                         bool targetIsSpider, int spiderBonusMin,
+                                         int spiderBonusMax, bool weaponIsMagickaEdge,
+                                         int magicka) {
+    PlayerMeleeResult out;
+    // The same gate the creature path uses -- `FUN_1004b71c` wraps
+    // FUN_1004b620, and the extra dodge/block test inside it is the one
+    // piece of the real to-hit this port still does not reproduce (see
+    // RollMeleeHit).
+    if (!RollMeleeHit(attackerAttack, defenderDefense)) return out;
+
+    const int lo = (std::min)(dmgMin, dmgMax);
+    const int hi = (std::max)(dmgMin, dmgMax);
+    // `FUN_100730c8(rng, min, max)` == `min + rand % (max - min + 1)`.
+    // Inclusive, unlike the creature's own roll.
+    int raw = lo + std::rand() % ((hi - lo) + 1);
+    // The exhaustion halving, on the roll and before every bonus -- which
+    // is where FUN_100425bc has it, one line after the roll.
+    if (halveRoll) raw >>= 1;
+
+    // The Spider Impaler. Note this bonus is *not* halved by exhaustion
+    // and the base roll is: the order is roll, halve, then add.
+    if (targetIsSpider) {
+        const int span = spiderBonusMax - spiderBonusMin;
+        if (span > 0) raw += spiderBonusMin + std::rand() % span;
+    }
+
+    // The Magicka Edge Axe. Both conditions are the real ones, including
+    // the strict `10 <` on the pool -- at exactly ten magicka it does not
+    // fire, and it never takes the player below zero because of it.
+    if (weaponIsMagickaEdge && magicka > kMagickaEdgeProcCost &&
+        (std::rand() % 101) < kMagickaEdgeProcChance) {
+        raw += kMagickaEdgeProcDamage;
+        out.magickaSpent = kMagickaEdgeProcCost;
+    }
+
+    out.damage = (std::max)(0, raw - defenderArmor);
+    return out;
+}
+
 bool InInteractRange(float playerX, float playerY, float playerYaw, float targetX, float targetY,
                       float range, float minFacing) {
     float dx = targetX - playerX, dy = targetY - playerY;

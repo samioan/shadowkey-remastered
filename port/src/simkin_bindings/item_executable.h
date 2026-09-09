@@ -256,6 +256,41 @@ public:
     bool isShield() const { return m_EntityCategory == 15; }
     int damageMin() const { return m_DamageMin; }
     int damageMax() const { return m_DamageMax; }
+    // ---- M87: `AddDamageBonus(name, min, max)`, item binding 0 ----
+    //
+    // `FUN_1002ebc4` appends to a **four-slot named table** on the item --
+    // `item+0x1e0 + n*0x20` is a 16-byte name, `+0x1f0` and `+0x1f4` its
+    // two bounds, with the count at `+0x1d4` -- and `FUN_1002eb48(item,
+    // key, &min, &max)` strcmps its way down all four looking for a key.
+    // Nothing about the table is spider-specific; the one consumer is.
+    //
+    // `FUN_100425bc`'s melee arm looks it up with the literal key
+    // `"spiders"` and only when the target's `+0x2d0` is 1
+    // (MonsterExecutable::spider(), SetSpider's own field), then rolls
+    // `min + rand % (max - min)` and adds it to the damage before armour.
+    // It also sprintfs `"attackRoll: spider impaler min %d max %d rolled
+    // %d"` -- the developers' own name for the weapon this exists for.
+    //
+    // The shipped corpus has exactly one call site, and it is that weapon:
+    // `weapons/spider_impaler.s`'s `AddDamageBonus("spiders", 4, 22)`, on
+    // a 4..12 axe. So against a spider the Spider Impaler swings for up to
+    // 33 instead of 11 -- nearly triple, and this port had none of it.
+    // The table is kept general anyway, because the item side is.
+    static constexpr int kMaxDamageBonuses = 4;
+    static constexpr const char* kSpiderBonusKey = "spiders";
+    struct DamageBonus {
+        std::string name;
+        int min = 0;
+        int max = 0;
+    };
+    // `FUN_1002eb48` -- null when this item carries no bonus under `key`.
+    const DamageBonus* FindDamageBonus(const std::string& key) const {
+        for (const DamageBonus& b : m_DamageBonuses) {
+            if (b.name == key) return &b;
+        }
+        return nullptr;
+    }
+    const std::vector<DamageBonus>& damageBonuses() const { return m_DamageBonuses; }
     bool equipped() const { return m_Equipped; }
     void SetEquipped(bool equipped) { m_Equipped = equipped; }
     // M25: a real weapon script's own SetWeaponSprite()/SetAnimationFrames()
@@ -457,6 +492,7 @@ private:
     int m_ArmorValue = 0;
     int m_ArmorType = 0;
     int m_ArmorConstraint = 0;
+    std::vector<DamageBonus> m_DamageBonuses;  // M87
     int m_DamageMin = 0;
     int m_DamageMax = 0;
     int m_WeaponSprite = -1;
