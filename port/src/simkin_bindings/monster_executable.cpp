@@ -441,13 +441,24 @@ void MonsterExecutable::ApplyStatModifier(int statIndex, int delta, int duration
     AddEffect(*this, kDurationTimed, statIndex, kOpIncrement, delta, durationSeconds);
 }
 
-bool MonsterExecutable::ConsumeAttackCadence(int deltaUnits) {
-    m_AttackCadence += deltaUnits;
-    if (m_AttackCadence <= kAiAttackCadenceThreshold) return false;
+void MonsterExecutable::JitterAttackCadence() {
     // Real reset: `rand & 0x1f`. Uses the same host RNG the rest of this
     // port's combat rolls use rather than reproducing the engine's own
-    // generator, which is not decompiled.
+    // generator, which is not decompiled. It makes the next decision land
+    // 22.5 to 25.6 ticks later instead of exactly 25.6, which is the whole
+    // point -- a pack that acquired the player on one frame would
+    // otherwise swing in lockstep forever.
     m_AttackCadence = std::rand() & 0x1f;
+}
+
+bool MonsterExecutable::TickLifespan(int deltaUnits) {
+    if (m_LifespanUnits <= 0) return false;
+    // The real line is `+0x2ec -= 3 * FUN_1001afa4(engine)` -- a lifespan
+    // burns three times as fast as every other timer in the tick. Nothing
+    // in the corpus arms it, so this is transcription, not observation.
+    m_LifespanUnits -= 3 * deltaUnits;
+    if (m_LifespanUnits > 0) return false;
+    m_LifespanUnits = 0;
     return true;
 }
 
@@ -491,6 +502,134 @@ bool MonsterExecutable::method(const skString& methodName, skRValueArray& args,
     }
     if (methodName == skString("SetAggressive") && args.entries() == 1) {
         m_Aggressive = args[0].boolValue();
+        return true;
+    }
+    // ---- M77: the remaining Monster(AI) bindings ----
+    //
+    // With these the class answers all 55 names in the real trie
+    // (docs/SIMKIN_NATIVE_API.md's `0x14da4`). The ones with no corpus
+    // caller are here because "stored and inert" and "soft-failed" are
+    // different claims and only the first one is checkable.
+    //
+    // SetBoss (15 scripts): the second attack throttle, and the
+    // SetCanTeleport block's implicit target. See monster_ai.h.
+    if (methodName == skString("SetBoss") && args.entries() == 1) {
+        m_Boss = args[0].boolValue();
+        return true;
+    }
+    // SetAttackSpeed (0 scripts): seconds between a boss's swings. The
+    // constructor's 2 is therefore what every boss in the game uses.
+    if (methodName == skString("SetAttackSpeed") && args.entries() == 1) {
+        m_AttackSpeedSeconds = args[0].intValue();
+        return true;
+    }
+    // SetCanTeleport (4 scripts) / ReplicateTeleport (1). The second only
+    // ever broadcasts the first over a multiplayer session
+    // (`if (engine+0x5c0 && self+0x2ad) FUN_1003cbd0(...)`), so it is a
+    // real no-op here rather than an unimplemented one.
+    if (methodName == skString("SetCanTeleport") && args.entries() == 1) {
+        m_CanTeleport = args[0].boolValue();
+        return true;
+    }
+    if (methodName == skString("ReplicateTeleport")) {
+        return true;
+    }
+    // SetImmobile (3 scripts): dispatcher case 0xf writes the same byte
+    // (`monster+0x2bc`) SetParalyzed's countdown clears, so an immobile
+    // creature is one holding the pose a paralysed one is put into.
+    if (methodName == skString("SetImmobile") && args.entries() == 1) {
+        m_Immobile = args[0].boolValue();
+        return true;
+    }
+    // StopAnimating (1 script): `+0x302 = !b`, and `+0x12c = -1` when
+    // switching it off, so the creature also drops whatever clip it was
+    // playing. Every PlayAnimation call in the tick and in the attack is
+    // guarded by this byte.
+    if (methodName == skString("StopAnimating") && args.entries() == 1) {
+        const bool stop = args[0].boolValue();
+        if (stop) m_CurrentAnim = -1;
+        m_Animating = !stop;
+        return true;
+    }
+    // SetHealth (30 scripts) is byte-for-byte the same dispatcher case as
+    // SetMaxHealth (both write the stats block's +0x12, +0x24 and +0x2a),
+    // i.e. a pure alias. It was soft-failing, which left 30 creatures on
+    // whatever SetMaxHealth happened to leave behind.
+    if (methodName == skString("SetHealth") && args.entries() == 1) {
+        m_MaxHealth = args[0].intValue();
+        m_CurrentHealth = m_MaxHealth;
+        return true;
+    }
+    // DoDamage (20 scripts): `stats->vtable[0x10](stats, n, 0, 0, 0)` --
+    // the creature damages *itself*, unsourced. Routed through ApplyDamage
+    // so invulnerability, death and OnKilled all behave as they would from
+    // any other source.
+    if (methodName == skString("DoDamage") && args.entries() >= 1) {
+        ApplyDamage(args[0].intValue());
+        return true;
+    }
+    // SetLifespan (0 scripts): `+0x2ec = seconds << 8`. See TickLifespan().
+    if (methodName == skString("SetLifespan") && args.entries() == 1) {
+        m_LifespanUnits = args[0].intValue() << 8;
+        return true;
+    }
+    // SetItemRequiredToHit (0 scripts): `+0x2e0`, read by the attack
+    // resolution as "only this item id can hurt me".
+    if (methodName == skString("SetItemRequiredToHit") && args.entries() == 1) {
+        m_ItemRequiredToHit = args[0].intValue();
+        return true;
+    }
+    // SetEnemy / Follow (0 scripts each) both write `monster+0x20c`, the
+    // target, without touching the package; GuardPlayer (0) writes
+    // `monster+0x2e8`, the "whose side am I on" pointer whose only reader
+    // is the creature-vs-creature scan in the look arm. This port's tick
+    // has exactly one possible target (the player, as in singleplayer) and
+    // no second faction, so all three are stored-and-inert -- accepting
+    // them is what makes that a statement rather than a silent miss.
+    if ((methodName == skString("SetEnemy") || methodName == skString("Follow") ||
+         methodName == skString("GuardPlayer")) &&
+        args.entries() == 1) {
+        return true;
+    }
+    // FindPathNode(name) (1 script): looks up a named node in the zone's
+    // `.pth` table and moves the creature onto the one nearest its target.
+    // The `.pth` format is still undecoded past its header
+    // (docs/ZONE_FORMAT.md), so this returns the engine's own
+    // node-not-found result, 0, rather than pretending.
+    if (methodName == skString("FindPathNode") && args.entries() >= 1) {
+        returnValue = skRValue(0);
+        return true;
+    }
+    // SetState(package, seconds) (0 scripts) is the script-callable form of
+    // the timed package the Fear spell uses -- dispatcher case 0xb, the
+    // same FUN_10086b98 body SetAiPackageTimed() already implements.
+    if (methodName == skString("SetState") && args.entries() >= 2) {
+        SetAiPackageTimed(args[0].intValue(), args[1].intValue());
+        return true;
+    }
+    // The getters, none of which any shipped script calls.
+    if (methodName == skString("GetAttackNoise")) {
+        returnValue = skRValue(m_AttackNoiseId);
+        return true;
+    }
+    if (methodName == skString("GetDeathNoise")) {
+        returnValue = skRValue(m_DeathNoiseId);
+        return true;
+    }
+    if (methodName == skString("Aggressive")) {
+        returnValue = skRValue(m_Aggressive);
+        return true;
+    }
+    if (methodName == skString("GetWimpy")) {
+        returnValue = skRValue(m_Wimpy);
+        return true;
+    }
+    if (methodName == skString("GetChaseRadius")) {
+        returnValue = skRValue(m_ChaseRadius);
+        return true;
+    }
+    if (methodName == skString("GetCurrentAIPackage")) {
+        returnValue = skRValue(m_AiPackage);
         return true;
     }
     if (methodName == skString("SetName") && args.entries() == 1) {
@@ -719,11 +858,20 @@ bool MonsterExecutable::method(const skString& methodName, skRValueArray& args,
         m_AiPackage = kAiSpellAssist;
         return true;
     }
-    if ((methodName == skString("AiActivate") || methodName == skString("AiWounded") ||
-         methodName == skString("AiPursue")) &&
+    // M77 -- CORRECTED. AiPursue was grouped with the no-ops. It is not
+    // one: dispatcher case 0x2d sets the package to **5** and stores a
+    // target, exactly like AiAttack's case 0x2a does with 3. What makes it
+    // look inert is the other end -- no arm of the tick reads package 5,
+    // so a creature put into it does stop acting. That is a different
+    // claim, and GetCurrentAIPackage() can tell them apart.
+    if (methodName == skString("AiPursue") && args.entries() >= 1) {
+        m_AiPackage = kAiFollow;
+        return true;
+    }
+    if ((methodName == skString("AiActivate") || methodName == skString("AiWounded")) &&
         args.entries() >= 0) {
-        // Genuine no-ops: each of these dispatcher cases falls straight
-        // through to the shared `break` and stores nothing.
+        // Genuine no-ops: both of these dispatcher cases fall straight
+        // through to the shared `break` and store nothing.
         return true;
     }
     if (methodName == skString("SetParalyzed") && args.entries() >= 1) {

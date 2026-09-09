@@ -6757,7 +6757,13 @@ soft-fails 39 -> 39, all 14 tracked `.ppm` renders byte-identical,
       is also not placed in any of the 21 zones (only the plain
       `monsters/Bandit_Brawler.s` is) -- the same story from the other side.
 
-  **What it is worth.** Loading every category-2/7 placement in all 21 zones
+  **What it is worth.** (**M77 corrected every number in this paragraph** --
+  it was measured with creatures that never call an `Ai*` binding sitting
+  in the constructor's package -1, and placement puts them in package 2.
+  The corrected census is 241 armed, 58 live handlers and 4 dead, across 20
+  scripts; `monsters/lakvan.s`, `twilite/pergan_asuul.s` and the nine
+  `raiders/*.s` arena creatures all work after all. Kept as written for the
+  record.) Loading every category-2/7 placement in all 21 zones
   through its real binding class: 1539 have a real script, **29 end their
   `Init()` armed** (non-aggressive, package idle) and **28 of those have an
   `OnDetect` handler that now runs -- it was 0**. Six distinct scripts:
@@ -6800,6 +6806,143 @@ soft-fails 39 -> 39, all 14 tracked `.ppm` renders byte-identical,
       no player can reach it. Recorded rather than fixed: the fix is a sweep
       across ~25 catch sites. A brace/bracket census of the corpus finds 12
       unbalanced files in all, of which only these three actually raise.
+
+- [x] **M77 -- every enemy in the game gets its AI back.** Reported: "only
+  the Azra rats of the first level have proper idle, chasing and attacking
+  AI; no other enemy has any AI attached to them, standing still doing
+  nothing when the player is near", and separately "in the original the
+  enemies attack at random intervals with large gaps, but in the port they
+  attack non stop". Both are real, and both come from the same milestone's
+  worth of re-reading `FUN_10082224`. Full write-up in
+  docs/WORLD_MODEL.md's new "The creature AI tick, transcribed" section;
+  the derivation lives in `port/src/simkin_bindings/monster_ai.h`.
+
+    - **A placed creature does not start asleep.** The actor constructor
+      (`FUN_100815e0`) sets `monster+0x2a8 = -1` and this port copied it.
+      But entity vtable slot **`+0x10`** is the "attach to the engine"
+      virtual, and the creature classes override it -- `FUN_10086f9c` for
+      vtable `0x100fe2b8` (entities.txt category 2, i.e. every creature and
+      NPC in the game) and `0x100fee0c` (category 13), `FUN_100866c0` for
+      `0x100ffaf4` (category 7). Both end:
+
+      ```
+      engine->actorRegistry[self->slot] = self;      // engine+0x14620
+      self->+0x5e  = 0x100;
+      self->+0x2a8 = 2;                              // the AI package
+      self->+0x1d4 = 10;
+      ```
+
+      and `GameEngine_InitLevel` calls it on **every** placement, one line
+      after the factory allocates the entity and *before* the `.ent` record
+      or the script are read. So a script's `Init()` always runs on a
+      creature that is already looking for a target.
+
+      That is the whole bug. Package 2 is the only state in which the tick
+      evaluates perception, and the corpus leans on the default entirely:
+      **318 scripts call `SetAggressive(true)`; only 38 call `AiDetect()`.**
+      Across the 21 zones, of 1539 category-2/7 placements with a real
+      script, 1296 are hostile and only **47** ask for a package by hand --
+      so **1249 hostile placements went from standing still to fighting**.
+      `monsters/Azra_Rat.s` is one of the 47, which is exactly why the rats
+      were the only creatures that worked: they call a binding that
+      re-states what the placement already did.
+
+    - **What the attack cadence gates.** `monster+0x2c4` and its `0x100`
+      threshold were already right (M35). What was wrong is where they sit.
+      The accumulate line is *above* the package branch, so it runs on
+      every tick in every package -- including while a creature is still
+      closing, which is what makes the first swing land on arrival. And the
+      threshold gates the **whole** approach/attack/give-up decision, not
+      the damage roll. This port accumulated only while already in melee
+      range and used the gate purely to rate-limit damage, while
+      re-asserting the swing clip on each of the ~25 ticks in between. The
+      real swing is played by the attack, once:
+      `vtable[0x148](self, +0x2be, 1, +0x2c1, 0xf00)` -- mode 1 is "play
+      through once, then hand over to this other clip", so between swings a
+      creature in range stands in its **idle** pose. That is the reported
+      "attacking non stop": one blow a second, animated as though it were
+      twenty-five.
+
+    - **`SetBoss` is the second, slower gate.** `monster+0x266` (15
+      scripts) arms an independent throttle on the game clock: a boss may
+      swing only once every `monster+0x2cc` seconds (`SetAttackSpeed`),
+      which the constructor sets to 2 and **no shipped script ever
+      changes** -- so every boss in the game attacks at half the rate of
+      everything else. Neither binding existed here.
+
+    - **CORRECTED: aggro is not sight-gated.** WORLD_MODEL.md's "Aggro is
+      gated on line of sight, not distance alone" was wrong, and this port
+      followed it into inventing a vertical gate (`kAggroMaxHeightDelta`)
+      and a lost-sight grace period (`kLoseInterestTicks`) on top. Both
+      raycasts are real and neither is in the acquire arm: `FUN_10082004`
+      is the melee **reach** test inside the attack decision, and
+      `vtable[0x21c]` is the **OnDetect** sightline (M76). The acquire arm
+      has only the scaled-squared distance against `SetChaseRadius` and the
+      perception roll, and giving up is `if (chaseRadius < d) { target = 0;
+      package = 2; }` and nothing else. A creature inside 8.4 tiles comes
+      for you through a wall. Both invented constants are gone, along with
+      `lastSeenX/Y`. The real vertical limit does exist -- but on the
+      *attack*, as `|self.z - target.z| < 0x200`, and only for melee: a
+      creature with a spell in slot 0 or `SetAttachedWeapon(225)` (the bow,
+      all 27 shipped archers) skips it and the reach raycast both.
+
+    - **CORRECTED: M76's own census.** M76 measured "29 placements armed,
+      28 with a live `OnDetect`, 34 with a dead one" against the wrong
+      spawn package. Same corpus, same method, corrected default:
+      **241 armed, 58 live, 4 dead**, across 20 distinct scripts instead of
+      six. `monsters/lakvan.s` and `twilite/pergan_asuul.s` -- written up
+      as dead ends for never calling `AiDetect()` -- both work, as do the
+      nine `raiders/*.s` arena creatures. The only shape that still kills
+      an `OnDetect` is an `Init()` that calls `SetAggressive(true)`
+      (`delfhide/dh_guard_talk.s`).
+
+    - **The Monster(AI) surface is now complete.** Parsing
+      `FUN_10012584`'s trie gives all 55 (name -> index) pairs, and those
+      indices *are* its dispatcher's case numbers. Fourteen were still
+      soft-failing here, two of them with real corpus use behind them:
+      **`SetHealth`** (30 scripts) is byte-for-byte the same case as
+      `SetMaxHealth` -- a pure alias -- and **`DoDamage(n)`** (20 scripts)
+      damages the creature *itself*. The rest: `SetBoss`, `SetAttackSpeed`,
+      `SetCanTeleport` (4 -- jump to a path node beside the player when it
+      leaves the chase radius), `ReplicateTeleport`, `SetImmobile` (3),
+      `StopAnimating` (1), `FindPathNode` (1 -- returns the engine's own
+      node-not-found 0, the `.pth` table being undecoded), `SetLifespan`
+      (`seconds << 8`, counted down at **3x** the frame delta),
+      `SetItemRequiredToHit`, `SetEnemy`/`Follow`/`GuardPlayer`,
+      `SetState`, and the six getters. A sweep that loads all 251 distinct
+      placed creature scripts with the soft-fail observer on now reports
+      zero Monster(AI) misses.
+
+    - **Two smaller corrections.** `AiPursue` was grouped with the genuine
+      no-ops; its case `0x2d` does store a package -- **5** -- exactly as
+      `AiAttack`'s stores 3. What makes it look inert is the other end: no
+      arm of the tick reads package 5 (nor 4, nor 6, nor -1).
+      And `vtable[0x1b4]` (`FUN_10006704`) is not the movement step: it is
+      eleven instructions that step `actor+0xb8` an eighth of the way
+      toward `actor+0x1a4`, or halve it when that is 0 -- an angular
+      damper. Real locomotion runs off `+0x1b9`/`+0x1bc`/`+0x1c0` through
+      the entity physics update and pathfinds over the zone's `.pth`
+      nodes, which stay undecoded; this port's steer-and-slide chase is the
+      one substantial part of the tick that is still its own.
+
+  **Verification.** New `m77_monster_ai_smoke` (40 checks, suite **68/68 ->
+  69/69**): the spawn package and every `Ai*` binding's package value; the
+  three creatures the report named (`cave_spider`, `alpha_wolf`,
+  `bandit_brawler`) shown hostile-and-looking with no `AiDetect()` anywhere
+  in their files; the 21-zone census with its 1539 / 1296 / 47 / 1249
+  counts; the cadence driven the way the tick drives it, measured at
+  **23-26 ticks between swings (0.92-1.04 s), never back to back**; the
+  boss throttle's arithmetic and `SetBoss`/`SetAttackSpeed` on a real boss
+  (`monsters/lakvan.s`); every new binding stored, plus the whole-corpus
+  soft-fail sweep; and the vertical limit with its three exemptions.
+  `m76_detect_smoke` was updated to the corrected census rather than left
+  asserting the old numbers.
+
+  Confirmed in the running game as well as in the tests: teleporting next
+  to a Bandit Brawler in azra (a creature with no `Ai*` call in its script,
+  and so previously inert) has it acquire and fight -- `ents` reports it
+  `attacking`, `diff` reports `ai.acquired +1` and `combat.hits_on_player
+  +8` over ~13 seconds of contact.
 
 ## Next milestones (not yet started)
 

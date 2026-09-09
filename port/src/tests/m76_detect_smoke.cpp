@@ -221,20 +221,21 @@ int main(int argc, char** argv) {
         Check(guard && DefinesHandler(*guard, "OnDetect") && guard->aggressive() && !armed(*guard),
               "delfhide/dh_guard_talk.s defines OnDetect but SetAggressive(true) kills it");
 
-        // Lakvan is non-aggressive but never calls AiDetect(), so he stays
-        // in the constructor's package -1 and the arm is never entered. He
-        // is reachable the M75 way instead -- SetUsable(true) + SetUseText.
+        // M77 -- CORRECTED. M76 read these two as dead ends: neither
+        // calls AiDetect() (Pergan's is `//AiDetect();`, commented out in
+        // the shipped file), so both were believed to stay in the actor
+        // constructor's package -1. They do not. Placement puts every
+        // creature in package 2 before Init() runs, so AiDetect() only ever
+        // re-states what is already true, and *both of these work*. Calling
+        // it is decoration; not calling it changes nothing.
         auto lakvan = loadInto(stack, "monsters/lakvan.s");
-        Check(lakvan && DefinesHandler(*lakvan, "OnDetect") &&
-                  lakvan->aiPackage() == sk_b::MonsterExecutable::kAiAsleep && !armed(*lakvan),
-              "monsters/lakvan.s defines OnDetect but never calls AiDetect() -- asleep");
-        Check(lakvan && lakvan->usable(), "  (he is talkable through the M75 use prompt instead)");
+        Check(lakvan && DefinesHandler(*lakvan, "OnDetect") && armed(*lakvan),
+              "monsters/lakvan.s never calls AiDetect() -- and is armed anyway (M77)");
+        Check(lakvan && lakvan->usable(), "  (he is also talkable through the M75 use prompt)");
 
-        // Pergan Asuul has `//AiDetect();` commented out in the shipped
-        // file -- the same dead end, one edit away from working.
         auto pergan = loadInto(stack, "twilite/pergan_asuul.s");
-        Check(pergan && DefinesHandler(*pergan, "OnDetect") && !armed(*pergan),
-              "twilite/pergan_asuul.s: AiDetect() is commented out in the shipped script");
+        Check(pergan && DefinesHandler(*pergan, "OnDetect") && armed(*pergan),
+              "twilite/pergan_asuul.s: its AiDetect() is commented out, and armed anyway");
 
         // A hostile creature is armed for the *other* arm.
         auto rat = loadInto(stack, "monsters/Azra_Rat.s");
@@ -362,22 +363,44 @@ int main(int argc, char** argv) {
     std::printf("  placements whose OnDetect can never run: %d\n", deadHandlers);
 
     for (const std::string& s : armedScripts) std::printf("    armed: %s\n", s.c_str());
-    Check(placed == 1539 && armedPlacements == 29,
-          "1539 creature placements; 29 of them ask the engine to tell them about the player");
-    Check(armedWithHandler == 28,
-          "  28 of those 29 have an OnDetect handler that now actually runs (was 0)");
-    Check(deadHandlers == 34,
-          "  and 34 more ship a handler the engine can never reach");
+    for (const std::string& s : deadHandlerScripts) std::printf("    dead:  %s\n", s.c_str());
+    // M77 -- CORRECTED, and this is the measurement the milestone is for.
+    // M76 asserted 29 / 28 / 34 here, computed with every creature that
+    // never calls an Ai* binding sitting in package -1. With the spawn
+    // package right (simkin_bindings/monster_ai.h), 241 of the 1539
+    // placements are non-aggressive and looking, 58 of them have an
+    // OnDetect the engine reaches, and only 4 ship one it cannot.
+    Check(placed == 1539 && armedPlacements == 241,
+          "1539 creature placements; 241 of them are non-aggressive and looking");
+    Check(armedWithHandler == 58,
+          "  58 have an OnDetect handler that actually runs (M76 could only reach 28)");
+    Check(deadHandlers == 4,
+          "  and only 4 ship one the engine cannot reach (M76 believed 34)");
 
-    // The six distinct scripts behind those 28 placements. Every one of
-    // them did nothing at all before this milestone.
+    // The 20 distinct scripts behind those 58 placements. The six M76
+    // found are still here; the other fourteen are the ones it wrote off
+    // for never calling AiDetect().
     const char* kArmed[] = {
         "broken2/perosius_temp.s",       // a boss: convo, then turns hostile and attacks
-        "dstar_e/dse_skyrim_archer.s",   // city guard, hostile once you've trespassed
+        "delfhide/delfran.s",            // Delfran, the Delve Hideout quest-giver
+        "dstar_e/dse_skyrim_archer.s",   // city guard, hostile once you have trespassed
         "dstar_e/dse_skyrim_soldier.s",  //   ...its partner
+        "dstar_e/thief_ace_archer.s",    // the thieves who greet you before they fight
+        "dstar_e/thief_raider.s",        //
         "erthcave/azra_zombie.s",        // SetAggressive(true) + EC_Menu7 in one handler
+        "monsters/lakvan.s",             // M77: works after all
         "monsters/olpac_trailslag.s",    // opens ghstpass/GP_Menu3, once per save
+        "raiders/blu_bounder.s",         // the nine arena creatures, three per colour
+        "raiders/blu_spiders.s",         //
+        "raiders/blu_wickeder.s",        //
+        "raiders/gld_bounder.s",         //
+        "raiders/gld_spider.s",          //
+        "raiders/gld_wickeder.s",        //
         "raiders/raider_enter.s",        // the arena doorman, opens Raiders/enter
+        "raiders/red_bounder.s",         //
+        "raiders/red_spider.s",          //
+        "raiders/red_wickeder.s",        //
+        "twilite/pergan_asuul.s",        // M77: works after all
     };
     for (const char* rel : kArmed) {
         Check(armedScripts.count(rel) == 1, std::string("placed and armed: ") + rel);
@@ -385,15 +408,11 @@ int main(int argc, char** argv) {
     Check(armedScripts.size() == sizeof(kArmed) / sizeof(kArmed[0]),
           "  and those are all of them");
 
-    // And the ones that stay dead, which is shipped content, not a gap:
-    // lakvan and pergan never call AiDetect() (pergan's is commented out),
-    // the guards call SetAggressive(true), and the ten raiders/*.s arena
-    // creatures set SetAlwaysOnDetect but never AiDetect.
-    for (const char* rel : {"monsters/lakvan.s", "delfhide/dh_guard_talk.s",
-                            "twilite/pergan_asuul.s", "raiders/blu_spiders.s"}) {
-        Check(deadHandlerScripts.count(rel) == 1,
-              std::string("placed with a dead OnDetect (faithful): ") + rel);
-    }
+    // What is left dead is one shape only: an Init() that calls
+    // SetAggressive(true), sending the creature to the attack arm of the
+    // same `if` instead. Shipped content, not a gap.
+    Check(deadHandlerScripts.count("delfhide/dh_guard_talk.s") == 1,
+          "placed with a dead OnDetect (SetAggressive(true)): delfhide/dh_guard_talk.s");
     // `monsters/bbrawler_talk.s`, the script this mechanism is best
     // documented by, is not placed in any of the 21 zones -- only the
     // plain `monsters/Bandit_Brawler.s` is. Its MenuClosed half being dead
@@ -422,11 +441,15 @@ int main(int argc, char** argv) {
         }
         Check(!sawSoftFail, "  and neither binding soft-fails any more");
 
-        // Neither changes anything in singleplayer: the flag's only reader
-        // sits behind `engine+0x5c0`, and the same script never calls
-        // AiDetect(), so it is asleep regardless.
-        Check(spider && spider->aiPackage() == sk_b::MonsterExecutable::kAiAsleep,
-              "  the flag alone does not arm anything -- blu_spiders.s is still asleep");
+        // The flag changes nothing in singleplayer: its only reader sits
+        // behind `engine+0x5c0`, and the guard it is one term of
+        // (`+0x306 || !multiplayer || isHost`) is already satisfied by
+        // `!multiplayer`. M77: what M76 asserted here instead -- that
+        // blu_spiders.s is asleep because it never calls AiDetect() -- was
+        // an artefact of the wrong spawn package. It is armed, and its
+        // OnDetect runs; the flag is still inert.
+        Check(spider && spider->aiPackage() == sk_b::MonsterExecutable::kAiIdle,
+              "  and the creature is armed by its placement, not by the flag");
 
         // DetectOnKilled has no shipped caller at all; drive it directly.
         auto rat = loadInto(stack, "monsters/Azra_Rat.s");
@@ -456,7 +479,8 @@ int main(int argc, char** argv) {
         Check(brawler && !brawler->aggressive(),
               "  after the conversation he stays non-aggressive, as on the device");
         Check(brawler && brawler->aiPackage() == sk_b::MonsterExecutable::kAiAsleep,
-              "  and asleep -- only MenuClosed would have re-armed him");
+              "  and asleep -- his own AiSleep() put him there, and only MenuClosed "
+              "would have re-armed him");
     }
 
     std::printf("\nm76_detect_smoke: %d/%d checks passed -- %s\n", g_checks - g_failures, g_checks,

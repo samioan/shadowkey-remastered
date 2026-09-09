@@ -596,3 +596,11 @@ target_link_libraries(dialogue_smoke PRIVATE sk_bindings sk_world)
 # attacking. See src/tests/m76_detect_smoke.cpp.
 add_executable(detect_smoke src/tests/m76_detect_smoke.cpp)
 target_link_libraries(detect_smoke PRIVATE sk_bindings sk_world)
+
+# M77: the creature AI tick, transcribed -- the spawn AI package that made
+# every non-rat enemy stand still, the cadence that gates the whole
+# decision rather than the damage roll, the boss throttle, and the
+# fourteen Monster(AI) bindings that were still soft-failing.
+# See src/tests/m77_monster_ai_smoke.cpp.
+add_executable(monster_ai_smoke src/tests/m77_monster_ai_smoke.cpp)
+target_link_libraries(monster_ai_smoke PRIVATE sk_bindings sk_world)

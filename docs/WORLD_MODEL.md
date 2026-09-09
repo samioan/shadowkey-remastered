@@ -305,9 +305,10 @@ Functions:
 | value | meaning | set by |
 |-------|---------|--------|
 | `-1`  | asleep / no package | the actor constructor, and `AiSleep` |
-| `2`   | idle — look for a target | default after spawn; `AiDetect` |
+| `2`   | idle — look for a target | **entity vtable `+0x10`, on every placement** (M77, see the end of this file); `AiDetect` |
 | `3`   | pursue/attack a target (`monster+0x20c`) | the tick, on acquiring a target; `AiAttack(target)` |
 | `4`   | flee | `AiFlee(target)` |
+| `5`   | pursue a target — **no arm in the tick reads it** | `AiPursue(target)` |
 | `6`   | spell-assist a target | `AiSpellAssistTarget(target)` |
 
 ### **The distance unit — the key finding**
@@ -366,7 +367,12 @@ case `0x24` writing `+0x2b2`, the same field the death handler
 | `+0x2b0`/`+0x2b2`/`+0x2b4` (u16) | `SetAttackNoise`/`SetDeathNoise`/`SetIsHitNoise` | sound ids |
 | — | `SetMeleeAttackRange` | **a genuine no-op** — its case falls straight through to the shared `break` and stores nothing (only one script in the corpus calls it). Same for `AiActivate` and `AiWounded`. |
 
-### Aggro is gated on line of sight, not distance alone
+### SUPERSEDED (M77): "Aggro is gated on line of sight, not distance alone"
+
+Wrong -- see the M77 section at the end of this file. Both raycasts named
+below are real, but neither is in the acquire arm: `FUN_10082004` is the
+melee reach test and `vtable[0x21c]` is the OnDetect sightline. Kept for
+the function addresses only.
 
 In single-player the only candidate target is `engine+0x618` (the player).
 Acquiring it does **not** rest on the chase radius alone: the tick calls
@@ -3361,10 +3367,22 @@ distance everywhere else in the same function. The constructor default
 
 ### What it is worth, in the shipped data
 
-Loading every category-2/7 placement in all 21 zones through its real
-binding class: 1539 placements have a real script, **29 of them end their
-`Init()` armed** (non-aggressive, package idle), and **28 of those 29 have
-an `OnDetect` handler**. Six distinct scripts are behind them:
+**M77 corrected these numbers.** They were computed with a creature that
+never calls an `Ai*` binding sitting in the actor constructor's package
+-1; placement puts every creature in package 2 before `Init()` runs, so
+`AiDetect()` only ever re-states what is already true. The corrected
+census -- same corpus, same method -- is **241 of the 1539 placements
+non-aggressive and looking, 58 of them with an `OnDetect` the engine
+reaches, and 4 with one it cannot**, across 20 distinct scripts rather
+than six. What is left dead is one shape only: an `Init()` that calls
+`SetAggressive(true)` and so takes the attack arm instead
+(`delfhide/dh_guard_talk.s`). In particular `monsters/lakvan.s` and
+`twilite/pergan_asuul.s` -- written up below as dead ends for never
+calling `AiDetect()` (Pergan's is commented out in the shipped file) --
+both work, as do the nine `raiders/*.s` arena creatures.
+
+The six scripts M76 could already reach, which are still the most
+interesting ones:
 
 | script | what it does |
 | --- | --- |
@@ -3374,9 +3392,9 @@ an `OnDetect` handler**. Six distinct scripts are behind them:
 | `monsters/olpac_trailslag.s` | opens `ghstpass/GP_Menu3`, once per save |
 | `raiders/raider_enter.s` | the arena doorman, opens `Raiders/enter` |
 
-A further **34 placements ship a handler the engine can never reach** —
-the aggressive guards, the never-`AiDetect()`ed bosses, and the ten
-`raiders/*.s` arena creatures.
+(M77: the "further 34 placements ship a handler the engine can never
+reach" that stood here is superseded by the corrected count above -- 4,
+all of them `delfhide/dh_guard_talk.s`.)
 
 ### `SetAlwaysOnDetect`, `DetectOnKilled`, and `MenuClosed`
 
@@ -3425,3 +3443,237 @@ script, so no player can reach it; it is recorded here rather than fixed
 because the fix is a sweep across ~25 catch sites, not part of this
 milestone. A corpus brace/bracket census finds 12 unbalanced files in all,
 of which only these three actually raise.
+
+## The creature AI tick, transcribed -- and the word that turned it on (M77)
+
+M31, M32 and M35 recovered the AI *parameters*; M76 recovered the OnDetect
+arm. What none of them recovered is the single fact that decides whether
+any of it ever runs on a real creature. This section supersedes the two
+places above that got it wrong, and is the reference for the whole tick.
+
+### A placed creature does not start asleep
+
+`FUN_100815e0`, the actor constructor, sets `monster+0x2a8 = -1`. That is
+not the last word. Entity vtable slot **`+0x10`** is the "attach to the
+engine" virtual, and the creature classes override it:
+
+| vtable | entities.txt category | slot `+0x10` |
+|--------|----------------------|--------------|
+| `0x100fe2b8` | 2 — every creature and NPC in the game | `FUN_10086f9c` |
+| `0x100fee0c` | 13 — no shipped placement | `FUN_10086f9c` |
+| `0x100ffaf4` | 7 | `FUN_100866c0` |
+
+(Resolved the usual way: `vtable+0x3c` holds `FUN_10064c60` in all 31
+entity vtables, which fixes each address point; only these three of the 31
+name either function.) Both overrides end with the same five lines:
+
+```c
+engine->actorRegistry[self->slot] = self;      // engine+0x14620
+self->+0x5e  = 0x100;
+self->+0x2a8 = 2;                              // the AI package
+self->+0x1d4 = 10;
+```
+
+and `GameEngine_InitLevel` calls it on **every** placement, one line after
+the factory allocates the entity and *before* the placement record or the
+entity's script are read:
+
+```c
+entity = engineFactory->vtable[0x18](factory, size, typeId);
+entity->vtable[0x10](entity, engine);          // <-- package = 2
+entity->vtable[0x134](entity, reader);         // the .ent record
+```
+
+So a script's own `Init()` always runs on a creature that is *already*
+looking for a target, and `-1` is only ever seen by an actor that was
+constructed and never placed.
+
+That one word is the difference between a level full of monsters and a
+level full of statues. Package 2 is the only state in which the tick
+evaluates perception at all, and the shipped corpus leans on the default
+completely:
+
+| | scripts | placements (all 21 zones) |
+|---|---:|---:|
+| category-2/7 placements with a real script | — | 1539 |
+| `SetAggressive(true)` | 318 | 1296 |
+| ...of those, calling `AiDetect()` or `AiAttack()` | — | **47** |
+| ...relying on the spawn default alone | — | **1249** |
+
+`monsters/Azra_Rat.s` is one of the 47. That is the entire reason the Azra
+rats were the only creatures in this port with any behaviour: they call a
+binding that re-states what the placement already did.
+
+### The tick's own shape
+
+`FUN_10082224`, in its own order, with the parts earlier sections already
+cover named rather than repeated:
+
+```c
+if (self->+0x48 /*destroyed*/)  return;
+if (self->+0x1e4 /*dead*/)      { death clip; return; }
+... the timed-effect list; the fear countdown (+0x300 -> restore +0x2fc);
+    the lifespan countdown (+0x2ec, at 3x the frame delta); the paralysis
+    countdown (+0x294) ...
+if (self->+0x2ee /*SetCanTeleport*/) {
+    if (!target && self->+0x266 /*SetBoss*/) target = engine->player;
+    if (dist(self, target) > self->+0x2b8) FUN_10086a18(self);   // jump to it
+}
+if (target && !self->+0x2bc /*SetImmobile*/) moveGoal = target position;
+if (!self->+0x2bc) vtable[0x1b4](self);
+self->+0x2c4 += FUN_1001afa4(engine);          // the cadence, EVERY tick
+
+if (package == 3 && target) {                  // ---- pursue/attack
+    if (self->+0x294 == 0) vtable[0x208](self, target->x, target->y);
+    d = vtable[0x5c](self, target);
+    if (d < self->+0x2dc) { stop moving; return to the idle pose; }
+    if (0x100 < self->+0x2c4) {                // <-- once a second
+        dz = |self->z - target->z|;            // both from +0xa4, s16
+        ranged = equippedWeapon->isLongRange    // +0x48, +0x1a7
+              || self->+0x310                   // a spell in slot 0
+              || self->+0x2c2 == 0xe1;          // SetAttachedWeapon(225), a bow
+        if (d < self->+0x2dc && (dz < 0x200 || ranged)) {
+            reach = ranged ? true
+                           : FUN_10082004(self, target, +0x2dc >> 8, ..., 1);
+            if (reach) {
+                if (self->+0x266 /*boss*/) {           // the second throttle
+                    now = engine->clock;
+                    if (self->+0x2c8 == 0 ||
+                        self->+0x2c8 + self->+0x2cc * 0x100 < now) self->+0x2c8 = now;
+                    else                                            suppress;
+                }
+                vtable[0x240](self, target);           // FUN_100835b8, the swing
+            }
+        }
+        else if (self->+0x2b8 < d) { target = 0; package = 2; idle pose; }
+        else                       { self->+0x1b9 = 1;  /* keep closing */ }
+        self->+0x2c4 = rand & 0x1f;
+    }
+}
+else if (package == 2 || (package == 3 && !target)) {   // ---- look
+    candidate = engine->player;                // the only one in singleplayer
+    d = vtable[0x5c](self, candidate);
+    if (package == 2) package = 3;             // target still 0 -- same arm
+    noticed = true;
+    if (d < self->+0x2b8) noticed = the perception roll (see the M76 section);
+    if (d < self->+0x2b8 && noticed) {
+        if (!self->+0x2ac) { ... OnDetect ... }
+        else               { target = candidate; package = 3; walk clip; }
+        self->+0x2c4 = 0;
+    }
+}
+```
+
+Packages **4** (`AiFlee`), **5** (`AiPursue`) and **6**
+(`AiSpellAssistTarget`) have no arm at all, and neither does **-1**
+(`AiSleep`). A creature left in any of them keeps its move goal and its
+timers and does nothing else.
+
+### CORRECTION: aggro is *not* gated on line of sight
+
+The section "Aggro is gated on line of sight, not distance alone" above is
+wrong, and this port followed it into inventing a vertical gate and a
+lost-sight grace period as well. Both raycasts are real; neither is in the
+acquire arm:
+
+- `FUN_10082004` is the **melee reach** test, inside the attack decision.
+- `vtable[0x21c]` (`FUN_10004d70`) is the **OnDetect sightline** — M76.
+
+The aggressive acquire arm has neither. Its only gates are the
+scaled-squared distance against `SetChaseRadius` and the perception roll,
+and *giving up is the same distance and nothing else*:
+
+```c
+else if (self->+0x2b8 < d) { target = 0; package = 2; }
+```
+
+evaluated only on a cadence tick. So a creature inside 8.4 tiles (the
+corpus's dominant `SetChaseRadius(18000)`) comes for you through a wall,
+and stops the moment you are further away than that. The generous-looking
+radii make sense on their own once they are read as squared: the whole
+"port that skips the check ends up with the level converging on the
+player" worry was an artefact of reading 18000 as linear, which M31 had
+already fixed.
+
+### CORRECTION: what the cadence gates
+
+`monster+0x2c4` accumulates **above** the package branch, so it runs on
+every tick in every package -- including while a creature is still walking
+toward you, which is what makes the first swing land on arrival. And
+`0x100 < +0x2c4` gates the whole approach/attack/give-up decision, not the
+damage roll: on the ~25 ticks in between, a creature in range simply
+stands in its idle pose.
+
+The swing clip is played by the attack, once:
+
+```c
+vtable[0x148](self, self->+0x2be /*swing*/, 1, self->+0x2c1 /*idle*/, 0xf00);
+```
+
+Mode 1 is "play through once, then hand over to this other clip". A port
+that re-asserts the swing clip every tick while in range shows a creature
+apparently attacking without pause even though it lands one blow a second
+-- which is exactly what this one did.
+
+### The second throttle: `SetBoss` and `SetAttackSpeed`
+
+`monster+0x266` (`SetBoss`, 15 scripts) arms an independent gate on the
+game clock: a boss may swing only once every `monster+0x2cc` seconds. The
+constructor sets that to 2, and **no shipped script calls
+`SetAttackSpeed`**, so every boss in the game attacks at half the rate of
+everything else. `SetBoss` has one other reader -- the `SetCanTeleport`
+block takes the player as its target only for a boss.
+
+### The rest of the Monster(AI) surface
+
+`FUN_10012584` builds the class's trie; its 55 (name -> index) pairs are
+its dispatcher's own case numbers. Resolving every one of them against
+`FUN_10084924` fills in the last of the fields:
+
+| binding | field | corpus | what it does |
+|---------|-------|-------:|--------------|
+| `SetHealth` | stats `+0x12`/`+0x24`/`+0x2a` | 30 | **byte-for-byte the same case as `SetMaxHealth`** -- a pure alias |
+| `DoDamage(n)` | — | 20 | damages the creature **itself**, unsourced |
+| `SetBoss(b)` | `+0x266` | 15 | the throttle above |
+| `SetCanTeleport(b)` | `+0x2ee` | 4 | `FUN_10086a18`: find a path node beside the target and move onto it |
+| `SetImmobile(b)` | `+0x2bc` | 3 | blocks the move goal and the movement step; the same byte `SetParalyzed`'s countdown clears |
+| `StopAnimating(b)` | `+0x302` | 1 | every `PlayAnimation` in the tick and the attack is guarded by it |
+| `ReplicateTeleport` | — | 1 | broadcasts `+0x2ee` over a multiplayer session; a real no-op otherwise |
+| `FindPathNode(name)` | — | 1 | the same jump as `SetCanTeleport`, to a named `.pth` node |
+| `SetEnemy(e)` / `Follow(e)` | `+0x20c` | 0 | set the target without touching the package |
+| `GuardPlayer(e)` | `+0x2e8` | 0 | the "whose side am I on" pointer -- the only reader is the creature-vs-creature scan in the look arm |
+| `SetLifespan(n)` | `+0x2ec` | 0 | `seconds << 8`, counted down at **3x** the frame delta |
+| `SetItemRequiredToHit(n)` | `+0x2e0` | 0 | "only this item id can hurt me" |
+| `SetAttackSpeed(n)` | `+0x2cc` | 0 | seconds between a boss's swings |
+| `SetState(pkg, secs)` | `+0x2a8`/`+0x300` | 0 | the script-callable form of the Fear spell's timed package |
+| `Aggressive` / `GetWimpy` / `GetChaseRadius` / `GetAttackNoise` / `GetDeathNoise` / `GetCurrentAIPackage` | — | 0 | plain getters |
+| `AiActivate` / `AiWounded` / `SetMeleeAttackRange` | — | 0/0/1 | genuine no-ops: their cases fall straight through to the shared `break` |
+
+One further correction: **`AiPursue` is not a no-op.** Case `0x2d` stores
+package **5** and a target, exactly as `AiAttack`'s case `0x2a` stores 3.
+What makes it look inert is the other end -- no arm of the tick reads
+package 5. `GetCurrentAIPackage()` can tell the two apart.
+
+### `vtable[0x1b4]` is not the movement step
+
+Worth recording because it looks like one. `FUN_10006704` is eleven
+instructions: it reads the signed 16-bit value at `actor+0xb8`, compares
+it with `actor+0x1a4`, and either steps it an eighth of the way toward
+that target or -- when the target is 0, which it always is -- decays it by
+half. It is an angular-velocity damper, not locomotion. The actual
+movement is driven by `+0x1b9`/`+0x1bc`/`+0x1c0` through the entity
+physics update, and the pathing behind it uses the zone's `.pth` node
+table, which is still undecoded past its header (see ZONE_FORMAT.md). The
+port's own steer-and-slide chase is the one substantial part of this tick
+that is not a transcription.
+
+### In the port
+
+`port/src/simkin_bindings/monster_ai.h` carries this derivation and the
+three constants (`kSpawnAiPackage`, `kAttackVerticalLimitUnits`,
+`kBowAttachedWeaponModel`) plus `BossAttackDue()`. The tick itself is
+main.cpp's creature loop, rewritten to the shape above;
+`MonsterExecutable::m_AiPackage` now defaults to `kSpawnAiPackage`.
+`port/src/tests/m77_monster_ai_smoke.cpp` (40 checks) covers the spawn
+package, the census, the cadence, the boss throttle, the fourteen bindings
+that were soft-failing, and the vertical limit.

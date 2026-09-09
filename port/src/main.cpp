@@ -51,6 +51,7 @@
 #include "simkin_bindings/menu_executable.h"
 #include "simkin_bindings/menu_stack.h"
 #include "simkin_bindings/monster_executable.h"
+#include "simkin_bindings/monster_ai.h"
 #include "simkin_bindings/on_detect.h"
 #include "simkin_bindings/player_executable.h"
 #include "simkin_bindings/popup_menu_executable.h"
@@ -377,14 +378,16 @@ struct MonsterInstance {
     // MonsterExecutable::SetPlacementScaleRaw and a later SetScale can
     // still change.)
     float rotA = 0.0f, rotB = 0.0f;
+    // Reporting only (the debug overlay's `state` column). The real state
+    // is the pair below it: the AI package on the script, plus whether
+    // `monster+0x20c` holds a target.
     enum class AiState { Idle, Chasing, Attacking } aiState = AiState::Idle;
-    // Ticks since this monster last actually had the player in sight.
-    // Chasing survives brief losses of sight (the player ducking round a
-    // pillar) but not indefinitely -- see the AI block in the tick loop.
-    int ticksSinceSeen = 0;
-    // Where the player last was when seen; a chaser steers toward this
-    // rather than freezing the instant sight breaks.
-    float lastSeenX = 0, lastSeenY = 0;
+    // M77: the real `monster+0x20c`, reduced to a bool because in
+    // singleplayer the only candidate the tick ever considers is
+    // `engine+0x618`, the player. Package 3 *without* a target is a real
+    // and reachable state -- it is what the look arm leaves behind on the
+    // tick before it acquires -- so this cannot be folded into the package.
+    bool hasTarget = false;
     // M28: vertex-animation playback state. `animClip` is the clip index
     // the creature's own script named (idle/walk/swing/death); `animTime`
     // counts seconds into it, and the death clip latches (plays once and
@@ -392,6 +395,12 @@ struct MonsterInstance {
     int animClip = -1;
     float animTime = 0.0f;
     bool animHoldLastFrame = false;
+    // M77: the real `PlayAnimation(clip, 1, next, rate)` -- mode 1 plays
+    // the clip through once and then hands over to `next`. The attack uses
+    // exactly that (`swing`, once, then `idle`), which is what makes a
+    // swing a discrete event rather than a looping pose. -1 when the
+    // clip currently playing has no successor.
+    int animThenClip = -1;
     // M24: the real entities.txt typeId this placement resolved from --
     // ZoneScriptExecutable::NotifyKilled() (a real zone-root script's own
     // AddTrigger()...SetEntityID(id) kill-count trigger, e.g. ghstpass.s's
@@ -434,6 +443,16 @@ int AdvanceMonsterAnimation(MonsterInstance& m, sk::ModelArchive& models) {
     int frameInClip;
     if (m.animHoldLastFrame) {
         frameInClip = (std::min)(advanced, clip->frameCount() - 1);
+        // M77: the successor half of the real PlayAnimation(clip, 1, next,
+        // rate). A clip that ran out with a successor hands over to it
+        // (looping) on the next tick; one without -- the death clip -- goes
+        // on holding its final frame, which is what M28 latched it for.
+        if (m.animThenClip >= 0 && advanced >= clip->frameCount()) {
+            m.animClip = m.animThenClip;
+            m.animThenClip = -1;
+            m.animHoldLastFrame = false;
+            m.animTime = 0.0f;
+        }
     } else {
         frameInClip = advanced % clip->frameCount();
         // Keep animTime from growing without bound over a long session.
@@ -4366,28 +4385,22 @@ int main(int argc, char** argv) {
                     if (gameVelZ > 0.0f) gameVelZ = 0.0f;
                 }
 
-                // Combat vertical-slice (docs/PORT_ROADMAP.md): from-
-                // scratch AI loop -- Idle -> Chasing once the player
-                // enters the monster's real SetChaseRadius(), Chasing ->
-                // Attacking once within melee range. Never de-aggroes
-                // once past Idle (no real data on leash/return-to-post
-                // behavior -- see monster_executable.h's class comment).
+                // M77: the creature tick below is no longer a from-scratch
+                // design. It is FUN_10082224 transcribed -- its package
+                // branch, its perception test, its cadence gate, its
+                // one-line give-up rule -- with only the movement step (the
+                // engine pathfinds through the zone's `.pth` nodes, which
+                // are undecoded) and the SetCanTeleport landing spot left
+                // as this port's own. The whole derivation, and the four
+                // things earlier milestones had backwards, are in
+                // simkin_bindings/monster_ai.h; the OnDetect arm's own
+                // derivation stays in simkin_bindings/on_detect.h.
                 //
-                // M16: gated on the real script's own SetAggressive()
-                // flag -- gameMonsters now also holds non-hostile NPCs
-                // (monster_executable.h's class comment), whose real
-                // scripts already call SetAggressive(false) themselves.
-                //
-                // M76: "skipping this whole block for them" turned out to
-                // be half the story. The real tick does not skip a
-                // non-aggressive creature -- it runs the identical
-                // perception test and then takes the *other* arm of
-                // `if (monster+0x2ac == 0)`, calling the script's OnDetect
-                // handler where an aggressive creature would acquire a
-                // target. That arm is now restored below (see
-                // simkin_bindings/on_detect.h); only the chase/attack tail
-                // is still aggressive-only, which is what the real branch
-                // says too.
+                // The one that mattered most: a placed creature does not
+                // start asleep. Entity vtable slot +0x10 puts it in package
+                // 2 at spawn, before its script's Init() runs -- which is
+                // what 280 of the 318 shipped `SetAggressive(true)` scripts
+                // depend on, none of them calling any Ai* binding at all.
                 // M31: aggro and stand-off distances are now the real
                 // decompiled ones -- MonsterExecutable::chaseRadius() and
                 // attackRange() convert the script's scaled-squared value
@@ -4432,22 +4445,16 @@ int main(int argc, char** argv) {
                 // port-side value.
                 constexpr float kMonsterMoveSpeed = 14.0f;
                 constexpr float kMonsterRadius = 40.0f;     // world units, wall-collision only
-                // How far above/below a monster the player can be and
-                // still be considered "on the same level". Real zones
-                // stack rooms vertically at very different floor heights
-                // (docs/RENDERER_3D.md's ~6800-raw-unit room heights), so
-                // without this a monster two storeys below aggroes on a
-                // player it can never reach. A generous 2x the eye-height
-                // constant -- enough to cover stairs and slopes within one
-                // room, far short of a whole floor.
-                constexpr float kAggroMaxHeightDelta = sk::kEyeHeightOffset * 2.0f;
-                // Chasing survives this many ticks of lost sight before
-                // the monster gives up and returns to Idle (~2s at the
-                // fixed 40ms tick). Previously monsters never de-aggroed
-                // at all, by design ("no real data on leash behaviour") --
-                // but combined with an un-gated 70-tile radius that meant
-                // the whole level permanently converging on the player.
-                constexpr int kLoseInterestTicks = 50;
+                // M77: `kAggroMaxHeightDelta` and `kLoseInterestTicks`
+                // used to live here -- a vertical gate on acquisition and a
+                // lost-sight grace period. Both were this port's own
+                // inventions, written when the acquire arm was believed to
+                // be sight-gated. It is not: its only gates are the
+                // scaled-squared distance against SetChaseRadius and the
+                // perception roll, and giving up is the same distance and
+                // nothing else. The real vertical limit exists but sits on
+                // the *attack* (0x200 raw units, and only for melee), which
+                // is where it now is. See simkin_bindings/monster_ai.h.
                 // Monsters push apart at this range so a pack doesn't
                 // collapse into one shared point on top of the player.
                 constexpr float kMonsterSeparation = 70.0f;
@@ -4464,6 +4471,20 @@ int main(int argc, char** argv) {
                     m.animClip = clip;
                     m.animTime = 0.0f;
                     m.animHoldLastFrame = holdLastFrame;
+                    m.animThenClip = -1;
+                };
+
+                // M77: `PlayAnimation(clip, 1, next, 0xf00)` -- vtable
+                // +0x148 with the real attack's own arguments. Play `clip`
+                // through exactly once, then hand back to `next`. Restarts
+                // even if `clip` is already playing, because a second swing
+                // a second later is a second swing.
+                auto setAnimOnce = [](MonsterInstance& m, int clip, int next) {
+                    if (clip < 0) return;
+                    m.animClip = clip;
+                    m.animTime = 0.0f;
+                    m.animHoldLastFrame = true;
+                    m.animThenClip = next;
                 };
 
                 // M36: world objects a script has condemned -- currently
@@ -4664,96 +4685,69 @@ int main(int argc, char** argv) {
                         setAnimClip(m, m.script->idleAnimation(), false);
                         continue;
                     }
-                    if (!m.script->aggressive()) {
-                        // M76: a non-aggressive creature is not idle in the
-                        // real engine -- it runs the *same* perception test
-                        // an aggressive one runs, and where that one would
-                        // acquire a target and attack, this one runs its
-                        // script's OnDetect handler instead. The two are
-                        // the two arms of one `if (monster+0x2ac == 0)`
-                        // inside the AI tick's idle/pursue branch. See
-                        // simkin_bindings/on_detect.h for the whole
-                        // derivation; this block is that branch.
-                        //
-                        // This is the mechanism behind every NPC that
-                        // speaks first: monsters/bbrawler_talk.s opens
-                        // "Talker" on you, monsters/olpac_trailslag.s opens
-                        // ghstpass/GP_Menu3 once per save, and
-                        // erthcave/azra_zombie.s turns hostile *and* opens
-                        // EC_Menu7 in the same handler.
-                        const int pkg = m.script->aiPackage();
-                        const bool looking =
-                            pkg == sk_bindings::MonsterExecutable::kAiIdle ||
-                            pkg == sk_bindings::MonsterExecutable::kAiPursue;
-                        bool detectOpenedMenu = false;
-                        if (looking && gameZone) {
-                            float ddx = gameCamera.x - m.x, ddy = gameCamera.y - m.y;
-                            float ddist = std::sqrt(ddx * ddx + ddy * ddy);
-                            // The engine's own three conditions, in order:
-                            // inside SetChaseRadius, the perception roll,
-                            // and a line of sight capped at
-                            // `SetAttackRange >> 8` tiles. The vertical
-                            // term is this port's `sameLevel` stand-in for
-                            // the real march's z tracking (it walks the
-                            // ray's own height against each tile's floor
-                            // and ceiling, which this DDA does not).
-                            const float sightRange =
-                                static_cast<float>(sk_bindings::SightRangeTiles(
-                                    m.script->attackRangeRaw())) *
-                                sk::kTileScale;
-                            const bool sameLevel =
-                                std::fabs(gameCamera.z - (m.z + sk::kEyeHeightOffset)) <=
-                                kAggroMaxHeightDelta;
-                            if (ddist <= m.script->chaseRadius() && ddist <= sightRange &&
-                                sameLevel &&
-                                sk_bindings::DetectionNoticed(
-                                    sk_bindings::DetectMissPercent(sk_bindings::kDetectStrength,
-                                                                   stack.player().agility()),
-                                    std::rand() % 101) &&
-                                gameZone->HasLineOfSight(m.x, m.y, gameCamera.x, gameCamera.y)) {
-                                sk_bindings::MenuExecutable* beforeMenu = stack.currentMenu();
-                                if (m.script->InvokeOnDetect(
-                                        static_cast<skiExecutable*>(&stack.player()))) {
+                    // ==== M77: the real tick, in the real order ====
+                    //
+                    // What follows is FUN_10082224's own body, transcribed
+                    // rather than designed. simkin_bindings/monster_ai.h
+                    // carries the whole derivation; the short version is
+                    // that a placed creature starts in package 2 (entity
+                    // vtable slot +0x10 writes it at spawn, before the
+                    // script's Init() runs), that the perception test has
+                    // no line-of-sight term on the aggressive side, and
+                    // that the `0x100 < +0x2c4` cadence gates the whole
+                    // approach/attack/give-up decision -- not just the
+                    // damage roll, which is how this port had it and why
+                    // creatures looked like they were swinging without
+                    // pause.
+
+                    // `if (self->+0x2ee) { ... }` -- SetCanTeleport, above
+                    // the package branch and so running in every package.
+                    // A boss with it set takes the player as its target
+                    // when it has none, and jumps to a path node beside it
+                    // the moment it falls outside the chase radius.
+                    // FUN_10086a18's node search needs the zone's `.pth`
+                    // table, which is undecoded (docs/ZONE_FORMAT.md), so
+                    // the port lands the creature at the player's own
+                    // position offset by its stand-off distance -- the
+                    // same *effect* (you cannot outrun it) reached a
+                    // simpler way, and the one place in this block that is
+                    // not a transcription.
+                    if (m.script->canTeleport() && gameZone) {
+                        float tdx = gameCamera.x - m.x, tdy = gameCamera.y - m.y;
+                        float tdist = std::sqrt(tdx * tdx + tdy * tdy);
+                        if (tdist > m.script->chaseRadius() && tdist > 1.0f) {
+                            float back = (std::max)(m.script->attackRange(),
+                                                     kPlayerRadius + kMonsterRadius);
+                            float nx = gameCamera.x - (tdx / tdist) * back;
+                            float ny = gameCamera.y - (tdy / tdist) * back;
+                            if (!gameZone->CircleHitsWall(nx, ny, kMonsterRadius)) {
+                                m.x = nx;
+                                m.y = ny;
+                                m.z = gameZone->FloorHeightAt(m.x, m.y);
 #if SK_DEBUG_SUITE
-                                    // SK_DEBUG_SUITE (M68)
-                                    sk_debug::Count("npc.detected");
+                                // SK_DEBUG_SUITE (M68)
+                                sk_debug::Count("npc.teleported");
 #endif
-                                }
-                                if (stack.currentMenu() != beforeMenu) {
-                                    // Same hand-off the Use path already
-                                    // uses: a handler that opened a menu
-                                    // pauses the 3D view into it. Stop the
-                                    // AI pass here rather than ticking the
-                                    // rest of the level inside a frame the
-                                    // world is no longer running -- the
-                                    // engine pauses at frame granularity,
-                                    // so a second creature getting a turn
-                                    // after the menu is up would be this
-                                    // port's invention, not the original's.
-                                    inGame = false;
-                                    gamePausedForMenu = true;
-                                    detectOpenedMenu = true;
-                                }
                             }
                         }
-                        // Idle NPCs and merchants still breathe.
-                        setAnimClip(m, m.script->idleAnimation(), false);
-                        if (detectOpenedMenu) break;
-                        continue;
                     }
+
+                    // `self->+0x2c4 += FUN_1001afa4(engine)` sits above the
+                    // package branch too, so it accumulates on every tick
+                    // in every package -- including while a creature is
+                    // still walking toward you, which is what makes the
+                    // first swing land promptly instead of a second after
+                    // arrival.
+                    m.script->TickAttackCadence(sk_bindings::kAiFrameDeltaUnits);
+
                     // M32: the real AI package gates everything below.
                     //
-                    // Package 6 (AiSpellAssistTarget) is faithfully inert:
-                    // nothing anywhere in the real binary reads it, so a
-                    // creature left in it matches neither branch of the
-                    // engine's own tick and simply stops acting. Package
-                    // -1 (AiSleep) is the same. Reproduced, not invented.
+                    // Packages 4 (AiFlee), 5 (AiPursue), 6
+                    // (AiSpellAssistTarget) and -1 (AiSleep) have no arm in
+                    // the tick at all -- a creature left in one keeps its
+                    // timers and its move goal and does nothing else.
+                    // Reproduced, not invented.
                     int pkg = m.script->aiPackage();
-                    if (pkg == sk_bindings::MonsterExecutable::kAiAsleep ||
-                        pkg == sk_bindings::MonsterExecutable::kAiSpellAssist) {
-                        setAnimClip(m, m.script->idleAnimation(), false);
-                        continue;
-                    }
 
                     float mdx = gameCamera.x - m.x, mdy = gameCamera.y - m.y;
                     float dist = std::sqrt(mdx * mdx + mdy * mdy);
@@ -4770,7 +4764,7 @@ int main(int argc, char** argv) {
                     // port's reading of that one-shot goal.
                     if (pkg == sk_bindings::MonsterExecutable::kAiFlee) {
                         setAnimClip(m, m.script->walkAnimation(), false);
-                        if (dist > 1.0f && !m.script->paralyzed()) {
+                        if (dist > 1.0f && !m.script->paralyzed() && !m.script->immobile()) {
                             float awayX = -mdx / dist, awayY = -mdy / dist;
                             for (float steer : kSteerAngles) {
                                 float cs = std::cos(steer), sn = std::sin(steer);
@@ -4789,158 +4783,193 @@ int main(int argc, char** argv) {
                         m.z = gameZone->FloorHeightAt(m.x, m.y);
                         continue;
                     }
-
-                    // A paralysed creature neither swings nor turns -- the
-                    // real attack function's first test is
-                    // `monster+0x294 < 1`, and the tick only steers toward
-                    // a target while that timer is exactly 0.
-                    if (m.script->paralyzed()) {
+                    if (pkg != sk_bindings::MonsterExecutable::kAiIdle &&
+                        pkg != sk_bindings::MonsterExecutable::kAiPursue) {
                         setAnimClip(m, m.script->idleAnimation(), false);
                         continue;
                     }
 
-                    // Can this monster actually perceive the player right
-                    // now? Real chase radii are enormous (see
-                    // Zone::HasLineOfSight()'s comment), so sight and
-                    // vertical separation -- not the radius -- are what
-                    // really bound aggro.
-                    bool inRadius = dist <= m.script->chaseRadius();
-                    bool sameLevel =
-                        std::fabs(gameCamera.z - (m.z + sk::kEyeHeightOffset)) <=
-                        kAggroMaxHeightDelta;
-                    // M33: the Blind effect (real effect flag 4) is what
-                    // its stat penalties imply -- the creature can't pick
-                    // the player out. It keeps whatever target it already
-                    // had (the real flag doesn't clear +0x20c) but stops
-                    // acquiring, so a blinded creature loses track once
-                    // the player moves.
-                    bool canSee = inRadius && sameLevel && !m.script->blinded() &&
-                                   gameZone->HasLineOfSight(m.x, m.y, gameCamera.x, gameCamera.y);
-                    if (canSee) {
-                        m.ticksSinceSeen = 0;
-                        m.lastSeenX = gameCamera.x;
-                        m.lastSeenY = gameCamera.y;
-                    } else {
-                        ++m.ticksSinceSeen;
-                    }
+                    // ---- the pursue/attack arm: package 3 with a target ----
+                    if (pkg == sk_bindings::MonsterExecutable::kAiPursue && m.hasTarget) {
+                        m.aiState = MonsterInstance::AiState::Chasing;
+                        // `if (+0x294 == 0) vtable[0x208](self, target)` --
+                        // a paralysed creature does not even turn.
+                        if (!m.script->paralyzed() && dist > 1.0f) {
+                            m.facingYaw = std::atan2(mdy, mdx);
+                        }
 
-                    if (m.aiState == MonsterInstance::AiState::Idle) {
-                        if (canSee) m.aiState = MonsterInstance::AiState::Chasing;
-                    } else if (m.ticksSinceSeen > kLoseInterestTicks) {
-                        // Lost it -- back to standing post rather than
-                        // homing on the player forever through geometry.
-                        m.aiState = MonsterInstance::AiState::Idle;
-                    }
-                    if (m.aiState == MonsterInstance::AiState::Idle) {
-                        setAnimClip(m, m.script->idleAnimation(), false);
-                        continue;
-                    }
-
-                    // The real stand-off: the AI tick zeroes the creature's
-                    // velocity and swings as soon as the distance drops
-                    // below `monster+0x2dc` (SetAttackRange, default 660
-                    // world units). Attacking whether or not the
-                    // centre-to-centre sightline clips a wall corner is
-                    // deliberate -- otherwise a monster in a doorway keeps
-                    // walking into the player instead of stopping to swing,
-                    // which is exactly the reported behaviour.
-                    float standAndAttack = m.script->attackRange();
-                    if (dist <= standAndAttack) {
-                        m.aiState = MonsterInstance::AiState::Attacking;
-                        setAnimClip(m, m.script->swingAnimation(), false);
-                        if (dist > 1.0f) m.facingYaw = std::atan2(mdy, mdx);
-                        // M32: the real attack cadence (monster+0x2c4).
-                        // The engine accumulates the frame delta every
-                        // frame, only lets a creature act once the total
-                        // passes 0x100, then resets it to `rand & 0x1f` so
-                        // a pack doesn't swing in lockstep. That works out
-                        // to roughly one attempt every 256ms, replacing
-                        // this port's invented fixed ~1s cooldown.
-                        if (m.script->ConsumeAttackCadence(
-                                sk_bindings::kAiFrameDeltaUnits)) {
-                            // M43: the real melee-vs-spell branch
-                            // (FUN_100835b8). A creature with a spell in
-                            // slot 0 rolls SetMeleeRoll against rand(0,100)
-                            // and casts unless the roll reaches it -- so a
-                            // script that adds spells but never calls
-                            // SetMeleeRoll (bandit_mage.s, highwaymage.s,
-                            // yelnicin.s) casts on every single attack, and
-                            // one that sets 75 (every floater, every ghost)
-                            // casts about three attacks in four.
-                            if (!m.script->RollForMelee()) {
-                                // M48: the real cast. The creature pays for
-                                // it and applies any self-targeted half
-                                // itself; an offensive spell now leaves the
-                                // muzzle as a projectile aimed along the
-                                // creature's facing, which is what makes a
-                                // caster's spell miss when the player steps
-                                // aside.
-                                sk_bindings::MonsterExecutable::CastAttempt attempt =
-                                    m.script->CastSpellAt(&stack.player());
-                                if (attempt.spell && attempt.result.cast) {
-                                    applyCastResult(attempt.spell, m.script.get(), attempt.result,
-                                                     m.x, m.y, m.z, m.facingYaw, 0.0f);
-                                }
-                            } else if (m.script->shootsProjectile()) {
-                                // M49: an archer. FUN_100835b8 puts its
-                                // whole melee resolution inside `if
-                                // (+0x2d8 == -1)`, so a creature that calls
-                                // SetProjectile shoots *instead of*
-                                // swinging -- it never lands a melee blow
-                                // at all. The type is hardcoded 599 on this
-                                // side (the script's own SetProjectile
-                                // value goes to a draw parameter, not the
-                                // art), the damage is `rand % damageMax`
-                                // exactly as on the player's side, and the
-                                // sound is the creature's own
-                                // SetAttackNoise -- which every one of the
-                                // twelve shipped archers sets to slot 1,
-                                // the same bow-fire sample the player uses.
-                                const int dmgMax = (std::max)(1, m.script->damageMax());
-                                gameArrows.push_back(sk_bindings::SpawnArrowProjectile(
-                                    m.script.get(), /*ownerIsPlayer=*/false,
-                                    static_cast<int>(m.x), static_cast<int>(m.y),
-                                    static_cast<int>(m.z), 0,
-                                    sk_bindings::EngineYawFromPortYaw(m.facingYaw),
-                                    /*pitch=*/0, sk_bindings::kBowProjectileTypeId,
-                                    std::rand() % dmgMax, m.script->attack()));
-                                playWorldSound(m.script->attackNoiseId(), m.x, m.y);
-                            } else {
-                                int dmg = sk_bindings::RollDamage(
-                                    m.script->attack(), stack.player().defense(),
-                                    stack.player().armorRating(), m.script->damageMin(),
-                                    m.script->damageMax());
-                                // M51: FUN_10044814 plays slot 80 on any
-                                // positive incoming damage, before it
-                                // applies it -- the same sample a
-                                // connecting swing uses, so an impact is
-                                // one sound whichever way it is going.
-                                if (dmg > 0) playPlayerSound(sk::kSoundAttackHit);
-#if SK_DEBUG_SUITE
-                                // SK_DEBUG_SUITE (M68): god mode. Applied
-                                // here, at the one place a creature damages
-                                // the player, so the roll still happens and
-                                // is still traceable -- only the damage is
-                                // dropped.
-                                if (debugRefs.godMode) dmg = 0;
-                                sk_debug::Count("combat.damage_taken", dmg);
-                                sk_debug::Count("combat.hits_on_player");
-#endif
-                                stack.player().ApplyDamage(dmg);
-                                playWorldSound(m.script->attackNoiseId(), m.x, m.y);
+                        // Evaluated every tick, before the cadence gate:
+                        // inside SetAttackRange the creature stops dead and
+                        // returns to its idle pose. The swing clip is not
+                        // set here -- the attack sets it, once, and it
+                        // hands back to idle on its own (see setAnimOnce).
+                        const float standAndAttack = m.script->attackRange();
+                        const bool inRange = dist <= standAndAttack;
+                        if (inRange) {
+                            m.aiState = MonsterInstance::AiState::Attacking;
+                            if (m.animThenClip < 0) {
+                                setAnimClip(m, m.script->idleAnimation(), false);
                             }
                         }
-                    } else {
-                        m.aiState = MonsterInstance::AiState::Chasing;
-                        setAnimClip(m, m.script->walkAnimation(), false);
-                        // Head for the player if currently visible, else
-                        // for wherever they were last seen.
-                        float goalX = canSee ? gameCamera.x : m.lastSeenX;
-                        float goalY = canSee ? gameCamera.y : m.lastSeenY;
-                        float gx = goalX - m.x, gy = goalY - m.y;
-                        float goalDist = std::sqrt(gx * gx + gy * gy);
-                        if (goalDist > 1.0f) {
-                            float dirX = gx / goalDist, dirY = gy / goalDist;
+
+                        bool keepClosing = !inRange;
+                        if (m.script->attackCadenceReady()) {
+                            // `dz` is the real `|(s16)self+0xa4 -
+                            // (s16)target+0xa4|`, i.e. a vertical limit on
+                            // melee, not the facing cone an earlier comment
+                            // here claimed. A ranged creature ignores it and
+                            // skips the reach raycast as well.
+                            const float dz =
+                                std::fabs(gameCamera.z - (m.z + sk::kEyeHeightOffset));
+                            const bool ranged = m.script->ranged();
+                            if (inRange &&
+                                (ranged || dz <= static_cast<float>(
+                                                    sk_bindings::kAttackVerticalLimitUnits))) {
+                                // FUN_10082004: the melee reach march, from
+                                // the creature's eye to its target's, with a
+                                // budget of `SetAttackRange >> 8` tiles. This
+                                // port's DDA is 2D and tests the same `.zmp`
+                                // blocking bit the real march ends on; see
+                                // Zone::HasLineOfSight.
+                                const bool reach =
+                                    ranged || !gameZone ||
+                                    gameZone->HasLineOfSight(m.x, m.y, gameCamera.x, gameCamera.y);
+                                // The boss throttle (monster+0x266 /
+                                // +0x2c8 / +0x2cc): at most one swing every
+                                // SetAttackSpeed seconds of game clock, on
+                                // top of the cadence. Nothing sets the
+                                // speed, so every boss uses the
+                                // constructor's 2 -- half the rate of
+                                // everything else.
+                                bool throttleOk = true;
+                                if (m.script->boss()) {
+                                    throttleOk = sk_bindings::BossAttackDue(
+                                        m.script->lastAttackClock(),
+                                        m.script->attackSpeedSeconds(), gameClockUnits);
+                                }
+                                if (reach && throttleOk) {
+                                    // FUN_100835b8. Its first act is
+                                    // `PlayAnimation(swing, 1, idle,
+                                    // 0xf00)` -- play the swing clip once,
+                                    // then hand over to idle. That is the
+                                    // whole of what a swing looks like, and
+                                    // getting it wrong (re-asserting the
+                                    // clip on all 25 ticks in between) is
+                                    // what made creatures look like they
+                                    // never stopped attacking.
+                                    setAnimOnce(m, m.script->swingAnimation(),
+                                                 m.script->idleAnimation());
+                                    // M43: the real melee-vs-spell branch
+                                    // (FUN_100835b8). A creature with a
+                                    // spell in slot 0 rolls SetMeleeRoll
+                                    // against rand(0,100) and casts unless
+                                    // the roll reaches it -- so a script
+                                    // that adds spells but never calls
+                                    // SetMeleeRoll (bandit_mage.s,
+                                    // highwaymage.s, yelnicin.s) casts on
+                                    // every single attack, and one that
+                                    // sets 75 (every floater, every ghost)
+                                    // casts about three attacks in four.
+                                    if (!m.script->RollForMelee()) {
+                                        // M48: the real cast. The creature
+                                        // pays for it and applies any
+                                        // self-targeted half itself; an
+                                        // offensive spell now leaves the
+                                        // muzzle as a projectile aimed
+                                        // along the creature's facing,
+                                        // which is what makes a caster's
+                                        // spell miss when the player steps
+                                        // aside.
+                                        sk_bindings::MonsterExecutable::CastAttempt attempt =
+                                            m.script->CastSpellAt(&stack.player());
+                                        if (attempt.spell && attempt.result.cast) {
+                                            applyCastResult(attempt.spell, m.script.get(),
+                                                             attempt.result, m.x, m.y, m.z,
+                                                             m.facingYaw, 0.0f);
+                                        }
+                                    } else if (m.script->shootsProjectile()) {
+                                        // M49: an archer. FUN_100835b8 puts
+                                        // its whole melee resolution inside
+                                        // `if (+0x2d8 == -1)`, so a
+                                        // creature that calls SetProjectile
+                                        // shoots *instead of* swinging --
+                                        // it never lands a melee blow at
+                                        // all. The type is hardcoded 599 on
+                                        // this side (the script's own
+                                        // SetProjectile value goes to a
+                                        // draw parameter, not the art), the
+                                        // damage is `rand % damageMax`
+                                        // exactly as on the player's side,
+                                        // and the sound is the creature's
+                                        // own SetAttackNoise -- which every
+                                        // one of the twelve shipped archers
+                                        // sets to slot 1, the same bow-fire
+                                        // sample the player uses.
+                                        const int dmgMax = (std::max)(1, m.script->damageMax());
+                                        gameArrows.push_back(sk_bindings::SpawnArrowProjectile(
+                                            m.script.get(), /*ownerIsPlayer=*/false,
+                                            static_cast<int>(m.x), static_cast<int>(m.y),
+                                            static_cast<int>(m.z), 0,
+                                            sk_bindings::EngineYawFromPortYaw(m.facingYaw),
+                                            /*pitch=*/0, sk_bindings::kBowProjectileTypeId,
+                                            std::rand() % dmgMax, m.script->attack()));
+                                        playWorldSound(m.script->attackNoiseId(), m.x, m.y);
+                                    } else {
+                                        int dmg = sk_bindings::RollDamage(
+                                            m.script->attack(), stack.player().defense(),
+                                            stack.player().armorRating(), m.script->damageMin(),
+                                            m.script->damageMax());
+                                        // M51: FUN_10044814 plays slot 80
+                                        // on any positive incoming damage,
+                                        // before it applies it -- the same
+                                        // sample a connecting swing uses,
+                                        // so an impact is one sound
+                                        // whichever way it is going.
+                                        if (dmg > 0) playPlayerSound(sk::kSoundAttackHit);
+#if SK_DEBUG_SUITE
+                                        // SK_DEBUG_SUITE (M68): god mode.
+                                        // Applied here, at the one place a
+                                        // creature damages the player, so
+                                        // the roll still happens and is
+                                        // still traceable -- only the
+                                        // damage is dropped.
+                                        if (debugRefs.godMode) dmg = 0;
+                                        sk_debug::Count("combat.damage_taken", dmg);
+                                        sk_debug::Count("combat.hits_on_player");
+#endif
+                                        stack.player().ApplyDamage(dmg);
+                                        playWorldSound(m.script->attackNoiseId(), m.x, m.y);
+                                    }
+                                }
+                            } else if (dist > m.script->chaseRadius()) {
+                                // `else if (+0x2b8 < d) { target = 0;
+                                // package = 2; }` -- the entire give-up
+                                // rule. No grace period, no memory of where
+                                // you were: this port's kLoseInterestTicks
+                                // and lastSeenX/Y were its own invention
+                                // and are gone.
+                                m.hasTarget = false;
+                                m.script->SetAiPackage(
+                                    sk_bindings::MonsterExecutable::kAiIdle);
+                                m.aiState = MonsterInstance::AiState::Idle;
+                                keepClosing = false;
+                                setAnimClip(m, m.script->idleAnimation(), false);
+                            } else {
+                                keepClosing = true;
+                            }
+                            m.script->JitterAttackCadence();
+                        }
+
+                        // The move goal is refreshed every tick, outside
+                        // the gate (`if (target && !+0x2bc) { +0x1b9 = 1;
+                        // goal = target position; }`), and the in-range
+                        // block above is what clears it again.
+                        if (keepClosing && !m.script->paralyzed() && !m.script->immobile() &&
+                            dist > 1.0f) {
+                            if (m.animThenClip < 0) {
+                                setAnimClip(m, m.script->walkAnimation(), false);
+                            }
+                            float dirX = mdx / dist, dirY = mdy / dist;
                             // Crowd separation: push away from any other
                             // live monster that's too close, so a group
                             // spreads out instead of stacking in one spot.
@@ -4968,21 +4997,14 @@ int main(int argc, char** argv) {
                             // its header, docs/ZONE_FORMAT.md) -- but
                             // enough that a monster follows a corridor
                             // round a corner instead of grinding face-first
-                            // into the wall between it and the player,
-                            // which is what the previous straight-line
-                            // beeline did.
-                            // Never close past bodily contact: melee range
-                            // is the trigger to swing, but the creature
-                            // still must not walk *into* the player. Clamp
-                            // this tick's step so it stops at the point
-                            // where the two bounding circles touch.
+                            // into the wall between it and the player.
                             // Stop where the real engine stops -- at the
                             // creature's own attackRange -- but never
                             // closer than bodily contact.
                             float standoff = (std::max)(m.script->attackRange(),
                                                          kPlayerRadius + kMonsterRadius);
-                            float step = kMonsterMoveSpeed;
-                            if (canSee) step = (std::min)(step, (std::max)(0.0f, dist - standoff));
+                            float step = (std::min)(kMonsterMoveSpeed,
+                                                     (std::max)(0.0f, dist - standoff));
                             for (float steer : kSteerAngles) {
                                 float cs = std::cos(steer), sn = std::sin(steer);
                                 float sx = dirX * cs - dirY * sn;
@@ -4997,8 +5019,111 @@ int main(int argc, char** argv) {
                                 }
                             }
                         }
+                        m.z = gameZone->FloorHeightAt(m.x, m.y);
+                        continue;
                     }
-                    m.z = gameZone->FloorHeightAt(m.x, m.y);
+
+                    // ---- the look arm: package 2, or 3 with no target ----
+                    //
+                    // One perception test, then a split on one byte. The
+                    // aggressive side acquires and chases; the other side
+                    // runs the script's OnDetect handler (M76, on_detect.h)
+                    // -- that is the whole of the difference between a
+                    // monster and an NPC who speaks first.
+                    m.aiState = MonsterInstance::AiState::Idle;
+
+                    // `if (candidate && package == 2) package = 3` -- run
+                    // before anything else and with the target still null,
+                    // so the creature simply lands back in this same arm
+                    // next tick. Transcribed because it is observable:
+                    // GetCurrentAIPackage() on an untouched creature
+                    // reports 3, not 2.
+                    if (pkg == sk_bindings::MonsterExecutable::kAiIdle) {
+                        m.script->SetAiPackage(sk_bindings::MonsterExecutable::kAiPursue);
+                    }
+
+                    // The engine's own two gates, and only these two.
+                    // There is deliberately no line-of-sight or vertical
+                    // term here: the aggressive acquire arm has neither,
+                    // so a creature inside SetChaseRadius (8.4 tiles for
+                    // the corpus's dominant 18000) comes for you through a
+                    // wall. WORLD_MODEL.md used to say the opposite; see
+                    // monster_ai.h.
+                    const bool inChaseRadius = dist <= m.script->chaseRadius();
+                    bool noticed = true;
+                    if (inChaseRadius) {
+                        noticed = sk_bindings::DetectionNoticed(
+                            sk_bindings::DetectMissPercent(sk_bindings::kDetectStrength,
+                                                            stack.player().agility()),
+                            std::rand() % 101);
+                    }
+                    if (!inChaseRadius || !noticed) {
+                        setAnimClip(m, m.script->idleAnimation(), false);
+                        continue;
+                    }
+
+                    if (!m.script->aggressive()) {
+                        // M76: the OnDetect arm. Unlike acquisition this
+                        // one *is* sight-gated -- `vtable[0x21c]`
+                        // (FUN_10004d70), an eye-to-eye march budgeted
+                        // `SetAttackRange >> 8` tiles. See on_detect.h.
+                        //
+                        // This is the mechanism behind every NPC that
+                        // speaks first: monsters/bbrawler_talk.s opens
+                        // "Talker" on you, monsters/olpac_trailslag.s opens
+                        // ghstpass/GP_Menu3 once per save, and
+                        // erthcave/azra_zombie.s turns hostile *and* opens
+                        // EC_Menu7 in the same handler.
+                        bool detectOpenedMenu = false;
+                        const float sightRange =
+                            static_cast<float>(
+                                sk_bindings::SightRangeTiles(m.script->attackRangeRaw())) *
+                            sk::kTileScale;
+                        if (gameZone && dist <= sightRange &&
+                            gameZone->HasLineOfSight(m.x, m.y, gameCamera.x, gameCamera.y)) {
+                            sk_bindings::MenuExecutable* beforeMenu = stack.currentMenu();
+                            if (m.script->InvokeOnDetect(
+                                    static_cast<skiExecutable*>(&stack.player()))) {
+#if SK_DEBUG_SUITE
+                                // SK_DEBUG_SUITE (M68)
+                                sk_debug::Count("npc.detected");
+#endif
+                            }
+                            if (stack.currentMenu() != beforeMenu) {
+                                // Same hand-off the Use path already uses:
+                                // a handler that opened a menu pauses the
+                                // 3D view into it. Stop the AI pass here
+                                // rather than ticking the rest of the level
+                                // inside a frame the world is no longer
+                                // running -- the engine pauses at frame
+                                // granularity, so a second creature getting
+                                // a turn after the menu is up would be this
+                                // port's invention.
+                                inGame = false;
+                                gamePausedForMenu = true;
+                                detectOpenedMenu = true;
+                            }
+                            m.script->ClearAttackCadence();
+                        }
+                        // Idle NPCs and merchants still breathe.
+                        setAnimClip(m, m.script->idleAnimation(), false);
+                        if (detectOpenedMenu) break;
+                        continue;
+                    }
+
+                    // The aggressive arm: acquire, switch to package 3,
+                    // and start walking. `+0x2c4 = 0` here rather than the
+                    // jitter the pursue arm uses, so the first swing lands
+                    // a full second after acquisition.
+                    m.hasTarget = true;
+                    m.script->SetAiPackage(sk_bindings::MonsterExecutable::kAiPursue);
+                    m.script->ClearAttackCadence();
+                    m.aiState = MonsterInstance::AiState::Chasing;
+                    setAnimClip(m, m.script->walkAnimation(), false);
+#if SK_DEBUG_SUITE
+                    // SK_DEBUG_SUITE (M68)
+                    sk_debug::Count("ai.acquired");
+#endif
                 }
 
                 // M72: automatic aim-assist pitch -- the real one.

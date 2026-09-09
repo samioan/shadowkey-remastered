@@ -45,6 +45,7 @@
 
 #include "simkin_bindings/actor_stats.h"
 #include "simkin_bindings/entity_position_ref.h"
+#include "simkin_bindings/monster_ai.h"
 #include "simkin_bindings/store.h"
 #include "simkin_bindings/script_delay.h"
 #include "simkin_bindings/spell_actor.h"
@@ -322,14 +323,24 @@ public:
     // (FUN_10084924) and the timed-package helper (FUN_10086b98). See
     // docs/WORLD_MODEL.md's "The monster AI" section.
     enum AiPackage {
-        kAiAsleep = -1,      // the actor constructor's own initial value; AiSleep()
-        kAiIdle = 2,         // look for a target -- what AiDetect() sets, and the only
-                             // package (with kAiPursue-without-a-target) in which the
-                             // real tick evaluates perception at all. M76: that makes
-                             // AiSleep() the switch a script uses to stop its own
-                             // OnDetect from re-firing -- see on_detect.h.
-        kAiPursue = 3,       // chase/attack monster+0x20c; set by the tick on acquiring a target
-        kAiFlee = 4,         // run away for a limited time -- the Fear spell, see below
+        kAiAsleep = -1,      // AiSleep(). The actor *constructor*'s value too -- but see
+                             // m_AiPackage's default below and monster_ai.h: a creature
+                             // that reaches a zone is never in it.
+        kAiIdle = 2,         // AiDetect(). Look for a target. M77: **also what entity
+                             // vtable slot +0x10 writes into every placement at spawn**,
+                             // which is what makes 280 shipped creatures that never call
+                             // any Ai* binding hostile at all. The only package (with
+                             // kAiPursue-without-a-target) in which the real tick
+                             // evaluates perception. M76: that makes AiSleep() the switch
+                             // a script uses to stop its own OnDetect re-firing.
+        kAiPursue = 3,       // AiAttack(target). Chase/attack monster+0x20c; also what the
+                             // look arm sets the instant it has a candidate -- with the
+                             // target still null, which lands back in the same arm.
+        kAiFlee = 4,         // AiFlee(target). Run away for a limited time -- the Fear
+                             // spell. No arm in the tick; see below.
+        kAiFollow = 5,       // AiPursue(target). Despite the name it is **not** package 3
+                             // and has no arm in the tick either. No shipped script calls
+                             // it.
         kAiSpellAssist = 6,  // AiSpellAssistTarget(); **no reader anywhere in the binary**
     };
     int aiPackage() const { return m_AiPackage; }
@@ -354,14 +365,66 @@ public:
     // see kAiFrameDeltaUnits.
     void TickAi(int deltaUnits);
 
-    // The real attack cadence (monster+0x2c4). The tick adds the frame
-    // delta every frame, only lets the creature act once the accumulator
-    // passes 0x100, and then resets it to `rand & 0x1f` -- a small random
-    // jitter so a pack doesn't swing in lockstep. Returns true on the
-    // frames the creature is allowed to attack, consuming the accumulator.
+    // The real attack cadence (monster+0x2c4), split into the three pieces
+    // the tick actually uses it in. M77 corrected how it is driven: the
+    // accumulate line sits *above* the package branch, so it runs on every
+    // tick in every package -- not only while a creature is already
+    // standing in melee range, which is how this port had it -- and what
+    // the 0x100 threshold gates is the whole approach/attack/give-up
+    // decision, not just the damage roll. See monster_ai.h.
     //
-    // This replaces the port's own invented fixed cooldown.
-    bool ConsumeAttackCadence(int deltaUnits);
+    //   TickAttackCadence   `+0x2c4 += FUN_1001afa4(engine)`, every tick
+    //   attackCadenceReady  `0x100 < +0x2c4`
+    //   JitterAttackCadence `+0x2c4 = rand & 0x1f`  (end of the pursue arm)
+    //   ClearAttackCadence  `+0x2c4 = 0`            (end of the look arm)
+    void TickAttackCadence(int deltaUnits) { m_AttackCadence += deltaUnits; }
+    bool attackCadenceReady() const { return m_AttackCadence > kAiAttackCadenceThreshold; }
+    void JitterAttackCadence();
+    void ClearAttackCadence() { m_AttackCadence = 0; }
+    int attackCadence() const { return m_AttackCadence; }
+
+    // ---- M77: the rest of the AI state a script can set ----
+
+    // `monster+0x266` (SetBoss). Two readers: this arms the second attack
+    // throttle in the pursue arm (see BossAttackDue in monster_ai.h), and
+    // the SetCanTeleport block takes the player as its target only for a
+    // boss. 15 shipped scripts.
+    bool boss() const { return m_Boss; }
+    // `monster+0x2cc` (SetAttackSpeed), seconds between a boss's swings.
+    // Constructor default 2; **no shipped script calls SetAttackSpeed**,
+    // so every boss in the game uses exactly that.
+    int attackSpeedSeconds() const { return m_AttackSpeedSeconds; }
+    // `monster+0x2c8` -- the clock stamp BossAttackDue() updates.
+    int& lastAttackClock() { return m_LastAttackClock; }
+
+    // `monster+0x2ee` (SetCanTeleport). When the target leaves the chase
+    // radius the tick calls FUN_10086a18, which finds a path node near the
+    // target and moves the creature onto it -- a boss you cannot outrun.
+    // 4 shipped scripts.
+    bool canTeleport() const { return m_CanTeleport; }
+
+    // `monster+0x2bc` (SetImmobile). Blocks both the per-tick move-goal
+    // update and the movement step itself; the creature still turns,
+    // perceives and swings. 3 shipped scripts. (The same byte is what
+    // SetParalyzed's countdown clears when it expires.)
+    bool immobile() const { return m_Immobile; }
+
+    // `monster+0x302` (StopAnimating). The tick and the attack both guard
+    // every PlayAnimation call with it; a creature with it cleared holds
+    // whatever pose it has. 1 shipped script.
+    bool animating() const { return m_Animating; }
+
+    // (What makes a creature able to strike without closing is ranged(),
+    // further down -- M77 corrected what that exempts it from.)
+
+    // `monster+0x2ec` (SetLifespan): a despawn countdown, decremented at
+    // **three times** the frame delta and armed as `seconds << 8`. On
+    // expiry the tick detaches the creature from every other actor holding
+    // it as a target and removes it. No shipped script calls it; stored so
+    // the binding is present and the behaviour documented.
+    int lifespanUnits() const { return m_LifespanUnits; }
+    // Returns true on the tick the lifespan runs out.
+    bool TickLifespan(int deltaUnits);
 
     int currentHealth() const { return m_CurrentHealth; }
     int maxHealth() const { return m_MaxHealth; }
@@ -617,9 +680,19 @@ public:
     //         || actor->spellSlot0 != 0                                 // +0x310
     //         || actor->attachedWeapon == 225;                          // +0x2c2
     //
-    // A ranged creature skips the facing-cone test (`|yawDelta| < 0x200`)
-    // and skips the melee reach/LOS raycast (`FUN_10082004`) entirely --
-    // it just attacks anything inside `SetAttackRange`.
+    // M77 -- CORRECTED. The test this exempts a creature from is not a
+    // facing cone. The quantity the tick compares against 0x200 is
+    //
+    //     iVar7 = |(s16)self->+0xa4  -  (s16)target->+0xa4|
+    //
+    // and `+0xa4` is the actor's **z** -- the same field FUN_10082004 adds
+    // `vtable[0x108]()` (the creature-height table) to for its eye
+    // position, and the same one MonsterAimCenterZ reads. So it is a
+    // vertical limit: a melee creature will not swing at something more
+    // than 0x200 (512) raw units above or below it, two tiles. A ranged
+    // creature ignores that *and* skips the melee reach raycast
+    // (`FUN_10082004`) entirely -- it just attacks anything inside
+    // `SetAttackRange`.
     //
     // The `== 225` clause is corroborated perfectly by the corpus: all 24
     // scripts that pass 225 are archers (`archer_guard`, `elite_bowman`,
@@ -724,12 +797,32 @@ private:
     // either, so both stay 0 and every deduction clamps straight back.
     int m_Magicka = 0;
     int m_Fatigue = 0;
-    // M32: see the AI package block above. Defaults match the real actor
-    // constructor (FUN_100815e0): package -1, timers clear.
-    int m_AiPackage = kAiAsleep;
+    // M32: see the AI package block above. The timers match the real actor
+    // constructor (FUN_100815e0), clear.
+    //
+    // M77 -- CORRECTED. This was kAiAsleep, copied from that same
+    // constructor's `monster+0x2a8 = -1`. But every MonsterExecutable here
+    // stands for a creature that has been *placed*, and placing one runs
+    // entity vtable slot +0x10 (FUN_10086f9c / FUN_100866c0), which writes
+    // 2 over it before the script's Init() ever runs. Starting asleep is
+    // what left 280 of the 318 shipped `SetAggressive(true)` scripts --
+    // every creature that does not happen to call AiDetect() -- standing
+    // still. See monster_ai.h for the whole derivation.
+    int m_AiPackage = kSpawnAiPackage;
     int m_SavedAiPackage = kAiIdle;  // monster+0x2fc
     int m_AiPackageTimer = 0;        // monster+0x300
     int m_AttackCadence = 0;         // monster+0x2c4
+    // M77, all real constructor defaults (FUN_100815e0): +0x266 = 0,
+    // +0x2c8 = 0, +0x2cc = 2, +0x2ee = 0, +0x2bc = 0, +0x302 = 1,
+    // +0x2ec = 0, +0x2e0 = -1.
+    bool m_Boss = false;                                       // +0x266
+    int m_LastAttackClock = 0;                                 // +0x2c8
+    int m_AttackSpeedSeconds = kDefaultAttackSpeedSeconds;     // +0x2cc
+    bool m_CanTeleport = false;                                // +0x2ee
+    bool m_Immobile = false;                                   // +0x2bc
+    bool m_Animating = true;                                   // +0x302
+    int m_LifespanUnits = 0;                                   // +0x2ec
+    int m_ItemRequiredToHit = -1;                              // +0x2e0
     // M33/M34/M43: the stats block -- see actor_stats.h. Holds the timed
     // stat modifiers, the effect flags and both periodic channels, plus the
     // paralysis lockout.

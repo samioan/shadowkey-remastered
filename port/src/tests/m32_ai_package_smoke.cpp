@@ -147,7 +147,8 @@ int main(int argc, char** argv) {
         int ticksToFirstSwing = 0;
         for (int i = 0; i < 200; ++i) {
             ++ticksToFirstSwing;
-            if (rat->ConsumeAttackCadence(sk_bindings::kAiFrameDeltaUnits)) break;
+            rat->TickAttackCadence(sk_bindings::kAiFrameDeltaUnits);
+            if (rat->attackCadenceReady()) { rat->JitterAttackCadence(); break; }
         }
         int expected = sk_bindings::kAiAttackCadenceThreshold / sk_bindings::kAiFrameDeltaUnits + 1;
         Check(ticksToFirstSwing == expected,
@@ -161,7 +162,8 @@ int main(int argc, char** argv) {
             int ticks = 0;
             for (int i = 0; i < 200; ++i) {
                 ++ticks;
-                if (rat->ConsumeAttackCadence(sk_bindings::kAiFrameDeltaUnits)) break;
+                rat->TickAttackCadence(sk_bindings::kAiFrameDeltaUnits);
+                if (rat->attackCadenceReady()) { rat->JitterAttackCadence(); break; }
             }
             // 0x100 to cover, with 0..31 of it already banked by the reset.
             int fastest = (sk_bindings::kAiAttackCadenceThreshold - 31) /
