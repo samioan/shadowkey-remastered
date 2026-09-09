@@ -48,7 +48,23 @@
 //   item+0x17a    SetBow            (also SetCrossbow -- one field)
 //   item+0x179    SetThrowingWeapon
 //
-// See docs/WORLD_MODEL.md, "The weapon swing".
+// **M78 wired the swing to the attack.** M47 recovered the swing's state
+// machine but left it a decoration: main.cpp started a swing on the attack
+// key and then attacked regardless of what the swing said. In the real
+// engine the swing *is* the attack's rate limit, and the fields below are
+// the whole of it. `FUN_100425bc` opens with an eleven-instruction gate --
+//
+//     if (0 < player->+0xf48) { player->+0xf48 -= frameDelta(); return; }
+//     player->+0xf48 = (s16)stats->+0x1c;                 // the Speed stat
+//     if (player->+0x204 && player->+0x204->+0x1a7)       // SetRange > 0x400
+//         player->+0xf48 = (s16)stats->+0x1c * 6;
+//     if (0 < player->+0x238) return;                     // mid weapon-swap
+//     if (0 < player->+0x234) return;                     // mid swing
+//
+// -- and everything a player attack does (the 4 fatigue, the swing, the
+// target search, the sound, the damage, the arrow) is below it, in one
+// call. See CheckPlayerAttackGate() and docs/WORLD_MODEL.md, "The weapon
+// swing".
 
 #include <cstdint>
 
@@ -84,12 +100,23 @@ struct WeaponViewmodel {
     int swingAccum = 0;              // player+0x234
     int swapTimer = 0;               // player+0x238
     int swayPhase = 0;               // player+0x244
+    // player+0xf48. M78. Lives on the player object in the real engine
+    // like every other field here; kept with them for the same reason.
+    // Counts down in the engine's usual 0x100-per-second units and is
+    // **not** clamped at zero -- the real decrement runs it negative and
+    // the gate's test is `0 < x`, so overshoot is simply free time.
+    int attackCooldown = 0;
     // item+0x17f. Lives on the *Item* in the real engine, but nothing else
     // reads it and an Item is only ever swung by the player, so keeping it
     // here avoids widening ItemExecutable for one transient.
     int swingVariant = 0;
 
-    bool swinging() const { return swingAccum >= kSwingAccumFloor; }
+    // The engine's own test, `if (0 < player->+0x234)`: a swing is
+    // running until its accumulator reaches zero, which is a good half
+    // second after the last frame it draws (see ResolveViewmodelDraw).
+    bool swinging() const { return swingAccum > 0; }
+    // The narrower question the draw asks -- is a swing frame on screen?
+    bool swingVisible() const { return swingAccum > kSwingAccumFloor; }
     bool swapping() const { return swapTimer > 0; }
 };
 
@@ -117,6 +144,41 @@ struct WeaponViewmodel {
 //
 // Returns true if a swing actually started (the gate let it through).
 bool StartWeaponSwing(WeaponViewmodel& vm, ItemExecutable* item);
+
+// `FUN_10042394` case 2's tail: a spell that casts successfully re-arms
+// the swing from whatever weapon is currently on screen. No gate of any
+// kind (it overwrites a swing in flight), no variant roll, and the `+ 2`
+// unconditionally -- a bow in hand does not take the ranged seed here the
+// way StartWeaponSwing gives it. Reproduced as found.
+void StartSpellSwing(WeaponViewmodel& vm);
+
+// `FUN_100425bc`'s opening gate, which is the whole of the player's attack
+// cadence. Call it once per tick per attack key that is **held** -- the
+// real input handler reads bound buttons 0xf (right hand) and 0xe (left)
+// with the plain `InputState_GetBoundButton`, not the edge form the
+// jump/use keys beside it use, so the cooldown below advances in real time
+// only while the key is down.
+//
+// `activeWeapon` is `player+0x204` as the caller has just set it: the item
+// in the hand whose key is down (`FUN_10042e44`, player vtable +0x274,
+// runs one line before the attack). Only its ranged flag is read, and it
+// is `+0x1a7` (SetRange above 0x400) -- **not** the `+0x179`/`+0x17a`
+// bow/thrown pair StartWeaponSwing tests. The two disagree for nothing in
+// the shipped corpus, but they are different fields and the engine picks
+// deliberately between them.
+//
+// The cooldown is re-seeded on every call that gets past it, before the
+// swap and swing tests, so holding the key through a swing keeps re-arming
+// it: the tick that finally sees an empty accumulator still owes one
+// cooldown before it swings again.
+enum class PlayerAttackGate {
+    CoolingDown,  // `0 < +0xf48` -- the cadence, one Speed's worth
+    Swapping,     // `0 < +0x238` -- a weapon change is on screen
+    Swinging,     // `0 < +0x234` -- the previous swing has not run out
+    Allowed,
+};
+PlayerAttackGate CheckPlayerAttackGate(WeaponViewmodel& vm, const ItemExecutable* activeWeapon,
+                                       int speedStat, int frameDeltaUnits);
 
 // `FUN_1001d778`, player vtable +0x194. Call whenever the item whose art
 // should be on screen changes (equip, unequip, swapping hands). Starts the

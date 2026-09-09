@@ -187,23 +187,33 @@ int main(int argc, char** argv) {
     // (72 / 88 / 104 / 120 / 136) is for.
     const int expected[3][5] = {{89, 90, 91, 92, 93}, {94, 95, 96, 97, 98}, {99, 100, 101, 102, 103}};
     const int variants[3] = {0, 5, 10};
+    //
+    // **M78 removed the sixth frame this used to assert.** M47 reproduced
+    // the arithmetic's boundary artifact rather than trimming it: the frame
+    // index is `(a * 0x100 - (acc - 0x200)) >> 8` with
+    // `a = frames + variant + 1`, so it reaches `a` -- one slot past this
+    // variant's last frame -- at exactly `acc == 0x200`, which the engine's
+    // `< 0x200` test lets through. On the device that lands on a *measured*
+    // frame delta and is a coin toss; at this port's fixed delta a
+    // five-frame melee weapon's 1792 - 512 = 1280 is exactly 32 drains of
+    // 40, so it landed there on every single swing -- and for variant 10
+    // the frame it drew is base+16, outside the weapon's 16-slot strip and
+    // inside the *next weapon's*. That is the reported "different weapon on
+    // the last frame". The port's floor test is `<=` now; see
+    // ResolveViewmodelDraw.
     for (int v = 0; v < 3; ++v) {
         VM vm;
         sk_bindings::StartWeaponSwing(vm, club.get());
         vm.swingVariant = variants[v];
         std::vector<int> seq = SwingSequence(vm);
-        // The last entry is the boundary artifact: the accumulator lands on
-        // exactly 0x200 on the final tick, which the `< 0x200` test lets
-        // through for one frame at one slot past the animation. Reproduced
-        // rather than trimmed -- it is what the arithmetic does.
-        bool tailOk = seq.size() == 6 && seq[5] == expected[v][4] + 1;
-        bool bodyOk = seq.size() >= 5;
-        for (int i = 0; bodyOk && i < 5; ++i) bodyOk = seq[static_cast<size_t>(i)] == expected[v][i];
-        Check(bodyOk, "club swing variant " + std::to_string(variants[v]) + " draws slots " +
-                          std::to_string(expected[v][0]) + ".." +
-                          std::to_string(expected[v][4]) + " (got " + Join(seq) + ")");
-        Check(tailOk, "...plus the one-frame acc==0x200 boundary artifact at " +
-                          std::to_string(expected[v][4] + 1));
+        bool ok = seq.size() == 5;
+        for (int i = 0; ok && i < 5; ++i) ok = seq[static_cast<size_t>(i)] == expected[v][i];
+        Check(ok, "club swing variant " + std::to_string(variants[v]) + " draws slots " +
+                      std::to_string(expected[v][0]) + ".." + std::to_string(expected[v][4]) +
+                      " and stops (got " + Join(seq) + ")");
+        Check(seq.size() == 5 && seq.back() <= 88 + 15,
+              "...never reaching " + std::to_string(expected[v][4] + 1) +
+                  ", which for variant 10 is the next weapon's strip");
     }
 
     // ---- 4. A ranged weapon starts two frames in ----

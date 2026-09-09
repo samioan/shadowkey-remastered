@@ -104,9 +104,14 @@ int main(int argc, char** argv) {
     // M47 replaced this port's invented Swinging/Hold/Idle phases with the
     // real accumulator (`player+0x234`), so the shape checked here changed:
     // a swing starts at `(animationFrames + 2) << 8` for a melee weapon and
-    // ends when the accumulator drops below 0x200. The exact sprite
+    // stops *drawing* once the accumulator reaches 0x200. The exact sprite
     // sequence is asserted in m47_weapon_swing_smoke; this only confirms
     // the machine still starts, runs and stops.
+    //
+    // M78: `swinging()` is the engine's own `0 < player->+0x234` now, which
+    // is the question the attack gate asks -- so it stays true through the
+    // half second after the last frame is drawn, while the accumulator
+    // finishes draining and no new attack may start.
     sk_bindings::StartWeaponSwing(vm, club.get());
     bool swingStarted = vm.item == club.get() && vm.swinging() &&
                          vm.swingAccum == ((club->animationFrames() + 2) << 8);
@@ -119,9 +124,12 @@ int main(int argc, char** argv) {
         sk_bindings::TickWeaponViewmodel(vm, 0);
         ++swingTicks;
     }
-    // (5+2)*256 = 1792, falling by 40 a tick, stops being drawn below 512.
-    bool swingRan = swingTicks == 33;
-    std::printf("the club's swing runs %d ticks (~1.3s at 25Hz) then stops -- %s\n", swingTicks,
+    // (5+2)*256 = 1792, falling by 40 a tick: 32 ticks of visible frames,
+    // then 13 more before the accumulator reaches 0 and the next attack is
+    // allowed. 45 ticks is 1.8s at 25Hz, and 1792/1024 = 1.75s of engine
+    // clock -- the player's real melee attack rate.
+    bool swingRan = swingTicks == 45;
+    std::printf("the club's swing locks out %d ticks (1.75s of engine clock) -- %s\n", swingTicks,
                 swingRan ? "OK" : "FAILED");
     if (!swingRan) ok = false;
 

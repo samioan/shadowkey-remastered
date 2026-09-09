@@ -12,11 +12,19 @@ namespace {
 //   delta = frameDelta * 4;
 //   if (weapon->0x184 != 0x100) delta = weapon->0x184 * delta >> 8;
 //
-// **No shipped script calls SetReloadSpeed**, so the field always holds
-// whatever the Item constructor left there. It has to be 0x100, because any
-// other default would rescale (or, at 0, freeze) every swing in the game --
-// but that is inference from the game working, not a read of the
-// constructor, so the port simply takes the unscaled path.
+// **No shipped script calls SetReloadSpeed**, and M78 closed the gap M47
+// left here by reading the constructor instead of inferring it: the Weapon
+// class's own `FUN_1006c960` writes `+0x184 = 0x100` (next to `+0x180 = 0`
+// and `+0x1a7 = 0`), so the scale really is the identity for every weapon
+// in the game and the unscaled path is the only one the shipped corpus can
+// take.
+//
+// So a swing drains at exactly four times the frame delta, which makes its
+// length a wall-clock constant rather than a frame count: a five-frame
+// melee weapon seeds `(5 + 2) << 8` = 1792 and drains 1024 units a second,
+// i.e. **1.75 seconds**, of which the last half second draws nothing at
+// all (see ResolveViewmodelDraw). That is the player's real melee attack
+// rate, and at this port's fixed 25Hz it is 45 ticks.
 constexpr int kSwingDeltaPerFrame = kViewmodelFrameDeltaUnits * 4;  // 40
 
 // The swap transition's own rate is this port's choice, and the one number
@@ -87,6 +95,41 @@ bool StartWeaponSwing(WeaponViewmodel& vm, ItemExecutable* item) {
     return true;
 }
 
+void StartSpellSwing(WeaponViewmodel& vm) {
+    // `FUN_10042394` case 2, after the cast has succeeded and its 3
+    // fatigue is spent:
+    //
+    //   if (player->+0x204 && (n = weapon->+0x180) != 0)
+    //       player->+0x234 = (n + 2) << 8;
+    //
+    // -- the plain melee seed, on whatever weapon is on screen, with no
+    // gate in front of it.
+    if (!vm.item) return;
+    int frames = vm.item->animationFrames();
+    if (frames <= 0) return;
+    vm.swingAccum = (frames + 2) << 8;
+}
+
+PlayerAttackGate CheckPlayerAttackGate(WeaponViewmodel& vm, const ItemExecutable* activeWeapon,
+                                       int speedStat, int frameDeltaUnits) {
+    // `FUN_100425bc`'s first eleven instructions, in their own order.
+    if (vm.attackCooldown > 0) {
+        // No floor: the real subtraction can leave this negative and the
+        // test above is `0 < x`, not `x != 0`.
+        vm.attackCooldown -= frameDeltaUnits;
+        return PlayerAttackGate::CoolingDown;
+    }
+    // Re-seeded before the two busy tests, so a key held through a swing
+    // pays the cadence again on the far side of it.
+    vm.attackCooldown = speedStat;
+    if (activeWeapon != nullptr && activeWeapon->usesRangedPath()) {
+        vm.attackCooldown = speedStat * 6;
+    }
+    if (vm.swapTimer > 0) return PlayerAttackGate::Swapping;
+    if (vm.swingAccum > 0) return PlayerAttackGate::Swinging;
+    return PlayerAttackGate::Allowed;
+}
+
 void NotifyWeaponChanged(WeaponViewmodel& vm, ItemExecutable* item) {
     // `FUN_1001d778(player, force=0)`: a swing in flight blocks the swap
     // (the real test also covers three other busy flags this port has no
@@ -146,9 +189,27 @@ ViewmodelDraw ResolveViewmodelDraw(const WeaponViewmodel& vm) {
     draw.visible = true;
 
     if (vm.swingAccum != 0) {
-        // The swing branch. Nothing is drawn once the accumulator falls
-        // below 0x200 -- that, not a frame counter, is what ends a swing.
-        if (vm.swingAccum < kSwingAccumFloor) {
+        // The swing branch. Nothing is drawn once the accumulator reaches
+        // 0x200 -- that, not a frame counter, is what ends the *visible*
+        // swing (the accumulator itself keeps draining to 0, and until it
+        // gets there no new attack may start).
+        //
+        // **M78: `<=`, where the engine writes `if (iVar3 < 0x200)`.** The
+        // frame index below is `(a * 0x100 - (acc - 0x200)) >> 8` with
+        // `a = frames + variant + 1`, so it reaches `a` -- one slot past
+        // the variant's own last frame -- at exactly `acc == 0x200` and
+        // nowhere else. On the device the drain is the *measured* frame
+        // delta (`app+0xd4`, clamped to 4..0x40) times four, so landing on
+        // that single value is a coin toss; here the delta is a fixed 10
+        // and a five-frame melee weapon's 1792 - 512 = 1280 is exactly 32
+        // drains of 40, so the port hit it on **every** melee swing. What
+        // it drew is a real sprite from the *next* weapon's strip: a melee
+        // weapon owns 16 consecutive slots (bases 72/88/104/120/136), the
+        // variant-10 run ends at base+15, and the overrun frame is
+        // base+16. That is the reported "different weapon equipped on the
+        // last frame", and it is why this is a `<=` and not a clamp -- one
+        // unit earlier, every variant plays exactly its own five frames.
+        if (vm.swingAccum <= kSwingAccumFloor) {
             draw.visible = false;
             return draw;
         }

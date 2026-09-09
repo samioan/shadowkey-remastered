@@ -1355,7 +1355,7 @@ buffer and sleeps 10 ms without retrying.
 
 ---
 
-## The weapon swing (M47)
+## The weapon swing (M47, wired to the attack in M78)
 
 M25 decompiled the first-person viewmodel's draw function in full but
 could not find what starts a swing, and recorded that as an exhaustive
@@ -1380,7 +1380,7 @@ why walking outward from the Weapon dispatcher never reached it.
 | `player+0x234` | the swing accumulator; counts down, non-zero == swinging |
 | `player+0x238` | the weapon-**swap** transition timer |
 | `player+0x244` | walk-bob phase |
-| `player+0xf48` | the player's attack cadence |
+| `player+0xf48` | the player's attack cadence, seeded from **Speed** |
 | `item+0x17f` | swing variant, re-rolled per swing: 0, 5 or 10 |
 | `item+0x180` | `SetAnimationFrames` |
 | `item+0x184` | `SetReloadSpeed`, an 8.8 scale on the decay rate |
@@ -1404,7 +1404,7 @@ if (player->attackCooldown /* +0xf48 */ > 0) {      // the player's attack caden
     player->attackCooldown -= frameDelta();          // the analogue of monster+0x2c4
     return;
 }
-player->attackCooldown = stats->attackSpeed /* +0x1c, i16 */;
+player->attackCooldown = stats->speed /* +0x1c, i16 -- the Speed stat */;
 if (player->weapon && player->weapon->usesRangedPath /* +0x1a7 */)
     player->attackCooldown *= 6;                     // ranged fires six times slower
 
@@ -1429,6 +1429,78 @@ Two more entries share the swing half: `FUN_10042394(player, item)` — "use
 item at target", which starts a swing after a cast succeeds — and
 `FUN_1001d880(player)`, player vtable **+0x190**, a bare "start a swing"
 with the same gate but no `+2`.
+
+`stats+0x1c` is the **Speed** attribute, not a weapon-speed field: it is
+the short `FUN_10048244`'s `TestSpeed` (Character-stats trie index `0xf`)
+and `GetSpeed` (`0x20`) both read, sitting in the eight-attribute run
+Strength `+0x14`, Intelligence `+0x16`, Agility `+0x18`, Will `+0x1a`,
+**Speed `+0x1c`**, Endurance `+0x1e`, Personality `+0x20`, Luck `+0x22`.
+The seed is the attribute itself, so a *higher* Speed means a *longer*
+cadence — which reads backwards but is unambiguous in the code, and matters
+most for bows, where the ×6 turns a Speed of 50 into 300 units (1.17s) and
+is the binding limit rather than the swing.
+
+### What the gate is worth (M78)
+
+M47 wrote the whole of the above down and the port implemented none of it:
+`main.cpp` started a swing on the attack key and then attacked regardless
+of what the swing said. Reported symptoms, all one cause — "the swinging
+animation is really slow", "every time I press the attack key the sound
+plays and damages the enemy independent of the swing", "I can attack as
+fast as I can press the key", "I can attack even without a weapon
+equipped".
+
+The rate the gate produces, at this port's fixed 25Hz:
+
+| weapon | swing | cadence | attacks every |
+|---|---|---|---|
+| melee, 5 frames (63 of 64) | `(5+2)<<8` = 1792, 45 ticks | Speed 50 = 5 ticks | **48 ticks / 1.9s** |
+| bow, 4 frames | `4<<8` = 1024, 26 ticks | 50 × 6 = 300, 30 ticks | **31 ticks / 1.24s** |
+
+48 rather than 45 because the cadence is **re-seeded above the two busy
+tests**: every sixth tick spent waiting on the swing puts another Speed's
+worth back on the clock, so the melee period is the swing rounded up to a
+whole cadence. A bow is the other way round — its swing has run out long
+before its ×6 cadence has.
+
+And `FUN_10042394` is the only caller, which settles the last symptom:
+
+```c
+if (param_2 != 0) {                                  // the WHOLE function
+    switch (FUN_1006d508(param_2)) {                 // the item's type
+    case 1:                                          // weapon
+        if (stats->periodic /* +0x7c */ != 4)        // not inside Sanctuary
+            { player->weapon = param_2; player->vtable[0x288](player); }
+        break;
+    case 2:                                          // spell
+        if (CanCast(param_2) && Cast(param_2, player)) {
+            player->fatigue -= 3;
+            if (player->weapon && player->weapon->frames)
+                player->swingAccum = (frames + 2) << 8;   // no gate at all
+        }
+        break;
+    case 4:  param_2->vtable[0x90](param_2, player, 0); break;   // consumable
+    }
+}
+```
+
+**There is no bare-handed attack in this game.** An empty hand reaches the
+`if (param_2 != 0)` and stops — no swing, no target search, no miss sound.
+The port's fists (1–3 damage at an invented reach) were invented, and are
+gone. The input handler above it reads the two attack keys as **held**
+(`InputState_GetBoundButton(input, 0xf)` for the right hand, `0xe` for the
+left), unlike the jump and use keys a few lines earlier in the same
+function, which pair it with `_GetBoundButtonPrev` for an edge — so the
+cadence advances in real time only while a key is down, and the *rate* of
+attacking is the gate's, never the keyboard's.
+
+Two smaller things the same pass settled. `FUN_10042e44` (player vtable
++0x274) writes `player+0x204` from the pressed hand one line before the
+attack, with no swap transition — so the viewmodel shows the hand you are
+actually using, which is why this port now resolves the drawn weapon from
+the last-pressed hand first. And the cast's swing above takes the **melee**
+seed unconditionally: a bow on screen does not get the ranged one there the
+way `FUN_100425bc` gives it.
 
 ### The sprite arithmetic, and why a weapon owns 16 sprite slots
 
@@ -1459,13 +1531,27 @@ is what the **16-slot spacing between weapon sprite bases** (72, 88, 104,
 is a visibly different swing (an overhead chop, a low sweep, a backhand),
 and 88 is the weapon simply held.
 
-A swing therefore lasts 32 ticks, about 1.3 seconds.
+A swing therefore **draws** for 32 ticks — but the accumulator is what the
+attack gate tests, and it keeps draining past the last frame to zero: 1792
+units at 1024 a second is **1.75 seconds**, of which the last half second
+draws no weapon at all. That is a wall-clock constant rather than a frame
+count, because the drain is four times the measured frame delta.
 
-Two details reproduced rather than tidied:
+One detail reproduced, one corrected:
 
-- **The accumulator lands on exactly `0x200` on the final tick**, which the
-  `< 0x200` test lets through, so one extra frame at one slot past the
-  animation is drawn. Real, and one frame long.
+- **CORRECTED (M78): the extra frame at the end.** The index reaches
+  `frames + variant + 1` — one slot past this variant's last frame — at
+  exactly `acc == 0x200`, which the engine's `< 0x200` test lets through.
+  On the device the drain is the *measured* delta (`app+0xd4`, clamped to
+  4..0x40) times four and landing on that one value is a coin toss; at a
+  fixed delta of 10 a five-frame melee weapon's 1792 − 512 = 1280 is
+  exactly 32 drains of 40, so this port hit it on **every** melee swing.
+  What it drew is a real sprite from the *next weapon's* strip — the
+  variant-10 run ends at base+15 and the overrun frame is base+16, which
+  for the club is 104, another weapon's base. That is the reported
+  "different weapon equipped on the last frame"; the port's floor test is
+  `<=` now, one unit earlier, which makes every variant play exactly its
+  own five frames and nothing else.
 - **A ranged weapon starts two frames in.** Without the `+2`,
   `weapons/bandit_longbow.s` (base 175, 4 frames) draws only 178 and 179 —
   the last two slots of its five-slot strip. Whether that is a bug or a
@@ -1474,9 +1560,12 @@ Two details reproduced rather than tidied:
   `SetCrossbow`; every other weapon in the game gets the three variants.
 
 `SetReloadSpeed` (`item+0x184`) has **zero call sites** in the corpus, so it
-always holds its constructed value. It has to be `0x100`, since any other
-default would rescale — or, at 0, freeze — every swing in the game; that is
-inference from the game working, not a read of the constructor.
+always holds its constructed value — and M78 read that value rather than
+inferring it: the Weapon constructor `FUN_1006c960` writes `+0x184 = 0x100`
+outright, next to `+0x180 = 0` (no animation frames until a script sets
+them), `+0x19c = 0` and `+0x1a7 = 0`. So the scale is the identity for
+every weapon in the game and the unscaled path is the only one the shipped
+corpus can take.
 
 `SetAnimationFrames`, `SetReloadFrames`, `SetNumClips`, `SetClipSize`,
 `SetIsAutomatic`, `SetHasZoom`, `SetScoped`: this Item class is a **leftover

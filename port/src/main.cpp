@@ -2897,6 +2897,10 @@ int main(int argc, char** argv) {
     // weapon_viewmodel.h's comment for the real RE ground truth this
     // recreates.
     sk_bindings::WeaponViewmodel gameWeaponViewmodel;
+    // M78: `player+0x204` as `FUN_10042e44` (player vtable +0x274) writes
+    // it -- the hand whose action key was last pressed. Non-owning, like
+    // gameWeaponViewmodel.item, and cleared through the same two paths.
+    sk_bindings::ItemExecutable* gameActiveHandItem = nullptr;
     // M48: live spell projectiles -- see simkin_bindings/spell_projectile.h.
     // Every offensive spell, the player's and a creature's alike, now goes
     // through one of these instead of touching its target directly.
@@ -3031,6 +3035,9 @@ int main(int argc, char** argv) {
         // would otherwise free it out from under that pointer, same
         // use-after-free shape PlayerExecutable::PurgeRemovedItems()
         // itself already guards for m_LeftItem/m_RightItem.
+        if (gameActiveHandItem && gameActiveHandItem->markedForRemoval()) {
+            gameActiveHandItem = nullptr;
+        }
         if (gameWeaponViewmodel.item && gameWeaponViewmodel.item->markedForRemoval()) {
             gameWeaponViewmodel.item = nullptr;
             gameWeaponViewmodel.swingAccum = 0;
@@ -3132,6 +3139,7 @@ int main(int argc, char** argv) {
             gameClockUnits = 0;
             gamePlayerPeriodicKind = 0;
             gameWeaponViewmodel = sk_bindings::WeaponViewmodel{};
+            gameActiveHandItem = nullptr;
             gameVelZ = 0.0f;
             onGround = true;
             inGame = false;
@@ -4411,21 +4419,19 @@ int main(int argc, char** argv) {
                 // earlier 8-tile cap this replaces was a guess that landed
                 // close by luck; it is gone.
                 //
-                // kMeleeRange survives only as the reach for the *player's*
-                // bare fists (tryAttack below) -- monsters use their own
-                // real attackRange().
+                // M78: bare-handed attacking is gone -- `FUN_10042394`
+                // does nothing at all for an empty hand, so there is no
+                // fist reach to define any more. kMeleeRange survives only
+                // as the floor of the on-screen "what am I facing" HP
+                // label's radius, so that an unarmed player still gets a
+                // name and a health bar off whatever is right in front of
+                // them. Monsters use their own real attackRange().
                 //
-                // M55: still an invented constant (no shipped script sets a
-                // range for bare hands), but no longer a free one. Entity
-                // collision now holds an actor off a creature by the sum of
-                // their boxes, and every creature model in the shipped
-                // manifests is 128 -- so anything shorter than
-                // `2 * kActorHalfExtent` cannot be reached at all. The
-                // previous 110 would have made bare-handed combat
-                // impossible. A real weapon's own `range()` (384 for every
-                // melee weapon in the corpus, M20) already clears this
-                // comfortably, and a monster's default `attackRange()` is
-                // 660, so only the fists needed the correction.
+                // M55 sized it: entity collision holds an actor off a
+                // creature by the sum of their boxes, and every creature
+                // model in the shipped manifests is 128, so anything
+                // shorter than `2 * kActorHalfExtent` could never be
+                // reached at all.
                 constexpr float kMeleeRange = sk::kActorHalfExtent * 2.0f;  // world units
                 // M22: no real spell script ever calls SetRange() (only
                 // weapon scripts do -- M20's own corpus-verified bimodal
@@ -5484,12 +5490,45 @@ int main(int argc, char** argv) {
                                       gameArrows.end());
                 }
 
-                // Player attack -- UseLeftAction/UseRightAction (Key7/
-                // Key5, real decoded default bindings, previously unused)
-                // swing/fire whichever hand's weapon is equipped (bare-
-                // fists 1-3 damage at kMeleeRange if empty) at the nearest
-                // alive monster within range and roughly in front of the
-                // camera.
+                // Player attack -- UseRightAction/UseLeftAction (Key5/
+                // Key7, the real decoded default bindings).
+                //
+                // M78 rebuilt the front of this around the two functions
+                // that actually stand between an attack key and a hit,
+                // neither of which this port had:
+                //
+                //   `FUN_10042394(player, item)` -- player vtable +0x280,
+                //   "use the item in this hand", reached once per tick for
+                //   each attack key that is **held**. It switches on the
+                //   item's type (`FUN_1006d508`): a weapon attacks, a
+                //   spell casts, a consumable is used -- and the whole
+                //   body is wrapped in `if (param_2 != 0)`, so a hand
+                //   holding **nothing does nothing**. There is no
+                //   bare-fisted attack in this game; the one here was
+                //   invented.
+                //
+                //   `FUN_100425bc(player)` -- player vtable +0x288, the
+                //   attack itself, which opens with the three-part gate
+                //   CheckPlayerAttackGate() reproduces: the Speed-long
+                //   cadence (`player+0xf48`), the weapon-swap transition,
+                //   and the swing accumulator. Everything the attack does
+                //   -- the 4 fatigue, the swing, the target search, the
+                //   sound and the damage -- is one call below that gate,
+                //   in that order.
+                //
+                // That is the whole of the reported bug list. The swing
+                // was a decoration played beside an attack that ignored
+                // it; now the accumulator it starts is what holds the next
+                // attack off, so the sound and the damage are the swing
+                // rather than one-per-keypress, and mashing the key cannot
+                // outrun it. A five-frame melee weapon's swing is 1792
+                // accumulator units draining at 1024 a second: **1.75
+                // seconds**, which is the player's real melee attack rate.
+                //
+                // M20/M49/M51 own everything below the gate -- the ranged
+                // branch's launch-and-forget arrow, the melee target
+                // search and which of the two swing sounds plays -- and
+                // are unchanged.
                 //
                 // M20: range is now the real equipped weapon's own
                 // SetRange() value (item_executable.h's range() comment --
@@ -5506,45 +5545,51 @@ int main(int argc, char** argv) {
                 // through a thin wall corner at extreme range, a documented
                 // simplification, same footing as every other from-scratch
                 // combat constant in this port.
-                auto tryAttack = [&](sk_bindings::ItemExecutable* handItem) {
-                    // M22: an equipped item that isn't a real weapon
-                    // (kItemTypeWeapon) is treated as a spell cast instead
-                    // of a melee/ranged swing -- reuses these same two
-                    // attack keys, matching the real default control
-                    // scheme's own lack of a dedicated "cast" action, same
-                    // reasoning M20 already established for ranged
-                    // weapons reusing them over a "fire" key.
-                    bool isWeapon = handItem && handItem->itemType() == sk_bindings::kItemTypeWeapon;
-                    // M48: a spell leaves here entirely. The real cast
-                    // (`FUN_10046764`) never looks for a target -- it
-                    // charges the caster, applies its self-targeted half,
-                    // and launches a projectile down the caster's facing.
-                    // So casting no longer needs anything in range, and a
-                    // spell that is all buff (Energize, Sanctuary,
-                    // HealWound, ...) finally does something when there is
-                    // nothing to shoot at, which is the larger half of the
-                    // bug this closes. The invented kSpellRange targeting
-                    // cone goes with it; a spell's real reach is its
-                    // projectile's twelve-tile flight.
-                    if (handItem && !isWeapon && handItem->spellTypeId() != 0) {
-                        runSpellCast(handItem, &stack.player(), gameCamera.x, gameCamera.y,
-                                      gameCamera.z, gameCamera.yaw, gameCamera.pitch);
+                // `FUN_100425bc`. Only ever reached with a real weapon
+                // (`kItemTypeWeapon`) in `weapon`, because the type switch
+                // in useHandItem below is the only caller -- which is why
+                // there is no null or non-weapon handling left in here.
+                auto playerAttack = [&](sk_bindings::ItemExecutable* weapon) {
+                    // The gate. `weapon` is `player+0x204` as the real
+                    // input handler has just set it (`FUN_10042e44`, one
+                    // line earlier), and the only thing read off it here
+                    // is the ranged flag that makes a bow's cadence six
+                    // times as long. See weapon_viewmodel.h.
+                    if (sk_bindings::CheckPlayerAttackGate(
+                            gameWeaponViewmodel, weapon, stack.player().speed(),
+                            sk_bindings::kViewmodelFrameDeltaUnits) !=
+                        sk_bindings::PlayerAttackGate::Allowed) {
                         return;
                     }
-                    // M73: `FUN_100425bc` spends 4 fatigue on its third
-                    // instruction, before the ranged/melee split, before
-                    // the target search and before any to-hit roll -- so a
-                    // whiff, a bare-fisted swing and a connecting sword
-                    // blow all cost the same, and a bow costs it too. The
-                    // spell path above never reaches this function in the
-                    // engine either (it is a different vtable slot), which
-                    // is why the cast's own 3 is charged separately.
+                    // M73: `FUN_100425bc` spends 4 fatigue before the
+                    // ranged/melee split, before the target search and
+                    // before any to-hit roll -- so a whiff and a
+                    // connecting sword blow cost the same, and a bow costs
+                    // it too. The spell path never reaches this function
+                    // in the engine either (it is a different vtable
+                    // slot), which is why the cast's own 3 is charged
+                    // separately.
+                    // M78: charged *after* the gate, where the real order
+                    // has it -- a press the cadence or an in-flight swing
+                    // refuses is free, and this port used to bill 4 for
+                    // every one of them.
                     stack.player().SetActorFatigue(stack.player().actorFatigue() -
                                                     sk_bindings::kAttackFatigueCost);
                     // Read after the spend: the halving test below is on
                     // the post-cost pool, exactly as the real order has it.
                     const bool exhausted =
                         sk_bindings::ExhaustedMeleeHalvesDamage(stack.player().actorFatigue());
+#if SK_DEBUG_SUITE
+                    // SK_DEBUG_SUITE (M68)
+                    sk_debug::Count("combat.swings");
+#endif
+                    // M78: the swing is started *by the attack*, here,
+                    // between the fatigue and the target search -- it is
+                    // the same statement in the real function. That is the
+                    // connection the port was missing: one attack, one
+                    // swing, and the accumulator this seeds is what the
+                    // gate above will refuse on for the next 1.75 seconds.
+                    sk_bindings::StartWeaponSwing(gameWeaponViewmodel, weapon);
                     // M49: a ranged weapon leaves here too, for the same
                     // reason a spell does -- `FUN_100425bc`'s ranged branch
                     // never aims at anything. It plays the bow sound, rolls
@@ -5555,7 +5600,7 @@ int main(int argc, char** argv) {
                     // 64-tile targeting cone this used to fire through
                     // (which was also how a shot reached through a wall
                     // corner) is gone with it.
-                    if (isWeapon && handItem->usesRangedPath()) {
+                    if (weapon->usesRangedPath()) {
                         // Slot 1 -- barch_firebow.wav in 21 of the 22
                         // shipped sound tables, and the same slot every
                         // archer script's SetAttackNoise(1) names.
@@ -5563,20 +5608,18 @@ int main(int argc, char** argv) {
                         // `rand() % weapon->damageMax` -- the minimum is
                         // simply not consulted on the ranged path, unlike
                         // the melee RandomRange(min, max) below.
-                        const int dmgMax = (std::max)(1, handItem->damageMax());
+                        const int dmgMax = (std::max)(1, weapon->damageMax());
                         gameArrows.push_back(sk_bindings::SpawnArrowProjectile(
                             &stack.player(), /*ownerIsPlayer=*/true,
                             static_cast<int>(gameCamera.x), static_cast<int>(gameCamera.y),
                             static_cast<int>(gameCamera.z), static_cast<int>(gameCamera.z),
                             sk_bindings::EngineYawFromPortYaw(gameCamera.yaw),
                             sk_bindings::EngineAngleFromRadians(gameCamera.pitch),
-                            handItem->projectileTypeId(), std::rand() % dmgMax,
+                            weapon->projectileTypeId(), std::rand() % dmgMax,
                             stack.player().attack()));
                         return;
                     }
-                    float range =
-                        handItem ? (isWeapon ? static_cast<float>(handItem->range()) : kSpellRange)
-                                 : kMeleeRange;
+                    float range = static_cast<float>(weapon->range());
                     MonsterInstance* target = nullptr;
                     float bestDist = range + 1.0f;
                     for (MonsterInstance& m : gameMonsters) {
@@ -5621,16 +5664,16 @@ int main(int argc, char** argv) {
                         return;
                     }
                     playPlayerSound(sk::kSoundAttackHit);
-                    if (handItem && !isWeapon) {
-                        // M22: a real spell's own HitTarget()/DoAttackRoll()
-                        // (ItemExecutable) applies damage itself -- nothing
-                        // else needed here. Harmless no-op if handItem
-                        // isn't actually a spell (no real script's own
-                        // HitTarget matches, soft-fails through).
-                        handItem->InvokeHitTarget(target->script.get());
-                    } else {
-                        int dmgMin = isWeapon ? handItem->damageMin() : 1;
-                        int dmgMax = isWeapon ? handItem->damageMax() : 3;
+                    {
+                        // M78: the "a non-weapon item swings like a club
+                        // for 1-3" arm is gone with the bare fists -- the
+                        // only way into this lambda is a real weapon, so
+                        // the damage is always the weapon's own
+                        // SetDamageMin/SetDamageMax pair (`item+0x1cc` /
+                        // `item+0x1ce`, which is what the real melee
+                        // branch reads).
+                        int dmgMin = weapon->damageMin();
+                        int dmgMax = weapon->damageMax();
                         // M43: attack(), not baseAttack() -- a creature can
                         // Drain, Weaken, FeebleBlade, Disease or Blind the
                         // player now, and every one of those is a timed
@@ -5664,41 +5707,80 @@ int main(int argc, char** argv) {
                         }
                     }
                 };
-                // Whichever hand actually holds a weapon provides the
-                // visible swing, so attacking bare-handed with one hand
-                // while the other holds the club still animates the club
-                // rather than silently drawing nothing.
-                auto swingItemFor = [&](sk_bindings::ItemExecutable* hand) {
-                    if (hand && hand->weaponSprite() >= 0) return hand;
-                    sk_bindings::ItemExecutable* other = stack.player().rightItem() == hand
-                                                              ? stack.player().leftItem()
-                                                              : stack.player().rightItem();
-                    return (other && other->weaponSprite() >= 0) ? other : hand;
+                // `FUN_10042394` -- the type switch that is the only way
+                // into an attack, a cast or a use.
+                auto useHandItem = [&](sk_bindings::ItemExecutable* handItem) {
+                    // `if (param_2 != 0)` wraps the entire function. An
+                    // empty hand is not an attack, not a miss and not a
+                    // sound -- there is no bare-handed combat here.
+                    if (!handItem) return;
+                    const int type = handItem->itemType();
+                    if (type == sk_bindings::kItemTypeWeapon) {
+                        // `FUN_1006d508(item) == 1`. The one thing between
+                        // the type test and the attack is the Sanctuary
+                        // channel (`stats+0x7c == 4`), which is checked
+                        // here and nowhere else -- being inside Sanctuary
+                        // means you cannot swing.
+                        if (stack.player().actorStats().periodicKind() ==
+                            sk_bindings::ActorStats::kPeriodicSanctuaryTimer) {
+                            return;
+                        }
+                        // `player+0x204 = item` -- FUN_10042e44, player
+                        // vtable +0x274, which the input handler calls one
+                        // line before the attack. It is what makes the
+                        // viewmodel show the hand you are actually using.
+                        gameActiveHandItem = handItem;
+                        playerAttack(handItem);
+                        return;
+                    }
+                    if (type == sk_bindings::kItemTypeSpell ||
+                        handItem->spellTypeId() != 0) {
+                        // `FUN_1006d508(item) == 2`. M48: the real cast
+                        // never looks for a target -- it charges the
+                        // caster, applies its self-targeted half and
+                        // launches a projectile down the caster's facing,
+                        // so a pure buff (Energize, Sanctuary, HealWound)
+                        // works with nothing in front of you.
+                        //
+                        // M78: the cast's own swing. Case 2's tail spends
+                        // 3 fatigue (inside runSpellCast, M73) and then
+                        // re-arms the swing from whatever weapon is on
+                        // screen -- with **no** cadence gate and no swing
+                        // gate, overwriting one in flight. Reproduced as
+                        // found: casting is not rate-limited by the swing
+                        // the way swinging is, only by the spell's own
+                        // refire cooldown and by magicka.
+                        if (!runSpellCast(handItem, &stack.player(), gameCamera.x, gameCamera.y,
+                                          gameCamera.z, gameCamera.yaw, gameCamera.pitch)) {
+                            return;
+                        }
+                        sk_bindings::StartSpellSwing(gameWeaponViewmodel);
+                        return;
+                    }
+                    // `FUN_1006d508(item) == 4` is a consumable, and the
+                    // real branch calls the item's own use through its
+                    // vtable +0x90. This port has no use-from-the-hand
+                    // path for consumables yet, so a potion in a hand does
+                    // nothing on the attack key -- still closer than the
+                    // melee swing it used to produce. See PORT_ROADMAP.
                 };
-                if (input.ConsumeBoundJustPressed(sk::Action::UseLeftAction)) {
-                    // M25: the swing pose plays on the keypress itself, not
-                    // only when tryAttack actually finds a target in range --
-                    // matches a real weapon swing happening whether or not it
-                    // connects (see WeaponViewmodel's comment; a no-op for a
-                    // non-weapon/no weaponSprite() item, e.g. bare fists or a
-                    // spell).
-#if SK_DEBUG_SUITE
-                    // SK_DEBUG_SUITE (M68)
-                    sk_debug::Count("combat.swings");
-#endif
-                    sk_bindings::StartWeaponSwing(gameWeaponViewmodel,
-                                                   swingItemFor(stack.player().leftItem()));
-                    tryAttack(stack.player().leftItem());
-                }
-                if (input.ConsumeBoundJustPressed(sk::Action::UseRightAction)) {
-#if SK_DEBUG_SUITE
-                    // SK_DEBUG_SUITE (M68)
-                    sk_debug::Count("combat.swings");
-#endif
-                    sk_bindings::StartWeaponSwing(gameWeaponViewmodel,
-                                                   swingItemFor(stack.player().rightItem()));
-                    tryAttack(stack.player().rightItem());
-                }
+                // The real input handler's own order and its own read: the
+                // right hand's bound button (0xf) first, then the left
+                // (0xe), both with the plain `InputState_GetBoundButton`
+                // -- **held**, not an edge. The jump and use keys a few
+                // lines above them in the same function do their own edge
+                // detection with `_GetBoundButtonPrev`, so the difference
+                // is deliberate: attacking is a held action whose rate is
+                // the cadence and the swing, not the keyboard's.
+                const bool useRightHeld = input.GetBoundButton(sk::Action::UseRightAction);
+                const bool useLeftHeld = input.GetBoundButton(sk::Action::UseLeftAction);
+                // Drain the edge latches these two slots would otherwise
+                // keep, so a press made during play cannot fire again in
+                // the next menu that opens.
+                input.ConsumeBoundJustPressed(sk::Action::UseRightAction);
+                input.ConsumeBoundJustPressed(sk::Action::UseLeftAction);
+                if (useRightHeld) useHandItem(stack.player().rightItem());
+                if (useLeftHeld) useHandItem(stack.player().leftItem());
                 // M30: the viewmodel now shows the equipped weapon *all
                 // the time*, not only for the moment after an attack key.
                 // Before this, `vm.item` was assigned solely inside
@@ -5715,8 +5797,20 @@ int main(int argc, char** argv) {
                 // the pointer directly. Changing the item on screen now
                 // plays the real transition -- old weapon, then the new one
                 // raised from below -- rather than snapping.
+                // M78: `player+0x204` first. The real draw reads the
+                // active weapon directly (`player->0x204->0x19c`), and the
+                // active weapon is whichever hand's key you last pressed
+                // -- FUN_10042e44 writes it with no transition of its own.
+                // Falling back to the equipped hands covers the case that
+                // hand has since been emptied, which the real equip path
+                // handles the same way.
                 {
-                    sk_bindings::ItemExecutable* shown = stack.player().rightItem();
+                    sk_bindings::ItemExecutable* shown = gameActiveHandItem;
+                    if (shown != stack.player().leftItem() &&
+                        shown != stack.player().rightItem()) {
+                        shown = nullptr;
+                    }
+                    if (!shown || shown->weaponSprite() < 0) shown = stack.player().rightItem();
                     if (!shown || shown->weaponSprite() < 0) shown = stack.player().leftItem();
                     if (shown && shown->weaponSprite() < 0) shown = nullptr;
                     sk_bindings::NotifyWeaponChanged(gameWeaponViewmodel, shown);
@@ -5737,7 +5831,7 @@ int main(int argc, char** argv) {
                 // monster_executable.h's class comment), and world pickups
                 // (M19, e.g. snowline/foxglove.s -- the last remaining
                 // unbound category, docs/PORT_ROADMAP.md). Same nearest-in-
-                // range-and-facing-cone targeting tryAttack uses above,
+                // range-and-facing-cone targeting playerAttack uses above,
                 // reused here (and again below for the on-screen use-text
                 // prompt).
                 // Reach for the Use action. 384 raw world units is the
@@ -6116,9 +6210,10 @@ int main(int argc, char** argv) {
                 // occupies y=0..31 across the top).
                 //
                 // M20/M22: "in range" now means whichever hand's real
-                // weapon reaches farthest (kMeleeRange for bare fists,
-                // kSpellRange for a non-weapon item -- a spell) -- matches
-                // tryAttack's own per-item range above, so equipping a bow
+                // weapon reaches farthest (kMeleeRange as a floor for empty
+                // hands, kSpellRange for a non-weapon item -- a spell) --
+                // matches
+                // playerAttack's own per-item range above, so equipping a bow
                 // or a spell genuinely shows the HP label from farther
                 // away too, not just landing the hit.
                 auto handRange = [&](sk_bindings::ItemExecutable* item) -> float {

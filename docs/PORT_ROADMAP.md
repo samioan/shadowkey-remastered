@@ -6944,6 +6944,123 @@ soft-fails 39 -> 39, all 14 tracked `.ppm` renders byte-identical,
   `attacking`, `diff` reports `ai.acquired +1` and `combat.hits_on_player
   +8` over ~13 seconds of contact.
 
+- [x] **M78 -- the player's attack, wired to its own swing.** Reported: the
+  swing animation is really slow and some swings show a different weapon on
+  the last frame; the sound plays and the damage lands on every keypress
+  independent of the swing; there is no cooldown at all; and an empty hand
+  attacks. Five symptoms, and the first four are one missing function.
+  Write-up in docs/WORLD_MODEL.md's "The weapon swing" section, which M47
+  had already written the gate into.
+
+    - **M47 decompiled the gate and the port never wired it.**
+      `FUN_100425bc` -- player vtable **+0x288**, the attack -- opens with
+      eleven instructions that are the whole of the player's attack rate:
+
+      ```c
+      if (0 < player->+0xf48) { player->+0xf48 -= frameDelta(); return; }
+      player->+0xf48 = (s16)stats->+0x1c;               // the Speed stat
+      if (player->+0x204 && player->+0x204->+0x1a7)     // SetRange > 0x400
+          player->+0xf48 = (s16)stats->+0x1c * 6;
+      if (0 < player->+0x238) return;                   // mid weapon-swap
+      if (0 < player->+0x234) return;                   // mid swing
+      ```
+
+      Everything the attack does -- the 4 fatigue, the swing, the target
+      search, the sound, the damage, the arrow -- is one call below that,
+      in that order. This port ran the swing and the attack as two
+      independent things off the same keypress, which is every reported
+      symptom at once: the animation looked slow because nothing waited for
+      it, the sound and damage fired per keypress because they were never
+      behind it, and mashing outran it because nothing counted.
+
+      `stats+0x1c` is **Speed** -- the short `FUN_10048244`'s `TestSpeed`
+      (Character-stats trie index `0xf`) and `GetSpeed` (`0x20`) both read,
+      in the run Strength `+0x14` / Intelligence `+0x16` / Agility `+0x18`
+      / Will `+0x1a` / **Speed `+0x1c`** / Endurance `+0x1e` / Personality
+      `+0x20` / Luck `+0x22`. The seed is the attribute itself, so a
+      higher Speed means a *longer* cadence. Backwards-reading, and
+      unambiguous.
+
+      The rate it produces, at the fixed 25Hz tick: a five-frame melee
+      weapon (63 of the 64 in the corpus) swings **every 48 ticks, 1.9
+      seconds**; a bow every **31 ticks, 1.24s**. 48 rather than the
+      swing's own 45 because the cadence is re-seeded *above* the two busy
+      tests -- every sixth tick spent waiting on the swing puts another
+      Speed's worth back on the clock -- so melee is the swing rounded up
+      to a whole cadence, while a bow is the other way round and is
+      cadence-limited outright.
+
+    - **There is no bare-handed attack in this game.** The attack's only
+      caller is `FUN_10042394` (player vtable **+0x280**), "use the item in
+      this hand", and its entire body is inside `if (param_2 != 0)`: an
+      empty hand reaches that test and stops. No swing, no target search,
+      not even a miss sound. This port's fists (1-3 damage at an invented
+      reach) were invented and are gone, along with the `kMeleeRange` they
+      used -- the constant survives only as the floor of the on-screen HP
+      label's radius. The switch under it is
+      `FUN_1006d508(item)`: **1** weapon (attack, unless `stats+0x7c == 4`,
+      the Sanctuary channel, which is checked here and nowhere else), **2**
+      spell (cast, then re-arm the swing from whatever weapon is on screen
+      -- with no cadence gate and no swing gate, overwriting one in
+      flight), **4** consumable (`item vtable +0x90`). The consumable arm is
+      the one gap left: this port has no use-from-the-hand path yet, so a
+      potion in a hand does nothing on the attack key, which is still
+      closer than the melee swing it used to produce.
+
+    - **The attack keys are read as held, not as an edge.** The input
+      handler calls `FUN_10042394` once per tick for each of bound buttons
+      `0xf` (right hand) and `0xe` (left), through the plain
+      `InputState_GetBoundButton` -- while the jump and use keys a few
+      lines earlier in the same function pair it with
+      `_GetBoundButtonPrev` for an edge. So the difference is deliberate,
+      and it is what makes the cadence a real-time one. This port used
+      `ConsumeBoundJustPressed` for both.
+
+    - **CORRECTED: the swing's last frame.** M47 found the frame index
+      reaching `frames + variant + 1` -- one slot past the variant's own
+      last frame -- at exactly `acc == 0x200`, which the engine's
+      `< 0x200` test lets through, and reproduced it as "a one-frame
+      boundary artifact". On the device the accumulator drains by the
+      *measured* frame delta (`app+0xd4`, clamped 4..0x40) times four, so
+      landing on that single value is a coin toss. Here the delta is a
+      fixed 10 and a five-frame melee weapon's 1792 - 512 = 1280 is exactly
+      32 drains of 40 -- so the port hit it on **every** melee swing, and
+      what it drew is a real sprite from the **next weapon's** strip: a
+      melee weapon owns 16 consecutive slots (bases 72/88/104/120/136), the
+      variant-10 run ends at base+15, and the overrun frame is base+16,
+      which for `weapons/club.s` is 104, another weapon's idle pose. That
+      is the reported "different weapon equipped on the last frame". The
+      floor test is `<=` now, one unit earlier, which makes each variant
+      play exactly its own five frames.
+
+    - **The swing's length was already right, and it is 1.75 seconds.**
+      Not the 1.3 M47 recorded: the accumulator keeps draining past the
+      last drawn frame to zero, and it is zero the attack gate waits for.
+      1792 units at 4x the frame delta is 1024 a second, so 1.75s of
+      wall clock at any framerate, of which the last half second draws no
+      weapon at all. M78 also closed M47's one piece of inference here by
+      reading the constructor instead: `FUN_1006c960` writes
+      `item+0x184 = 0x100` outright, so `SetReloadSpeed`'s scale really is
+      the identity for every weapon in the game.
+
+  **Verification.** New `m78_player_attack_smoke` (33 checks, suite
+  **69/69 -> 70/70**): the cadence's seed, drain and x6; the seed happening
+  *above* the busy tests; both busy gates; a held attack key driven for 300
+  ticks with a club and with a longbow, measured at 48 and 31 ticks between
+  swings and never back to back; the 45-tick swing lock-out with its 32
+  drawn frames and 13 blank ones; all three club variants staying inside
+  the weapon's own 16-slot strip; the item-type switch; the cast's
+  ungated swing; and the fatigue only being billed on a swing that
+  happened. `m47_weapon_swing_smoke` was updated to assert five frames per
+  variant instead of the artifact's six, and `m25_weapon_viewmodel_smoke`
+  to the 45-tick lock-out.
+
+  Confirmed in the running game: with a club equipped, holding the right-
+  hand attack key next to a Bandit Brawler for 12 seconds reports
+  `combat.swings +6` and `combat.hits_by_player +6` -- one hit per swing,
+  about one every 1.9 seconds -- and holding the *left*-hand key with an
+  empty left hand for the same 12 seconds reports nothing at all.
+
 ## Next milestones (not yet started)
 
 Roughly in priority order for reaching "actually playable," not commitments:

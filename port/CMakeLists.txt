@@ -604,3 +604,7 @@ target_link_libraries(detect_smoke PRIVATE sk_bindings sk_world)
 # See src/tests/m77_monster_ai_smoke.cpp.
 add_executable(monster_ai_smoke src/tests/m77_monster_ai_smoke.cpp)
 target_link_libraries(monster_ai_smoke PRIVATE sk_bindings sk_world)
+
+# See src/tests/m78_player_attack_smoke.cpp.
+add_executable(player_attack_smoke src/tests/m78_player_attack_smoke.cpp)
+target_link_libraries(player_attack_smoke PRIVATE sk_bindings sk_world)
