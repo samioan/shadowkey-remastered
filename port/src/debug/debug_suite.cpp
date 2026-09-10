@@ -96,10 +96,28 @@ void DebugSuite::Attach(DebugHost& host, skInterpreter& interpreter,
     // An autoexec makes a repro reproducible: put the setup for whatever
     // you are chasing in port/debug/autoexec.cfg and every launch starts
     // there. Silently absent is the normal case.
+    //
+    // Post-M87: **absent is silent, present is not.** A leftover
+    // autoexec.cfg from a finished repro can change the game beyond
+    // recognition before the player touches anything -- one left behind by
+    // a headless driver did exactly that, and its `zone azra` / `equip
+    // Club r` / `set freezeai 1` read from the outside as three separate
+    // regressions: the main menu skipped, a weapon already in hand, and
+    // every creature frozen in its idle pose. Nothing on screen said why,
+    // because the only trace was a line in the console log.
+    //
+    // So the banner below goes to stdout as well as the console, names the
+    // file, and echoes every command it is about to run. It costs one line
+    // per launch in the one case where the launch is not a normal one.
     const std::string autoexec = m_Context.configDirectory + "/autoexec.cfg";
     std::ifstream probe(autoexec);
     if (probe) {
         probe.close();
+        const std::string banner =
+            "autoexec.cfg is present and about to run -- this launch is NOT a clean "
+            "start. Delete " + autoexec + " to boot the game normally.";
+        m_Console.Print(banner, LineKind::Notice);
+        std::printf("shadowkey-port: *** %s ***\n", banner.c_str());
         m_Console.PrintMultiline(m_Console.Execute("exec autoexec"), LineKind::Output);
     }
 }
