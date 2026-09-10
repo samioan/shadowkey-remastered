@@ -342,6 +342,19 @@ public:
     // `levelup.s`, which moves to 10 to fit eleven rows on one page.
     int startCoord() const { return m_StartCoord; }
     int titleTextId() const { return m_TitleTextId; }
+    // M88: AddTitle's real (textId, y) pairs, in call order. questlog.s is
+    // the screen that made one slot untenable -- it adds two,
+    // `AddTitle(3785,10)` ("Quest Log") and `AddTitle(3786,25)` ("Use 'key
+    // 5' to exit"), and with a single slot the second silently replaced
+    // the first and then drew at the shared layout cursor, i.e. straight
+    // across the first quest in the table. A title whose `y` is -1 (the
+    // one-argument form every other screen uses) still draws at the
+    // cursor and still advances it, so nothing else moves.
+    struct MenuTitle {
+        int textId = -1;
+        int y = -1;
+    };
+    const std::vector<MenuTitle>& titles() const { return m_Titles; }
     int selectedItem() const { return m_SelectedItem; }  // 1-based, 0 = none
     bool useHoriz() const { return m_UseHoriz; }
     bool textEntryActive() const { return m_TextEntryActive; }
@@ -357,6 +370,11 @@ public:
     // TextAreaExecutable) to implement .SetSelectable(bool) and (for
     // TextAreaExecutable) .SetLocalizedText(id).
     void SetRowSelectable(size_t rowIndex, bool selectable);
+    // M88: same thing addressed by the widget rather than by row index --
+    // `FUN_10034830`'s tail clears the quest-log table's own focusable
+    // byte (`table+0x5c`) when the log holds fewer than two quests, and a
+    // widget has no idea which row of its owner it ended up on.
+    void SetWidgetSelectable(const skiExecutable* widget, bool selectable);
     void SetRowTextId(size_t rowIndex, int textId);
     // M10: ButtonExecutable/MenuItemHandle's .SetItemText(literalString).
     void SetRowLiteralText(size_t rowIndex, const std::string& text);
@@ -371,7 +389,16 @@ public:
     void SetRowVisible(size_t rowIndex, bool visible);
     // M10: TitleHandle's .SetLocalizedText(id) -- AddTitle()'s return
     // value, see inventory.s's WeaponsMenu()/ArmorMenu()/etc.
-    void SetTitleTextId(int textId) { m_TitleTextId = textId; }
+    void SetTitleTextId(int textId) {
+        m_TitleTextId = textId;
+        // TitleHandle::SetLocalizedText() retitles whichever title the
+        // script is holding, which is always the one it just added.
+        if (m_Titles.empty()) {
+            m_Titles.push_back(MenuTitle{textId, -1});
+        } else {
+            m_Titles.back().textId = textId;
+        }
+    }
     // Resolves a stringtable id through this menu's stack. "?" when the
     // table is missing or the id is out of range.
     std::string ResolveText(int textId) const;
@@ -447,6 +474,7 @@ private:
     // startCoord() above.
     int m_StartCoord = 50;
     int m_TitleTextId = -1;
+    std::vector<MenuTitle> m_Titles;
     TitleHandle m_TitleHandle{*this};
     bool m_UseHoriz = false;
     bool m_TextEntryActive = false;

@@ -18,6 +18,7 @@
 #include "simkin_bindings/native_binding_common.h"
 #include "simkin_bindings/player_executable.h"
 #include "simkin_bindings/popup_menu_executable.h"
+#include "simkin_bindings/quest_table.h"
 #include "simkin_bindings/slider_executable.h"
 #include "simkin_bindings/table_executable.h"
 #include "simkin_bindings/text_area_executable.h"
@@ -172,6 +173,15 @@ MenuExecutable::MenuRow& MenuExecutable::AddRow(RowKind kind, int textId,
 
 void MenuExecutable::SetRowSelectable(size_t rowIndex, bool selectable) {
     if (rowIndex < m_Rows.size()) m_Rows[rowIndex].selectable = selectable;
+}
+
+void MenuExecutable::SetWidgetSelectable(const skiExecutable* widget, bool selectable) {
+    for (MenuRow& row : m_Rows) {
+        if (row.widget.get() == widget) {
+            row.selectable = selectable;
+            return;
+        }
+    }
 }
 
 void MenuExecutable::SetRowTextId(size_t rowIndex, int textId) {
@@ -680,13 +690,18 @@ bool MenuExecutable::method(const skString& methodName, skRValueArray& args,
         return true;
     }
     if (methodName == skString("AddTitle") && args.entries() >= 1) {
-        // questlog.s calls this twice with an explicit y position
-        // (AddTitle(3785,10); AddTitle(3786,25);) -- this port's renderer
-        // only has one title slot, so the extra y argument is accepted
-        // but ignored and the second call simply replaces the first
-        // (documented simplification, same spirit as the flat-color
-        // MenuBackground stand-in).
-        m_TitleTextId = args[0].intValue();
+        // M88: real, plural, and positioned. questlog.s calls this twice
+        // with explicit y positions (`AddTitle(3785,10)`,
+        // `AddTitle(3786,25)`); the old single-slot version kept only the
+        // second and drew it at the shared layout cursor, which on that
+        // screen is where the first quest's title goes -- "Use 'key 5' to
+        // exit" printed straight through "Rat Quest". See
+        // MenuExecutable::MenuTitle.
+        MenuTitle title;
+        title.textId = args[0].intValue();
+        if (args.entries() >= 2) title.y = args[1].intValue();
+        m_Titles.push_back(title);
+        m_TitleTextId = title.textId;
         returnValue = skRValue(static_cast<skiExecutable*>(&m_TitleHandle), false);
         return true;
     }
@@ -909,6 +924,7 @@ bool MenuExecutable::method(const skString& methodName, skRValueArray& args,
         m_Rows.clear();
         m_SelectedItem = 0;
         m_TitleTextId = -1;
+        m_Titles.clear();
         m_UseHoriz = false;
         m_TextEntryActive = false;
         // Old popups get replaced (their script variable reassigned) or
@@ -1293,19 +1309,68 @@ bool MenuExecutable::method(const skString& methodName, skRValueArray& args,
         return true;
     }
     if (methodName == skString("DisplayObjectives") && args.entries() == 1) {
-        // No quest-state system exists in this port (a separate,
-        // sizeable undertaking -- see docs/PORT_ROADMAP.md's "next
-        // milestones") -- a single placeholder row stands in for real
-        // objective text so questlog.s renders as a real, non-empty
-        // screen rather than throwing or staying blank.
-        if (auto* table = dynamic_cast<TableExecutable*>(args[0].obj())) {
-            skRValueArray setArgs;
-            setArgs.append(skRValue(0));
-            setArgs.append(skRValue(0));
-            setArgs.append(skRValue(skString("No active quests.")));
-            skRValue ret;
-            table->method(skString("SetText"), setArgs, ret, context);
+        // M88: the real quest log, `FUN_100347c8`. Not a trie binding --
+        // it is one more `wcscmp`-dispatched native (the fifth found,
+        // after the three merchant ones and `SetGoldText`), which is why
+        // it never appeared in the 702-entry enumeration.
+        //
+        // The engine's loop, verbatim in shape:
+        //
+        //     FUN_1008e3d8(table);                 // drop every cell
+        //     row = 0;
+        //     for (id = 0; id < 0x100; id++) {
+        //       FUN_10044d84(&rec, player, id);    // player+0xb34+id*4
+        //       if (QuestAssigned(id) && !QuestCompleted(id) && rec.desc)
+        //       {
+        //         if (FUN_1008e210(table) < row + 3) FUN_1008e43c(table, 3);
+        //         FUN_1008df60(table, row,   0, strings[rec.title], 6);
+        //         FUN_1008df60(table, row+1, 0, strings[rec.desc],  0);
+        //         cell = FUN_1008df60(table, row+2, 0, "", 0);
+        //         cell[0x34] = 1;
+        //         row += 3;
+        //       }
+        //     }
+        //
+        // Three things in that are worth not "improving":
+        //
+        //  - **Assigned and not completed** is the whole filter. A solved
+        //    quest still shows, with its original objective line -- the
+        //    game has no "done, go hand it in" text, and `QuestSolved` is
+        //    only ever read by the conversation that closes the quest.
+        //    Completing it is what removes it from the log.
+        //  - **The id range is 0..255, not 0..49.** The description-id
+        //    test is what bounds it; see quest_table.h.
+        //  - **The blank third row is a real row**, not padding skipped at
+        //    draw time. It is what separates two quests, and it is why the
+        //    row budget below counts in threes.
+        auto* table = dynamic_cast<TableExecutable*>(args[0].obj());
+        if (!table) return true;
+        const sk::StringTable* strings = m_Stack.strings();
+        PlayerExecutable& player = m_Stack.player();
+        table->ClearCells();
+        int row = 0;
+        for (int id = 0; id < kQuestStateSlots; ++id) {
+            const QuestText text = QuestTextFor(id);
+            if (!text.valid()) continue;
+            if (!player.questAssigned(id)) continue;
+            if (player.questCompleted(id)) continue;
+            if (table->allocatedRows() < row + 3) table->AddRows(3);
+            TableCell& title = table->CellAt(static_cast<size_t>(row), 0);
+            title.text = strings ? strings->Get(text.titleId) : std::string();
+            title.displayFlags = kCellFlagCentered;
+            TableCell& objective = table->CellAt(static_cast<size_t>(row + 1), 0);
+            objective.text = strings ? strings->Get(text.descriptionId) : std::string();
+            TableCell& spacer = table->CellAt(static_cast<size_t>(row + 2), 0);
+            spacer.text.clear();
+            spacer.continuation = true;
+            row += 3;
         }
+        // The engine's tail: under two quests' worth of rows there is
+        // nothing to scroll, so the table stops taking focus and the menu
+        // hands it back to its default widget -- questlog.s's own quit
+        // button, the only other thing on the screen.
+        table->owner().SetWidgetSelectable(table, row >= 6);
+        if (row == 0) table->SetUsedRows(0);
         return true;
     }
     if (methodName == skString("TrimText") && args.entries() == 2) {

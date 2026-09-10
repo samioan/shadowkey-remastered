@@ -223,9 +223,17 @@ bool TableExecutable::method(const skString& methodName, skRValueArray& args,
         }
         return true;
     }
+    if (methodName == skString("SetLineWrap") && args.entries() == 1) {
+        // M88: real, and no longer a no-op -- questlog.s is the only
+        // shipped caller and it passes true, which is what turns a
+        // 100-character objective line ("Return five types of herbs to
+        // Rilora: Foxglove, Mountain Tail, ...") into something that fits
+        // a 176px screen instead of running off the right edge.
+        m_LineWrap = args[0].boolValue();
+        return true;
+    }
     if (methodName == skString("SetRowSelect") || methodName == skString("AutoWrapCells") ||
-        methodName == skString("SetLineWrap") || methodName == skString("SetCellSpacing") ||
-        methodName == skString("SetSelectable")) {
+        methodName == skString("SetCellSpacing") || methodName == skString("SetSelectable")) {
         // Cosmetic/behavioral flags this port's simplified single-column-
         // of-rows table model doesn't need to branch on -- every table is
         // already row-selectable with wrapped-if-needed text. Accepted so

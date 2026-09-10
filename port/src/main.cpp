@@ -55,6 +55,7 @@
 #include "simkin_bindings/on_detect.h"
 #include "simkin_bindings/player_executable.h"
 #include "simkin_bindings/popup_menu_executable.h"
+#include "simkin_bindings/quest_table.h"
 #include "simkin_bindings/slider_executable.h"
 #include "simkin_bindings/arrow_projectile.h"
 #include "simkin_bindings/spell_cast.h"
@@ -122,6 +123,39 @@ int DrawWrappedText(sk::Backbuffer& bb, int x, int y, const std::string& text, i
     while (words >> word) {
         std::string candidate = current.empty() ? word : current + " " + word;
         if (static_cast<int>(candidate.size()) > maxChars && !current.empty()) {
+            lines.push_back(current);
+            current = word;
+        } else {
+            current = candidate;
+        }
+    }
+    if (!current.empty() || lines.empty()) lines.push_back(current);
+    for (size_t i = 0; i < lines.size(); ++i) {
+        sk::BitmapFont::DrawString(bb, x, y + static_cast<int>(i) * lineHeight, lines[i], color);
+    }
+    return static_cast<int>(lines.size());
+}
+
+// M88: the same word-wrap, but bounded by real pixels instead of a
+// character count. AddTable's box is 150 *pixels* wide and the font is
+// proportional, so a characters-per-line estimate either wastes a third
+// of the box or (as it first did on the quest log) runs "Return five
+// types of herbs to Rilora: Foxglove, ..." off the right-hand edge.
+// Kept separate from DrawWrappedText rather than replacing it: that one's
+// callers pass widths the *scripts* give in characters
+// (`textArea.SetTextWidth(11)`, starthelp.s's 0x19), which are not
+// pixels and must not be reinterpreted as such.
+int DrawWrappedTextPx(sk::Backbuffer& bb, int x, int y, const std::string& text, int maxPixels,
+                       uint16_t color) {
+    const int lineHeight = sk::BitmapFont::kGlyphHeight + 3;
+    if (maxPixels <= 0) maxPixels = sk::Backbuffer::kWidth - x;
+    std::vector<std::string> lines;
+    std::string current;
+    std::istringstream words(text);
+    std::string word;
+    while (words >> word) {
+        std::string candidate = current.empty() ? word : current + " " + word;
+        if (sk::BitmapFont::TextWidth(candidate) > maxPixels && !current.empty()) {
             lines.push_back(current);
             current = word;
         } else {
@@ -644,7 +678,7 @@ public:
 
     std::vector<std::string> Pages() const override {
         return {"mini", "world", "player", "zone", "entities", "tile", "inventory", "quests",
-                "render", "script"};
+                "menu",  "render", "script"};
     }
 
     void Inspect(const std::string& page, std::vector<sk_debug::StatGroup>& out) const override;
@@ -1187,9 +1221,79 @@ void LiveDebugHost::Inspect(const std::string& page,
             if (assigned) state += "assigned ";
             if (solved) state += "solved ";
             if (completed) state += "completed";
-            group.Add(std::to_string(id), state);
+            // M88: the real title, from the engine's own per-quest string
+            // table (quest_table.h). Also says outright when an id has no
+            // text, since that is exactly the id that can be assigned and
+            // still never show up in the quest log.
+            const sk_bindings::QuestText text = sk_bindings::QuestTextFor(id);
+            std::string label = std::to_string(id);
+            if (text.valid() && m_Refs.strings) {
+                label += "  " + m_Refs.strings->Get(text.titleId);
+            } else {
+                label += "  (no quest text -- never shown in the log)";
+            }
+            if (assigned && !completed && text.valid()) state += "  [IN LOG]";
+            group.Add(label, state);
         }
         if (group.rows.empty()) group.Add("(none touched)", "");
+        out.push_back(std::move(group));
+        return;
+    }
+
+    if (name == "menu") {
+        // M88: whatever screen is currently on top of the menu stack,
+        // row by row -- the only way to see what a real .s screen
+        // actually built without reading pixels. Added for the quest log
+        // (`call player OpenMenu questlog` then `inspect menu` is the
+        // headless equivalent of walking to the character manager and
+        // choosing Quest Log), but it is not quest-specific.
+        sk_debug::StatGroup group;
+        sk_bindings::MenuExecutable* menu = m_Refs.stack ? m_Refs.stack->currentMenu() : nullptr;
+        if (!menu) {
+            group.title = "menu";
+            group.Add("state", "no menu is open");
+            out.push_back(std::move(group));
+            return;
+        }
+        group.title = "menu rows";
+        int index = 0;
+        for (const auto& row : menu->rows()) {
+            const std::string prefix = std::to_string(index++);
+            std::string kind;
+            switch (row.kind) {
+                case sk_bindings::MenuExecutable::RowKind::MenuItem: kind = "item"; break;
+                case sk_bindings::MenuExecutable::RowKind::StaticItem: kind = "static"; break;
+                case sk_bindings::MenuExecutable::RowKind::ComboBox: kind = "combo"; break;
+                case sk_bindings::MenuExecutable::RowKind::TextArea: kind = "textarea"; break;
+                case sk_bindings::MenuExecutable::RowKind::FloatingSprite: kind = "sprite"; break;
+                case sk_bindings::MenuExecutable::RowKind::TextEntry: kind = "textentry"; break;
+                case sk_bindings::MenuExecutable::RowKind::ItemButton: kind = "itembutton"; break;
+                case sk_bindings::MenuExecutable::RowKind::Table: kind = "table"; break;
+                case sk_bindings::MenuExecutable::RowKind::Slider: kind = "slider"; break;
+            }
+            if (row.kind == sk_bindings::MenuExecutable::RowKind::Table) {
+                auto* table = static_cast<sk_bindings::TableExecutable*>(row.widget.get());
+                group.Add(prefix + " table",
+                           std::to_string(table->rowCount()) + " rows, wrap=" +
+                               (table->lineWrap() ? "on" : "off") + ", focusable=" +
+                               (row.selectable ? "yes" : "no"));
+                for (int r = 0; r < table->rowCount(); ++r) {
+                    const sk_bindings::TableCell* cell = table->PeekCell(r, 0);
+                    std::string text = table->CellText(r, 0);
+                    if (cell && (cell->displayFlags & sk_bindings::kCellFlagCentered) != 0) {
+                        text = "[centred] " + text;
+                    }
+                    if (text.empty()) text = "--";
+                    group.Add(prefix + "." + std::to_string(r), text);
+                }
+                continue;
+            }
+            std::string text = row.literalText;
+            if (text.empty() && row.textId >= 0 && m_Refs.strings) {
+                text = m_Refs.strings->Get(row.textId);
+            }
+            group.Add(prefix + " " + kind, text.empty() ? std::string("--") : text);
+        }
         out.push_back(std::move(group));
         return;
     }
@@ -2025,9 +2129,19 @@ void RenderMenu(sk::Backbuffer& backbuffer, sk_bindings::MenuExecutable& menu,
     // and SetStartCoord's default 0x32 are all being read right.
     const int lineHeight = sk_bindings::kMenuRowPitch;
 
-    if (menu.titleTextId() >= 0) {
-        sk::BitmapFont::DrawString(backbuffer, 4, y, strings.Get(menu.titleTextId()), kTitleColor);
-        y += lineHeight + 2;
+    // M88: every AddTitle, at its own real y when the script gave one.
+    // A title with no y keeps the old behaviour exactly -- drawn at the
+    // shared cursor, and advancing it -- so every screen that adds a
+    // single untitled-position header renders unchanged.
+    for (const auto& title : menu.titles()) {
+        if (title.textId < 0) continue;
+        const std::string text = strings.Get(title.textId);
+        if (title.y >= 0) {
+            sk::BitmapFont::DrawString(backbuffer, 4, title.y, text, kTitleColor);
+        } else {
+            sk::BitmapFont::DrawString(backbuffer, 4, y, text, kTitleColor);
+            y += lineHeight + 2;
+        }
     }
 
     for (size_t rowIndex = 0; rowIndex < menu.rows().size(); ++rowIndex) {
@@ -2197,7 +2311,27 @@ void RenderMenu(sk::Backbuffer& backbuffer, sk_bindings::MenuExecutable& menu,
                 // touching that vendored file.
                 int start = (std::max)(0, selected - kVisibleRows / 2);
                 int end = (std::min)(table->rowCount(), start + kVisibleRows);
+                // M88: a wrapped table (questlog.s is the only shipped
+                // caller of SetLineWrap(true)) has rows of *varying*
+                // height, so the fixed six-row window above is the wrong
+                // budget for it -- a single quest is three rows and its
+                // objective line alone wraps to three or four. Draw until
+                // AddTable's own real box height is used up instead, and
+                // start from the selection rather than centring on it, so
+                // scrolling down reveals whole quests.
+                const bool wrapped = table->lineWrap();
+                const int tableBottom =
+                    row.y >= 0 ? row.y + table->height() : sk::Backbuffer::kHeight;
+                if (wrapped) {
+                    start = (std::max)(0, selected);
+                    end = table->rowCount();
+                }
+                // AddTable's own real box width, in pixels -- the wrap is
+                // measured in the font that actually draws it.
+                const int wrapPixels =
+                    table->width() > 0 ? table->width() : sk::Backbuffer::kWidth - tableX;
                 for (int r = start; r < end; ++r) {
+                    if (wrapped && y >= tableBottom) break;
                     std::string line = table->CellText(r, 0);
                     for (int c = 1; c < table->columnCount(); ++c) {
                         // M60: the store table's last two columns hold a
@@ -2222,8 +2356,26 @@ void RenderMenu(sk::Backbuffer& backbuffer, sk_bindings::MenuExecutable& menu,
                     }
                     uint16_t rowColor = (isSelected && r == selected) ? kSelectedTextColor
                                                                        : kTextColor;
-                    sk::BitmapFont::DrawString(backbuffer, tableX, y, line, rowColor);
-                    y += lineHeight;
+                    // M88: cell+0x2c bit 1 -- the engine drops the
+                    // left-aligned shadowed draw for a centred one (see
+                    // table_executable.h's TableCell::displayFlags). It is
+                    // what makes a quest's title read as a heading over
+                    // its objective line rather than as another row of it.
+                    const sk_bindings::TableCell* cell0 = table->PeekCell(r, 0);
+                    const bool centered =
+                        cell0 && (cell0->displayFlags & sk_bindings::kCellFlagCentered) != 0;
+                    if (wrapped && !centered) {
+                        y += DrawWrappedTextPx(backbuffer, tableX, y, line, wrapPixels, rowColor) *
+                             lineHeight;
+                    } else if (centered) {
+                        int cx = tableX + (table->width() - sk::BitmapFont::TextWidth(line)) / 2;
+                        sk::BitmapFont::DrawString(backbuffer, (std::max)(tableX, cx), y, line,
+                                                   rowColor);
+                        y += lineHeight;
+                    } else {
+                        sk::BitmapFont::DrawString(backbuffer, tableX, y, line, rowColor);
+                        y += lineHeight;
+                    }
                 }
                 if (table->rowCount() == 0) {
                     sk::BitmapFont::DrawString(backbuffer, tableX, y, "(empty)", kStaticTextColor);

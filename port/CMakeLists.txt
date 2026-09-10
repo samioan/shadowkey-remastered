@@ -639,3 +639,7 @@ target_link_libraries(hit_feedback_smoke PRIVATE sk_bindings sk_render3d sk_worl
 # See src/tests/m87_player_damage_smoke.cpp.
 add_executable(player_damage_smoke src/tests/m87_player_damage_smoke.cpp)
 target_link_libraries(player_damage_smoke PRIVATE sk_bindings sk_world)
+
+# See src/tests/m88_quest_log_smoke.cpp.
+add_executable(quest_log_smoke src/tests/m88_quest_log_smoke.cpp)
+target_link_libraries(quest_log_smoke PRIVATE sk_bindings sk_world)

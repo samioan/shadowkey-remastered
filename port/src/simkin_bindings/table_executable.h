@@ -86,7 +86,27 @@ struct TableCell {
     bool compareLeftHand = false;                  // cell+0x41
     bool classTinted = true;                       // cell+0x42, ctor default 1
     bool statLine = false;                         // cell+0x43
+    // M88: cell+0x2c, the display-flags word that is `FUN_1008df60`'s
+    // fifth argument. Every store-screen cell passes 0; the quest log
+    // passes 6 for a quest's title row and 0 for its objective row. The
+    // renderer reads exactly one bit of it -- `FUN_1008e4b0` hands
+    // `(flags >> 1) & 1` to `FUN_1007f49c`, which switches from the
+    // shadowed left-aligned draw (`FUN_1008f8a4` twice, once offset by
+    // one pixel for the drop shadow) to `FUN_1008f97c`, whose signature
+    // has no x at all: a centred line. Bit 2 of the 6 is never read
+    // anywhere, so "centred" is the whole observable meaning.
+    unsigned int displayFlags = 0;
+    // M88: cell+0x34. Set on a row's *second* cell by both screens that
+    // build multi-cell rows -- the store's "GP : 111 Qty: 3" line under a
+    // product name, and the quest log's blank spacer under a quest -- and
+    // cleared on every cell that carries the row's subject. Recorded for
+    // the same reason the other four flag bytes are: it is part of the
+    // real cell, and a continuation cell is not a thing to select.
+    bool continuation = false;
 };
+
+// cell+0x2c's only meaningful bit, as `FUN_1008e4b0` reads it.
+constexpr unsigned int kCellFlagCentered = 0x2;
 
 // Returned by TableExecutable::GetSelectedRow(), and handed to the table's
 // SetCallback() handler as its `cell` argument -- inventory.s's
@@ -182,6 +202,18 @@ public:
 
     MenuExecutable& owner() const { return m_Owner; }
     int inset() const { return m_Inset; }  // table+0xe2, SetInset()
+    // AddTable(rows, x, y, w, h)'s own box. Only the two sizes needed a
+    // reader before M88; the quest log is the first screen whose rows are
+    // taller than one line, so the renderer has to know both how wide a
+    // line may run and where the table's box ends.
+    int width() const { return m_W; }
+    int height() const { return m_H; }
+    // M88: SetLineWrap(true) -- real, and the quest log is the only
+    // shipped caller that passes true (`inventory.s`/`buysell.s` never
+    // call it at all, `statsscreen.s` builds its own aligned columns).
+    // A wrapped table's rows are drawn as however many lines the text
+    // needs inside `width()` rather than one clipped line.
+    bool lineWrap() const { return m_LineWrap; }
 
 private:
     struct Row {
@@ -196,6 +228,7 @@ private:
     int m_VisibleRows = 0;
     int m_SelectedRow = -1;
     int m_Inset = 0;
+    bool m_LineWrap = false;
 };
 
 }  // namespace sk_bindings

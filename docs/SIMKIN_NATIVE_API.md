@@ -776,6 +776,14 @@ else                           return FUN_10033660(menu, ...);
 with identical bodies — the wcscmp copy shadows the trie one and the trie
 entry is dead. Somebody added the name in both places.
 
+**A fifth one, over the quest log (M88).** `FUN_100347c8` sits above the
+character-manager dispatcher `FUN_10032de0` and tests exactly one name,
+`DisplayObjectives`, falling through for everything else. Its body is the
+entire quest log: a 0..255 loop over the player's quest arrays emitting
+three table rows per shown quest. `questlog.s` is its only caller, and it
+is not in any trie -- the same reason the merchant natives and
+`SetGoldText` are not.
+
 **A whole class with no trie at all.** The table's cell object — what
 `SelectedItem[ (cell) ...` receives, and what every `cell.GetItemText()`
 in `buysell.s` and `inventory.s` dispatches on — has **eight** methods and

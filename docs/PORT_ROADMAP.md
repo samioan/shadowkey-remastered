@@ -7894,6 +7894,112 @@ soft-fails 39 -> 39, all 14 tracked `.ppm` renders byte-identical,
   now, because three runs were measuring stale code before that was
   noticed.
 
+- [x] **M88 -- quest tracking: the log, the text table, and the screen
+      that shows them.** Reported: "quests are not being added or resolved
+      in any way." Half true, and the half that was false is why it looked
+      total. M17 had implemented the three real state flags
+      (`SetQuestAssigned`/`SetQuestSolved`/`SetQuestCompleted` and their
+      getters) and real dialogue trees genuinely branched on them; what
+      was missing was every way a player could *see* that. The quest log
+      was a stub that wrote one fixed row, "No active quests.", no matter
+      what the player had taken.
+    - **The engine's own per-quest text table** (`quest_table.h`, new).
+      Nothing in the whole `.s` corpus carries a quest's name -- scripts
+      only ever say `SetQuestAssigned(6)`. The names come from
+      `FUN_10045334`, an override of the player's vtable slot at +0x10
+      (vtable `0x100fd044`) that runs once at construction and fills
+      `player+0xb34` with fifty four-byte records by pure arithmetic:
+      quest `i`'s title is stringtable id `0x45 + i`, its objective line
+      `0x77 + i`. Confirmed end to end against a real `stringtable.eng` --
+      0x45/0x77 are "Rat Quest" / "Kill 8 rats, return to Gravel
+      Trothgar", and the two runs stay in lockstep to 0x76/0xa8,
+      "Caretaker Rescue" / "Clear the entrance, and help the Caretaker
+      escape", with 0xa9 ("None") proving the block really ends at fifty.
+    - **The table is fifty wide; the state arrays are 256.** That gap is
+      load-bearing, not sloppy: the log's own loop runs 0..255 and skips
+      any id whose *description* id is zero, so a script can set a quest
+      flag that never appears on screen. The shipped game uses that on
+      purpose. Of the 25 distinct ids the corpus names, three are outside
+      the text table: **240**, which `crypt3.s` sets and `crypt1/2/3.s`
+      read back as "the crypt has been opened" -- a hidden world flag
+      parked in the quest array because it is the only 256-wide
+      persistent bit array a script can reach -- plus **233** and **88**,
+      which are read by `broken1.s`/`delfhide.s`/`dstar_w.s` and **never
+      written anywhere**, i.e. permanently-false conditions in the shipped
+      game.
+    - **`DisplayObjectives`, for real** (`FUN_100347c8`). Not a trie
+      binding: it is a fifth `wcscmp` layer above the menu dispatcher,
+      after the three merchant natives and `SetGoldText`, which is why it
+      never showed up in the 702-entry enumeration. Its loop emits three
+      rows per shown quest -- the title with cell flags `6`, the objective
+      with `0`, and a blank third row with `cell+0x34 = 1` -- and its
+      filter is **assigned and not completed**. Solved is deliberately not
+      part of it: there is no "done, go hand it in" text in the game, so a
+      solved quest keeps showing its original objective until the
+      conversation that closes it calls `SetQuestCompleted`. Its tail
+      clears the table's focusable byte when fewer than six rows (two
+      quests) were emitted, so an under-full log hands focus back to the
+      screen's quit button instead of trapping it in a list with nothing
+      to scroll.
+    - **Two cell fields decoded.** `cell+0x2c` is the flags word
+      `FUN_1008df60` takes as its fifth argument, and the renderer reads
+      exactly one bit of it: `FUN_1008e4b0` passes `(flags >> 1) & 1` to
+      `FUN_1007f49c`, which switches from the shadowed left-aligned draw
+      to `FUN_1008f97c` -- whose signature has no x parameter at all, i.e.
+      a centred line. So the quest log's `6` means "centre the title", and
+      bit 2 of it is never read anywhere. `cell+0x34` is set on the
+      *second* cell of a row by both screens that build multi-cell rows
+      (the store's "GP : 111 Qty: 3" line, this screen's blank spacer) and
+      cleared on every cell carrying the row's subject.
+    - **`SetLineWrap(true)` stopped being a no-op**, and the wrap is now
+      measured in pixels. `questlog.s` is the only shipped caller and it
+      passes true, which is the difference between a readable screen and
+      "Return five types of herbs to Rilora: Foxglove, Mountain Tail,
+      Snow Blossom, Trefoil Flower, Yuin Root" running off the right-hand
+      edge. `DrawWrappedTextPx` wraps against `AddTable`'s own real 150px
+      box using the font that actually draws it; the existing
+      character-counted `DrawWrappedText` is untouched, because its
+      callers pass widths the *scripts* give in characters
+      (`textArea.SetTextWidth(11)`, `starthelp.s`'s 0x19) which are not
+      pixels.
+    - **`AddTitle` became plural and positioned.** It had one slot and
+      ignored its y argument, which was invisible everywhere until this
+      screen: `questlog.s` adds two (`AddTitle(3785,10)` "Quest Log",
+      `AddTitle(3786,25)` "Use 'key 5' to exit"), so the second replaced
+      the first and then drew at the shared layout cursor -- printing
+      straight through the first quest in the table. A title with no y
+      still draws at the cursor and still advances it, so every other
+      screen renders unchanged.
+    - **`AllQuests` (index 39)** implemented -- the one quest native no
+      shipped script calls, a leftover debug switch whose body is a plain
+      descending fill of `player+0x430..+0x52f`, i.e. all **256** ids and
+      not the fifty that have text.
+    - **Debug**: the `quests` page now prints each id's real title and
+      marks the ones that actually reach the log; a new `menu` inspect
+      page dumps whatever screen is on top of the stack row by row
+      (`call player OpenMenu questlog` then `inspect menu` is the headless
+      equivalent of walking to the character manager and choosing Quest
+      Log). `port/debug/m88_quests.cfg` is the repro.
+    - **Verified**, `quest_log_smoke` (`src/tests/m88_quest_log_smoke.cpp`,
+      **280 checks**): the fifty records against a real `stringtable.eng`
+      (every title and objective non-empty, the two blocks adjacent and
+      bounded); the corpus scan that found 88/233/240; the real
+      `questlog.s` opened through a real `MenuStack` across empty / one
+      quest / solved / two quests / completed / a textless id /
+      `AllQuests`; the three-row shape with the centred title and the
+      continuation spacer; and end to end through `trothgarconvo.s`'s own
+      `YesResponse` and `MoreResponse` handlers -- the real way quest 0 is
+      taken and closed -- checking the log fills, the reward is paid, and
+      completing it empties the log again. Suite **78/78**.
+    - **Live**: `zone azra`, two quests taken through the real native,
+      then Tab to the character manager and down to Quests. The screen
+      draws "Quest Log" and "Use 'key 5' to exit" at their own real y's,
+      "Rat Quest" centred over a two-line wrapped objective, a blank
+      separator, then "Herbs for Rilora" centred over its five wrapped
+      lines, all inside the 150px box. Completing quest 0 from the console
+      removes it and leaves the other. No new soft-fails: the screen has
+      no unimplemented native left on it.
+
 ## Next milestones (not yet started)
 
 Roughly in priority order for reaching "actually playable," not commitments:

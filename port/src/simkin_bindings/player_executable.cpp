@@ -15,6 +15,7 @@
 #include "simkin_bindings/menu_stack.h"
 #include "simkin_bindings/monster_executable.h"
 #include "simkin_bindings/native_binding_common.h"
+#include "simkin_bindings/quest_table.h"
 #include "simkin_bindings/vitals.h"
 #include "skInterpreter.h"
 #include "skParseException.h"
@@ -1116,6 +1117,17 @@ bool PlayerExecutable::method(const skString& methodName, skRValueArray& args,
         } else {
             m_QuestCompleted.erase(id);
         }
+        return true;
+    }
+    if (methodName == skString("AllQuests") && args.entries() == 0) {
+        // M88: index 39, and the one quest native no shipped script
+        // calls -- a leftover debug switch. Its body is a plain
+        // descending memset of `player+0x430..+0x52f` to 1, i.e. it
+        // assigns **all 256** ids, not the 50 that have text; the extra
+        // 206 are invisible in the quest log for the reason quest_table.h
+        // explains. Reproduced at that width rather than at 50 so the two
+        // agree if a script ever reads QuestAssigned(200) after it.
+        for (int id = 0; id < kQuestStateSlots; ++id) m_QuestAssigned.insert(id);
         return true;
     }
     if (methodName == skString("AddMonsterKilled") && args.entries() == 1) {
