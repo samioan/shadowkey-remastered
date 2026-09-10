@@ -5,6 +5,7 @@
 #include <cstdlib>
 
 #include "assets/string_table.h"
+#include "assets/zone_display_names.h"
 #include "audio/audio_engine.h"
 #include "simkin_bindings/action_text.h"
 #include "simkin_bindings/button_executable.h"
@@ -626,10 +627,26 @@ bool MenuExecutable::TryInvokeWithArg(const std::string& handlerName, const skRV
 bool MenuExecutable::GoBack() {
     // The real back/cancel softkey, in the order the evidence supports.
     //
+    // 0. `<ScriptName>Back` -- M90, and the one the *generic menu class*
+    //    actually calls. `FUN_10075bdc` (the menu screen's input tick)
+    //    routes the right softkey to `FUN_100768b4`, whose whole body is:
+    //    take the screen's own name from `menu+0xc`, `sprintf("%sBack")`
+    //    (the format string is at `0x100b32c8`), call that script method.
+    //    It explains a family of handlers this port had no caller for --
+    //    41 of them across the corpus, one per screen, and their names
+    //    track the *open path's* last component exactly, case and all:
+    //    `LockPickDoorBack`, `LootMenuBack`, `skeleton_key_menuBack`,
+    //    `armor_convoBack`, and -- the one M90 needed -- levelconfirm.s's
+    //    `LevelConfirmBack`, which is the only way to decline a trip with
+    //    the back key rather than the "Don't Go" row.
     // 1. The screen's own handler, if it has one. The corpus spells the
     //    name both "OnRightSoftkey" and "OnRightSoftKey" depending on the
     //    file (a genuine authoring inconsistency in the original scripts,
-    //    not something to "fix"), so both are tried.
+    //    not something to "fix"), so both are tried. `OnRightSoftKey` is
+    //    a real dispatch too, just a different screen class's:
+    //    `FUN_1003006c` (the character-manager/store family) calls it
+    //    where the generic class calls `<ScriptName>Back`. This port has
+    //    one screen class, so it tries both.
     // 2. Otherwise the screen's own SetPrevMenu() target.
     //
     // Step 2 is the fix for a real, badly user-visible bug: 15 real
@@ -644,7 +661,18 @@ bool MenuExecutable::GoBack() {
     // nothing whatsoever and the player was stranded on that screen with
     // no way out.
     MenuExecutable* before = m_Stack.currentMenu();
-    bool handled = TryInvoke("OnRightSoftkey") || TryInvoke("OnRightSoftKey");
+    // Step 0 keeps the same "did it actually do something" guard the rest
+    // of this function uses, rather than winning outright on the strength
+    // of merely existing. Two of the 41 are deliberately conditional --
+    // `mainmenu.s`'s `MainMenuBack` closes the front end only `if(
+    // GameActive() )` -- and for those the pre-M90 chain below is still
+    // what gets the player off the screen.
+    bool handled = !m_ScriptName.empty() && TryInvoke(m_ScriptName + "Back");
+    if (handled && (m_Stack.currentMenu() != before || m_Stack.closeMenuRequested() ||
+                    m_Stack.quitRequested() || m_Stack.gameStartRequested())) {
+        return true;
+    }
+    handled = TryInvoke("OnRightSoftkey") || TryInvoke("OnRightSoftKey") || handled;
     // A handler that actually navigated somewhere is done.
     if (handled && m_Stack.currentMenu() != before) return true;
     if (m_Stack.quitRequested() || m_Stack.gameStartRequested()) return true;
@@ -1238,6 +1266,34 @@ bool MenuExecutable::method(const skString& methodName, skRValueArray& args,
         returnValue = skRValue(skString(text.c_str()));
         return true;
     }
+    if (methodName == skString("GetNextLevelName") && args.entries() == 0) {
+        // M90: GameEngine-root binding 10, and the whole of its case:
+        //
+        //     buf = malloc(0x40);
+        //     FUN_100290a8(app+0x28 + 0x28, buf);   // internal name -> display
+        //     return wide string of length wcslen(buf);
+        //
+        // `app+0x28`'s `+0x28` slot is the *destination* by the time this
+        // runs -- `Level.LoadLevel` wrote it there on the line before it
+        // raised this screen -- so the name is the place being travelled
+        // to, not the place being left.
+        //
+        // `FUN_100290a8` is the engine's internal-zone-name -> display-
+        // string lookup, which this port already has (M26 recovered the
+        // whole 3821-3840 run of it, assets/zone_display_names.h). The one
+        // script call site is `levelconfirm.s`'s own Init(),
+        // `AddStaticItem(3950, false); AddStaticItem(GetNextLevelName(),
+        // false)` -- string 3950 being "Travel to: ", which is why the two
+        // rows read as one sentence.
+        const std::string& zoneName = m_Stack.currentLevelName();
+        int id = sk::ZoneDisplayNameStringId(zoneName);
+        // A zone with no entry in the run (`ffarena` is the only one)
+        // falls back to its internal name rather than an empty row.
+        std::string text =
+            (id >= 0 && m_Stack.strings()) ? m_Stack.strings()->Get(id) : zoneName;
+        returnValue = skRValue(skString(text.c_str()));
+        return true;
+    }
     if (methodName == skString("SetInventoryList") && args.entries() == 1) {
         m_InventoryListTarget = dynamic_cast<TableExecutable*>(args[0].obj());
         return true;
@@ -1394,8 +1450,24 @@ bool MenuExecutable::method(const skString& methodName, skRValueArray& args,
         }
         return true;
     }
+    // M90 -- **the six engine-opened screens are opened by the engine's own
+    // spelling of their names now, not by their filenames.**
+    //
+    // It used to make no difference: `ResolveScriptPath` appends ".s" and
+    // Windows opens `inventory.s` for "Inventory" just as Symbian's FAT
+    // does. But GoBack() builds `<ScriptName>Back` out of exactly this
+    // string, and `inventory.s` defines `InventoryBack`, not
+    // `inventoryBack`, so the lowercase spellings would have silently
+    // missed every one of these screens' real back handlers.
+    //
+    // The names are read off the engine's own persistent-menu list, the
+    // run right after `"ClearPersistantMenu"` at `0x100ad794`: `Inventory`,
+    // `CharacterManager`, `QuestLog`, `StatsScreen`, `BuySell`,
+    // `ActionQueue`, `RemoveQueue`, `InventoryButtonItem` -- with
+    // `"DragonStarStackMenu::OpenMenu %s"`, the open-by-name trace itself,
+    // sitting a few bytes further on in the same block.
     if (methodName == skString("DisplayCharacterManager") && args.entries() == 0) {
-        m_Stack.OpenMenu("charactermanager");
+        m_Stack.OpenMenu("CharacterManager");
         return true;
     }
     if (methodName == skString("DisplayLevelUp") && args.entries() == 0) {
@@ -1406,19 +1478,19 @@ bool MenuExecutable::method(const skString& methodName, skRValueArray& args,
         // questlog, 4 statsscreen, ...) to one shared setter, while this
         // one calls `FUN_1002c274(controller, 8)` directly. Both arms
         // stall 10ms in `User::After` first.
-        m_Stack.OpenMenu("levelup");
+        m_Stack.OpenMenu("LevelUp");
         return true;
     }
     if (methodName == skString("DisplayInventory") && args.entries() == 0) {
-        m_Stack.OpenMenu("inventory");
+        m_Stack.OpenMenu("Inventory");
         return true;
     }
     if (methodName == skString("DisplayStatsScreen") && args.entries() == 0) {
-        m_Stack.OpenMenu("statsscreen");
+        m_Stack.OpenMenu("StatsScreen");
         return true;
     }
     if (methodName == skString("DisplayQuestLog") && args.entries() == 0) {
-        m_Stack.OpenMenu("questlog");
+        m_Stack.OpenMenu("QuestLog");
         return true;
     }
     if (methodName == skString("OpenMainMenu") && args.entries() == 0) {
@@ -1457,7 +1529,7 @@ bool MenuExecutable::method(const skString& methodName, skRValueArray& args,
         // real object in the shipped game either -- this port reproduces
         // that same (non-functional) screen rather than inventing a
         // working one, faithful to the real, confirmed-broken behavior.
-        m_Stack.OpenMenu("actionqueue");
+        m_Stack.OpenMenu("ActionQueue");
         if (auto* target = dynamic_cast<MenuExecutable*>(m_Stack.currentMenu())) {
             target->SetQueueHandIsRight(m_QueueHandIsRight);
         }

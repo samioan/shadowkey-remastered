@@ -50,6 +50,20 @@ bool FileExists(const std::string& path) {
     return f.good();
 }
 
+// M90: the screen's own name, which is the last component of the path it
+// was opened by, with its case left alone. The engine keeps it at
+// `menu+0xc` and `FUN_100768b4` -- the generic menu class's right-softkey
+// handler -- sprintf's it through `"%sBack"` to get the script handler to
+// call. The corpus is unanimous: `OpenMenu("Menus\\LockPickDoor")` is
+// answered by `menus/lockpickdoor.s`'s `LockPickDoorBack`, and
+// `menus/skeleton_key_menu.s` (opened by its own lowercase name) by
+// `skeleton_key_menuBack`. The name, not the filename -- Symbian's FAT is
+// case-insensitive, so the two need not agree and often don't.
+std::string ScriptNameOf(const std::string& simkinPath) {
+    size_t cut = simkinPath.find_last_of("\\/");
+    return cut == std::string::npos ? simkinPath : simkinPath.substr(cut + 1);
+}
+
 }  // namespace
 
 MenuStack::MenuStack(std::string scriptRoot, skInterpreter& interpreter,
@@ -120,6 +134,7 @@ MenuExecutable* MenuStack::GetOrCreateMenu(const std::string& simkinPath, skiExe
     }
     MenuExecutable* raw = menu.get();
     if (opener) raw->SetOpener(opener);
+    raw->SetScriptName(ScriptNameOf(simkinPath));  // M90, see ScriptNameOf()
     raw->SetScreenMode(static_cast<MenuExecutable::ScreenMode>(screenMode));
     m_Menus[key] = std::move(menu);
     // M56: a menu script's Init() can raise a *runtime* exception, not
@@ -148,6 +163,7 @@ MenuExecutable* MenuStack::CreateRootMenu(const std::string& key, const std::str
     skExecutableContext loadCtxt(&m_Interpreter);
     std::unique_ptr<MenuExecutable> menu(new MenuExecutable(skString(filePath.c_str()), loadCtxt, *this));
     MenuExecutable* raw = menu.get();
+    raw->SetScriptName(ScriptNameOf(key));  // M90, see ScriptNameOf()
     m_Menus[NormalizeKey(key)] = std::move(menu);
     m_Current = raw;
     raw->RunInit();

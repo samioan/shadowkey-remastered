@@ -464,6 +464,13 @@ public:
     // sites depend on.
     skiExecutable* opener() const { return m_Opener; }
 
+    // M90: the screen's own name -- the last component of the path it was
+    // opened by, kept verbatim (case included). The engine keeps the same
+    // thing at `menu+0xc` and builds this screen's back-key handler out of
+    // it; see GoBack().
+    void SetScriptName(std::string name) { m_ScriptName = std::move(name); }
+    const std::string& scriptName() const { return m_ScriptName; }
+
 private:
     MenuRow& AddRow(RowKind kind, int textId, const std::string& callback, bool selectable);
 
@@ -482,6 +489,8 @@ private:
     // (which every screen's OnDisplay runs), since the real call site is
     // Init(), which runs only once per screen.
     std::string m_PrevMenuPath;
+    // M90: see SetScriptName(). Set by MenuStack when the screen is built.
+    std::string m_ScriptName;
     std::vector<MenuRow> m_Rows;
     int m_SelectedItem = 0;
     bool m_QueueHandIsRight = false;

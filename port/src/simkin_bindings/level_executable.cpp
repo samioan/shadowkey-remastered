@@ -6,6 +6,7 @@
 
 #include "assets/sound_archive.h"
 #include "audio/audio_engine.h"
+#include "engine/screen_mode.h"
 #include "simkin_bindings/game_constants.h"
 #include "simkin_bindings/item_executable.h"
 #include "simkin_bindings/menu_stack.h"
@@ -200,6 +201,24 @@ bool LevelExecutable::TakePendingCreature(PendingCreature& out,
 
 bool LevelExecutable::method(const skString& methodName, skRValueArray& args,
                               skRValue& returnValue, skExecutableContext& context) {
+    if (NativeMethod(methodName, args, returnValue, context)) return true;
+    // M75: `Level` is the zone-root script object -- see AttachZoneScript()
+    // in the header for the two independent pieces of corpus evidence.
+    // Anything this class has no native handler for is a call on that
+    // script: `crypt2/pedestal_entity.s` says `Level.AddCrystal()` seven
+    // times and `AddCrystal[()...]` is defined in `crypt2.s`.
+    //
+    // M90: the zone script's *script-defined* handlers only. It used to be
+    // its whole `method()`, which now calls back into this class's
+    // `NativeMethod()` and would recurse.
+    if (m_ZoneScript && m_ZoneScript->ScriptMethod(methodName, args, returnValue, context)) {
+        return true;
+    }
+    return SoftFailNativeCall("Level", methodName, args, returnValue);
+}
+
+bool LevelExecutable::NativeMethod(const skString& methodName, skRValueArray& args,
+                                    skRValue& returnValue, skExecutableContext& context) {
     if (methodName == skString("GetEntity") && args.entries() == 1) {
         auto it = m_Entities.find(ToStdString(args[0].str()));
         if (it != m_Entities.end()) {
@@ -226,7 +245,49 @@ bool LevelExecutable::method(const skString& methodName, skRValueArray& args,
         returnValue = skRValue(static_cast<skiExecutable*>(&m_Stack.player()), false);
         return true;
     }
-    if ((methodName == skString("LoadLevel") || methodName == skString("ForceLoadLevel") ||
+    if (methodName == skString("LoadLevel") && args.entries() >= 1) {
+        // M90: **binding 0x17 does not load anything.** The whole of the
+        // engine's case, in order (`FUN_1006dbec` case 0x17):
+        //
+        //     sprintf(buf, "Setting %s as save level", app+0x28);
+        //     strcpy(app+0x50, app+0x28);           // remember where we are
+        //     sprintf(buf, "Setting %s as next level", name);
+        //     strcpy(app+0x28, name);               // the destination
+        //     app+0x48 = x;  app+0x4c = y;
+        //     FUN_100779b8(app+0x20, "LevelConfirm", 1, 0);
+        //
+        // -- that last call is `OpenMenu` on the menu manager, and
+        // `levelconfirm.s` is the "Travel to: <zone> / Go / Don't Go"
+        // prompt. `Go` calls `ActuallyLoadLevel(GetNextLevel(),
+        // GetNextLevelX(), GetNextLevelY())`, reading back exactly the
+        // three fields written above; `Don't Go` calls
+        // `RestoreSaveLevel()`, which copies the saved name back and
+        // disarms the spawn override. Until M90 this port loaded on the
+        // spot, so every scripted trip -- azra's three exits, ghstpass's
+        // five, the whole map -- teleported the player with no prompt.
+        //
+        // `FUN_100779b8`'s third argument, the 1, lands on `menuMgr+0x49`,
+        // and Menu binding 0x25 (`ReturnToGame`) is gated on it being
+        // exactly 1: it means "this screen is up over live gameplay".
+        // That is this port's `gamePausedForMenu`, which main.cpp sets
+        // when a menu appears from inside a script call (M80).
+        //
+        // ReopenMenu, not OpenMenu: `FUN_100779b8` tears the whole menu
+        // list down (`vtable+0xc` with 3 on every entry, then
+        // `FUN_100a488c` empties the list) before building the named
+        // screen, so its `Init()` always reruns -- and levelconfirm's
+        // Init() is where `GetNextLevelName()` is read, so a cached
+        // instance would name the wrong destination on the second trip.
+        std::string name = ToStdString(args[0].str());
+        int nextX = args.entries() >= 2 ? args[1].intValue() : -1;
+        int nextY = args.entries() >= 3 ? args[2].intValue() : -1;
+        std::printf("  [zone] LoadLevel(\"%s\") -- travel prompt (from \"%s\")\n", name.c_str(),
+                    m_Stack.currentLevelName().c_str());
+        m_Stack.SetPendingLevel(std::move(name), nextX, nextY);
+        m_Stack.ReopenMenu(sk::kLevelConfirmMenuName);
+        return true;
+    }
+    if ((methodName == skString("ForceLoadLevel") ||
          methodName == skString("ActuallyLoadLevel")) &&
         args.entries() >= 1) {
         // M26: a real script's own zone-transition request (e.g.
@@ -239,30 +300,36 @@ bool LevelExecutable::method(const skString& methodName, skRValueArray& args,
         // entry).
         //
         // M61: all three take `(name, x, y)` with the two coordinates
-        // optional and defaulting to -1, and all three record the pending
-        // level the same way (MenuStack::SetPendingLevel). Where they
-        // differ is *when* the load happens, and that is a difference this
-        // port does not currently have to make:
+        // optional and defaulting to -1. M90 split the confirmed one out
+        // above; these two are the ones that load.
         //
-        //   ForceLoadLevel (0x16) / ActuallyLoadLevel (0x18) load right
-        //     now, straight through the app object's own loader.
-        //   LoadLevel (0x17) does NOT load. It records the destination and
-        //     opens `levelconfirm.s` -- the "Travel to: <name> / Go /
-        //     Don't Go" prompt -- and it is `Go` that calls
-        //     `ActuallyLoadLevel(GetNextLevel(), GetNextLevelX(),
-        //     GetNextLevelY())`.
+        // They differ from each other only in bookkeeping, and the
+        // difference is visible in the decompilation:
         //
-        // Raising that prompt needs a menu screen wired through main.cpp's
-        // mode machinery plus the menu-side `GetNextLevelName()`, so it is
-        // deliberately left out of this milestone and noted in
-        // docs/PORT_ROADMAP.md. Every one of the three still defers by one
-        // tick here, which is what the shipped scripts' arm-then-load
-        // ordering needs (they call SetCameraStart on the line *after*
-        // LoadLevel).
+        //   ForceLoadLevel (0x16) does `strcpy(app+0x50, app+0x28)` --
+        //     it is a trip nobody confirmed, so it takes on itself the
+        //     save-level push `LoadLevel` would have done.
+        //   ActuallyLoadLevel (0x18) does not touch either name slot. It
+        //     is only ever reached from `levelconfirm.s`'s `Go`, where
+        //     `LoadLevel` has already written both, and overwriting the
+        //     saved name with the destination would lose the only record
+        //     of where the player came from.
+        //
+        // (0x16 also skips the multiplayer branch 0x18 takes first, which
+        // is the other half of what "Force" means; this port has no
+        // Bluetooth session to hand the level change to.)
+        //
+        // Both still defer the load by one tick, which is what the shipped
+        // scripts' arm-then-load ordering needs -- every one of them calls
+        // SetCameraStart on the line *after* the transition call.
         std::string name = ToStdString(args[0].str());
         int nextX = args.entries() >= 2 ? args[1].intValue() : -1;
         int nextY = args.entries() >= 3 ? args[2].intValue() : -1;
-        m_Stack.SetPendingLevel(name, nextX, nextY);
+        if (methodName == skString("ForceLoadLevel")) {
+            m_Stack.SetPendingLevel(name, nextX, nextY);
+        } else {
+            m_Stack.SetPendingLevelCoords(nextX, nextY);
+        }
         m_Stack.RequestZoneChange(std::move(name));
         return true;
     }
@@ -465,19 +532,7 @@ bool LevelExecutable::method(const skString& methodName, skRValueArray& args,
                     e.sizeY);
         return true;
     }
-    // M75: `Level` is the zone-root script object -- see AttachZoneScript()
-    // in the header for the two independent pieces of corpus evidence.
-    // Anything this class has no native handler for is a call on that
-    // script: `crypt2/pedestal_entity.s` says `Level.AddCrystal()` seven
-    // times and `AddCrystal[()...]` is defined in `crypt2.s`.
-    //
-    // The zone script's own method() runs its native handlers first and
-    // then falls through to skScriptedExecutable, which is what finds the
-    // script-defined handler; a name neither of them knows comes back
-    // false and lands on this class's soft-fail below, so the "unresolved
-    // native" log still reports every genuinely missing binding.
-    if (m_ZoneScript && m_ZoneScript->method(methodName, args, returnValue, context)) return true;
-    return SoftFailNativeCall("Level", methodName, args, returnValue);
+    return false;
 }
 
 void LevelExecutable::AttachZoneScript(ZoneScriptExecutable* script) {

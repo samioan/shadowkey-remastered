@@ -106,4 +106,16 @@ inline constexpr int kProgressBarFrameSlot = 206;
 // The full-screen splash behind it (`engine+0x4718`).
 inline constexpr int kProgressBarSplashSlot = 174;
 
+// M90: the screen `Level.LoadLevel(name, x, y)` raises instead of loading
+// -- the "Travel to: <zone> / Go / Don't Go" prompt. Spelled exactly as
+// the engine spells it, in the one place it appears: a plain ASCII string
+// constant at `0x100b2558`, passed to `FUN_100779b8` (open-menu-by-name)
+// by the Zone/Level dispatcher's case 0x17. The file on disk is
+// `levelconfirm.s` -- Symbian's FAT filenames are case-insensitive, so the
+// engine's own `"%s\\%s.s"` open finds it -- but the *name* matters
+// independently of the file, because the menu class builds its back-key
+// handler out of it (`"%sBack"` at `0x100b32c8`, hence levelconfirm.s's
+// own `LevelConfirmBack`). See MenuExecutable::GoBack().
+inline constexpr const char* kLevelConfirmMenuName = "LevelConfirm";
+
 }  // namespace sk

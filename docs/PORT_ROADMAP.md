@@ -8132,6 +8132,143 @@ soft-fails 39 -> 39, all 14 tracked `.ppm` renders byte-identical,
       candelabra instead of near-black ones, and no green patch anywhere
       on its walls. All fourteen tracked `.ppm` dumps move, as they must
       when the lighting model changes.
+- [x] **M90 -- the travel prompt, and the bare `LoadLevel` that never
+      resolved.** Reported from play: walking into a level-transition
+      region either teleported the player to the next zone with no
+      warning (azra -> ghstpass) or did nothing at all, and the log said
+      `ZoneScript: LoadLevel(broken1) -- not implemented`. Two symptoms,
+      two separate defects, and one shipped screen missing between them.
+    - **`Level.LoadLevel(name, x, y)` does not load anything.** Binding
+      **0x17**, and `FUN_1006dbec`'s case for it is six statements:
+      `strcpy(app+0x50, app+0x28)` (remember where we are),
+      `strcpy(app+0x28, name)` (the destination), `app+0x48 = x`,
+      `app+0x4c = y`, and then
+      `FUN_100779b8(app+0x20, "LevelConfirm", 1, 0)` -- open-a-menu-by-
+      name on the menu manager. That screen is `levelconfirm.s`, four
+      rows of it, and it has shipped with the game the whole time:
+      "Travel to: " (3950) / the destination's display name / "No"
+      (1389, callback `DontGo`) / "Yes" (1375, callback `Go`), with
+      "Accept" and "Back" (4077/4078) on the softkey line. `Go` is
+      `Level.ActuallyLoadLevel(Level.GetNextLevel(), GetNextLevelX(),
+      GetNextLevelY())` -- reading back exactly the three fields
+      `LoadLevel` wrote -- and `DontGo` is `Level.RestoreSaveLevel()`,
+      which copies the saved name back and disarms the spawn override.
+      M61 traced all of this and deliberately left the screen out; this
+      is that milestone's own open item, closed.
+    - **The three transition bindings are three different things**, and
+      only now does the port need the difference. `LoadLevel` (0x17)
+      prompts. `ForceLoadLevel` (0x16) loads without asking, and takes
+      on the save-level push itself (`strcpy(app+0x50, app+0x28)`)
+      because no prompt did it. `ActuallyLoadLevel` (0x18) loads and
+      touches **neither** name slot -- it is only ever reached from the
+      prompt's `Go`, where both are already written, and pushing the
+      destination over the saved name there would throw away the only
+      record of where the player came from. The port used to run all
+      three through one handler.
+    - **A zone root script *is* the `Level` object, so every Level native
+      is reachable from it bare.** This is the other half of the report,
+      and it is the bigger one. `azra.s`'s EnterZone says
+      `Level.LoadLevel("GhstPass")`; `ghstpass.s`'s EnterZone -- the
+      handler on the other side of that same doorway -- says
+      `LoadLevel("azra")`. Same binding, same object; which spelling a
+      file uses is authoring habit. The enumeration had said so since
+      M56 (`Level` is one bare global whose dispatch chain is Zone/Level
+      `0x14d38` plus Zone effects `0x14df8`), but this port modelled the
+      two as separate C++ objects and only `LevelExecutable` answered.
+      Across the 21 zone root scripts the bare spelling is the *majority*
+      -- **33 `LoadLevel`, 33 `UnlockZone`, 15 `PlayAmbient`**, plus
+      `LockZone` and `CreateEntity`, against 9 `Level.`-qualified
+      `LoadLevel` -- and every one of those calls soft-failed and did
+      nothing. That is why some doorways teleported and others were
+      inert, and a zone whose EnterZone cannot `UnlockZone` is a door
+      that never opens.
+      `ZoneScriptExecutable::method()` now falls through to
+      `LevelExecutable::NativeMethod()`. The `Native`/`Script` split is
+      not decoration: `LevelExecutable::method()` already fell through to
+      the zone script for a script-defined handler
+      (`crypt2/pedestal_entity.s`'s `Level.AddCrystal()`, defined in
+      `crypt2.s`), so without splitting each class's own half out the two
+      would call each other forever.
+    - **`<ScriptName>Back` is the engine's right-softkey dispatch.** Found
+      while looking for what calls `levelconfirm.s`'s `LevelConfirmBack`.
+      `FUN_10075bdc`, the menu screen's input tick, routes the right
+      softkey to `FUN_100768b4`, whose whole body is: take the screen's
+      own name from `menu+0xc`, `sprintf("%sBack")` (the format string is
+      at `0x100b32c8`), call that script method. It explains a family of
+      41 handlers across the corpus that no shipped script ever calls --
+      `LootMenuBack`, `InventoryBack`, `OptionsBack`, `LockPickDoorBack`,
+      `skeleton_key_menuBack`, `armor_convoBack` -- and their names track
+      the *open path's last component*, case and all, not the filename
+      (`OpenMenu("Menus\\LockPickDoor")` -> `menus/lockpickdoor.s`'s
+      `LockPickDoorBack`). `MenuExecutable::GoBack()` tries it first, and
+      keeps the existing `OnRightSoftkey`/`SetPrevMenu` chain behind it
+      for the screens whose handler is conditional (`mainmenu.s`'s
+      `MainMenuBack` only acts `if( GameActive() )`). `OnRightSoftKey` is
+      a real dispatch too, just a different screen class's --
+      `FUN_1003006c`, the character-manager/store family -- which is why
+      the corpus has both.
+      Consequence: the six engine-opened screens are opened by the
+      engine's own spelling now (`Inventory`, `CharacterManager`,
+      `QuestLog`, `StatsScreen`, `ActionQueue`, `LevelUp`, read off the
+      persistent-menu list at `0x100ad794`), because `inventory.s`
+      defines `InventoryBack`, not `inventoryBack`.
+    - **`GetNextLevelName()`** (GameEngine-root binding **10**), the
+      prompt's second row: `FUN_100290a8(app+0x28 + 0x28, buf)`, the
+      internal-name -> display-string lookup this port already had from
+      M26 (`assets/zone_display_names.h`). By the time it runs, `app+0x28`
+      is the *destination* -- `LoadLevel` wrote it there on the line
+      before -- so the row says where you are going, not where you are.
+    - **The prompt has to survive the in-game menu shortcut.** A screen
+      opened over live gameplay is normally something the player can be
+      lifted straight out of with the right softkey, and main.cpp did
+      exactly that, bypassing the screen entirely. A travel prompt is a
+      *decision*: skipping it would leave the game running in ghstpass
+      believing it was in broken1, because `LoadLevel` has already
+      written the destination over the current name and only `DontGo`
+      puts it back. The shortcut now gives the screen's own back handler
+      first refusal and takes over only when there isn't one -- which is
+      every conversation and tutorial popup it was written for.
+    - **A held key must not drive the screen that just opened.** Found
+      live, and it is exactly the kind of thing `levelconfirm.s`'s row
+      order exists to protect against: the player walks into a doorway
+      with the forward key down, the prompt appears, and the still-held
+      key immediately moved the highlight off "No" and onto "Yes". The
+      engine cannot have this -- its menu tick tests
+      `GetButton2(slot) && !GetButtonPrev(slot)` throughout, edges only --
+      but this port's menu navigation also reads auto-repeat
+      (`ConsumeJustPressedOrRepeat`), which is its own convenience and had
+      no reason to survive the handover. `InputState::ClearPendingEdges()`
+      drops the pending edges and repeats (not the held keys themselves)
+      at every point a menu takes over from live gameplay.
+    - **Debug**: `inspect menu` now names the screen and the selected row
+      alongside the rows themselves. That is how the above was found --
+      the screenshot showed the wrong word in white and the page said
+      `selected 4` in the log, which is a fact rather than an inference
+      about pixel colour.
+    - **Verified**, `level_transition_smoke`
+      (`src/tests/m90_level_transition_smoke.cpp`, **74 checks**):
+      `levelconfirm.s`'s four handlers and five stringtable ids against a
+      real `stringtable.eng`, including that "No" is added first so the
+      prompt opens on the safe answer; the corpus census (21/21 root
+      scripts, 33 bare against 9 qualified) and the 19 sampled
+      `<ScriptName>Back` handlers, none of which any script calls; the
+      four bindings in isolation, including that `ActuallyLoadLevel`
+      leaves the saved name alone and `ForceLoadLevel` does not; and end
+      to end through two real shipped scripts, one of each spelling --
+      `ghstpass.s`'s `EnterZone("BrokenWing")` driven into the real
+      prompt and out again three times, once through "No", once through
+      the back key, once through "Yes", checking the level name, the
+      spawn override and the load request each time, and `azra.s`'s
+      `EnterZone("ghasts")` raising the same screen reading "Ghast's
+      Pass". Suite **80/80**.
+    - **Live**: `port/debug/m90_level_transition.cfg`. ghstpass's Broken
+      Wing doorway now stops the player and asks -- "Travel to: / Broken
+      Wing I / No / Yes", opening on "No". Confirming "No" leaves them
+      standing on the same tile in ghstpass; so does the back softkey,
+      through `LevelConfirmBack`. "Yes" runs the real loading screen and
+      arrives in broken1 at (16768, 1388), which is
+      `ghstpass.s`'s own `SetCameraStart` for that doorway to the digit.
+
 
 ## Next milestones (not yet started)
 
@@ -8216,6 +8353,15 @@ per-zone file that ships with the game; and the green wall patch was not
 unexplained, it was this port reading the `.zlu` family as a 64-rung block
 index instead of the +0..+3 rung bias the engine's own four palette
 pointers make it. Models turned out not to be lit at all.
+
+**M90 closed one of M61's.** That milestone traced the whole three-step
+transition conversation -- `LoadLevel` writes and prompts, `Go` reads back
+and loads, `Don't Go` restores and disarms -- and then implemented only the
+two ends, noting that raising the prompt "needs a menu screen wired through
+main.cpp's mode machinery plus the menu-side `GetNextLevelName()`". Both
+turned out to be small; what was not small, and what nobody had looked for,
+was that most of the calls into that machinery were spelled without the
+`Level.` prefix and had never resolved at all.
 
 M89 leaves two of its own, both traced but neither implemented, both in
 `SurfaceFace_BuildAndProject`'s per-vertex light and both worth having in

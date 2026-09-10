@@ -375,12 +375,20 @@ public:
     // That is why arming the spawn override before the load is safe, and
     // why disarming it is a named script binding at all.
     //
-    // This port keeps the state and the three getters, but `LoadLevel`
-    // still requests the transition directly rather than raising the
-    // confirm prompt -- see LevelExecutable's own comment.
+    // M90: the prompt is real now -- `LoadLevel` raises `LevelConfirm` and
+    // it is `Go` / `Don't Go` that decide whether the load happens. See
+    // LevelExecutable's three handlers.
     void SetPendingLevel(std::string name, int nextX, int nextY) {
         m_PreviousLevel = m_CurrentLevel;
         m_CurrentLevel = std::move(name);
+        m_PendingLevelX = nextX;
+        m_PendingLevelY = nextY;
+    }
+    // M90: `ActuallyLoadLevel` (0x18), the one transition binding that
+    // does *not* touch either name slot -- `LoadLevel` has already
+    // written both, and pushing the destination over the saved name would
+    // throw away the only record of where the player came from.
+    void SetPendingLevelCoords(int nextX, int nextY) {
         m_PendingLevelX = nextX;
         m_PendingLevelY = nextY;
     }

@@ -361,6 +361,15 @@ public:
     bool method(const skString& methodName, skRValueArray& args, skRValue& returnValue,
                 skExecutableContext& context) override;
 
+    // M90: only the handlers the `.s` file itself defines -- no native
+    // bindings, no soft-fail. `LevelExecutable::method()` calls this when
+    // a `Level.<name>()` turns out to be a call on the zone's own script
+    // (`crypt2/pedestal_entity.s`'s `Level.AddCrystal()`, defined in
+    // `crypt2.s`), and calling the full `method()` there would bounce
+    // straight back into LevelExecutable::NativeMethod() and recurse.
+    bool ScriptMethod(const skString& methodName, skRValueArray& args, skRValue& returnValue,
+                      skExecutableContext& context);
+
     // M38: keep an object assigned to a *pre-declared* script field --
     // see native_binding_common.h's StoreScriptObjectField() for the
     // vendored-Simkin behaviour this works around and the real script

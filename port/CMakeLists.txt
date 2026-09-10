@@ -108,6 +108,10 @@ target_include_directories(sk_save PUBLIC src)
 
 add_library(sk_bindings STATIC
   src/assets/string_table.cpp
+  # M90: `GetNextLevelName()` (GameEngine-root binding 10) resolves a
+  # zone display name from inside MenuExecutable now, not just from
+  # main.cpp's loading screen, so the table moves in here with it.
+  src/assets/zone_display_names.cpp
   src/simkin_bindings/action_text.cpp
   src/simkin_bindings/button_executable.cpp
   src/simkin_bindings/character_progression.cpp
@@ -211,7 +215,6 @@ add_executable(shadowkey_port
   src/main.cpp
   src/assets/gdr_font.cpp
   src/assets/sprite_archive.cpp
-  src/assets/zone_display_names.cpp
   src/graphics/bitmap_font.cpp
   src/platform/win32/console_tee.cpp
   src/platform/win32/crash_report.cpp
@@ -347,8 +350,7 @@ target_link_libraries(weapon_viewmodel_smoke PRIVATE sk_bindings)
 
 # Real zone-transition loading screen smoke test -- see
 # src/tests/m26_loading_screen_smoke.cpp.
-add_executable(loading_screen_smoke src/tests/m26_loading_screen_smoke.cpp
-                                     src/assets/zone_display_names.cpp)
+add_executable(loading_screen_smoke src/tests/m26_loading_screen_smoke.cpp)
 target_link_libraries(loading_screen_smoke PRIVATE sk_bindings)
 
 # Real audio pipeline smoke test -- see src/tests/m27_audio_smoke.cpp.
@@ -647,3 +649,7 @@ target_link_libraries(quest_log_smoke PRIVATE sk_bindings sk_world)
 # See src/tests/m89_lighting_smoke.cpp.
 add_executable(zone_lighting_smoke src/tests/m89_lighting_smoke.cpp)
 target_link_libraries(zone_lighting_smoke PRIVATE sk_world)
+
+# M90 milestone smoke test -- see src/tests/m90_level_transition_smoke.cpp.
+add_executable(level_transition_smoke src/tests/m90_level_transition_smoke.cpp)
+target_link_libraries(level_transition_smoke PRIVATE sk_bindings)

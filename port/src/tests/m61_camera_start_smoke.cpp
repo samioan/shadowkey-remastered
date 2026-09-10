@@ -31,7 +31,9 @@
 #include <vector>
 
 #include "assets/string_table.h"
+#include "engine/screen_mode.h"
 #include "simkin_bindings/level_executable.h"
+#include "simkin_bindings/menu_executable.h"
 #include "simkin_bindings/menu_stack.h"
 #include "simkin_bindings/player_executable.h"
 #include "simkin_bindings/zone_script_executable.h"
@@ -233,8 +235,18 @@ int main(int argc, char** argv) {
 
         // The LoadLevel on the line above it, which is what makes arming
         // the override before the level exists meaningful.
-        Check(stack.gameStartRequested() && stack.requestedZone() == "fearfrst",
-              "the same handler's Level.LoadLevel(\"fearfrst\") requested the transition");
+        //
+        // M90: and *nothing has loaded*. The whole point of the ordering
+        // is that the override is armed for a trip the player has not
+        // agreed to yet -- `LoadLevel` raised `levelconfirm.s` and went
+        // no further. If it still loaded on the spot, arming afterwards
+        // would be arming after the fact and the disarm in Part 3 would
+        // have nothing to undo.
+        Check(!stack.gameStartRequested(),
+              "the same handler's Level.LoadLevel(\"fearfrst\") did NOT load -- prompt only");
+        Check(stack.currentMenu() != nullptr &&
+                  stack.currentMenu()->scriptName() == sk::kLevelConfirmMenuName,
+              "LoadLevel raised the LevelConfirm screen");
         Check(stack.currentLevelName() == "fearfrst",
               "LoadLevel already moved the pending level name to the destination");
 

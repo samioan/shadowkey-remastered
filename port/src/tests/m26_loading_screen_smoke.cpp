@@ -76,7 +76,15 @@ int main(int argc, char** argv) {
     if (!prefixOk) ok = false;
 
     // --- Part 2: a real script's Level.LoadLevel(...) genuinely requests
-    // a zone change, without re-granting starting inventory. ---
+    // a zone change, without re-granting starting inventory.
+    //
+    // M90: it does that *through the confirm prompt* now. `LoadLevel`
+    // (binding 0x17) raises `levelconfirm.s` and records the destination
+    // -- it loads nothing. It is that screen's `Go` row, whose body is
+    // `Level.ActuallyLoadLevel(Level.GetNextLevel(), GetNextLevelX(),
+    // GetNextLevelY())`, that asks for the load. Both halves are driven
+    // here in that order, and the loading screen this test is about is
+    // still fed by the second one exactly as it was. ---
     skInterpreter interpreter;
     sk_bindings::MenuStack stack(scriptRoot, interpreter, &strings);
     stack.RequestGameStart("azra");  // simulates a real game already under way
@@ -92,9 +100,33 @@ int main(int argc, char** argv) {
                 handled ? "true" : "false", handled ? "OK" : "FAILED");
     if (!handled) ok = false;
 
+    bool promptOk = !stack.gameStartRequested() && stack.currentLevelName() == "delfhide";
+    std::printf(
+        "after LoadLevel: gameStartRequested()=%s currentLevelName()=\"%s\" (expected false, "
+        "\"delfhide\" -- the prompt is up, nothing is loading yet) %s\n",
+        stack.gameStartRequested() ? "true" : "false", stack.currentLevelName().c_str(),
+        promptOk ? "OK" : "FAILED");
+    if (!promptOk) ok = false;
+
+    // levelconfirm.s's own `Go`, verbatim:
+    //   Level.ActuallyLoadLevel( Level.GetNextLevel(), Level.GetNextLevelX(),
+    //                            Level.GetNextLevelY() );
+    skRValueArray none;
+    skRValue nextName;
+    skRValue nextX;
+    skRValue nextY;
+    stack.level().method(skString("GetNextLevel"), none, nextName, ctxt);
+    stack.level().method(skString("GetNextLevelX"), none, nextX, ctxt);
+    stack.level().method(skString("GetNextLevelY"), none, nextY, ctxt);
+    skRValueArray goArgs;
+    goArgs.append(nextName);
+    goArgs.append(nextX);
+    goArgs.append(nextY);
+    stack.level().method(skString("ActuallyLoadLevel"), goArgs, ret, ctxt);
+
     bool requestedOk = stack.gameStartRequested() && stack.requestedZone() == "delfhide";
     std::printf(
-        "after LoadLevel: gameStartRequested()=%s requestedZone()=\"%s\" (expected true, "
+        "after the prompt's Go: gameStartRequested()=%s requestedZone()=\"%s\" (expected true, "
         "\"delfhide\") %s\n",
         stack.gameStartRequested() ? "true" : "false", stack.requestedZone().c_str(),
         requestedOk ? "OK" : "FAILED");

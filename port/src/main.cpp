@@ -1256,6 +1256,14 @@ void LiveDebugHost::Inspect(const std::string& page,
             return;
         }
         group.title = "menu rows";
+        // M90: which screen, and which row the confirm key would fire.
+        // `scriptName` is what the engine keeps at `menu+0xc` and builds
+        // this screen's back handler out of (`<ScriptName>Back`, see
+        // MenuExecutable::GoBack()), so it is worth seeing next to the
+        // rows; and a prompt whose safe answer is row 1 is only safe if
+        // the selection is actually on it.
+        group.Add("screen", menu->scriptName().empty() ? std::string("?") : menu->scriptName());
+        group.Add("selected", std::to_string(menu->selectedItem()) + "  (1-based row)");
         int index = 0;
         for (const auto& row : menu->rows()) {
             const std::string prefix = std::to_string(index++);
@@ -4136,9 +4144,13 @@ int main(int argc, char** argv) {
             // view -- RightSelectionKey (Esc) still returns straight to
             // the main menu when not paused for a menu.
             if (input.ConsumeBoundJustPressed(sk::Action::CharacterManager)) {
-                stack.OpenMenu("charactermanager");
+                // M90: the engine's own spelling of the name -- see
+                // MenuExecutable::GoBack(), which builds this screen's
+                // back handler (`CharacterManagerBack`) out of it.
+                stack.OpenMenu("CharacterManager");
                 inGame = false;
                 gamePausedForMenu = true;
+                input.ClearPendingEdges();  // M90, see its comment
             } else if (input.ConsumeJustPressed(sk::ButtonSlot::RightSelectionKey)) {
                 inGame = false;
             } else {
@@ -4681,6 +4693,7 @@ int main(int argc, char** argv) {
                         if (stack.currentMenu() != beforeRegionMenu) {
                             inGame = false;
                             gamePausedForMenu = true;
+                            input.ClearPendingEdges();  // M90, see its comment
                             // Deliberately keeps walking the rest of the
                             // region list: the set diff below has to see
                             // every region the player stands in this tick,
@@ -5495,6 +5508,7 @@ int main(int argc, char** argv) {
                                 // port's invention.
                                 inGame = false;
                                 gamePausedForMenu = true;
+                                input.ClearPendingEdges();  // M90, see its comment
                                 detectOpenedMenu = true;
                             }
                             m.script->ClearAttackCadence();
@@ -6544,6 +6558,7 @@ int main(int argc, char** argv) {
                                 stack.OpenMenu("LootMenu", pickup->script.get());
                                 inGame = false;
                                 gamePausedForMenu = true;
+                                input.ClearPendingEdges();  // M90, see its comment
                             } else {
                                 stack.player().AddItem(std::move(pickup->script));
                                 gamePickups.erase(gamePickups.begin() +
@@ -6559,6 +6574,7 @@ int main(int argc, char** argv) {
                         } else if (stack.currentMenu() != beforeMenu) {
                             inGame = false;
                             gamePausedForMenu = true;
+                            input.ClearPendingEdges();  // M90, see its comment
                         }
                     } else if (npc && npcDist <= doorDist) {
                         // A real NPC's OnUse() (e.g. tanyinconvo.s) calls
@@ -6578,6 +6594,7 @@ int main(int argc, char** argv) {
                         if (stack.currentMenu() != before) {
                             inGame = false;
                             gamePausedForMenu = true;
+                            input.ClearPendingEdges();  // M90, see its comment
                         }
                     } else if (door) {
                         // M38: mode 1 -- the real engine notifies the
@@ -6960,10 +6977,48 @@ int main(int argc, char** argv) {
         }
 
         if (gamePausedForMenu && input.ConsumeJustPressed(sk::ButtonSlot::RightSelectionKey)) {
-            // See gamePausedForMenu's declaration comment -- always
-            // resumes gameplay directly, bypassing whatever menu screen
+            // See gamePausedForMenu's declaration comment -- resumes
+            // gameplay directly, bypassing whatever menu screen
             // (charactermanager.s or a nested Inventory/Stats/QuestLog)
             // is currently open.
+            //
+            // M90: **except when the screen's own back handler has
+            // something to say.** A screen opened over gameplay is not
+            // always a view the player can simply be lifted out of --
+            // `levelconfirm.s` is a decision, and its
+            // `LevelConfirmBack -> DontGo -> Level.RestoreSaveLevel()` is
+            // the only thing that puts the level name back after
+            // `LoadLevel` wrote the destination over it. Skipping the
+            // screen would leave the game running in azra believing it
+            // was in ghstpass.
+            //
+            // MenuExecutable::GoBack() is the engine's own right-softkey
+            // dispatch (`<ScriptName>Back`, see its comment). It answers
+            // false on every screen that defines no handler, which is the
+            // conversation/tutorial case this shortcut was written for,
+            // and those still resume immediately.
+            if (sk_bindings::MenuExecutable* paused = stack.currentMenu()) {
+                sk_bindings::MenuExecutable* beforeBack = paused;
+                bool handled = false;
+                try {
+                    handled = paused->GoBack();
+                } catch (skRuntimeException& e) {
+                    std::printf("shadowkey-port: RUNTIME ERROR in back handler: %s\n",
+                                e.toString().ptr());
+                }
+                if (handled && stack.currentMenu() != beforeBack) {
+                    // The handler put another screen up. Leave it there.
+                    RenderMenu(backbuffer, *stack.currentMenu(), stack.player(), strings,
+                                spriteArchive);
+                    window.Present(backbuffer);
+                    return;
+                }
+                // Anything else -- a plain Quit(), or no handler at all --
+                // resumes gameplay below, which is what both were going to
+                // do anyway. The close request is consumed here so the
+                // block further down doesn't act on it a second time.
+                stack.ClearCloseMenuRequest();
+            }
             gamePausedForMenu = false;
             inGame = true;
             zoneRenderer.Render(backbuffer, *gameZone, gameCamera, gameEntities, &modelArchive);

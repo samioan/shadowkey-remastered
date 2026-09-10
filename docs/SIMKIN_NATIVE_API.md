@@ -868,14 +868,80 @@ a level that has not loaded and might never load, and the decline path is
 responsible for taking it back.
 
 `ForceLoadLevel` (0x16) is `ActuallyLoadLevel` without the multiplayer
-branch — it skips straight to the app object's loader.
+branch — it skips straight to the app object's loader. It differs in one
+more way, and the difference is load-bearing (M90): **0x16 does
+`strcpy(app+0x50, app+0x28)` and 0x18 does not.** 0x16 is a trip nobody
+confirmed, so it takes on the save-level push `LoadLevel` would have done;
+0x18 is only ever reached from `levelconfirm.s`'s `Go`, where `LoadLevel`
+has already written both slots, and pushing the destination over the saved
+name there would throw away the only record of where the player came from
+— which a later `RestoreSaveLevel` still needs.
 
 > **String 3950 belongs to this prompt.** `levelconfirm.s`'s `Init` is
 > `AddStaticItem(3950,false); AddStaticItem(GetNextLevelName(),false)`, so
 > `"Travel to: "` is the confirm dialog's own header. M26 used it as the
-> loading-screen banner instead. Not corrected here — the port's loading
-> screen has to say something and no other candidate string was found —
-> but the shipped use site is this one.
+> loading-screen banner instead. The port now uses it in both places
+> (M90): the prompt is real, and the loading screen still needs to say
+> something on a transition, so the string does double duty rather than
+> moving.
+>
+> The whole screen, resolved against a real `stringtable.eng`: **3950**
+> `"Travel to: "`, then `GetNextLevelName()`, then **1389** `"No"` (the
+> `DontGo` row, added *first*, so the prompt opens on the safe answer) and
+> **1375** `"Yes"` (the `Go` row), with **4077** `"Accept"` and **4078**
+> `"Back"` on the softkey line.
+
+### The back softkey calls `<ScriptName>Back` (M90)
+
+Found while looking for what calls `levelconfirm.s`'s `LevelConfirmBack`,
+and it turns out to be a whole missing dispatch rather than one dead
+handler.
+
+`FUN_10075bdc` is the generic menu screen's input tick. Its right-softkey
+arm (buttons 10 / 0x11) calls **`FUN_100768b4`**, whose entire body is:
+
+```
+name = menu+0xc                    // the screen's own name
+sprintf(buf, "%sBack", name)       // format string at 0x100b32c8
+call script method buf             // vtable+0x40, the script dispatcher
+```
+
+That explains **41 handlers across the shipped corpus that no script ever
+calls** — one per screen, named after the screen. Their names track the
+*last component of the path the screen was opened by*, verbatim, case
+included:
+
+| opened as | script file | handler |
+|---|---|---|
+| `LevelConfirm` | `levelconfirm.s` | `LevelConfirmBack` |
+| `Menus\LockPickDoor` | `menus/lockpickdoor.s` | `LockPickDoorBack` |
+| `Inventory` | `inventory.s` | `InventoryBack` |
+| `Options` | `options.s` | `OptionsBack` |
+| `Menus\skeleton_key_menu` | `menus/skeleton_key_menu.s` | `skeleton_key_menuBack` |
+| `dstar_w\armor_convo` | `dstar_w/armor_convo.s` | `armor_convoBack` |
+
+The name, not the filename: Symbian's FAT is case-insensitive, so the
+engine's own `"%s\%s.s"` open finds `levelconfirm.s` for `"LevelConfirm"`
+and the two need not agree. The engine's own spellings of the six screens
+it opens natively are in the persistent-menu list at `0x100ad794`:
+`Inventory`, `CharacterManager`, `QuestLog`, `StatsScreen`, `BuySell`,
+`ActionQueue`, `RemoveQueue`, `InventoryButtonItem` — with
+`"DragonStarStackMenu::OpenMenu %s"`, the open-by-name trace, a few bytes
+further on in the same block.
+
+**`OnRightSoftKey` is a second, separate dispatch**, not an alternative
+spelling of the same one: `FUN_1003006c` — the character-manager/store
+screen family — calls it where the generic class calls `<ScriptName>Back`.
+That is why the corpus has both, and why a screen like `inventory.s`
+defines `OnRightSoftKey`, `MenuBack` *and* `InventoryBack`: two engine
+entry points and one convenience alias between them.
+
+This also retires half of an earlier conclusion. `OptionsMenuBack`,
+`MenuBack` and `HostGameMenuBack` really are absent from the 702-entry
+table and really do miss when a script calls them — but the screens that
+call them are not therefore unexitable, because the engine was calling
+`OptionsBack` / `InventoryBack` / `HostGameMenuBack`'s real siblings all
+along.
 
 ### Two smaller things in the same code
 

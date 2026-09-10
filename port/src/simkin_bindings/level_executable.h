@@ -112,6 +112,24 @@ public:
     bool method(const skString& methodName, skRValueArray& args, skRValue& returnValue,
                 skExecutableContext& context) override;
 
+    // M90: this class's *own* native bindings, with neither the fall-
+    // through to the attached zone-root script nor the soft-fail log.
+    // `method()` is that plus both; `ZoneScriptExecutable::method()` calls
+    // this one directly.
+    //
+    // The two objects are one object in the engine. `Level` is the bare
+    // global for a single dispatch chain -- Zone/Level (`0x14d38`) and
+    // Zone effects (`0x14df8`) chained together (docs/SIMKIN_NATIVE_API.md)
+    // -- and a zone's root script is that same object's script, which is
+    // why the corpus reaches the identical binding both ways in the same
+    // handler: `azra.s` says `Level.LoadLevel("GhstPass")` while
+    // `ghstpass.s`, four lines into its own `EnterZone`, says
+    // `LoadLevel("azra")` bare. This port models them as two C++ objects,
+    // so each has to be able to answer for the other without the pair
+    // recursing; splitting the natives out is what makes that terminate.
+    bool NativeMethod(const skString& methodName, skRValueArray& args, skRValue& returnValue,
+                      skExecutableContext& context);
+
     // Called by main.cpp's zone-load block for every live door/monster
     // whose real .ent `name` field is non-empty. `object` must outlive
     // every subsequent GetEntity() call that could return it -- callers

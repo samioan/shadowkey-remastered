@@ -331,10 +331,38 @@ bool ZoneScriptExecutable::method(const skString& methodName, skRValueArray& arg
         m_Encounters.push_back(std::move(encounter));
         return true;
     }
-    if (skScriptedExecutable::method(methodName, args, returnValue, context)) {
-        return true;
-    }
+    if (ScriptMethod(methodName, args, returnValue, context)) return true;
+    // M90 -- **a zone root script IS the Level object, so every Level
+    // native is reachable from it bare.**
+    //
+    // The corpus says so twice over. `azra.s`'s EnterZone writes
+    // `Level.LoadLevel("GhstPass")`; `ghstpass.s`'s EnterZone, the handler
+    // on the other side of that same doorway, writes `LoadLevel("azra")`.
+    // Both are the same binding on the same object -- the enumeration
+    // (docs/SIMKIN_NATIVE_API.md) has `Level` as one bare global whose
+    // dispatch chain is Zone/Level (`0x14d38`) plus Zone effects
+    // (`0x14df8`), and the zone's root script is that object's script.
+    // Which spelling a given file uses is authoring habit, nothing more.
+    //
+    // Until this milestone the bare half simply did not resolve, and it is
+    // not a rare spelling: across the 21 zone root scripts it is 33
+    // `LoadLevel`, 33 `UnlockZone`, 15 `PlayAmbient`, plus `CreateEntity`
+    // and `LockZone`. That is most of the world's connective tissue --
+    // every one of those calls soft-failed and did nothing, which is why
+    // some doorways teleported the player (the `Level.`-qualified ones)
+    // and others did nothing at all (the bare ones).
+    //
+    // `NativeMethod`, not `method`: LevelExecutable::method() falls
+    // through to *this* object for a script-defined handler, so the two
+    // classes would otherwise call each other forever. Each side reaches
+    // only the other's half it cannot supply itself.
+    if (m_Stack.level().NativeMethod(methodName, args, returnValue, context)) return true;
     return SoftFailNativeCall("ZoneScript", methodName, args, returnValue);
+}
+
+bool ZoneScriptExecutable::ScriptMethod(const skString& methodName, skRValueArray& args,
+                                         skRValue& returnValue, skExecutableContext& context) {
+    return skScriptedExecutable::method(methodName, args, returnValue, context);
 }
 
 void ZoneScriptExecutable::RunCallback(const std::string& callback, TriggerExecutable* trigger,

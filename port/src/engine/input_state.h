@@ -167,6 +167,30 @@ public:
         holdTicks_.fill(0);
     }
 
+    // M90: drop every *pending* edge and repeat, but leave the held keys
+    // held. For the moment a menu takes over from live gameplay: the
+    // player is normally holding a direction key when they walk into
+    // whatever opened it, and the port's menu navigation reads auto-repeat
+    // (ConsumeJustPressedOrRepeat, see TickRepeats()) as well as edges, so
+    // the still-held key drove the new screen the instant it appeared.
+    //
+    // The engine cannot have this problem: its own menu tick
+    // (FUN_10075bdc) tests `GetButton2(slot) && !GetButtonPrev(slot)`
+    // throughout -- edges only, never a held key -- and its open-by-name
+    // (FUN_100779b8) clears two input-ish flags on the way in besides.
+    // Auto-repeat in menus is this port's own convenience, so this is the
+    // narrowest place to keep it from leaking across the handover.
+    //
+    // Cheap and visible where it mattered: `levelconfirm.s` puts "No"
+    // first precisely so that a stray confirm does nothing, and walking
+    // into a doorway with the forward key held moved the highlight to
+    // "Yes" before the player had seen the screen.
+    void ClearPendingEdges() {
+        justPressed_.fill(false);
+        repeat_.fill(false);
+        holdTicks_.fill(0);
+    }
+
     void Rebind(Action action, ButtonSlot slot) {
         bindingOffset_[static_cast<size_t>(action)] = static_cast<int>(slot);
     }
