@@ -8,6 +8,7 @@
 #include <fstream>
 
 #include "assets/zone_file.h"
+#include "world/automap.h"   // M89: AutomapSine() is the engine's shared 2048-entry 8.8 sin LUT
 
 namespace sk {
 
@@ -171,6 +172,17 @@ bool Zone::Load(const std::string& scriptRoot, const std::string& zoneName) {
     if (zluData_.empty()) {
         std::printf("Zone: %s.zlu missing/empty\n", zoneName.c_str());
         return false;
+    }
+
+    // --- .zfg: the per-zone fog table (M89), 65536 u16 entries indexed
+    // by (fogLevel << 12) | rgb444. Not fatal if missing: FogColor() then
+    // passes every pixel through untouched, which is the engine's own
+    // `engine+0xbe0f == 0` path. The original prints "Failed to load fog."
+    // and carries on the same way.
+    zfgData_ = LoadCompressedZoneFile(base + ".zfg");
+    if (!hasFog()) {
+        std::printf("Zone: %s.zfg missing/short (%zu bytes) -- no fog\n", zoneName.c_str(),
+                     zfgData_.size());
     }
 
     // --- .zsk: the zone's skybox mesh (M70), see zone.h's SkyMesh()
@@ -517,17 +529,35 @@ uint16_t Zone::PaletteColor(uint8_t hueGroup, uint16_t lightLevel, uint8_t texel
     // caller's job to resolve to the right tile -- see
     // render3d/zone_renderer.cpp), not a per-.sur-record one.
     constexpr int kRungSize = 512;
-    constexpr int kRungsPerFamily = 64;
     constexpr int kMinRung = 4;   // RENDERER_3D.md's real [0x400, 0x3f00] clamp, >>8
     constexpr int kMaxRung = 63;
 
+    // M89: the family is a +0..+3 rung bias, not a 64-rung block index --
+    // the four `.zlu` pointers the engine builds are 0x200 bytes apart.
+    // See zone.h's M89 note for the decompiled derivation.
     hueGroup &= 0x3;
-    int rung = std::clamp(static_cast<int>(lightLevel >> 8), kMinRung, kMaxRung);
-    size_t offset = (static_cast<size_t>(hueGroup) * kRungsPerFamily + static_cast<size_t>(rung)) *
-                         static_cast<size_t>(kRungSize) +
-                     static_cast<size_t>(texel) * 2;
+    int rung = std::clamp(static_cast<int>(lightLevel >> 8), kMinRung, kMaxRung) +
+                static_cast<int>(hueGroup);
+    size_t offset =
+        static_cast<size_t>(rung) * static_cast<size_t>(kRungSize) + static_cast<size_t>(texel) * 2;
     if (offset + 1 >= zluData_.size()) return 0;
     return ReadU16(&zluData_[offset]);
+}
+
+uint16_t Zone::FogColor(int fogLevel, uint16_t raw444) const {
+    // See zone.h: index = (level << 12) | rgb444, into 65536 u16 entries.
+    if (!hasFog() || fogLevel <= 0) return raw444;
+    if (fogLevel > 15) fogLevel = 15;
+    size_t index = (static_cast<size_t>(fogLevel) << 12) | static_cast<size_t>(raw444 & 0x0fff);
+    return ReadU16(&zfgData_[index * 2]);
+}
+
+int Zone::FogScaleFor(int zoomScale) {
+    // engine+0x5c8 = 0x10000 / (tier.maxSteps / 2), TileGrid_RaycastVisibility's
+    // own first act. Integer division exactly as the original does it.
+    const int halfRange = TierFor(zoomScale).maxSteps / 2;
+    if (halfRange <= 0) return 0;
+    return 0x10000 / halfRange;
 }
 
 bool Zone::CircleHitsWall(float worldX, float worldY, float radius) const {
@@ -688,82 +718,91 @@ namespace {
 
 constexpr int kLightAddPerCell = 0x40;  // Bullseye_PropagateLight's flat add per crossed cell
 
-// Reproduces Bullseye_PropagateLight (docs/ZONE_FORMAT.md): a 2D ray-cast
-// from a light-source cell in 256 directions, adding kLightAddPerCell to
-// every cell each ray crosses (clamped, saturating at kMaxLightLevel),
-// bouncing off the first wall it hits on each axis (sign-flipping that
-// axis' step direction), and stopping once it has bounced on both axes or
-// left the grid.
+// M89: a faithful transcription of Bullseye_PropagateLight (0x1000ef74),
+// replacing M9's float-march approximation. The approximation is what made
+// every zone too dark -- see the three differences below, and
+// docs/PORT_ROADMAP.md's M89 entry for the measured effect.
 //
-// SIMPLIFICATION: the original steps its rays using the same integer
-// sin/cos LUT the rotation-matrix/automap code shares (RENDERER_3D.md) --
-// not reproduced here bit-for-bit. This instead marches each ray in small
-// fixed world-unit steps (kStepSize) and only credits a cell the first
-// time the ray enters it, which visits the same sequence of cells a
-// simple grid DDA would for reasonable step sizes -- close enough for a
-// "torches spread warm light, walls block/bounce it" result without
-// matching the original's exact per-ray footprint.
+// The original, line for line:
+//
+//     for (ray = 0; ray < 256; ++ray) {
+//         stepX = sinLut[(ray * 8)       & 0x7ff] >> 1;   // +-0x80
+//         stepY = sinLut[(ray * 8 + 512) & 0x7ff] >> 1;   // i.e. cos
+//         xAcc = srcX; yAcc = srcY; row = srcY >> 8;
+//         do {
+//             xAcc += stepX;
+//             col   = clamp(xAcc >> 8, 0, width - 1);
+//             wallA = cell(col, row).flags & 2;
+//             yAcc += stepY;  row = yAcc >> 8;
+//             if (wallA) stepX = -stepX;
+//             wallB = cell(col, clamp(row, 0, height - 1)).flags & 2;
+//             cx = (xAcc + 0x80) >> 8;  cy = (yAcc + 0x80) >> 8;
+//             if (wallB) stepY = -stepY;
+//             if (cy >= height - 1 || cx >= width - 1 || cx < 1 || cy < 1) break;
+//             cell(cx, cy).light = min(light + 0x40, 0x3f00);
+//         } while (!wallA && !wallB);
+//     }
+//
+// Three things M9 got wrong, all of them brightness:
+//
+//  1. **The ray had a 20-tile cap.** The original has none: a ray runs
+//     until it leaves the grid or hits a wall. In an open outdoor zone
+//     that is the full 128 tiles, and cutting it at 20 threw away most of
+//     the light in exactly the zones that looked worst.
+//  2. **A cell was credited once per ray.** The original adds 0x40 on
+//     every iteration, and one iteration is **half a tile** (the sin/cos
+//     LUT is 8.8, so `>> 1` gives a step of magnitude 0x80 against a
+//     0x100 tile) -- so roughly twice per tile crossed, plus a third hit
+//     wherever rounding lands two steps in the same cell.
+//  3. **Walls bounced.** They don't. The sign flips above are real
+//     instructions but dead ones: the loop condition exits on the same
+//     wall that set them, so a ray simply **stops at the first wall**.
+//     M9's version bounced and kept going, which leaked light into rooms
+//     the source cannot see.
+//
+// The sin LUT is the same 2048-entry 8.8 table BuildRotationMatrix3x4 and
+// the automap share (RENDERER_3D.md) -- `AutomapSine()` already is that
+// table, verified entry for entry against the shipped image.
 void PropagateLight(std::vector<ZmpCell>& cells, int width, int height, int startTx, int startTy) {
     constexpr int kRayCount = 256;
-    constexpr float kStepSize = 48.0f;     // world units per march step (< 1 tile)
-    constexpr float kMaxDistance = 20.0f * kTileScale;  // ray travel cap
-    constexpr float kTwoPi = 6.28318530718f;
 
-    auto inBounds = [&](int tx, int ty) { return tx >= 0 && ty >= 0 && tx < width && ty < height; };
-    auto addLight = [&](int tx, int ty) {
-        ZmpCell& c = cells[static_cast<size_t>(ty) * static_cast<size_t>(width) + static_cast<size_t>(tx)];
-        int v = static_cast<int>(c.lightLevel) + kLightAddPerCell;
-        c.lightLevel = static_cast<uint16_t>(std::min(v, static_cast<int>(kMaxLightLevel)));
+    auto flagsAt = [&](int col, int row) -> uint8_t {
+        return cells[static_cast<size_t>(row) * static_cast<size_t>(width) +
+                      static_cast<size_t>(col)]
+            .flags;
     };
 
-    float originX = startTx * kTileScale + kTileScale * 0.5f;
-    float originY = startTy * kTileScale + kTileScale * 0.5f;
+    const int srcX = startTx * 0x100 + 0x80;
+    const int srcY = startTy * 0x100 + 0x80;
 
-    for (int r = 0; r < kRayCount; ++r) {
-        float angle = static_cast<float>(r) * (kTwoPi / static_cast<float>(kRayCount));
-        float dx = std::cos(angle), dy = std::sin(angle);
-        float x = originX, y = originY;
-        int lastTx = startTx, lastTy = startTy;
-        bool bouncedX = false, bouncedY = false;
+    for (int ray = 0; ray < kRayCount; ++ray) {
+        int stepX = AutomapSine(ray * 8) >> 1;
+        int stepY = AutomapSine(ray * 8 + 512) >> 1;
+        int xAcc = srcX, yAcc = srcY;
+        int row = srcY >> 8;
 
-        for (float traveled = 0.0f; traveled < kMaxDistance; traveled += kStepSize) {
-            float stepDx = dx * kStepSize, stepDy = dy * kStepSize;
-            x += stepDx;
-            y += stepDy;
-            int tx = static_cast<int>(std::floor(x / kTileScale));
-            int ty = static_cast<int>(std::floor(y / kTileScale));
-            if (!inBounds(tx, ty)) break;  // left the grid
-            if (tx == lastTx && ty == lastTy) continue;
+        for (;;) {
+            xAcc += stepX;
+            int col = std::clamp(xAcc >> 8, 0, width - 1);
+            const bool wallA = (flagsAt(col, std::clamp(row, 0, height - 1)) & 0x2) != 0;
 
-            const ZmpCell& cell = cells[static_cast<size_t>(ty) * static_cast<size_t>(width) +
-                                         static_cast<size_t>(tx)];
-            if (cell.IsWall()) {
-                bool crossedX = tx != lastTx, crossedY = ty != lastTy;
-                bool bounced = false;
-                if (crossedX && !bouncedX) {
-                    dx = -dx;
-                    bouncedX = true;
-                    bounced = true;
-                }
-                if (crossedY && !bouncedY) {
-                    dy = -dy;
-                    bouncedY = true;
-                    bounced = true;
-                }
-                if (!bounced) break;  // both axes already bounced (or re-hit) -- stop this ray
-                // Undo the step that walked into the wall cell (using the
-                // pre-flip delta) so x/y land back at a safe position just
-                // outside it -- otherwise x/y stay inside the wall cell and
-                // the next iteration's tx/ty may not change enough to look
-                // like a fresh crossing, causing spurious repeated "bounce"
-                // detection against the same wall.
-                x -= stepDx;
-                y -= stepDy;
-                continue;
-            }
-            addLight(tx, ty);
-            lastTx = tx;
-            lastTy = ty;
+            yAcc += stepY;
+            row = yAcc >> 8;
+            if (wallA) stepX = -stepX;
+
+            const bool wallB = (flagsAt(col, std::clamp(row, 0, height - 1)) & 0x2) != 0;
+            const int cx = (xAcc + 0x80) >> 8;
+            const int cy = (yAcc + 0x80) >> 8;
+            if (wallB) stepY = -stepY;
+
+            if (cy >= height - 1 || cx >= width - 1 || cx < 1 || cy < 1) break;
+
+            ZmpCell& c = cells[static_cast<size_t>(cy) * static_cast<size_t>(width) +
+                                static_cast<size_t>(cx)];
+            int v = static_cast<int>(c.lightLevel) + kLightAddPerCell;
+            c.lightLevel = static_cast<uint16_t>(std::min(v, static_cast<int>(kMaxLightLevel)));
+
+            if (wallA || wallB) break;
         }
     }
 }
@@ -773,8 +812,16 @@ void PropagateLight(std::vector<ZmpCell>& cells, int width, int height, int star
 void Zone::BakeLighting() {
     for (ZmpCell& c : cells_) c.lightLevel = 0;
 
-    for (int ty = 0; ty < height_; ++ty) {
-        for (int tx = 0; tx < width_; ++tx) {
+    // M89: passes 2 and 3 run over the **interior only** -- rows and
+    // columns 1..n-2. Bullseye_BakeLighting's own loop bounds say so
+    // (`iVar2 = 1; ... while (iVar4 < height - 1)`, and the same for the
+    // column loop inside it), and only pass 1's zeroing covers the whole
+    // grid. This port used to apply both to every cell, which lit the
+    // one-cell border ring the original leaves at zero -- worth 508 cells
+    // in a 128x128 zone, and visible as the outermost ring of tiles being
+    // the only lit thing in an otherwise dark corner of the map.
+    for (int ty = 1; ty < height_ - 1; ++ty) {
+        for (int tx = 1; tx < width_ - 1; ++tx) {
             if (cells_[static_cast<size_t>(ty) * static_cast<size_t>(width_) + static_cast<size_t>(tx)]
                     .IsLightSource()) {
                 PropagateLight(cells_, width_, height_, tx, ty);
@@ -782,10 +829,14 @@ void Zone::BakeLighting() {
         }
     }
 
-    for (ZmpCell& c : cells_) {
-        const ZcpEntry& t = TypeOf(c);
-        int v = static_cast<int>(c.lightLevel) + static_cast<int>(t.lightDelta) * 256;
-        c.lightLevel = static_cast<uint16_t>(std::clamp(v, 0, static_cast<int>(kMaxLightLevel)));
+    for (int ty = 1; ty < height_ - 1; ++ty) {
+        for (int tx = 1; tx < width_ - 1; ++tx) {
+            ZmpCell& c = cells_[static_cast<size_t>(ty) * static_cast<size_t>(width_) +
+                                 static_cast<size_t>(tx)];
+            const ZcpEntry& t = TypeOf(c);
+            int v = static_cast<int>(c.lightLevel) + static_cast<int>(t.lightDelta) * 256;
+            c.lightLevel = static_cast<uint16_t>(std::clamp(v, 0, static_cast<int>(kMaxLightLevel)));
+        }
     }
 }
 

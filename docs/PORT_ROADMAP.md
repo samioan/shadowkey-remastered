@@ -8000,6 +8000,139 @@ soft-fails 39 -> 39, all 14 tracked `.ppm` renders byte-identical,
       removes it and leaves the other. No new soft-fails: the screen has
       no unimplemented native left on it.
 
+- [x] **M89 -- fog, and the three other reasons every zone was too dark.**
+      Reported from play, on top of the two defects M71 left open: "there
+      are random color patches on the ground in random places, and the
+      levels, even the sunnier ones like snowline, are too dark." Four
+      separate defects, one investigation, and the M71 entry that sent it
+      off was itself wrong about what it was looking for.
+    - **`engine+0x5c4` is not a model-lighting table. It is a file.**
+      M71 recorded it as "the fade table, never dumped" and M81 repeated
+      that when the loot bags came out black. It is written in exactly
+      one place, in `GameEngine_InitLevel`:
+      `sprintf(buf, "%s\\%s.zfg", root, zoneName); engine[0x5c4] =
+      WholeFile_Load(buf)`, bracketed by the `"InitLevel Pre Fog"` debug
+      marker and printing `"Failed to load fog."` when it fails. So it
+      was never something to *dump* -- it ships next to the `.zmp` and
+      the `.ztx`, one per zone, and this port had simply never noticed
+      the extension. In fairness to the decompilation: `ZONE_FORMAT.md`'s
+      per-zone file table has had the row (`.zfg` -> `engine+0x5c4`, "the
+      fog/fade lookup table `CompositeSceneBufferToScreen` reads") since
+      the file was written. It was the roadmap and the loader that were
+      wrong, not the format doc.
+    - **`<zone>.zfg`, the ninth per-zone file.** All 21 decompress to
+      exactly 131072 bytes = 65536 `uint16` entries, and
+      `CompositeSceneBufferToScreen` (0x1005dfe0) indexes it with
+      `(pixel & 0xffff) * 2` on its way from the 32bpp scene buffer to
+      the real screen. The index is the composite word the rasterizers
+      write: **`(fogLevel << 12) | rgb444`** -- 16 fog levels across the
+      whole 4096-colour space. Level 0 is the identity map in every
+      shipped file (verified over all 4096 entries x 21 zones), so an
+      unfogged pixel passes through untouched. The gate is
+      `engine+0xbe0f`, which the engine constructor sets to 1 and nothing
+      ever clears: **fog is always on**.
+    - **What each zone fades to is the whole story.** Fourteen of the
+      twenty-one fade to `0x000` -- a dungeon darkness cue, which is why
+      indoor zones looked broadly right without any of this. The other
+      seven are the outdoor ones and they fade to a *bright* pale haze:
+      snowline `0x99b`, drgnfld/dstar_e/dstar_w `0xaac`,
+      ghstpass/glaciercrawl `0xaab`, stouttp `0x889`. That is exactly the
+      washed-out look of the device screenshot of snowline, and its
+      absence is why the port's snowline read as a black canyon under a
+      blue sky.
+    - **That seven is corroborated from the other side.** M70's skybox
+      census -- run for entirely unrelated reasons, off the `.zsk` skins
+      -- found exactly eight zones with a sky picture rather than a black
+      one: azra (a night sky with Masser and Secunda),
+      drgnfld/ghstpass/snowline/stouttp (blue day), glaciercrawl (grey
+      blizzard), dstar_e/dstar_w (hazy overcast). Those are the same
+      seven daylight zones, plus azra -- and azra's sky is night, so a
+      fog that fades to black is the right answer for it too. Two
+      independent per-zone properties, decoded from two different files
+      years apart in this project's own history, agreeing exactly on
+      which zones are outdoors. M70 also, in passing, glossed the
+      extension correctly while explaining a different one: "`.zsk` is
+      'zone sky', the same naming as `.ztx` (texture), `.zlu` (LUT),
+      **`.zfg` (fog)**." Nobody followed it up for nineteen milestones.
+    - **The fog scale, `engine+0x5c8`**, resolved with it:
+      `TileGrid_RaycastVisibility`'s own first act is
+      `engine[0x5c8] = 0x10000 / (tier.maxSteps / 2)`, sharing the
+      25/93/172-tile visibility tier the port already had (M41). Both
+      fade rasterizer families then compute
+      `fog = min(viewDepth * engine[0x5c8] >> 8, 0xffff)` per vertex,
+      interpolate it across the span and OR `fog & 0xf000` into the
+      pixel. So fog saturates at **half** the tier's ray range -- at the
+      shipped default zoom (`engine+0x608 == 0x100`, floored there by the
+      only code that moves it) that is about **twelve tiles**, one level
+      every three quarters of a tile. Heavy, fast fog, by design.
+    - **Models are not lit. At all.** `Poly3D_RasterizeTextured_v3`'s
+      inner loop stores `*dst = texel | (fog & 0xf000) | (depth << 16)`,
+      where `texel` is a straight 16bpp read out of the model's own skin
+      -- no palette, no `.zlu` rung, no light term anywhere in the actor
+      pipeline. A model carries its own lit-looking artwork and the
+      engine only fogs it. M35 had substituted the *surface* pipeline's
+      `cellLight - depth/2` as an RGB scale, precisely because the fog
+      factor and table were unavailable; with both in hand the
+      substitution goes, and that is the answer to M71's dark roof and
+      M81's black loot bags.
+    - **`Bullseye_PropagateLight`, transcribed instead of approximated.**
+      M9's version marched each ray in float steps and said so. Three of
+      its simplifications were brightness, not detail: it **capped every
+      ray at 20 tiles** (the original has no cap -- a ray runs to the
+      grid edge), it **credited a cell once per ray** (the original adds
+      `0x40` every iteration, and one iteration is *half* a tile, since
+      the shared 8.8 sin/cos LUT is used as `>> 1`), and it **bounced off
+      walls** (the original's sign flips are real instructions but dead
+      ones -- the loop condition exits on the same wall that sets them,
+      so a ray simply stops). A fourth: `Bullseye_BakeLighting`'s
+      light-source pass and `.zcp`-delta pass both run over rows and
+      columns `1..n-2` only, and this port ran them over the whole grid,
+      lighting the one-cell border ring the original leaves at zero.
+    - **Measured.** Mean `.zlu` rung, out of 63, over the whole grid:
+      **snowline 5.7 -> 26.9**, **azra 12.8 -> 31.8**. drgnfld barely
+      moves (20.6 -> 20.4) because it has two light sources and a `.zcp`
+      that hands almost every tile a flat `+23` -- which is a useful
+      control: the zones the bug hurt are exactly the ones that rely on
+      propagation.
+    - **The `.zlu` family stride, and the green wall.** The four palette
+      pointers `GameEngine_InitLevel` builds are `zlu+0`, `+0x200`,
+      `+0x400`, `+0x600` -- **512 bytes apart, one rung** -- stashed at
+      `engine+0x6b24..+0x6b30`, selected per tile by
+      `engine + 0x6b24 + ((*zmpCell & 0x30) >> 2)` and landed on by
+      `palette = familyPtr + ((lightA + lightB) & 0xfffffe00)`. So the
+      real address is `(family + (light >> 8)) * 512 + texel * 2` and
+      "hue family" is a misnomer: it buys a **shade**, not a hue. This
+      port had it indexing a whole 64-rung block -- and a `.zlu`'s four
+      blocks genuinely are four different ramps, block 2's being green.
+      Hence "random": 35 cells in azra (the wall behind the candelabra,
+      around 124,42), 24 in erthcave, 130 in fearfrst, 15 in ghstpass,
+      13 in snowline, 1-4 in six more. One zone is not random at all --
+      **all 16384 of broken2's cells set those bits to 3**, so that whole
+      zone was drawn from the wrong ramp.
+    - **Verified**, `zone_lighting_smoke`
+      (`src/tests/m89_lighting_smoke.cpp`, **269 checks**): all 21
+      `.zfg` files at 131072 bytes with an identity level 0 over all
+      4096 colours, a monotone ramp, and a flat level 15 whose colour is
+      pinned per zone; the 14/7 black-vs-haze split; `FogScaleFor` for
+      all three tiers and the saturation distance each implies; the baked
+      light **sum** and floor-rung count for every one of the 21 zones
+      against an independent transcription of the two decompiled bake
+      functions -- exact equality, 21/21, which is the check that says
+      the port and the decompile agree rather than that the port agrees
+      with itself; the bits 4-5 census per zone; `PaletteColor` against
+      the raw `.zlu` for every family x rung x a spread of texels; and
+      the azra (124,42) regression pinned both ways -- the corrected
+      colour a shade from its neighbours, the old one six 4-bit steps
+      away. Suite **79/79**.
+    - **Live**: `port/debug/m89_lighting.cfg`. snowline now renders as
+      bright snow and pale blue-white cliffs washing into haze with
+      distance -- the same picture as the device screenshot of the same
+      place -- with its goblins at full colour in front of it. azra's
+      start room comes back with a lit ceiling, a lit table and a lit
+      candelabra instead of near-black ones, and no green patch anywhere
+      on its walls. All fourteen tracked `.ppm` dumps move, as they must
+      when the lighting model changes.
+
 ## Next milestones (not yet started)
 
 Roughly in priority order for reaching "actually playable," not commitments:
@@ -8076,10 +8209,24 @@ first and let the difference tell you which decompiled function to re-read.
 **The bullet list below is empty.** Every item that was in it -- merchants,
 the store screen, `SetCameraStart`, `Level.CreateEffect`, the `levelup.s`
 cluster, the `TestX` rolls, the `ZoneRenderer::Render` crash, and "what a
-`.zsk` actually is" -- is done (M59-M70). Two things M71 left behind belong
-in it when it is repopulated: **model lighting** (the `engine+0x5c4` fade
-table, never dumped -- large models read far too dark), and **azra's green
-wall patch** behind the candelabra, which no decompiled path explains yet.
+`.zsk` actually is" -- is done (M59-M70). Both of the things M71 left behind
+are **done (M89)**, and both of its descriptions of them were wrong:
+`engine+0x5c4` was never a table to dump, it is `<zone>.zfg`, a ninth
+per-zone file that ships with the game; and the green wall patch was not
+unexplained, it was this port reading the `.zlu` family as a 64-rung block
+index instead of the +0..+3 rung bias the engine's own four palette
+pointers make it. Models turned out not to be lit at all.
+
+M89 leaves two of its own, both traced but neither implemented, both in
+`SurfaceFace_BuildAndProject`'s per-vertex light and both worth having in
+a dungeon: a **player torch glow** (`(3 - chebyshevTileDistance) * 0x400`
+added to any vertex within three tiles of the player, gated on
+`*(char *)(player + 0x228)`, a field this port has not identified) and
+**per-entity light emitters** (a walk of the vertex cell's entity list at
+`engine+0x6904`: template ids 3 / 0x47 / 0x1787 add a flickering
+`2 + (rand & 3) * 0x100`, and any entity whose `+0x86` has bit 4 set pins
+the vertex to full `0x3f00`). See `RENDERER_3D.md`'s per-vertex
+light/fog section.
 Re-run
 `shadowkey/ghidra/scripts/analyze_port_native_coverage.py` to repopulate it
 from real call-site counts rather than adding guesses here.

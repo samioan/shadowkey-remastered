@@ -488,8 +488,34 @@ struct ProjectedVertex {
     // the real [0x400, 0x3f00] range. Interpolated affinely in screen
     // space, matching the original -- not perspective-divided like u/v.
     float light = 0;
+    // M89: the engine's *other* per-vertex scalar, and the one that was
+    // missing entirely. Both fade rasterizer families compute
+    // `fog = min(viewDepth * engine[0x5c8] >> 8, 0xffff)` in their
+    // prologue (SurfaceFace_RasterizeTextured_v2's is the clearest:
+    // `rec[0x10] = rec[0x08] * engine[0x5c8] >> 8`, capped at 0xffff),
+    // interpolate it across the span and OR `fog & 0xf000` into the pixel
+    // word -- so its **top nibble** is a 0..15 fog level, and
+    // CompositeSceneBufferToScreen resolves that through `<zone>.zfg`.
+    // Interpolated affinely in screen space, exactly like `light`.
+    float fog = 0;
     float depthWorld = 0;  // view-forward distance, raw world units
 };
+
+// M89: the per-vertex fog scalar and the level its top nibble encodes.
+// `kDefaultZoomScale` is the engine's own boot value for `engine+0x608`
+// (0x100, set in the engine constructor and floored there by the only
+// code that moves it), which picks the 25-tile visibility tier -- so fog
+// saturates at ~12 tiles.
+constexpr int kDefaultZoomScale = 0x100;
+
+float FogScalar(float depthWorld) {
+    static const float kScale = static_cast<float>(Zone::FogScaleFor(kDefaultZoomScale));
+    return std::clamp(depthWorld * kScale / 256.0f, 0.0f, 65535.0f);
+}
+
+int FogLevelOf(float fogScalar) {
+    return std::clamp(static_cast<int>(fogScalar) >> 12, 0, 15);
+}
 
 // 4-bit-per-channel color (docs/GRAPHICS_FORMAT.md), 0x0RGB -> RGB565 for
 // the backbuffer. `brightness` (M9, [0,1]-ish) scales each channel before
@@ -576,6 +602,13 @@ void RasterizeTriangle(Backbuffer& backbuffer, std::vector<float>& depthBuffer,
             uint16_t raw444 = zone.PaletteColor(hueGroup, lightLevel, texel);
             if (raw444 == 0x0f0f) continue;  // chroma-key cutout (docs/GRAPHICS_FORMAT.md)
 
+            // M89: the fog remap, last, on the finished colour word --
+            // exactly where CompositeSceneBufferToScreen applies it. The
+            // chroma-key test stays *above* it because the engine's
+            // rasterizer tests the palette read, not the fogged result.
+            const float fogF = l0 * a.fog + l1 * b.fog + l2 * c.fog;
+            raw444 = zone.FogColor(FogLevelOf(fogF), raw444);
+
             depthBuffer[static_cast<size_t>(depthIndex)] = invW;
             backbuffer.SetPixel(px, py, ExpandRGB444(raw444, 1.0f));
         }
@@ -605,7 +638,8 @@ void RasterizeModelTriangle(Backbuffer& backbuffer, std::vector<float>& depthBuf
                              const ProjectedVertex& a, const ProjectedVertex& b,
                              const ProjectedVertex& c, const Model& model, int skinIndex,
                              bool asSkybox = false, uint8_t* objectIds = nullptr,
-                             uint8_t objectId = 0, int flashLevel = -1) {
+                             uint8_t objectId = 0, int flashLevel = -1,
+                             const Zone* zone = nullptr) {
     // M66: a model with no skin pixels has nothing to sample. Every texel
     // would come back as the chroma key anyway (Model::TexelAt returns
     // 0x0f0f for any out-of-range coordinate), so this changes nothing
@@ -665,28 +699,34 @@ void RasterizeModelTriangle(Backbuffer& backbuffer, std::vector<float>& depthBuf
             if (raw444 == 0x0f0f) continue;  // chroma-key cutout
 
             depthBuffer[static_cast<size_t>(depthIndex)] = invW;
-            // M35: models are lit and fogged now, instead of being drawn
-            // at a flat 1.0 forever. That flat factor is why creatures,
-            // trees and props stayed fully bright at any distance while
-            // the walls around them faded -- they read as floating in
-            // front of the fog rather than being in it.
+            // M89 -- **models are not lit at all**, and M35's RGB scale by
+            // cell light is why every large model, every roof and every
+            // loot bag in this port read far too dark.
             //
-            // The real actor pipeline does fog them, by its own route:
-            // `Poly3D_ClipAndDispatch` picks between 10 rasterizer
-            // variants, and the five "fade" ones compute a per-vertex
+            // M35 wrote, correctly, that the actor pipeline computes
             // `intensity = clamp(vertexZ * engine[+0x5c8] >> 8, 0,
-            // 0xffff)` -- depth scaled by a global factor -- interpolate
-            // it across the polygon, and OR its top nibble into the
-            // output colour word, which CompositeSceneBufferToScreen then
-            // runs through the engine+0x5c4 lookup table
-            // (docs/RENDERER_3D.md). Neither that factor nor that table
-            // was extracted, so the exact curve isn't reproducible; what
-            // is reproducible is the term the surface pipeline already
-            // uses (cell light minus half the view depth), applied here
-            // as a straight RGB scale because a model carries its own
-            // RGB444 skin rather than indexing a .zlu palette rung.
-            // Approximation in the mapping, right in the behaviour: the
-            // two pipelines now agree about distance.
+            // 0xffff)`, ORs its top nibble into the colour word, and lets
+            // CompositeSceneBufferToScreen resolve that through the
+            // `engine+0x5c4` table -- and then, because neither the factor
+            // nor the table had been extracted, substituted the *surface*
+            // pipeline's `cellLight - depth/2` as an RGB scale.
+            //
+            // Both are extracted now. `engine+0x5c8` is
+            // `0x10000 / (visibilityTier.maxSteps / 2)`, written at the
+            // top of TileGrid_RaycastVisibility; `engine+0x5c4` is the
+            // whole of `<zone>.zfg`, a ninth per-zone file. And with the
+            // real path in place the substitution has to go: reading
+            // `Poly3D_RasterizeTextured_v3`'s inner loop, the pixel it
+            // stores is
+            //
+            //     *dst = texel | (fog & 0xf000) | (depth << 16);
+            //
+            // where `texel` is a straight 16bpp read out of the model's
+            // own skin. No palette, no rung, no light term anywhere in the
+            // actor pipeline -- a model carries its own lit-looking RGB444
+            // artwork and the engine only fogs it. So: full texture
+            // colour, fog, nothing else.
+            //
             // M85: the stencil half of the real actor rasterizers --
             // `*(u8 *)(engine + 0x5b8 + x + y * 0xb0) = objectId`, at
             // every pixel actually drawn, after the chroma-key cutout and
@@ -708,9 +748,9 @@ void RasterizeModelTriangle(Backbuffer& backbuffer, std::vector<float>& depthBuf
                 backbuffer.SetPixel(px, py, ExpandRGB444(ramps.entry[row][step], 1.0f));
                 continue;
             }
-            float lightF = l0 * a.light + l1 * b.light + l2 * c.light;
-            float brightness = std::clamp(lightF / static_cast<float>(kMaxLightLevel), 0.0f, 1.0f);
-            backbuffer.SetPixel(px, py, ExpandRGB444(raw444, brightness));
+            const float fogF = l0 * a.fog + l1 * b.fog + l2 * c.fog;
+            if (zone != nullptr) raw444 = zone->FogColor(FogLevelOf(fogF), raw444);
+            backbuffer.SetPixel(px, py, ExpandRGB444(raw444, 1.0f));
         }
     }
 }
@@ -836,24 +876,13 @@ void SubmitModel(Backbuffer& backbuffer, std::vector<float>& depthBuffer, const 
             vv3[i].u = uv[i]->u / 256.0f;
             vv3[i].v = uv[i]->v / 256.0f;
 
-            if (asSkybox) {
-                vv3[i].light = static_cast<float>(kMaxLightLevel);
-                continue;
-            }
-
-            // M35: the same per-vertex light the tile-grid pipeline uses
-            // (its own comment has the decompiled formula) -- the cell's
-            // baked light where this vertex stands, less half the view
-            // depth. See RasterizeModelTriangle for why a model applies it
-            // as an RGB scale rather than a palette rung.
-            float worldVertX = (offsetTileX + lx / kTileScale) * kTileScale;
-            float worldVertY = (offsetTileY + lz / kTileScale) * kTileScale;
-            int cellTx = static_cast<int>(std::floor(worldVertX / kTileScale));
-            int cellTy = static_cast<int>(std::floor(worldVertY / kTileScale));
-            float cellLight = static_cast<float>(zone.CellAt(cellTx, cellTy).lightLevel);
-            vv3[i].light = std::clamp(cellLight - vv3[i].forward * kTileScale * 0.5f,
-                                       static_cast<float>(kMinLightLevel),
-                                       static_cast<float>(kMaxLightLevel));
+            // M89: no per-vertex cell light here any more. The actor
+            // pipeline has no light term at all -- see
+            // RasterizeModelTriangle -- so M35's tile-grid light lookup
+            // and the RGB scale it fed are both gone, and the only thing
+            // distance does to a model is fog it. `light` stays full for
+            // any caller that still reads it.
+            vv3[i].light = static_cast<float>(kMaxLightLevel);
         }
 
         // Same real near-plane clip the tile-grid pipeline above uses --
@@ -873,10 +902,11 @@ void SubmitModel(Backbuffer& backbuffer, std::vector<float>& depthBuffer, const 
             pvc[i].u = clipped[i].u * pvc[i].invW;
             pvc[i].v = clipped[i].v * pvc[i].invW;
             pvc[i].light = clipped[i].light;  // M35
+            pvc[i].fog = FogScalar(pvc[i].depthWorld);  // M89
         }
         for (int i = 1; i + 1 < clippedCount; ++i) {
             RasterizeModelTriangle(backbuffer, depthBuffer, pvc[0], pvc[i], pvc[i + 1], model,
-                                    skinIndex, asSkybox, objectIds, objectId, flashLevel);
+                                    skinIndex, asSkybox, objectIds, objectId, flashLevel, &zone);
         }
     }
 }
@@ -1148,6 +1178,7 @@ void ZoneRenderer::Render(Backbuffer& backbuffer, const Zone& zone, const Camera
                 pv[i].u = clipped[i].u * pv[i].invW;
                 pv[i].v = clipped[i].v * pv[i].invW;
                 pv[i].light = clipped[i].light;
+                pv[i].fog = FogScalar(pv[i].depthWorld);  // M89
             }
             for (int i = 1; i + 1 < clippedCount; ++i) {
                 RasterizeTriangle(backbuffer, depthBuffer, pv[0], pv[i], pv[i + 1], zone,

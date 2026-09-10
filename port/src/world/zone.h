@@ -537,7 +537,82 @@ public:
     // the real texel data too, not just the family/rung math checked out
     // in isolation -- the family/rung *selection* mechanism documented
     // above is decompiled ground truth either way.
+    //
+    // **M89 -- the family STRIDE was wrong, and it is what put the green
+    // patch on azra's wall.** Everything above about *which* two bits pick
+    // the family stands; what this function did with the answer did not.
+    // The four family pointers are built in `GameEngine_InitLevel` from
+    // one `WholeFile_Load` of the `.zlu`:
+    //
+    //     p0 = zlu + 0x000;  p1 = zlu + 0x200;
+    //     p2 = zlu + 0x400;  p3 = zlu + 0x600;
+    //
+    // -- **512 bytes apart, i.e. one rung**, not 32768 (one 64-rung
+    // block). `Bullseye_Init` stashes them at `engine+0x6b24..+0x6b30`,
+    // `SurfaceFace_BuildAndProject` picks one with
+    // `engine + 0x6b24 + ((*zmpCell & 0x30) >> 2)` and hands it to the
+    // rasterizer, which lands on the final rung with
+    // `palette = familyPtr + ((lightA + lightB) & 0xfffffe00)` -- a byte
+    // offset, so `(2 * light) / 512 == light >> 8` rungs on top of the
+    // family's 0..3. So the real formula is
+    //
+    //     rung = hueGroup + clamp(light >> 8, 4, 63)
+    //
+    // and "hue family" is a misnomer: it is a **+0..+3 rung bias**, worth
+    // a shade of brightness. This port had it addressing a whole 64-rung
+    // block away, which is a completely different colour ramp -- and
+    // since a `.zlu`'s four blocks really are four different hues,
+    // block 2 being green, the handful of real cells that set those bits
+    // came out as saturated colour patches. There are not many of them,
+    // which is exactly why this read as "random": 35 cells in azra (the
+    // wall behind the candelabra), 24 in erthcave, 130 in fearfrst, 15 in
+    // ghstpass, 13 in snowline, 1-4 in six more. One zone is not random
+    // at all: **every one of broken2's 16384 cells sets bits 4-5 to 3**,
+    // so that whole zone was drawn out of the wrong ramp.
     uint16_t PaletteColor(uint8_t hueGroup, uint16_t lightLevel, uint8_t texel) const;
+
+    // M89 -- `<zone>.zfg`, the per-zone FOG table, the ninth per-zone file
+    // and the one this port never knew existed.
+    //
+    // `GameEngine_InitLevel` loads it whole (`"%s\\%s.zfg"`, bracketed by
+    // the `"InitLevel Pre Fog"` marker, `"Failed to load fog."` on
+    // failure) into `engine+0x5c4`, and `CompositeSceneBufferToScreen`
+    // (0x1005dfe0) runs **every pixel of the finished 3D frame** through
+    // it whenever `engine+0xbe0f` is set -- which the engine constructor
+    // sets to 1 unconditionally, so: always. All 21 shipped `.zfg` files
+    // decompress to exactly 131072 bytes = 65536 `uint16` entries, and
+    // the index is the composite word the rasterizers write:
+    //
+    //     index = (fogLevel << 12) | rgb444
+    //
+    // i.e. **16 fog levels x the whole 4096-colour RGB444 space**. Level 0
+    // is the identity map in every shipped file (verified), so an unfogged
+    // pixel passes through untouched. The level the other 15 fade *to* is
+    // per zone and is the whole point: azra fades to `0x000` (a dungeon
+    // darkness cue), snowline to `0x88a` and drgnfld to `0x99b` (pale
+    // blue-grey daylight haze). That is why the original's outdoor zones
+    // look washed out with distance and the port's looked black.
+    //
+    // Returns `raw444` unchanged when the zone has no `.zfg` (or the level
+    // is out of range), which is exactly the engine's own `engine+0xbe0f
+    // == 0` path.
+    uint16_t FogColor(int fogLevel, uint16_t raw444) const;
+    bool hasFog() const { return zfgData_.size() >= 131072; }
+
+    // The per-vertex fog scalar's global scale, `engine+0x5c8`, written
+    // once per frame at the top of `TileGrid_RaycastVisibility`
+    // (0x1000f694) right beside the visibility tier it shares a source
+    // with: `engine+0x5c8 = 0x10000 / (tier.maxSteps / 2)`. Both fade
+    // rasterizer families then compute, per vertex,
+    //
+    //     fog = min(viewDepth * engine[0x5c8] >> 8, 0xffff)
+    //
+    // interpolate it across the span and OR `fog & 0xf000` into the pixel
+    // -- so fog reaches full saturation at half the tier's ray range. At
+    // the shipped default zoom (`engine+0x608 == 0x100`, tier range 25
+    // tiles) that is **~12 tiles**, which is why the original fogs so
+    // hard so fast.
+    static int FogScaleFor(int zoomScale);
 
     uint8_t surfaceTextureIndex(int surIndex) const;
 
@@ -781,6 +856,7 @@ private:
     std::vector<SurfaceRecord> surfaces_;   // the whole decoded .sur table -- see surface()
     std::vector<uint8_t> ztxData_;          // 1 header byte + N*0x4000 texture slots
     std::vector<uint8_t> zluData_;          // N*2048-byte palette sets
+    std::vector<uint8_t> zfgData_;          // M89: 65536 u16 fog entries -- see FogColor()
     std::vector<EntPlacement> entities_;
     std::vector<Region> regions_;        // M44: parsed <zone>.zon, see regions()
     std::vector<TileChange> tileChanges_;  // M44: see tileChanges()

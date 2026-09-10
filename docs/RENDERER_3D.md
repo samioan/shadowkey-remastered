@@ -261,7 +261,16 @@ decompiling and diffing all 10 against each other:
   across the polygon, and OR its top nibble into the output color word
   before writing. `CompositeSceneBufferToScreen` then runs the *entire*
   16-bit color+nibble word through the `engine+0x5c4` lookup table — a
-  torchlight/distance-fog effect keyed by depth, not a flat filter.
+  distance-fog effect keyed by depth, not a flat filter.
+  **Both halves resolved (M89).** `engine+0x5c8` is
+  `0x10000 / (visibilityTier.maxSteps / 2)`, written at the top of
+  `TileGrid_RaycastVisibility` from the same 25/93/172-tile tier it picks
+  its ray range from — so the scalar saturates at `0xffff`, and the fog
+  nibble at 15, at **half that range** (≈12 tiles at the shipped default
+  `engine+0x608 == 0x100`). And `engine+0x5c4` is not an internal table at
+  all: it is `<zone>.zfg`, loaded whole from disk per zone, 65536 `uint16`
+  entries indexed `(fogLevel << 12) | rgb444`. See `ZONE_FORMAT.md`'s
+  `.zfg` row.
 - **stencil**: selected by `Poly3D_ClipAndDispatch`'s mode-word bit 1. The
   mode-word parameter is repurposed from a bitmask into a literal **byte**
   value (`param_6`), stamped into a *second* 176×208 8bpp framebuffer plane
@@ -386,9 +395,12 @@ other caller, `FUN_10057890`.
   When a flag (`engine+0xbe0f`) is set, composite instead runs the full
   16-bit color word (color + a fog nibble some rasterizer variants OR into
   its top bits — see below) through a 2-byte-stride lookup table at
-  `engine+0x5c4`, indexed by that entire 16-bit word (`index = word*2`,
-  table size/exact indexing range not pinned down) — confirming the
-  torchlight/distance-fog guess.
+  `engine+0x5c4`, indexed by that entire 16-bit word (`index = word*2`) —
+  confirming the distance-fog guess. **M89**: the table is 65536 `uint16`
+  entries = 131072 bytes, which is exactly the decompressed size of every
+  shipped `<zone>.zfg`, and its index splits as
+  `(fogLevel << 12) | rgb444` — 16 levels over the whole RGB444 space,
+  level 0 the identity.
 
 ### The `engine+0x62c` mesh is the zone's **skybox** (M70)
 
@@ -656,6 +668,24 @@ Full writeup and the tile-record/type-table field layout live in
    across each scanline, so lighting is genuinely per-vertex rather than
    flat per face.
 
+   **M89 -- two corrections and a scope note.** (a) The `- depth/2` term
+   is a *second*, coarser distance falloff, not the engine's fog: the real
+   fog is the separate per-vertex scalar
+   `min(viewDepth * engine[0x5c8] >> 8, 0xffff)` whose top nibble indexes
+   `<zone>.zfg`, and both are applied. (b) The `[0x400, 0x3f00]` clamp is
+   the last step of a longer computation, and two terms before it were
+   missed: a **player torch glow** — gated on `*(char *)(player + 0x228)`,
+   adding `(3 - chebyshevTileDistance) * 0x400` to any vertex within three
+   tiles of the player — and a walk of the vertex cell's entity list
+   (`engine+0x6904`) that adds a flickering `2 + (rand & 3) * 0x100` for
+   entities of template id 3, 0x47 or 0x1787, and pins the vertex to
+   `0x3f00` outright for any entity whose `+0x86` has bit 4 set. Neither is
+   implemented in the PC port yet. (c) **None of this touches models.**
+   The whole light term belongs to the surface/tile-grid pipeline; the
+   actor pipeline's rasterizers read a model's skin straight
+   (`*dst = texel | (fog & 0xf000) | (depth << 16)`) with no palette and
+   no light of any kind.
+
 So the wall/surface pipeline isn't drawing every tile boundary every
 frame — it's gated by (a) a genuine visibility raycast and (b) a
 per-direction, per-height-band "does this tile-type even have a face
@@ -815,12 +845,19 @@ this renderer, so gate 7 stands in for it via `Zone::HasLineOfSight`.
 - What `FUN_10068e0c`'s other switch cases are (it's a general screen-state
   machine; case `5` is confirmed as "render the 3D game view", cases `1` and
   `6` look like menu/list UI — not traced in this pass).
-- The `engine+0xbe0f`/`engine+0x5c4` fade/lighting lookup-table path is now
-  understood structurally (a depth-driven color-remap table indexed by the
-  full color+fog-nibble word, fed by the fade-family rasterizer variants —
-  see above) but its actual **contents** (what darkness/color curve it
-  encodes) haven't been dumped from a real binary/asset — worth doing if a
-  PC port wants to preserve the torchlight falloff look.
+- ~~The `engine+0xbe0f`/`engine+0x5c4` fade path's actual **contents**
+  haven't been dumped from a real binary/asset~~ — **resolved (M89), and
+  there was nothing to dump**: `engine+0x5c4` is written in exactly one
+  place, `GameEngine_InitLevel`'s
+  `sprintf(buf, "%s\\%s.zfg", root, zone); engine[0x5c4] =
+  WholeFile_Load(buf)`, between the `"InitLevel Pre Fog"` marker and a
+  `"Failed to load fog."` failure print. The curve is **per zone, and
+  ships with the game**: 14 of the 21 `.zfg` files fade to pure black (the
+  dungeon look) and the 7 outdoor ones fade to a bright pale haze
+  (snowline `0x99b`, drgnfld/dstar_e/dstar_w `0xaac`,
+  ghstpass/glaciercrawl `0xaab`, stouttp `0x889`). `engine+0xbe0f` is set
+  to 1 by the engine constructor and cleared nowhere, so the fade path is
+  the only one that ever runs.
 - ~~The tile-grid traversal inside `Render3DScene` that decides *which*
   faces get a dynamic draw~~ / ~~exactly which `.zcp` byte maps to which
   face direction~~ — **both resolved**, see "The traversal: what decides

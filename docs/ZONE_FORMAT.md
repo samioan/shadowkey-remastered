@@ -628,8 +628,8 @@ just the first):
 |---------|-------------------------------|------|
 | `.ztx`  | `engine+0x364` (+ `engine+0x360` = first byte); forwarded to `engine+0x6b1c`/`+0x6b20` | the wall-texture atlas — **decoded**: a flat array of `0x4000`-byte (16384-byte), **8bpp-palettized** texture slots, one per `.sur` surface index. See "The tile-grid wall/surface-face renderer", `RENDERER_3D.md` |
 | `.zmp`  | `engine+0x328`                | zone metadata — **header decoded, bulk content decoded** (a `field80`×`zmpTotal` light/nav grid, see "The 'bullseye' subsystem" below) |
-| `.zlu`  | `engine+0x36c/0x370/0x374/0x378` (4×512-byte chunks of one 2048-byte blob); forwarded to `engine+0x6b24..+0x6b30` | **decoded**: 4 selectable 256-color palettes (512 bytes = 256×2-byte entries) that convert `.ztx`'s indexed wall texels into real 16bpp color, selected per-face by 2 bits of a material byte. **This is what the `"InitLevel Pre/Post LUA"` debug markers actually bracket** — "LUA" is short for `.zlu`, not the Lua scripting language (see correction below). See "The tile-grid wall/surface-face renderer", `RENDERER_3D.md`. **Two corrections (port scaffold session)**: (1) a real `azra.zlu` decompresses to 131072 bytes = **64** 2048-byte blobs, not one — `Bullseye_Init`'s 4 forwarded chunk pointers are one fixed set stashed once at zone load (matching this doc's description), but the port's own renderer, needing a *per-surface* palette instead, empirically picks the blob at `(surfaceTextureIndex % 64) * 2048` and always its chunk 0; this works well against real data (see below) but isn't independently confirmed to be the original's exact per-face selection rule. (2) each 16-bit palette entry is **4-bit-per-channel** (`0x0RGB`, matching `GRAPHICS_FORMAT.md`'s framebuffer format exactly — confirmed by real `.zlu` bytes: `0xfff`/white, `0xf0f`/magenta chroma-key literal present in every chunk), not RGB565 as this doc's "256×2-byte entries" phrasing could be misread to imply — an RGB565 read of real data produces garish cyan/blue nonsense, an RGB444 read of the exact same bytes against a real `.ztx` texture produces an unmistakable, correctly-shaded wood-plank floor texture. |
-| `.zfg`  | `engine+0x5c4`                | the fog/fade lookup table `CompositeSceneBufferToScreen` reads when `engine+0xbe0f` is set (`RENDERER_3D.md`'s fade-LUT open item) — "zfg" = "zone fog" |
+| `.zlu`  | `engine+0x36c/0x370/0x374/0x378` (4×512-byte chunks of one 2048-byte blob); forwarded to `engine+0x6b24..+0x6b30` | **decoded**: 4 selectable 256-color palettes (512 bytes = 256×2-byte entries) that convert `.ztx`'s indexed wall texels into real 16bpp color, selected per-face by 2 bits of a material byte. **This is what the `"InitLevel Pre/Post LUA"` debug markers actually bracket** — "LUA" is short for `.zlu`, not the Lua scripting language (see correction below). See "The tile-grid wall/surface-face renderer", `RENDERER_3D.md`. **Two corrections (port scaffold session)**: (1) a real `azra.zlu` decompresses to 131072 bytes = **64** 2048-byte blobs, not one — `Bullseye_Init`'s 4 forwarded chunk pointers are one fixed set stashed once at zone load (matching this doc's description), but the port's own renderer, needing a *per-surface* palette instead, empirically picks the blob at `(surfaceTextureIndex % 64) * 2048` and always its chunk 0; this works well against real data (see below) but isn't independently confirmed to be the original's exact per-face selection rule. (2) each 16-bit palette entry is **4-bit-per-channel** (`0x0RGB`, matching `GRAPHICS_FORMAT.md`'s framebuffer format exactly — confirmed by real `.zlu` bytes: `0xfff`/white, `0xf0f`/magenta chroma-key literal present in every chunk), not RGB565 as this doc's "256×2-byte entries" phrasing could be misread to imply — an RGB565 read of real data produces garish cyan/blue nonsense, an RGB444 read of the exact same bytes against a real `.ztx` texture produces an unmistakable, correctly-shaded wood-plank floor texture. **Correction (M89), and this one changes the addressing**: the four forwarded pointers are `zlu+0`, `zlu+0x200`, `zlu+0x400`, `zlu+0x600` — **512 bytes apart, i.e. one rung apart**, not one 2048-byte blob apart and not one 64-rung block apart. The whole file is therefore **256 consecutive 512-byte rungs**, and the rasterizer lands on one with `palette = familyPtr + ((lightA + lightB) & 0xfffffe00)` — a byte offset, so `light >> 8` rungs on top of the family's 0..3. The complete address is `(family + (light >> 8)) * 512 + texel * 2`, with `light` clamped to `[0x400, 0x3f00]` per vertex, i.e. rungs 4..66 of the 256. **"Hue family" is a misnomer**: the 2-bit selector buys a **+0..+3 rung brightness bias**, one shade, not a hue. The file really does contain four 64-rung ramps in four different hues (block 2's is green) and rungs 67..255 are simply never addressed — but reading the selector as a block index lands on a completely different ramp, which is what put a green patch on azra's wall in the PC port. See `PORT_ROADMAP.md`'s M89. |
+| `.zfg`  | `engine+0x5c4`                | the fog lookup table `CompositeSceneBufferToScreen` reads when `engine+0xbe0f` is set — "zfg" = "zone fog". **Now fully decoded (M89)**: every one of the 21 shipped files decompresses to exactly **131072 bytes = 65536 `uint16` entries**, indexed by the composite word the fade rasterizers write — **`(fogLevel << 12) | rgb444`**, i.e. **16 fog levels × the whole 4096-colour RGB444 space**. Level 0 is the identity map in every shipped file (checked over all 4096 entries in all 21), so an unfogged pixel passes through untouched; each successive level moves every channel monotonically toward that zone's terminal colour, and level 15 is a flat fill. `engine+0xbe0f` is set to 1 by the engine constructor and cleared nowhere, so **fog is always on**. What a zone fades *to* is the interesting part: **14 of 21 fade to `0x000`** (the dungeon darkness cue) and the **7 outdoor zones fade to a bright pale haze** — snowline `0x99b`, drgnfld/dstar_e/dstar_w `0xaac`, ghstpass/glaciercrawl `0xaab`, stouttp `0x889`. That set is exactly the daylight half of M70's independent `.zsk` skybox census. The per-vertex scalar whose top nibble supplies the level is `min(viewDepth * engine[0x5c8] >> 8, 0xffff)`, and `engine+0x5c8` is `0x10000 / (visibilityTier.maxSteps / 2)`, written at the top of `TileGrid_RaycastVisibility` — so fog saturates at **half the tier's ray range**, about 12 tiles at the shipped default zoom. See `RENDERER_3D.md`. |
 | `.zcp`  | `engine+0x32c`                | a small indexed table of per-cell light-level deltas for the lighting bake — **decoded**, see "The 'bullseye' subsystem" below. **Correction (port scaffold session)**: its entry count is a `u32`, not the `u8` originally guessed — see the full note where `ZcpFile`/`ZcpEntry` are defined below. |
 | **`.zsk`** | **`(*(engine+0x62c))+0x54`** | **the zone's skybox mesh — see below. ("zone sky", and the engine's own word: `engine+0x62c` is its Skybox object.)** |
 
@@ -908,17 +908,41 @@ fixed-point scale as the actor-collision/position code in
 entry at `zcpIndex`, add its signed delta byte (× `0x100`) to
 `lightLevel`, clamped to `[0, 0x3eff]`/saturating at `0x3f00`.
 
+**Loop bounds (M89), and they matter**: only pass 1 covers the whole
+grid. Passes 2 and 3 both run `row = 1 .. height-2`, `col = 1 .. width-2`
+— so the **one-cell border ring is zeroed and then left alone**, getting
+neither propagated light nor its `.zcp` delta. In a 128×128 zone that is
+508 cells that stay pitch black by construction. (The PC port ran both
+passes over the whole grid until M89, which lit the border ring and
+nothing else out there.)
+
 **`Bullseye_PropagateLight`** (was `FUN_1000ef74`) is a real **2D ray-cast
 light-propagation-with-wall-bounce** simulation: casts rays in 256
 directions from a light-source cell using the *same* 2048-entry sin/cos
 LUT shape as `BuildRotationMatrix3x4`/the automap's rotated player marker
-(`RENDERER_3D.md`), stepping cell by cell along each ray and adding a flat
-`+0x40` to every cell's `lightLevel` it crosses (same clamp as above). A
-cell with `flags` bit1 set (wall) makes the ray **bounce** — its step
-direction sign-flips on that axis — rather than pass through; each ray
-stops once it has bounced on both axes or left the grid. This is a
-lightmap bake: torches/light sources spread illumination outward,
-reflecting off walls, computed once per zone load rather than every frame.
+(`RENDERER_3D.md`), adding a flat `+0x40` to the cell it lands in on every
+iteration (same clamp as above). This is a lightmap bake: light sources
+spread illumination outward, computed once per zone load rather than every
+frame.
+
+**Two details this doc originally got wrong, corrected in M89 by
+transcribing the loop instruction for instruction:**
+
+- **One iteration is half a tile, not a cell.** The step is
+  `sinLut[...] >> 1`, and the LUT is 8.8 (`±0x100`), so each step moves
+  `0x80` against a `0x100` tile. A ray therefore credits roughly **two
+  `+0x40` adds per tile crossed**, sometimes three where the
+  round-to-nearest (`(acc + 0x80) >> 8`) lands two steps in the same cell.
+  Reading it as one add per crossed cell halves every zone's light.
+- **Walls do not bounce. Rays stop.** The sign flips on `flags` bit1 are
+  real instructions, but dead ones: the loop's own condition is
+  `while (!wallA && !wallB)`, and it is the same wall that sets the flags
+  which ends the loop, so the flipped direction is never stepped. A ray
+  simply terminates at the first wall cell it touches on either axis.
+- There is **no distance cap**: a ray runs until it hits a wall or its
+  rounded cell reaches the grid's border ring. In an open outdoor zone
+  that is the full width of the map, which is where most of an outdoor
+  zone's light comes from.
 
 **`.zcp`'s format, fully decoded from `Bullseye_BakeLighting`'s lookup**:
 

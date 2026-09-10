@@ -643,3 +643,7 @@ target_link_libraries(player_damage_smoke PRIVATE sk_bindings sk_world)
 # See src/tests/m88_quest_log_smoke.cpp.
 add_executable(quest_log_smoke src/tests/m88_quest_log_smoke.cpp)
 target_link_libraries(quest_log_smoke PRIVATE sk_bindings sk_world)
+
+# See src/tests/m89_lighting_smoke.cpp.
+add_executable(zone_lighting_smoke src/tests/m89_lighting_smoke.cpp)
+target_link_libraries(zone_lighting_smoke PRIVATE sk_world)
