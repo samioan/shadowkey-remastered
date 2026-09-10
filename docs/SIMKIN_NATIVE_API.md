@@ -955,6 +955,176 @@ along.
   part of the Bluetooth/Arena multiplayer level-sync protocol, not just
   local state.
 
+## The menu stack, and what a row callback really is (M91)
+
+Three separate things about menus, all of them one line of the real
+engine, and all three visible from play as "the menus are glitchy".
+
+### A row callback is an ordinary method call
+
+`AddMenuItem(id, "Foo")`, `popup.AddItem(id, "Foo")` and
+`popup.SetBack("Foo")` all record a name the engine later invokes as a
+Simkin method **on the menu object**. That is the whole mechanism — which
+means the name resolves through the object's *entire* dispatch chain, and
+a bare native in that slot is perfectly ordinary Simkin.
+
+The corpus leans on this heavily. **290 shipped call sites name `Quit`**
+as a row callback — every conversation's "Goodbye", every one-button
+message popup's "Okay", both answers on `azra_menu_yousure.s` ("Are you
+sure you want to leave town without finishing your first quest?"),
+`ohnoskelos.s`'s single row — plus `QuitToMenu` in `savegamecorrupted.s`
+and `savegamenospace.s`, and `ActuallySaveGame` in `saveconfirm.s`.
+
+A handful of callback names are neither a script handler nor a registered
+native: `MenuQuit` (deathmenu.s, loadgamemenu.s, mpdeathmenu.s,
+noloot.s), `MenuBack`, `ExitMenu`. Those are dead in the shipped binary
+too, exactly like the already-documented `OptionsMenuBack` /
+`UpdateTextItems` cases — the row is drawn and does nothing.
+
+No script method anywhere in the corpus shadows a *menu-class* native, so
+the order of the two lookups is not observable. The nine names that do
+collide (`DropGold`, `ResetQueue`, `SellItem`, `OpenDoor`,
+`ChooseCharacter`, `ChooseRace`, `QuestAssigned`, `DropItem`, `Init`) all
+belong to the player or entity classes, which a menu object never answers
+for.
+
+### `DragonStarStackMenu`: class `0x14d8c`, and the two `OpenMenu`s
+
+Trie `0x14d8c`, dispatcher `FUN_100801fc`, five bindings — and it sits at
+the **front** of the menu dispatch chain, ahead of the 23-binding
+`DragonStarGeneralMenu` (`0x14dd4`, `FUN_1003136c`) and the 115-binding
+menu class (`0x14cf0`, `FUN_10078de4`). Each falls through to the next,
+and the last returns "not handled".
+
+| # | name | what it does |
+|---|---|---|
+| 0 | `ClearMenu` | `FUN_10080048` — destroy this screen's row list |
+| 1 | `CreateMenu` | build a menu object for the name **once** and register it |
+| 2 | `OpenMenu` | switch to a registered one, else fall through to the destructive open |
+| 3 | `SetPrevMenu` | `this->0xdc = <the registered menu with that name>` |
+| 4 | `Quit` | current menu := none, then fall through |
+
+`CreateMenu(name)` allocates a 0xe4-byte menu object, stores it in a
+collection shared by every menu (the root's `+0xd0`), points it back at
+the root (`+0xe0`), and runs `FUN_100779b8` on it — which parses
+`<root>\<name>.s` and calls its `Init()`. **`Init` therefore runs once, at
+CreateMenu time.** `mainmenu.s`'s own `Init` does this nineteen times.
+
+`OpenMenu(name)` looks the name up in that collection (`FUN_100806ac`, a
+linear `wcscmp` walk). If it is there, the engine copies the caller's
+`+0x49` ("open over a live session") onto it, makes it the current menu
+(`FUN_10080c70(root, target)` → `root->0xcc = target`) and sets screen
+mode 1 — **without re-parsing anything and without re-running `Init`**.
+If it is *not* there, the call falls through to the base class's
+`OpenMenu` (menu binding `0x6e`), which is the destructive `FUN_100779b8`
+path: tear the whole row list down, re-read the `.s`, `Init()` again.
+
+That split is why `savegamemenu.s`, `loadgamemenu.s` and `mainmenu.s` put
+**nothing** in `Init` but a `MenuBackground` and a `SetPrevMenu`, and
+build every row in `OnDisplay` instead. `OnDisplay` (`FUN_10077554`, a
+vtable slot) is the per-visit half.
+
+`Quit()` is not "pop one level": it sets the root's current menu to
+**null** (`FUN_10080c70(root, 0)` — the disassembly shows `mov r1,#0x0`
+immediately before the call) and then falls through to
+`DragonStarGeneralMenu`'s case `0x16`, which resets the input state and
+falls through again to the base `Quit` (`0x32`), which sets screen mode
+**5**. So `Quit()` means "close the menus, back to the game", from any
+depth.
+
+### `SetPrevMenu` is read by the engine, and it has a fallback
+
+Nothing in the corpus ever calls a `GetPrevMenu()`, and 15 screens call
+`SetPrevMenu(...)`. `FUN_10080ccc` is the reader:
+
+```c
+int PrevMenuOf(collection, menu) {
+    int prev = menu->0xdc;              /* the SetPrevMenu target */
+    if (prev == 0) {
+        node = FindNode(collection, menu);
+        if (!node || !node->next) return 0;
+        prev = *(node->next);           /* the preceding registration */
+    }
+    prev->0x49 = menu->0x49;            /* inherit "over a live session" */
+    return prev;
+}
+```
+
+Its one caller is `FUN_1003006c`, the right-softkey handler of the
+character-manager/store family: if a menu is current, go to its previous
+one; if none is (the screen is standing alone over the game), call
+`OnRightSoftKey` on the app's own script object instead. The *generic*
+menu class routes the same key differently — through `FUN_100768b4`'s
+`"%sBack"` construction (M90) — which is why the corpus carries both
+spellings.
+
+### A popup's `SetSelectedItem` is 0-based
+
+Popup class `0x14cfc`, dispatcher `FUN_10087a60`. `SetSelectable(idx,
+flag)` (case 3) and `GetSelectedItem()` (case 0xc) both walk `idx` links
+from the head of the item list, and `SetSelectedItem(n)` (case 5) writes
+that same `popup+0xa0`. The index is **0-based, into all items**.
+
+That is the difference between a confirm popup that can be answered and
+one that cannot. Every one in the game is built like this:
+
+```
+myPopup.AddItem(4019);                     // "Do you really wish to quit?"
+myPopup.AddItem(4010,"CancelQuitGame");    // "No"
+myPopup.AddItem(4009,"ConfirmQuitGame");   // "Yes"
+myPopup.SetSelectable(0,false);
+myPopup.SetSelectedItem(1);
+```
+
+`SetSelectedItem(1)` selects item **1** — "No", the safe answer. Read as
+1-based it selects the prompt line, which has no callback, and the
+confirm key then does nothing at all.
+
+### `GameActive()` is one pointer
+
+Menu binding `0x5e`, and the whole case is:
+
+```c
+case 0x5e:
+    result = (engine->level /* +0x6908 */ != 0);
+```
+
+"A level is loaded". `mainmenu.s`'s `OnDisplay` is one long chain of
+`if (GameActive())` — it is what turns the title screen into the pause
+menu (Return to Game 1965, **Save Game 718**, "End Game" 3495 instead of
+"Quit Game" 3848, and no New Game / Credits / Multiplayer). It is also
+what makes `loadgamemenu.s` ask "Loading a game will lose your progress in
+your current game. Continue?" before loading over a live session, and what
+routes `mainmenu.s`'s quit confirmation into "Do you wish to save before
+ending the game?".
+
+### The save chain
+
+| # | name | behaviour |
+|---|---|---|
+| 0 | `CanSaveGame` | `return 1` — a constant, in the shipped binary |
+| 0x2f | `GetSaveSlot` | `engine+0x14a71` |
+| 0x30 | `SaveGame(n)` | writes that byte, then opens **`SaveConfirm`** |
+| 0x31 | `ActuallySaveGame([n])` | the write; the argument is optional |
+
+`ActuallySaveGame` sets screen mode **4** (the progress bar's "saving"
+mode), copies the current level name into the save-level slot
+(`strcpy(app+0x50, app+0x28)`), and calls `FUN_10018e70(engine,
+"current.sav", 1)`. It then calls one of three **script methods** back by
+name, chosen by that function's status word:
+
+| status | script method | notes |
+|---|---|---|
+| 0 | `DoneSave` | plus `FUN_1001aa44(engine, slot, 0)` / `FUN_1001a8b8(engine, slot)` — commit into the slot |
+| 1 | `SaveFailed` | |
+| 2 | `SaveFailed` | after `FUN_1001a9f4(engine, slot)` and marking the slot bad |
+| 3 | `NotEnoughSpace` | the original mode is restored rather than left on 4 |
+
+`saveconfirm.s` defines all three; `savegamemenu.s` defines `DoneSave`,
+`SaveFailed` and `NotEnoughSpace` as popups; `loadgamemenu.s` has the
+matching `SaveCorrupted` for the load side (menu binding `0x2b`,
+`LoadGame`).
+
 ## The Object/Entity position bindings (M62)
 
 Class `0x14d08` (dispatcher `FUN_10061a60`) is the **Object/Entity base** a

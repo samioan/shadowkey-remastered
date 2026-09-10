@@ -653,3 +653,7 @@ target_link_libraries(zone_lighting_smoke PRIVATE sk_world)
 # M90 milestone smoke test -- see src/tests/m90_level_transition_smoke.cpp.
 add_executable(level_transition_smoke src/tests/m90_level_transition_smoke.cpp)
 target_link_libraries(level_transition_smoke PRIVATE sk_bindings)
+
+# M91 milestone smoke test -- see src/tests/m91_ingame_menu_smoke.cpp.
+add_executable(ingame_menu_smoke src/tests/m91_ingame_menu_smoke.cpp)
+target_link_libraries(ingame_menu_smoke PRIVATE sk_bindings)

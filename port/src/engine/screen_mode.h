@@ -18,17 +18,27 @@
 namespace sk {
 
 enum class ScreenMode : int {
-    // Normal gameplay. Set by GameEngine_InitLevel when a level has
-    // finished loading, and by the menu stack on Quit.
-    kGameplay = 1,
+    // M91: **1 and 5 were the wrong way round here.** The pair is
+    // settled by three call sites that only make sense one way:
+    // `FUN_100779b8` (open-menu-by-name) sets **1** on its way in;
+    // menu binding 0x32 `Quit` -- "close the menu, go back to the game"
+    // -- sets **5**; and `SetCameraStart` (FUN_10038674), the last thing
+    // a level entry does after writing the player's position and angles,
+    // also sets **5**. The app's foreground handler (FUN_1002152c) then
+    // confirms it from the other side: it raises the main menu over the
+    // running game only `if (mode == 5)`.
+    //
+    // A menu/UI screen.
+    kMenu = 1,
+    // Normal gameplay -- set by SetCameraStart when a level is ready to
+    // play, and by the menu stack on Quit.
+    kGameplay = 5,
     // Travelling to another zone (`FUN_1006c31c`, controller vtable slot
     // +0x2c) -- the `nGEN_Loading` thread is running.
     kZoneTravel = 3,
     // Writing a save (`FUN_10018e70` feeds the bar its own literal
     // 3/10/30/50/70 percentages).
     kSaving = 4,
-    // A menu/UI screen.
-    kMenu = 5,
     // Loading a saved game -- LoadGame's own path.
     kLoadingSavedGame = 10,
     // M54: quitting the current session and returning to the main menu.

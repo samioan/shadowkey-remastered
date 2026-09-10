@@ -44,14 +44,25 @@ public:
     const std::vector<Item>& items() const { return m_Items; }
     bool visible() const { return m_Visible; }
     // 1-based index into **all** items (`m_Items[selectedItem()-1]`), not
-    // into just the selectable ones -- the same convention MenuExecutable
-    // uses, and the same one real scripts rely on (buysell.s's
-    // `msgPopup.SetSelectedItem(2)` names item 2 of the popup as built).
-    // Use IsItemSelected() rather than recounting: main.cpp's popup
-    // renderer used to compare this against a selectable-only counter, so
-    // the highlight sat on the wrong row on any popup with a static
-    // message line above its buttons -- which is every confirm popup in
-    // the game.
+    // into just the selectable ones. Use IsItemSelected() rather than
+    // recounting: main.cpp's popup renderer used to compare this against
+    // a selectable-only counter, so the highlight sat on the wrong row on
+    // any popup with a static message line above its buttons -- which is
+    // every confirm popup in the game.
+    //
+    // M91: this is an *internal* 1-based index, and the script-facing
+    // `SetSelectedItem`/`GetSelectedItem` are **0-based** -- see the
+    // method() handlers, which convert. The popup class's own dispatcher
+    // (FUN_10087a60) settles it: `SetSelectable(idx, flag)` (case 3) and
+    // `GetSelectedItem()` (case 0xc) walk `idx` links from the head of
+    // the same item list, and `SetSelectedItem(n)` (case 5) writes that
+    // same `popup+0xa0`. So the pattern every confirm popup in the game
+    // is built from --
+    //     popup.AddItem(4029);                  // "Game Saved."
+    //     popup.AddItem(4028,"CancelDoneSave"); // "OK"
+    //     popup.SetSelectable(0,false);
+    //     popup.SetSelectedItem(1);
+    // -- opens on **OK**, not on the message line above it.
     int selectedItem() const { return m_SelectedItem; }
     bool IsItemSelected(size_t itemIndex) const {
         return static_cast<int>(itemIndex) + 1 == m_SelectedItem;

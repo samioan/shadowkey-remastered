@@ -247,8 +247,8 @@ bool MenuStack::GameAvailableForLoad(int slot) const {
     return probe(slot);
 }
 
-void MenuStack::ActuallySaveGame(int slot) {
-    if (slot < 0 || slot >= kSaveSlotCount) return;
+bool MenuStack::ActuallySaveGame(int slot) {
+    if (slot < 0 || slot >= kSaveSlotCount) return false;
     SaveSlot& s = m_SaveSlots[static_cast<size_t>(slot)];
     s.used = true;
     std::time_t now = std::time(nullptr);
@@ -266,7 +266,20 @@ void MenuStack::ActuallySaveGame(int slot) {
     // lookup already handles (FUN_1000b100 returns null and the caller
     // moves on), so the file stays loadable by its own rules.
     sk::SaveStream stream;
-    m_Player->BuildSaveRecord(m_CurrentLevel).Write(stream);
+    sk::SavedEntity record = m_Player->BuildSaveRecord(m_CurrentLevel);
+    // M91: **where the player was standing.** The four fields are part of
+    // the record's Entity layer (`+0x94`/`+0x9c`/`+0xa4`/`+0xb6`, see
+    // SavedEntityBase) and the writer has always emitted them -- as
+    // zeroes, because nothing filled them in, so every load put the
+    // player back at the zone's own `.ent` start record instead of where
+    // they saved. x/y/z come off the player's EntityPositionRef, which
+    // main.cpp mirrors the camera onto each tick; the heading is
+    // playerHeadingUnits(). LoadGameFromSlot() reads all four back.
+    record.entity.x = m_Player->positionX();
+    record.entity.y = m_Player->positionY();
+    record.entity.z = static_cast<int16_t>(m_Player->positionZ());
+    record.entity.yaw = static_cast<int16_t>(m_PlayerHeadingUnits);
+    record.Write(stream);
     std::vector<sk::SaveArchive::Record> records;
     records.push_back({sk::kCharacterMemberName, stream.bytes()});
     const std::vector<uint8_t> bytes = sk::SaveArchive::Serialize(records);
@@ -276,12 +289,13 @@ void MenuStack::ActuallySaveGame(int slot) {
     if (!out) {
         std::printf("  [MenuStack] slot %d: cannot write %s -- keeping it in memory only\n", slot,
                     path.c_str());
-        return;
+        return false;
     }
     out.write(reinterpret_cast<const char*>(bytes.data()),
               static_cast<std::streamsize>(bytes.size()));
     std::printf("  [MenuStack] saved to slot %d (%s) -- %s, %zu bytes\n", slot, s.timeStr.c_str(),
                 path.c_str(), bytes.size());
+    return true;
 }
 
 std::string MenuStack::LoadGameFromSlot(int slot) {
@@ -318,8 +332,23 @@ std::string MenuStack::LoadGameFromSlot(int slot) {
     }
     m_Player->ApplySaveRecord(record, *this);
     m_CurrentLevel = record.character.levelName;
-    std::printf("  [MenuStack] loaded slot %d -- \"%s\", level \"%s\"\n", slot,
-                record.player.characterName.c_str(), m_CurrentLevel.c_str());
+    // M91: put the player back where the save found them. The engine has
+    // one mechanism for "arrive somewhere other than the .ent start
+    // record" -- the SetCameraStart override GameEngine_InitLevel's
+    // entity pass consumes (see ArmCameraStart) -- and this is the second
+    // thing that arms it. Roll is not a channel this port's camera has;
+    // pitch is deliberately left level, because the engine's own auto-aim
+    // recomputes it from the first frame of play anyway (M72).
+    //
+    // A save written before M91 carries zeroes here and would drop the
+    // player at the world origin, so an all-zero placement falls back to
+    // the zone's own start record rather than being trusted.
+    if (record.entity.x != 0 || record.entity.y != 0) {
+        ArmCameraStart(record.entity.x, record.entity.y, record.entity.z, 0, record.entity.yaw, 0);
+    }
+    std::printf("  [MenuStack] loaded slot %d -- \"%s\", level \"%s\", at (%d,%d,%d) heading %d\n",
+                slot, record.player.characterName.c_str(), m_CurrentLevel.c_str(), record.entity.x,
+                record.entity.y, record.entity.z, record.entity.yaw & 0xffff);
     return m_CurrentLevel;
 }
 

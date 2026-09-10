@@ -197,6 +197,40 @@ actual vtable it points at and lists the first N entries as (offset,
 target address, function name if Ghidra already knows it). This is how
 `ScreenModeController`'s vtable at `0x100fb908` was found and read.
 
+## Screen modes 1 and 5: which is which (M91)
+
+`SetScreenMode(app, 1)` and `SetScreenMode(app, 5)` are the two modes the
+game spends nearly all of its time in, and it is easy to guess them the
+wrong way round. Three call sites settle it, and they only make sense one
+way:
+
+* **`FUN_100779b8`** — open-a-menu-by-name — ends with
+  `if (appview->threadRunning == 0) SetScreenMode(app, 1)`. Opening a menu
+  sets **1**.
+* **Menu binding `0x32` `Quit`** — "close this screen and go back to the
+  game" — ends with `SetScreenMode(app, 5)`. So do `0x35`
+  `QuitAndDestroyOpener` and `0x36` `QueryDestroy`.
+* **`FUN_10038674`** — the Player binding `SetCameraStart` — writes the
+  player's position and all three orientation channels and then calls
+  `SetScreenMode(app, 5)`. That is the last thing a level entry does.
+
+And the app's own foreground handler confirms it from the other side:
+
+```c
+/* FUN_1002152c -- the app comes back to the front */
+if (app->controller->mode == 5) {
+    FUN_100779b8(app->controller->menuManager, "MainMenu", 1, 0);
+}
+```
+
+"If the player was *playing* when the phone took the call, put the main
+menu up over the game." That third argument is the menu manager's
+`+0x49` — "this screen is open over a live session" — and it is the only
+in-game main-menu entry point in the image.
+
+So: **1 is a menu/UI screen, 5 is normal gameplay.** `port/src/engine/
+screen_mode.h` had the pair transposed from M54 until M91.
+
 ## Screen mode 0x1f: quitting to the main menu (M54)
 
 `ScreenModeController + 0x78` is the screen mode. M26 found that the

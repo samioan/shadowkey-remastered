@@ -227,6 +227,25 @@ public:
     // M60: the same, with one argument -- the real table/row callbacks
     // take the selected cell ("SelectedItem[ (cell) ...").
     bool TryInvokeWithArg(const std::string& handlerName, const skRValue& arg);
+    // M91: what a *row's* callback name means, as opposed to an optional
+    // hook. TryInvoke() above reaches the script and nothing else, which
+    // is right for `OnDisplay`/`DoneSave`/`<ScriptName>Back` -- but a
+    // callback named in `AddMenuItem(id, "...")`, `popup.AddItem`,
+    // `SetBack`, a slider or a combo is a plain Simkin method call on
+    // this object, so the engine resolves it through the *whole* chain
+    // and a bare native name is a perfectly ordinary thing to write
+    // there. 290 shipped call sites name `Quit` alone (every
+    // conversation's "Goodbye" row, every one-button popup's "Okay"),
+    // plus `QuitToMenu` in savegamecorrupted.s/savegamenospace.s and
+    // `ActuallySaveGame` in saveconfirm.s. Script first, then this
+    // class's natives: no menu-class native is shadowed by a script
+    // method anywhere in the corpus (the nine names that do collide --
+    // DropGold, ResetQueue, SellItem, OpenDoor, ChooseCharacter,
+    // ChooseRace, QuestAssigned, DropItem -- are all *player*/*entity*
+    // bindings, which a menu object never answers), so the order is not
+    // observable and this one keeps every pre-M91 callback resolving
+    // exactly where it already did.
+    bool InvokeCallback(const std::string& callbackName);
 
     // M60: reachbacks the table's cell class needs (FUN_100a4ce4 reads
     // both straight off the player).

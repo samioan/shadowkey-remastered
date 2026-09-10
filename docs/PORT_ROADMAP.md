@@ -8270,6 +8270,172 @@ soft-fails 39 -> 39, all 14 tracked `.ppm` renders byte-identical,
       `ghstpass.s`'s own `SetCameraStart` for that doorway to the digit.
 
 
+- [x] **M91 -- the in-game main menu, saving and loading, and the menu
+      rows that never fired.** Reported from play, three complaints in
+      one: pressing Esc in the game brought up the *title* menu, with no
+      Save Game anywhere; the menus were "glitchy", colliding with popups
+      and secondary pages with no way to close them; and azra's "are you
+      sure you want to leave town without finishing your first quest?"
+      prompt would not answer either of its two rows. Three defects, each
+      one line of the real engine.
+    - **A menu row's callback is an ordinary Simkin method call, so a
+      bare native name in the callback slot is normal -- and this port
+      only ever looked for a script method.** `AddMenuItem(id, "Foo")`,
+      `popup.AddItem(id, "Foo")` and `popup.SetBack("Foo")` all record a
+      name the engine later invokes *on the menu object*, which resolves
+      through the object's whole dispatch chain. `azra_menu_yousure.s` is
+      four lines long and both of its answers are `AddMenuItem(id,
+      "Quit")` -- the native, named directly -- so with only the script
+      consulted, neither row did anything and the prompt could not be
+      answered. It is not a one-off: **290 shipped call sites name
+      `Quit`** that way (every conversation's "Goodbye", every
+      one-button message popup's "Okay", `ohnoskelos.s`), plus
+      `QuitToMenu` in `savegamecorrupted.s`/`savegamenospace.s` and
+      `ActuallySaveGame` in `saveconfirm.s`.
+      `MenuExecutable::InvokeCallback()` is the row path now -- script
+      first, then this class's natives -- and `TryInvoke()` stays what it
+      was, the script-only path for genuine hooks (`OnDisplay`,
+      `DoneSave`, `<ScriptName>Back`). The order is not observable: no
+      script method in the corpus shadows a *menu-class* native, and the
+      nine names that do collide (`DropGold`, `ResetQueue`, `SellItem`,
+      `OpenDoor`, ...) are all player/entity bindings a menu never
+      answers for. A callback that is neither now reaches the soft-fail
+      log, which is right -- the corpus's genuinely dead rows
+      (`MenuQuit`, `MenuBack`, `ExitMenu`, none of them in the real
+      702-entry table) are dead in the shipped game too, and this is how
+      they announce themselves.
+    - **`GameActive()` is one pointer, and it had been answering a flat
+      `false` since M10.** Menu binding `0x5e`, and the whole case is
+      `engine->level /* +0x6908 */ != 0`. `mainmenu.s` is not two
+      scripts: its `OnDisplay` is one long chain of `if (GameActive())`,
+      and with a real answer the same file builds the pause menu --
+      Return to Game (1965), Load Game, **Save Game (718)**, Delete Saved
+      Game, Options, "End Game" (3495) where the front end says "Quit
+      Game" (3848), and no New Game, Credits or Multiplayer. It is also
+      what makes `loadgamemenu.s` ask "Loading a game will lose your
+      progress in your current game. Continue?" before loading over a
+      live session, and what routes the quit confirmation into "Do you
+      wish to save before ending the game?". Set by the host where the
+      zone becomes real and cleared in the QuitToMenu teardown, rather
+      than inferred from the current level *name*, which `LoadGame`
+      writes before the zone it names exists.
+    - **The in-game main menu has a real entry point, and M10's comment
+      said there wasn't one.** `FUN_1002152c` -- the app's own foreground
+      handler -- does `if (mode == 5) FUN_100779b8(app->0x20, "MainMenu",
+      1, 0)`: come back to the front while the player was playing, and
+      put the main menu up *over* the running game. That third argument
+      is the menu manager's `+0x49`, "this screen is open over a live
+      session", which is this port's `gamePausedForMenu`. Esc in the 3D
+      view now does exactly that instead of a bare `inGame = false`,
+      which had been dropping the player onto whatever menu object
+      happened to still be current -- in practice the front-end MainMenu
+      with its front-end rows, because nothing had re-run its `OnDisplay`
+      since boot. `OpenMenu`, not `ReopenMenu`: `Init` is where
+      `mainmenu.s` `CreateMenu`s its nineteen children, and `OnDisplay`
+      is the per-visit half.
+    - **A popup's `SetSelectedItem` is 0-based**, which is the difference
+      between a confirmation dialog that can be answered and one that
+      cannot. Popup dispatcher `FUN_10087a60` settles it: `SetSelectable
+      (idx, flag)` (case 3) and `GetSelectedItem()` (case 0xc) both walk
+      `idx` links from the head of the item list, and `SetSelectedItem
+      (n)` (case 5) writes that same `popup+0xa0`. So the pattern every
+      confirm popup in the game is built from -- `AddItem(prompt);
+      AddItem(answer, "cb"); SetSelectable(0,false);
+      SetSelectedItem(1);` -- opens on the **answer**. Read as 1-based it
+      opens on the prompt line, which has no callback, and the confirm
+      key does nothing at all. That is "the popup won't close", and it
+      was reachable from the save screen the moment Save Game started
+      working: "Game Saved." / "OK", with the highlight on "Game Saved.".
+      A pre-M91 comment in `PopupMenuExecutable::MoveSelection` had
+      rationalised this as the scripts deliberately pointing at their own
+      prompt; that workaround is gone.
+    - **A visible popup owns the back key.** `main.cpp`'s in-game
+      shortcut (right softkey resumes gameplay from a screen opened over
+      it) fired ahead of the popup's own `SetBack` target, so Esc over
+      `mainmenu.s`'s End Game confirmation both skipped
+      `CancelQuitGame` *and* left the popup latched visible on the cached
+      screen -- so the next visit came up with a dialog over it and no
+      way to answer. That is the "menus collide with popups" shape
+      exactly. The shortcut now stands down while a popup is up and the
+      regular menu tick routes the key to `PopupMenuExecutable::GoBack()`.
+    - **Saving and loading.** The write path already worked (M40/M50/M52
+      built the real archive and the real character record); what was
+      missing was every way of reaching it and one field inside it.
+      `CanSaveGame` (binding 0, a literal `return 1` in the shipped
+      binary), `GetSaveSlot`/`SaveGame(n)` (bindings 0x2f/0x30 -- the
+      pair that carries a chosen slot from one screen to the next through
+      `engine+0x14a71`; `SaveGame` opens `SaveConfirm`), and
+      `ActuallySaveGame`'s **optional** argument, which the port had been
+      requiring. The real case 0x31 calls one of three script methods
+      back depending on the writer's status word -- 0 `DoneSave`, 3
+      `NotEnoughSpace`, 1/2 `SaveFailed` -- and the port had been calling
+      `DoneSave` unconditionally; it now distinguishes the two outcomes
+      it can actually have.
+    - **A save now records where the player was standing.** The four
+      fields are part of the record's Entity layer (`+0x94`/`+0x9c`/
+      `+0xa4`/`+0xb6`) and the writer has always emitted them -- as
+      zeroes, because nothing filled them in, so every load put the
+      player back at the zone's own `.ent` start record. Two halves: the
+      player's `EntityPositionRef` is now mirrored from the camera every
+      tick (every *placed* entity has been seeded since M62, so that a
+      script's `GetPositionX()` reads where the thing is -- the player
+      never was, which also means `GetPlayer().GetPositionX()` had been
+      answering 0 to every script that asked), and the loader arms the
+      placement back through the `SetCameraStart` override, the engine's
+      one mechanism for "arrive somewhere other than the start record".
+      A pre-M91 save carries zeroes there and falls back to the start
+      record rather than being dropped at the world origin.
+    - **`docs/RENDER_LOOP.md`: screen modes 1 and 5 were transposed** in
+      `engine/screen_mode.h` from M54 until now. Three call sites settle
+      it and they only make sense one way: open-a-menu-by-name sets
+      **1**, `Quit` ("close this and go back to the game") sets **5**,
+      and `SetCameraStart` -- the last thing a level entry does -- sets
+      **5**. The foreground handler above confirms it from the other
+      side.
+    - **`docs/SIMKIN_NATIVE_API.md`: `DragonStarStackMenu` (class
+      `0x14d8c`, `FUN_100801fc`)**, written up while chasing the above.
+      Five bindings -- `ClearMenu`, `CreateMenu`, `OpenMenu`,
+      `SetPrevMenu`, `Quit` -- at the *front* of the menu dispatch chain,
+      ahead of `DragonStarGeneralMenu` (`0x14dd4`) and the 115-binding
+      menu class (`0x14cf0`). The interesting part is that there are two
+      `OpenMenu` semantics: a name that was `CreateMenu`d is a
+      **registered instance the engine switches to**, without re-parsing
+      and without re-running `Init`; anything else falls through to the
+      destructive parse-and-`Init` open. That is why `savegamemenu.s`,
+      `loadgamemenu.s` and `mainmenu.s` put nothing in `Init` but a
+      background and a `SetPrevMenu` and build every row in `OnDisplay`.
+      This port already had exactly those caching semantics (M17's
+      `OpenMenu`/`ReopenMenu` split), which is a pleasant confirmation
+      rather than a change. Also recovered: `FUN_10080ccc`, the reader
+      for `SetPrevMenu` -- the target if set, else the *preceding*
+      registration -- which is the evidence M90 reasoned its way to
+      without.
+    - **Verified**, `ingame_menu_smoke`
+      (`src/tests/m91_ingame_menu_smoke.cpp`, **105 checks**): the
+      callback census over six real screens, and both dispatch paths on
+      `azra_menu_yousure.s` (TryInvoke finds nothing, InvokeCallback
+      closes the screen); `mainmenu.s` driven through both arms of
+      `GameActive()`, checking the exact rows each builds and that the
+      in-game one opens on Return To Game; `MainMenuBack` acting in game
+      and declining on the front end; the End Game popup opening on "No"
+      and the "Game Saved." popup opening on "OK", each answered with
+      the confirm key; the reported screen end to end; a save/load round
+      trip that moves the player and the gold and gets both back,
+      including the placement and heading; the slot pair and the three
+      result-callback names; and the two screen-mode constants. Suite
+      **81/81**.
+    - **Live**: `port/debug/m91_ingame_menu.cfg`. Esc in ghstpass brings
+      up Return To Game / Load Game / Save Game / Delete Saved Game /
+      Options / End Game, with Load and Delete greyed until a save
+      exists. Save Game -> slot 1 -> "Game Saved." -> OK returns to the
+      menu with Load Game now live. End Game -> "Do you really wish to
+      quit?" (on "No") -> Yes -> "Do you wish to save before ending the
+      game?" -> No tears the session down and comes back to the title
+      menu with the *front-end* rows. Load Game from there puts the
+      player back at (16512, 6360) facing raw heading 61155 -- the exact
+      placement `where` printed before the save. And in azra, the "leave
+      town" prompt now answers both of its rows.
+
 ## Next milestones (not yet started)
 
 Roughly in priority order for reaching "actually playable," not commitments:
@@ -8353,6 +8519,15 @@ per-zone file that ships with the game; and the green wall patch was not
 unexplained, it was this port reading the `.zlu` family as a 64-rung block
 index instead of the +0..+3 rung bias the engine's own four palette
 pointers make it. Models turned out not to be lit at all.
+
+**M91 closed one of M10's.** That milestone's comment on
+`gamePausedForMenu` recorded that "no real in-game pause-menu entry point
+was ever found to disambiguate the two contexts", and settled for "the
+right softkey always means back to gameplay". `FUN_1002152c` is that entry
+point: the app's foreground handler raises `MainMenu` with the
+over-a-live-session flag whenever it returns to the front in gameplay
+mode. The shortcut stays -- it is still what gets a player out of a
+conversation -- but the menu it opens is now the right one.
 
 **M90 closed one of M61's.** That milestone traced the whole three-step
 transition conversation -- `LoadLevel` writes and prompts, `Go` reads back

@@ -563,14 +563,17 @@ void MenuExecutable::ActivateSelected() {
     if (m_SelectedItem < 1 || static_cast<size_t>(m_SelectedItem) > m_Rows.size()) return;
     MenuRow& row = m_Rows[static_cast<size_t>(m_SelectedItem - 1)];
     switch (row.kind) {
+        // M91: InvokeCallback, not TryInvoke -- see its declaration. A row
+        // callback naming a native (`AddMenuItem(3747, "Quit")`) is
+        // ordinary Simkin and the corpus is full of it.
         case RowKind::MenuItem:
-            TryInvoke(row.callback);
+            InvokeCallback(row.callback);
             break;
         case RowKind::ComboBox:
-            TryInvoke(static_cast<ComboBoxExecutable*>(row.widget.get())->onEnterCallback());
+            InvokeCallback(static_cast<ComboBoxExecutable*>(row.widget.get())->onEnterCallback());
             break;
         case RowKind::FloatingSprite:
-            TryInvoke(static_cast<FloatingSpriteExecutable*>(row.widget.get())->callback());
+            InvokeCallback(static_cast<FloatingSpriteExecutable*>(row.widget.get())->callback());
             break;
         default:
             break;
@@ -611,6 +614,22 @@ bool MenuExecutable::TryInvoke(const std::string& handlerName) {
     // unresolved native call. The return value says whether the script
     // actually defined it -- GoBack() below needs to know.
     return skScriptedExecutable::method(skString(handlerName.c_str()), args, ret, ctxt);
+}
+
+bool MenuExecutable::InvokeCallback(const std::string& callbackName) {
+    // See the declaration for why a row callback goes through more than
+    // TryInvoke() does. method() is this object's full dispatch, so
+    // calling it directly would also soft-fail-log an unresolved name --
+    // which is exactly what should happen here (a row wired to nothing
+    // is a bug worth seeing, and it is how the corpus's genuinely dead
+    // rows, `MenuQuit`/`MenuBack`/`ExitMenu`, announce themselves).
+    if (callbackName.empty()) return false;
+    skRValueArray args;
+    skRValue ret;
+    skExecutableContext ctxt(&m_Stack.interpreter());
+    skString name(callbackName.c_str());
+    if (skScriptedExecutable::method(name, args, ret, ctxt)) return true;
+    return method(name, args, ret, ctxt);
 }
 
 bool MenuExecutable::TryInvokeWithArg(const std::string& handlerName, const skRValue& arg) {
@@ -1052,9 +1071,37 @@ bool MenuExecutable::method(const skString& methodName, skRValueArray& args,
         returnValue = skRValue(m_Stack.GameAvailableForLoad(slot));
         return true;
     }
-    if (methodName == skString("ActuallySaveGame") && args.entries() == 1) {
-        m_Stack.ActuallySaveGame(args[0].intValue());
-        TryInvoke("DoneSave");  // no-ops if this menu doesn't define one
+    if (methodName == skString("ActuallySaveGame")) {
+        // M91: the argument is genuinely optional in the real binding
+        // (`if (argc != 0) slot = arg;` -- otherwise the slot SaveGame()
+        // already stored is used), and the port required it, so a bare
+        // `ActuallySaveGame()` soft-failed instead of writing.
+        int slot = args.entries() >= 1 ? args[0].intValue() : m_Stack.saveSlot();
+        m_Stack.SetSaveSlot(slot);
+        const bool ok = m_Stack.ActuallySaveGame(slot);
+        // M91: the real case 0x31 calls one of three script methods back
+        // depending on the writer's status word -- see
+        // MenuStack::ActuallySaveGame(). Both of these are optional hooks
+        // (savegamemenu.s and saveconfirm.s define them; mainmenu.s does
+        // not), so TryInvoke, not InvokeCallback.
+        TryInvoke(ok ? "DoneSave" : "SaveFailed");
+        return true;
+    }
+    // M91: menu bindings 0x2f/0x30, the pair that carries a chosen slot
+    // from one screen to the next through `engine+0x14a71`. `SaveGame(n)`
+    // stores it and opens **SaveConfirm** -- a plain
+    // `FUN_100779b8(..., "SaveConfirm", 0, 0)` in case 0x30 -- and
+    // saveconfirm.s's OnDisplay reads it straight back with GetSaveSlot()
+    // to decide between "overwrite?" and writing outright. No shipped
+    // script calls SaveGame(), which is why this never surfaced; the
+    // native bridge and the multiplayer path both can.
+    if (methodName == skString("GetSaveSlot") && args.entries() == 0) {
+        returnValue = skRValue(m_Stack.saveSlot());
+        return true;
+    }
+    if (methodName == skString("SaveGame") && args.entries() >= 1) {
+        m_Stack.SetSaveSlot(args[0].intValue());
+        m_Stack.ReopenMenu("SaveConfirm");
         return true;
     }
     if (methodName == skString("DeleteGame") && args.entries() == 1) {
@@ -1158,12 +1205,23 @@ bool MenuExecutable::method(const skString& methodName, skRValueArray& args,
         m_Stack.ShowCredits();
         return true;
     }
-    if (methodName == skString("GameActive") || methodName == skString("CheatsActivated") ||
-        methodName == skString("IsMultiplayer") || methodName == skString("IsMultiplayerClient") ||
-        methodName == skString("ArenaActive")) {
-        // No game session or multiplayer/cheat state exists yet at this
-        // milestone -- a fixed "off" answer is the correct behavior for a
-        // freshly booted main menu, not a soft-fail placeholder.
+    if (methodName == skString("GameActive") && args.entries() == 0) {
+        // M91: the real one, at last -- see MenuStack::gameActive().
+        returnValue = skRValue(m_Stack.gameActive());
+        return true;
+    }
+    if (methodName == skString("CanSaveGame") && args.entries() == 0) {
+        // M91: menu binding 0, and the whole case is `uVar3 = 1; goto
+        // LAB_1007dc88` -- a constant true. Transcribed rather than
+        // reasoned about: whatever it was meant to gate, the shipped
+        // binary never says no.
+        returnValue = skRValue(true);
+        return true;
+    }
+    if (methodName == skString("CheatsActivated") || methodName == skString("IsMultiplayer") ||
+        methodName == skString("IsMultiplayerClient") || methodName == skString("ArenaActive")) {
+        // No multiplayer or cheat state exists yet -- a fixed "off"
+        // answer is the correct behavior, not a soft-fail placeholder.
         returnValue = skRValue(false);
         return true;
     }

@@ -218,7 +218,15 @@ public:
     // slot == -1 means "is ANY slot available" (mainmenu.s/newgamemenu.s's
     // usage); slot in [0, kSaveSlotCount) checks that one specifically.
     bool GameAvailableForLoad(int slot) const;
-    void ActuallySaveGame(int slot);
+    // M91: returns whether the write actually landed -- the real
+    // ActuallySaveGame (menu binding 0x31) branches on FUN_10018e70's
+    // status word and calls one of three script methods back: 0 ->
+    // DoneSave(), 3 -> NotEnoughSpace(), 1 or 2 -> SaveFailed(). The port
+    // has no quota to run out of, so it distinguishes the two it can:
+    // wrote it, or couldn't.
+    bool ActuallySaveGame(int slot);
+    int saveSlot() const { return m_SaveSlot; }
+    void SetSaveSlot(int slot) { m_SaveSlot = slot; }
     void DeleteGame(int slot);
     void DeleteAllGames();
     std::string GetSavedTimeStr(int slot) const;
@@ -229,6 +237,34 @@ public:
 
     void RequestQuit() { m_QuitRequested = true; }
     bool quitRequested() const { return m_QuitRequested; }
+
+    // M91: `GameActive()` -- menu-class binding 0x5e, and one line of the
+    // real dispatcher: `engine + 0x6908 != 0`, the pointer to the loaded
+    // level. "A session exists", nothing subtler. It had been answering a
+    // flat `false` since M10, which is why the front end was the *only*
+    // main menu the port could show: mainmenu.s's OnDisplay is one long
+    // `if (GameActive())` and every branch it picks -- Return to Game
+    // (1965), Save Game (718), the "End Game" spelling of Quit (3495),
+    // suppressing New Game/Credits/Multiplayer -- is the in-game menu.
+    // loadgamemenu.s reads it too, to ask "abandon the current game?"
+    // before loading over a live session, and so does mainmenu.s's
+    // ConfirmQuitGame, which is what routes End Game into "save first?".
+    //
+    // Set by the host (main.cpp) rather than inferred from m_CurrentLevel,
+    // because that name is written by LoadGame() *before* the zone it
+    // names is loaded, and the answer must be about the live session.
+    void SetGameActive(bool active) { m_GameActive = active; }
+    bool gameActive() const { return m_GameActive; }
+
+    // M91: the player's live heading, in the engine's own `player+0xb6`
+    // units ([0, 65536) to the turn). x/y/z already live on the player's
+    // EntityPositionRef, which main.cpp mirrors the camera onto every
+    // tick; this is the fourth channel a save needs and the one nothing
+    // else had a home for. See ActuallySaveGame(), which writes all four
+    // into the record's Entity layer, and LoadGameFromSlot(), which arms
+    // them back through the SetCameraStart path.
+    void SetPlayerHeadingUnits(int units) { m_PlayerHeadingUnits = units; }
+    int playerHeadingUnits() const { return m_PlayerHeadingUnits; }
 
     // M54: `QuitToMenu()` -- GameEngine root binding index 0x33, the
     // *other* thing a real "Quit" row can mean. RequestQuit() above is
@@ -446,6 +482,13 @@ private:
     int m_PendingScreenMode = 0;
     bool m_QuitRequested = false;
     bool m_QuitToMenuRequested = false;  // M54: see quitToMenuRequested() above
+    bool m_GameActive = false;          // M91: see gameActive() above
+    int m_PlayerHeadingUnits = 0;       // M91: see playerHeadingUnits() above
+    // M91: `GetSaveSlot()` / `SaveGame(slot)` -- engine+0x14a71, one byte
+    // shared by the whole save chain. SaveGame() writes it and opens
+    // SaveConfirm; saveconfirm.s reads it straight back out with
+    // GetSaveSlot() and hands it to ActuallySaveGame().
+    int m_SaveSlot = 0;
     bool m_QuitAfterSave = false;        // M54: see quitAfterSave() above
     bool m_CreditsActive = false;
     std::vector<std::string> m_CreditsLines;

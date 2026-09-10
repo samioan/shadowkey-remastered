@@ -3241,12 +3241,23 @@ int main(int argc, char** argv) {
     // gameCamera stay alive so RightSelectionKey can resume gameplay
     // directly instead of falling through to charactermanager.s's own
     // OnRightSoftKey handler, which calls Quit()+OpenMainMenu() (correct
-    // for reaching it from a menu, wrong for reaching it mid-game -- no
-    // real in-game pause-menu entry point was ever found to disambiguate
-    // the two contexts, so this is a deliberate host-side simplification:
-    // RightSelectionKey always means "back to gameplay" here, even from a
-    // nested Inventory/Stats/QuestLog screen, rather than backing out one
-    // level at a time).
+    // for reaching it from a menu, wrong for reaching it mid-game). It is
+    // a deliberate host-side simplification: RightSelectionKey means
+    // "back to gameplay" here, even from a nested Inventory/Stats/
+    // QuestLog screen, rather than backing out one level at a time.
+    //
+    // M91: this flag turns out to be a real engine field, not an
+    // invention -- the menu manager's `+0x49`, written by
+    // `FUN_100779b8`'s third argument and meaning exactly "this screen is
+    // open over a live session". The app's own foreground handler
+    // (FUN_1002152c) raises `MainMenu` with it set when the phone comes
+    // back to the front mid-game, which is the in-game pause-menu entry
+    // point this comment used to say had never been found. See the Esc
+    // handler in the movement tick below.
+    //
+    // M90/M91: two things now stand ahead of the shortcut -- a screen
+    // whose own back handler is a *decision* (levelconfirm.s), and a
+    // visible popup, which owns the back key outright.
     bool gamePausedForMenu = false;
 
 #if SK_DEBUG_SUITE
@@ -3414,6 +3425,12 @@ int main(int argc, char** argv) {
             gameTileStamp.SetZone(nullptr);
             gameZone.reset();
             stack.SetCurrentLevelName(std::string());
+            // M91: `engine + 0x6908` goes null with the level, and
+            // GameActive() is exactly that pointer -- so mainmenu.s's
+            // OnDisplay comes back with the front end's rows (New Game,
+            // Credits, Multiplayer) rather than the in-game ones the
+            // player just left. See MenuStack::gameActive().
+            stack.SetGameActive(false);
             // Same reset the zone-load block does, for the same reason --
             // FUN_1002fca4 zeroes the script clock whenever the level goes.
             stack.gameClock().Reset();
@@ -3528,6 +3545,11 @@ int main(int argc, char** argv) {
                 // which `Entity::Init` copies onto every placement of it.
                 gameModelCollision.Load(scriptRoot, stack.requestedZone());
                 gameZone = std::move(zone);
+                // M91: the level pointer GameActive() *is* -- see
+                // MenuStack::gameActive(). Set here, where the level
+                // becomes real, and cleared with it in the QuitToMenu
+                // teardown above.
+                stack.SetGameActive(true);
 #if SK_DEBUG_SUITE
                 // SK_DEBUG_SUITE (M68)
                 sk_debug::Count("zone.loads");
@@ -4152,7 +4174,34 @@ int main(int argc, char** argv) {
                 gamePausedForMenu = true;
                 input.ClearPendingEdges();  // M90, see its comment
             } else if (input.ConsumeJustPressed(sk::ButtonSlot::RightSelectionKey)) {
+                // M91: **the in-game main menu.** This used to be a bare
+                // `inGame = false`, which dropped the player onto
+                // whatever menu object happened to still be current --
+                // in practice the front-end MainMenu, with its front-end
+                // rows, because nothing had re-run its OnDisplay since
+                // boot. So the pause menu offered New Game and Credits
+                // and had no Save Game at all.
+                //
+                // The real entry point is `FUN_100779b8(app->0x20,
+                // "MainMenu", 1, 0)` -- the app's own foreground handler
+                // (FUN_1002152c) raises exactly that when it comes back
+                // to the front with the screen mode still on gameplay.
+                // The third argument is the flag the menu manager keeps
+                // at `+0x49`, "this screen is open over a live session",
+                // and it is this port's gamePausedForMenu. mainmenu.s
+                // does the rest by itself: its OnDisplay is one long
+                // `if (GameActive())`, so with M91's real GameActive the
+                // same script builds Return to Game / Load / Save Game /
+                // Delete / Options / End Game instead.
+                //
+                // OpenMenu (not ReopenMenu): Init() is where mainmenu.s
+                // CreateMenu()s its nineteen children, and re-running it
+                // would rebuild all of them. OnDisplay is the per-visit
+                // half, and OpenMenu runs exactly that.
+                stack.OpenMenu("MainMenu");
                 inGame = false;
+                gamePausedForMenu = true;
+                input.ClearPendingEdges();  // M90, see its comment
             } else {
                 constexpr float kMoveSpeed = 40.0f;    // world units/tick (256 units/tile)
                 constexpr float kTurnSpeed = 0.06f;    // radians/tick
@@ -4407,6 +4456,23 @@ int main(int argc, char** argv) {
                         gameVelZ = 0.0f;
                         onGround = true;
                     }
+                    // M91: and the *other* direction. Every placed entity
+                    // gets its EntityPositionRef seeded at zone load so a
+                    // script's own `GetPositionX()` reads where the thing
+                    // is (see SetWorldPosition's comment) -- the player
+                    // never did, so `GetPlayer().GetPositionX()` answered
+                    // 0 and a save recorded the origin. The camera *is*
+                    // the player, so mirror it here, once the tick's
+                    // movement and any teleport have both settled. Ground
+                    // level, not eye level, because that is the height a
+                    // scripted `SetPosition` writes.
+                    //
+                    // SetWorldPosition does not raise the dirty flag, so
+                    // this cannot feed back into applyTeleport above.
+                    stack.player().SetWorldPosition(
+                        static_cast<int>(gameCamera.x), static_cast<int>(gameCamera.y),
+                        static_cast<int>(gameCamera.z - sk::kEyeHeightOffset));
+                    stack.SetPlayerHeadingUnits(CameraHeadingUnits(gameCamera.yaw));
                 }
 
                 // M38: the real trap proximity check, once the player's
@@ -6976,7 +7042,22 @@ int main(int argc, char** argv) {
             }
         }
 
-        if (gamePausedForMenu && input.ConsumeJustPressed(sk::ButtonSlot::RightSelectionKey)) {
+        // M91: a *visible popup* owns the back key outright, so this
+        // shortcut has to stand down while one is up. The real popups
+        // carry their own SetBack() target -- mainmenu.s's End Game
+        // confirmation is `myPopup.SetBack("CancelQuitGame")`,
+        // savegamemenu.s's overwrite prompt is
+        // `myPopup.SetBack("CancelSaveGame")` -- and lifting the player
+        // straight back into the 3D view instead would both skip that
+        // handler and leave the popup latched visible on the cached
+        // screen, so the *next* visit came up with a confirmation dialog
+        // over it and no way to answer. That is the "menus collide with
+        // popups" shape exactly. The regular menu tick below already
+        // routes the key to PopupMenuExecutable::GoBack().
+        const bool popupOwnsBackKey =
+            stack.currentMenu() != nullptr && stack.currentMenu()->activePopup() != nullptr;
+        if (gamePausedForMenu && !popupOwnsBackKey &&
+            input.ConsumeJustPressed(sk::ButtonSlot::RightSelectionKey)) {
             // See gamePausedForMenu's declaration comment -- resumes
             // gameplay directly, bypassing whatever menu screen
             // (charactermanager.s or a nested Inventory/Stats/QuestLog)

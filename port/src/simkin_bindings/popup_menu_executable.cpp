@@ -76,7 +76,17 @@ bool PopupMenuExecutable::method(const skString& methodName, skRValueArray& args
         return true;
     }
     if (methodName == skString("SetSelectedItem") && args.entries() == 1) {
-        m_SelectedItem = args[0].intValue();
+        // M91: 0-based on the wire, 1-based inside -- see selectedItem().
+        m_SelectedItem = args[0].intValue() + 1;
+        return true;
+    }
+    if (methodName == skString("GetSelectedItem") && args.entries() == 0) {
+        // M91: popup binding 0xc, the other half of the pair. Guarded the
+        // same way the real case is (`-1 < idx && idx < count`), which
+        // answers -1 for a popup that has never been pointed anywhere.
+        int index = m_SelectedItem - 1;
+        returnValue = skRValue(index >= 0 && static_cast<size_t>(index) < m_Items.size() ? index
+                                                                                        : -1);
         return true;
     }
     if (methodName == skString("IsVisible") && args.entries() == 0) {
@@ -112,13 +122,17 @@ void PopupMenuExecutable::MoveSelection(int delta) {
         }
     }
     if (!found) {
-        // Real scripts genuinely start some popups on a non-selectable
-        // item -- deletesavedgames.s's confirm popups do
-        // `SetSelectable(0,false)` then `SetSelectedItem(1)`, i.e. they
-        // point at the prompt line. Land on the *first* selectable choice
-        // when the player then presses a direction, instead of applying
-        // `delta` from an assumed position 0 and skipping it (which, on
-        // exactly those popups, skipped "Cancel" straight onto "Delete").
+        // A popup that has never been pointed anywhere (no
+        // SetSelectedItem, or one aimed at a non-selectable row) lands on
+        // its *first* selectable choice when the player presses a
+        // direction, rather than applying `delta` from an assumed
+        // position 0 and skipping straight past it.
+        //
+        // M91 note: this used to be the load-bearing correction for every
+        // confirm popup in the game, on the belief that the scripts
+        // deliberately pointed at their own prompt line. They do not --
+        // SetSelectedItem is 0-based (see selectedItem()) -- so this is
+        // back to being the guard it reads as.
         m_SelectedItem = static_cast<int>(selectableIndices[0]) + 1;
         return;
     }
@@ -130,9 +144,12 @@ void PopupMenuExecutable::MoveSelection(int delta) {
 void PopupMenuExecutable::ActivateSelected() {
     if (m_SelectedItem < 1 || static_cast<size_t>(m_SelectedItem) > m_Items.size()) return;
     const Item& item = m_Items[static_cast<size_t>(m_SelectedItem - 1)];
-    m_Owner.TryInvoke(item.callback);
+    // M91: a popup row is a row -- InvokeCallback, not TryInvoke. See
+    // MenuExecutable::InvokeCallback(). Every one-button popup in the
+    // corpus ("Okay" over a message) is `AddItem(id, "Quit")`.
+    m_Owner.InvokeCallback(item.callback);
 }
 
-void PopupMenuExecutable::GoBack() { m_Owner.TryInvoke(m_BackCallback); }
+void PopupMenuExecutable::GoBack() { m_Owner.InvokeCallback(m_BackCallback); }
 
 }  // namespace sk_bindings
