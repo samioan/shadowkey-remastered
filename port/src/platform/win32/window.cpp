@@ -3,6 +3,8 @@
 #include <cstdint>
 #include <utility>
 
+#include "graphics/viewport.h"
+
 #include <windows.h>
 
 // <windows.h> #defines DrawText to DrawTextW, which silently renames
@@ -381,10 +383,33 @@ void Window::Present(const Backbuffer& backbuffer) {
         if (impl_->backDc) target = impl_->backDc;
     }
 
+    // Post-M91 fix: the frame keeps the device's 176x208 aspect at any
+    // window shape, centred, and whatever client area is left over is
+    // painted black -- see graphics/viewport.h for why the engine cannot
+    // simply be stretched to fit. Repainting the (constant, black) bars
+    // every present rather than only on a size change is invisible and
+    // costs two FillRects; it also means a freshly exposed strip after a
+    // resize is covered by the very next tick, with no WM_PAINT handler
+    // and no erase-background of its own (WM_ERASEBKGND is suppressed).
+    const Viewport view =
+        FitPreservingAspect(destW, destH, Backbuffer::kWidth, Backbuffer::kHeight);
+    if (view.x > 0 || view.y > 0) {
+        HBRUSH black = static_cast<HBRUSH>(GetStockObject(BLACK_BRUSH));
+        RECT bars[4] = {
+            {0, 0, view.x, destH},                        // left
+            {view.x + view.width, 0, destW, destH},       // right
+            {view.x, 0, view.x + view.width, view.y},     // top
+            {view.x, view.y + view.height, view.x + view.width, destH},  // bottom
+        };
+        for (const RECT& bar : bars) {
+            if (bar.right > bar.left && bar.bottom > bar.top) ::FillRect(target, &bar, black);
+        }
+    }
+
     SetStretchBltMode(target, COLORONCOLOR);
     StretchDIBits(
-        target, 0, 0, destW, destH, 0, 0, Backbuffer::kWidth, Backbuffer::kHeight,
-        backbuffer.Data(), reinterpret_cast<const BITMAPINFO*>(&impl_->bmi),
+        target, view.x, view.y, view.width, view.height, 0, 0, Backbuffer::kWidth,
+        Backbuffer::kHeight, backbuffer.Data(), reinterpret_cast<const BITMAPINFO*>(&impl_->bmi),
         DIB_RGB_COLORS, SRCCOPY);
 
     // SK_DEBUG_SUITE (M68): the debug overlay, drawn over the finished

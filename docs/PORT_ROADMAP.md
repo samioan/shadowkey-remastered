@@ -8436,6 +8436,52 @@ soft-fails 39 -> 39, all 14 tracked `.ppm` renders byte-identical,
       placement `where` printed before the save. And in azra, the "leave
       town" prompt now answers both of its rows.
 
+- [x] **Post-M91 -- the window keeps the device's aspect ratio.**
+      Reported: resizing or maximising `shadowkey_port.exe` stretched the
+      picture. `Window::Present` had handed `StretchDIBits` the entire
+      client rect since M0, so every window shape the user dragged out
+      rescaled the two axes independently -- a maximised 16:9 window drew
+      the 176x208 screen more than three times too wide.
+
+      Nothing in the engine can absorb a different aspect: the HUD
+      sprites, every menu row and the 3D projection's 90-degree isotropic
+      frustum (M71's focal 104px) are all authored against those exact
+      pixels. So the frame is scaled by one factor on both axes, centred
+      in the client area, and the leftover margin is painted black --
+      pillarbox on a wide window, letterbox on a tall one.
+
+      The arithmetic is `sk::FitPreservingAspect` in
+      `port/src/graphics/viewport.h`: a free function over plain ints, no
+      Windows types, deciding the binding axis by cross-multiply so no
+      rounding happens before the comparison. `Present` asks it for a
+      destination rectangle, fills the (constant, black) bars with one
+      `FillRect` each, and blits into the rectangle instead of the client
+      rect. Repainting the bars every present rather than on a size
+      change is invisible, costs two fills, and is what covers a strip
+      freshly exposed by a resize -- the window has no `WM_PAINT` handler
+      and `WM_ERASEBKGND` is suppressed (the post-M68 flicker fix).
+
+      The debug overlay still draws at full client resolution and is
+      deliberately left there: it is anchored to the window, not to the
+      game frame, and drawing it over the bars is the point.
+
+    - **Test**: `port/src/tests/aspect_viewport_smoke.cpp`, 14 checks. The
+      default 528x624 window and a 1:1 window still fill their client
+      area exactly (the fix cost the port nothing at its default size);
+      1920x1080 pillarboxes to 913 wide at x=503; 528x1000 letterboxes to
+      624 tall at y=188; the aspect holds within a pixel across six more
+      shapes including 3440x1440 and 300x1200, always inside the client
+      rect; and a 0x0 (minimized) or negative client area returns an
+      empty viewport rather than a bad blit.
+    - **Live**: 1384x661 client -> the frame sits 413..972 with black each
+      side; 484x861 client -> black above and below. Both captured from
+      the running exe.
+
+      **A widescreen hack is explicitly not this.** Filling a 16:9 window
+      with *more world* means a wider frustum and a HUD that re-lays out,
+      which is renderer work (M71's projection) rather than presentation
+      work; deferred by decision.
+
 ## Next milestones (not yet started)
 
 Roughly in priority order for reaching "actually playable," not commitments:

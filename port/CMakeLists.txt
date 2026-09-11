@@ -657,3 +657,9 @@ target_link_libraries(level_transition_smoke PRIVATE sk_bindings)
 # M91 milestone smoke test -- see src/tests/m91_ingame_menu_smoke.cpp.
 add_executable(ingame_menu_smoke src/tests/m91_ingame_menu_smoke.cpp)
 target_link_libraries(ingame_menu_smoke PRIVATE sk_bindings)
+
+# Post-M91 fix: the presentation aspect ratio -- see
+# src/tests/aspect_viewport_smoke.cpp. Header-only arithmetic, so no
+# libraries.
+add_executable(aspect_viewport_smoke src/tests/aspect_viewport_smoke.cpp)
+target_include_directories(aspect_viewport_smoke PRIVATE src)
