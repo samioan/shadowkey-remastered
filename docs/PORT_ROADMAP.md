@@ -8509,7 +8509,9 @@ constants the port never read. The lesson M67 wrote down ("play the game")
 generalises: when the report is *visual*, get the two images side by side
 first and let the difference tell you which decompiled function to re-read.
 
-**The bullet list below is empty.** Every item that was in it -- merchants,
+**The bullet list below was empty from M70 until the post-M91 census
+refilled it** (see "What is actually left", below). Every item that was in
+it -- merchants,
 the store screen, `SetCameraStart`, `Level.CreateEffect`, the `levelup.s`
 cluster, the `TestX` rolls, the `ZoneRenderer::Render` crash, and "what a
 `.zsk` actually is" -- is done (M59-M70). Both of the things M71 left behind
@@ -8551,6 +8553,166 @@ light/fog section.
 Re-run
 `shadowkey/ghidra/scripts/analyze_port_native_coverage.py` to repopulate it
 from real call-site counts rather than adding guesses here.
+
+### What is actually left: the post-M91 census (2026-09-11)
+
+Done as asked rather than guessed at, and it took **three** measures,
+because no one of them can see the whole picture. Where they disagree is
+where the work is.
+
+**1. `analyze_port_native_coverage.py`, the explicit-receiver measure.**
+Unchanged in shape since M56:
+
+| receiver | call sites | handled | unhandled names |
+|---|---|---|---|
+| `GetPlayer()` | 2207 | 2111 (**96%**) | 24 |
+| `Level` | 1318 | 1302 (**99%**) | 4 |
+| `GetOwner()` | 195 | 195 (**100%**) | 0 |
+| `GetOpener()` | 124 | 98 (79%) | 13 |
+
+Two of those percentages are better than they read. Every unhandled name
+was checked against the real 702-entry binding table this time, and
+**eleven of the 41 are not natives at all** -- `Level`'s `AddCrystal` and
+`saved_Dawn`, and nine of `GetOpener()`'s thirteen (`MagicDamage`,
+`GetLoot`, `OpenChest`, `LockPicked`, `UseKey`, `LootChest`, `Locket`,
+`GetMana`, `GetAxe`) are handler names declared in the *called script's
+own* `.s` file, i.e. SimKin-to-SimKin dispatch, exactly the caveat the
+tool's own docstring carries. `Level` is at 100% of what is real, minus
+multiplayer. Do this check before treating any line of that tool's output
+as work.
+
+**2. `analyze_port_native_gaps.py` (NEW), the same question from the
+binary's side.** The blind spot the roadmap has warned about since M60 --
+a menu script's *bare* calls are invisible to measure 1 -- does not exist
+if the question is asked against the binding table instead of against the
+call syntax:
+
+> **648 unique registered native names. The port implements 408 (63%).
+> Of the 240 with no handler anywhere, a shipped script ever calls only
+> 55.**
+
+The other **185 are dead in the shipped game too** -- the studio's own
+FPS-engine inheritance, registered and never called (`MountFlak88`,
+`SetNationality`, `MPToggleKillcam`, `SetClipSize`, `ShotsIgnoreWalls`,
+`NextNationality`, ...). They cost nothing and imply no work; the tool
+lists them separately for exactly that reason. So the real remaining
+surface is **55 names**, and they bucket by owning class like this:
+
+| sites | class | names |
+|---|---|---|
+| 94 | Object/Entity base (`0x14d08`) | `ShowEntity` (40), `MirrorMethod` (33), `GetID` (9), `RunScript` (7), `SetModel`, `SetRotationTurn` |
+| 46 | Item (`0x14d74`) | **`SetCanDrop` (39)**, `MoveToEmptyQueue`, `CastAzraWrath`, `MoveToLeftQueue`, `GetMarketValue`, `DisplayPopup` |
+| 40 | GameEngine root (`0x14cf0`) | ~25 multiplayer/Bluetooth, plus `SetLanguage` (6), `ConfigKeysMenu` (3), `ConfigKeysDefault`, `SaveConfig` |
+| 35 | GameState (`0x14dbc`) | `DropGold` (9), `CanDisarmTrap` (9), `VisitStore` (5), `IsMenuActive` (3), `SetGhost`/`IsGhost`, `SetPositionMirrorAll`, `SetPlayerClassFlag`, `EnableCoords`, `CanAvoidTrap` |
+| 19 | trap/magic-damage mixin (`0x14e10`) | `SetMagicDamage` (6), `SetDormant` (6), `SetSpellLevel` (4), `DoMagicDamage` (3) |
+| 9 | Character stats (`0x14db0`) | `StatModXP` (7), `SetMaxMagicka`, `ModHealthBonus` |
+| 6 | Actor (`0x14d68`) | `SetDead`, `GetInvulnerable`, `WalkTo`, `AddInventoryItem` |
+| 4 | menu/popup | `SetFocus` (2), `GetMessagePopup`, `DelayOnEnter` |
+
+None of these needs new RE to *find*: every one has a known trie, index
+and dispatcher case in `SIMKIN_NATIVE_API.md`, so the work is reading a
+case and writing a handler.
+
+**3. The soft-fail log, which is the only measure that sees a name
+implemented on the wrong class.** Both tools above are
+receiver-agnostic, so a native this port handles on Monster but not on
+Door counts as implemented by both -- the M62 trap, generalised. The full
+smoke suite (82 executables, 81 pass; `render_at_smoke` is the
+argument-taking render tool, not a test) produces **112 soft-fail lines
+over 23 distinct receiver+method pairs**, and they are three different
+things:
+
+- **5 are correct and should stay.** `Menu.MenuQuit`,
+  `Menu.UpdateTextItems`, `Menu.IsRightQueue`, `Monster.SetMagicResistable`
+  and `Item.HitTarget` are not in the 702-entry table at all. They are
+  dead rows in the shipped game, and the soft-fail line is how this port
+  says so -- same story as M91's `MenuBack`/`ExitMenu`.
+- **13 are measure 2's list showing up at runtime**, led by
+  `Item.SetCanDrop` (10 lines) and `Item.SetDormant` (9).
+- **5 are the cross-receiver hole, and only this measure can see them**:
+  `Door.SetName` (23 lines -- `SetName` exists on Item and Monster),
+  `Monster.SetPassable` (12 -- exists on Door), `Item.PlaySound` (7 --
+  exists on Monster and Player), `Item.Init`, `Level.IsMultiplayerClient`.
+  The first three are `0x14d08` Object/Entity-base bindings, which every
+  entity in the game answers; splitting them per-class is the defect, not
+  the absence of an implementation.
+
+**A real play session hits almost none of it.** Two driven sessions
+through ghstpass -- the opening vignette, walking, the character manager
+and all four of its pages, the map, both hand queues, use and attack, and
+the in-game main menu -- produced **one** soft-fail line between them,
+`Item: SetCanDrop(false)`. The suite is the pessimistic measure because it
+deliberately drives screens and scripts a player may never reach.
+
+### The map overlay does not own the back key (found 2026-09-11)
+
+Not a native gap -- a port-side regression introduced by M91, found while
+driving the census, and the same shape as the "menus collide" report M91
+answered.
+
+M57 made the map an **overlay**: `FUN_1001ee50` is a bare toggle of
+`player+0x3a4`, the game keeps running underneath it, and nothing in the
+engine ever clears that byte on a softkey (scanned: the only other
+touches are the two level-init clears and the two renderer reads). This
+port models it the same way, as `gameMapOpen`.
+
+M91 then gave Esc-in-gameplay to `stack.OpenMenu("MainMenu")`. The map
+overlay does not intercept the key, so Esc falls straight through to that
+branch: **the map is open, Esc raises the main menu over it, and the flag
+is still set** -- so Esc again resumes gameplay with the map still up, and
+it reads from play as Esc toggling map <-> main menu with no way back to
+the 3D view. `M` does still close it, so it is not a hard lock, but a
+player who reaches for the back key will never find that out.
+
+The fix belongs where M91 put the popup's: a visible overlay owns the back
+key. `main.cpp` already stands the resume shortcut down while
+`currentMenu()->activePopup()` is up; `gameMapOpen` needs the same
+treatment on the other side of the pause, closing the map instead of
+raising the menu.
+
+### The list, then
+
+Ranked by call sites and by whether a player would notice, not by
+difficulty:
+
+- [ ] **The `0x14d08` Object/Entity base, on every receiver that inherits
+      it.** Two halves, and both are one milestone: the six unimplemented
+      names (`ShowEntity` 40 sites, `MirrorMethod` 33, `GetID` 9,
+      `RunScript` 7, `SetModel`, `SetRotationTurn`) and the three that
+      exist but only on some classes (`SetName`, `SetPassable`,
+      `PlaySound` -- 42 soft-fail lines between them). `ShowEntity` is the
+      one with visible consequences: scripted set-pieces still have props
+      standing where the script hid them.
+- [ ] **`Item.SetCanDrop`**, 39 call sites and the only thing a real play
+      session soft-fails on. Quest items can currently be dropped.
+- [ ] **The map overlay and the back key** (above). Small, and it is a
+      regression, so it should go first if anything here is played before
+      it is fixed.
+- [ ] **The trap/magic-damage mixin `0x14e10`** -- `SetMagicDamage`,
+      `SetDormant`, `SetSpellLevel`, `DoMagicDamage`, 19 sites, all of
+      them the trapped chests in delfhide and the magic doors. The chests
+      currently open without ever hurting anyone.
+- [ ] **GameState odds and ends** (35 sites): `DropGold` (the drop-gold
+      menu does nothing), `CanDisarmTrap`/`CanAvoidTrap` (the rolls the
+      trap chain above asks for), `VisitStore`, `IsMenuActive`.
+- [ ] **`StatModXP`** (7 sites) -- the conversations that award experience
+      award none.
+- [ ] **Options that don't apply**: `SetLanguage` (6), `ConfigKeysMenu`
+      (3), `ConfigKeysDefault`, `SaveConfig`. The screens exist and build
+      their rows; the rows land on nothing.
+- **Explicitly not planned: multiplayer and Bluetooth** (~25 of the 55).
+  `JoinGame`, `MPPreHost`, `GetBluetoothName`, `RejectClient` and the rest
+  need an N-Gage Bluetooth session this port has no counterpart for, and
+  `IsMultiplayer()`/`IsMultiplayerClient()` already answer false
+  everywhere (M91), which is what routes every script down its
+  single-player branch. Listed so nobody counts them as a gap twice.
+
+Re-run both tools rather than trusting this list to stay current:
+
+```
+python shadowkey/ghidra/scripts/analyze_port_native_coverage.py .
+python shadowkey/ghidra/scripts/analyze_port_native_gaps.py .
+```
 
 
 ## Verification approach

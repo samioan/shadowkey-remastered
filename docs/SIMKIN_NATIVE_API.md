@@ -1313,3 +1313,12 @@ any of them are confirmed).
   described above; writes `shadowkey/simkin_native_bindings.json`.
 - `analyze_port_native_coverage.py` — M56's per-receiver port
   coverage report described above. Plain Python, no Ghidra.
+- `analyze_port_native_gaps.py` — the same question asked from *this*
+  table's side instead of from the call syntax: of the 648 registered
+  names, which has the port no handler for, and does any shipped script
+  call it? Immune to the bare-call blind spot the coverage tool has, and
+  it separates the ~185 names that are dead in the shipped game too (the
+  studio's FPS-engine inheritance) from the ones that are really
+  missing. Post-M91 numbers and the resulting work list are in
+  [`PORT_ROADMAP.md`](PORT_ROADMAP.md)'s "What is actually left". Plain
+  Python, no Ghidra.
