@@ -23,6 +23,9 @@
 
 namespace sk_bindings {
 
+sk::SoundArchive* MonsterExecutable::entitySounds() const { return m_Stack.sounds(); }
+sk::AudioEngine* MonsterExecutable::entityAudio() const { return m_Stack.audio(); }
+
 MonsterExecutable::MonsterExecutable(const skString& filename, skExecutableContext& ctxt,
                                       const sk::StringTable* strings, PlayerExecutable& player,
                                       MenuStack& stack)
@@ -31,6 +34,9 @@ MonsterExecutable::MonsterExecutable(const skString& filename, skExecutableConte
       m_Player(player),
       m_Stack(stack),
       m_Interpreter(ctxt.getInterpreter()) {
+    // M92: RunScript() swaps this object's script file out from under it;
+    // the base needs the skTreeNodeObject half of `this` to do that.
+    AttachEntityScript(this);
     // M59: every creature carries a shop (monster+0x330); only the ones
     // whose script calls AddProduct ever fill it. See store.h.
     m_Store.SetDatabase(&m_Stack.products());
@@ -40,8 +46,8 @@ MonsterExecutable::MonsterExecutable(const skString& filename, skExecutableConte
 MonsterExecutable::~MonsterExecutable() = default;
 
 std::string MonsterExecutable::name() const {
-    if (m_Strings && m_NameId >= 0) return m_Strings->Get(m_NameId);
-    return m_Id.empty() ? std::string("?") : m_Id;
+    if (m_Strings && entityNameId() >= 0) return m_Strings->Get(entityNameId());
+    return entityId().empty() ? std::string("?") : entityId();
 }
 
 void MonsterExecutable::PlayNoise(int soundId) {
@@ -472,31 +478,6 @@ bool MonsterExecutable::TickLifespan(int deltaUnits) {
 
 bool MonsterExecutable::method(const skString& methodName, skRValueArray& args,
                                 skRValue& returnValue, skExecutableContext& context) {
-    if (methodName == skString("PlaySound") && args.entries() >= 1) {
-        // M27: a real monster script's own bare self-call (e.g. monsters/
-        // umbra_keth.s's `PlaySound(83)`) -- same real per-zone-manifest
-        // slot-index convention PlayerExecutable::PlaySound() documents in
-        // full (assets/sound_archive.h).
-        // M51: the real dispatcher is
-        // `PlaySound(id, volume = 100, directional = false, repeats = 1)`
-        // -- FUN_10061a60 case 0x25 builds three optional skRValues with
-        // exactly those defaults and hands them to FUN_1001b198. The
-        // corpus uses one argument 120 times and all four exactly once
-        // (twilite/steamsound.s's `PlaySound(65, 75, 1, 255)`: a quieter,
-        // directional, endlessly repeating steam hiss), which is what
-        // pinned the meaning of each.
-        //
-        // `directional` is not panning -- see sound_mixing.h; it asks for
-        // a small (<= 12.5%) cut based on the *emitter's* facing, and is
-        // applied by the caller that knows the geometry, not here.
-        if (m_Stack.sounds() && m_Stack.audio()) {
-            const sk::Sound* sound = m_Stack.sounds()->GetSound(args[0].intValue());
-            const int volume = args.entries() >= 2 ? args[1].intValue() : sk::kDefaultSoundVolume;
-            const int repeats = args.entries() >= 4 ? args[3].intValue() : sk::kDefaultSoundRepeats;
-            if (sound) m_Stack.audio()->PlaySfx(*sound, volume, repeats);
-        }
-        return true;
-    }
     // M76: Monster(AI) bindings 4 and 3 (dispatcher cases 4 and 3),
     // `monster+0x306` and `monster+0x307`. Both were soft-failing; both are
     // multiplayer-only in effect. See on_detect.h.
@@ -638,14 +619,6 @@ bool MonsterExecutable::method(const skString& methodName, skRValueArray& args,
     }
     if (methodName == skString("GetCurrentAIPackage")) {
         returnValue = skRValue(m_AiPackage);
-        return true;
-    }
-    if (methodName == skString("SetName") && args.entries() == 1) {
-        m_NameId = args[0].intValue();
-        return true;
-    }
-    if (methodName == skString("SetID") && args.entries() == 1) {
-        m_Id = ToStdString(args[0].str());
         return true;
     }
     if (methodName == skString("SetExpWorth") && args.entries() == 1) {
@@ -1096,14 +1069,19 @@ bool MonsterExecutable::method(const skString& methodName, skRValueArray& args,
     // DoorOpened()/DestroyObjectMirror() pattern -- no multiplayer here),
     // and azra_rat.s's own OnKilled uses it to move Trothgar.
     //
-    // M62: this handler moved to the shared EntityPositionRef -- the engine
+    // M62: this handler moved to the shared EntityBaseRef -- the engine
     // has one implementation, on the Object/Entity base class every placed
-    // thing derives from, and so does this port now. Two real corrections
+    // thing derives from, and so does this port now. M92 moved
+    // `PlaySound`, `SetName` and `SetID` after it, and brought
+    // `SetPassable` (12 soft-fail lines on a monster: `dstar_w.s` and
+    // `fearfrst.s` hide an NPC and make it walk-through in the same
+    // breath), `ShowEntity`, `GetID`, `SetRotationTurn`, `SetModel`,
+    // `RunScript` and `MirrorMethod` with it. Two real corrections
     // came with the move: `z` is optional (the real case branches on
     // `argc == 3` and passes 0 otherwise, so this used to reject the
     // two-argument form outright), and the three matching getters
     // `GetPositionX/Y/Z` exist and were missing here.
-    if (HandleEntityPositionNative(methodName, args, returnValue)) return true;
+    if (HandleEntityBaseNative(methodName, args, returnValue)) return true;
     if (methodName == skString("DestroyObjectMirror")) {
         // M23: see destroyed()'s comment -- azra.s's own
         // `M1.DestroyObjectMirror(M1)` (self-passed, network/replication

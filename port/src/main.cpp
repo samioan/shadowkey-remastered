@@ -43,6 +43,7 @@
 #include "simkin_bindings/combat.h"
 #include "simkin_bindings/combo_box_executable.h"
 #include "simkin_bindings/door_executable.h"
+#include "simkin_bindings/entity_base_ref.h"
 #include "simkin_bindings/floating_sprite_executable.h"
 #include "simkin_bindings/game_constants.h"
 #include "simkin_bindings/item_button_executable.h"
@@ -962,8 +963,16 @@ void LiveDebugHost::Entities(std::vector<sk_debug::EntityRow>& out) const {
             if (m.script) {
                 row.health = m.script->currentHealth();
                 row.maxHealth = m.script->maxHealth();
+                // Not outOfWorld(): a hidden creature is still alive, and
+                // printing a reversible state as DEAD would read as a bug.
+                // `state` below is where hidden shows up.
                 row.alive = m.script->alive() && !m.script->destroyed();
-                row.state = m.script->destroyed() ? "destroyed"
+                // M92: `destroyed` and `hidden` reach the same place by
+                // different routes -- see MonsterExecutable::outOfWorld().
+                // The row keeps them apart because that is the difference
+                // a person reading it wants.
+                row.state = m.script->destroyed()     ? "destroyed"
+                            : m.script->entityHidden() ? "hidden"
                             : m.aiState == MonsterInstance::AiState::Chasing ? "chasing"
                             : m.aiState == MonsterInstance::AiState::Attacking ? "attacking"
                                                                                 : "idle";
@@ -1716,11 +1725,8 @@ bool LiveDebugHost::Spawn(const std::string& what, int count, float distance,
             instance.z = zone()->FloorHeightAt(instance.x, instance.y);
             monster->SetWorldPosition(static_cast<int>(instance.x), static_cast<int>(instance.y),
                                        static_cast<int>(instance.z));
-            skRValueArray args;
-            args.append(skRValue(0));
-            skRValue result;
             skExecutableContext callContext(m_Refs.interpreter);
-            monster->method(skString("Init"), args, result, callContext);
+            sk_bindings::RunEntityInit(*monster, m_Refs.stack->scriptRoot(), callContext);
             instance.placementYaw = m_Refs.camera->yaw + 3.14159265f;  // looking back at us
             instance.facingYaw = instance.placementYaw;
             instance.modelArchiveIndex = -1;  // no entities.txt row -> no model
@@ -1773,11 +1779,8 @@ bool LiveDebugHost::Give(const std::string& what, int count, std::string& messag
             try {
                 item = std::make_unique<sk_bindings::ItemExecutable>(skString(path.c_str()),
                                                                      loadContext, *m_Refs.stack);
-                skRValueArray args;
-                args.append(skRValue(0));
-                skRValue result;
                 skExecutableContext callContext(m_Refs.interpreter);
-                item->method(skString("Init"), args, result, callContext);
+                sk_bindings::RunEntityInit(*item, m_Refs.stack->scriptRoot(), callContext);
             } catch (skParseException& e) {
                 message = std::string("parse error in ") + path + ": " + e.toString().ptr();
                 return false;
@@ -1837,7 +1840,7 @@ bool LiveDebugHost::KillAll(const std::string& filter, std::string& message) {
     }
     int killed = 0;
     for (MonsterInstance& m : *m_Refs.monsters) {
-        if (!m.script || !m.script->alive() || m.script->destroyed()) continue;
+        if (!m.script || !m.script->alive() || m.script->outOfWorld()) continue;
         if (!DebugContains(m.script->name(), filter)) continue;
         // Through ApplyDamage, not by zeroing health: death has to run the
         // real path (loot drop, kill counters, zone triggers), because those
@@ -3792,11 +3795,16 @@ int main(int argc, char** argv) {
                                 door->AttachTileStamp(&gameTileStamp, dc.halfExtentX,
                                                        dc.halfExtentY, e.yawRaw);
                             }
-                            skRValueArray args;
-                            args.append(skRValue(0));  // placeholder for Init's "(s)" parameter
-                            skRValue ret;
+                            // M92: and its `.ent` placement name, which is
+                            // what `GetID()` answers. Before Init() for the
+                            // same reason the position is -- and
+                            // `lakvan/sdoor_trapa.s` is one script shared by
+                            // four placements that tells them apart with
+                            // `if (GetID() = "11s")` in a handler Init()
+                            // can reach.
+                            door->SetEntityId(e.name);
                             skExecutableContext callCtxt(&interpreter);
-                            door->method(skString("Init"), args, ret, callCtxt);
+                            sk_bindings::RunEntityInit(*door, scriptRoot, callCtxt);
                             DoorInstance inst;
                             inst.placementYaw = PlacementYawRadians(e.yawRaw);
                             inst.rotA = PlacementRotRadians(e.rotARaw);
@@ -3846,11 +3854,11 @@ int main(int argc, char** argv) {
                             // list -- so a script whose Init() reads
                             // GetPositionX/Y/Z sees where it actually is.
                             item->SetWorldPosition(e.x, e.y, e.z);
-                            skRValueArray args;
-                            args.append(skRValue(0));  // placeholder for Init's "(s)" parameter
-                            skRValue ret;
+                            // M92: the placement name GetID() answers --
+                            // see the door branch above.
+                            item->SetEntityId(e.name);
                             skExecutableContext callCtxt(&interpreter);
-                            item->method(skString("Init"), args, ret, callCtxt);
+                            sk_bindings::RunEntityInit(*item, scriptRoot, callCtxt);
                             PickupInstance inst;
                             inst.placementYaw = PlacementYawRadians(e.yawRaw);
                             inst.rotA = PlacementRotRadians(e.rotARaw);
@@ -3901,11 +3909,11 @@ int main(int argc, char** argv) {
                             // list -- so a script whose Init() reads
                             // GetPositionX/Y/Z sees where it actually is.
                             monster->SetWorldPosition(e.x, e.y, e.z);
-                            skRValueArray args;
-                            args.append(skRValue(0));  // placeholder for Init's "(s)" parameter
-                            skRValue ret;
+                            // M92: the placement name GetID() answers --
+                            // see the door branch above.
+                            monster->SetEntityId(e.name);
                             skExecutableContext callCtxt(&interpreter);
-                            monster->method(skString("Init"), args, ret, callCtxt);
+                            sk_bindings::RunEntityInit(*monster, scriptRoot, callCtxt);
                             // M71: step 5 of GameEngine_InitLevel's own
                             // order -- the record's `+0x5e` scale is
                             // written *after* Init(), so the placement wins
@@ -3979,11 +3987,8 @@ int main(int argc, char** argv) {
                     try {
                         auto monster = std::make_unique<sk_bindings::MonsterExecutable>(
                             skString(fullPath.c_str()), loadCtxt, &strings, stack.player(), stack);
-                        skRValueArray args;
-                        args.append(skRValue(0));
-                        skRValue ret;
                         skExecutableContext callCtxt(&interpreter);
-                        monster->method(skString("Init"), args, ret, callCtxt);
+                        sk_bindings::RunEntityInit(*monster, scriptRoot, callCtxt);
                         MonsterInstance inst;
                         // Far enough to be fully in frame on arrival, and
                         // to be watched walking in.
@@ -4314,13 +4319,22 @@ int main(int argc, char** argv) {
                     // its box is axis-aligned exactly like this one. The
                     // grid was what kept opened doors shut.
                     for (const DoorInstance& d : gameDoors) {
+                        if (d.script->entityHidden()) continue;  // M92
                         if (d.script->passable() || !solidAt(d.modelArchiveIndex)) continue;
                         if (sk::BoxesOverlap(mover, boxOf(d.x, d.y, d.modelArchiveIndex))) {
                             return true;
                         }
                     }
                     for (const MonsterInstance& m : gameMonsters) {
-                        if (!m.script->alive() || m.script->destroyed()) continue;
+                        if (!m.script->alive() || m.script->outOfWorld()) continue;
+                        // M92: `entity+0xd5` on a creature, the same byte a
+                        // door has always used. `dstar_w.s` and
+                        // `fearfrst.s` hide an NPC and make it walk-through
+                        // in the same breath (`Porliss.ShowEntity(false);
+                        // Porliss.SetPassable(true);`) -- 12 of the suite's
+                        // soft-fail lines were this exact pairing losing
+                        // its second half.
+                        if (m.script->entityPassable()) continue;
                         if (!solidAt(m.modelArchiveIndex)) continue;
                         // Vertical separation, so a creature on another
                         // floor of the same tile column doesn't block.
@@ -4414,7 +4428,7 @@ int main(int argc, char** argv) {
                 // entity_position_ref.h), and it applies the real snap
                 // rule: an **actor** lands on the surface of the tile it
                 // arrives in, anything else lands exactly where it was put.
-                auto applyTeleport = [&](sk_bindings::EntityPositionRef& script, float& x,
+                auto applyTeleport = [&](sk_bindings::EntityBaseRef& script, float& x,
                                           float& y, float& z) {
                     float nx = 0, ny = 0, nz = 0;
                     if (!script.TakePendingPosition(nx, ny, nz)) return false;
@@ -4432,7 +4446,19 @@ int main(int argc, char** argv) {
                     return true;
                 };
                 for (MonsterInstance& m : gameMonsters) {
-                    if (m.script) applyTeleport(*m.script, m.x, m.y, m.z);
+                    if (!m.script) continue;
+                    applyTeleport(*m.script, m.x, m.y, m.z);
+                    // M92: `SetRotationTurn(raw)` -- `entity+0xb6`, the same
+                    // field a door's swing accumulates into. Drained here
+                    // rather than read per frame because the AI tick owns a
+                    // creature's facing and would overwrite it on the very
+                    // next one. Both shipped sites are the scripted herb
+                    // scene turning Trothgar to face the player
+                    // (`Trthgar.SetRotationTurn(-26414)`).
+                    int facingRaw = 0;
+                    if (m.script->TakePendingRotation(facingRaw)) {
+                        m.facingYaw = sk_bindings::PortYawFromEngineYaw(facingRaw & 0xffff);
+                    }
                 }
                 for (DoorInstance& d : gameDoors) {
                     if (d.script) applyTeleport(*d.script, d.x, d.y, d.z);
@@ -4457,7 +4483,7 @@ int main(int argc, char** argv) {
                         onGround = true;
                     }
                     // M91: and the *other* direction. Every placed entity
-                    // gets its EntityPositionRef seeded at zone load so a
+                    // gets its EntityBaseRef seeded at zone load so a
                     // script's own `GetPositionX()` reads where the thing
                     // is (see SetWorldPosition's comment) -- the player
                     // never did, so `GetPlayer().GetPositionX()` answered
@@ -5065,7 +5091,7 @@ int main(int argc, char** argv) {
                         // the level's whole creature list.
                         for (MonsterInstance& victim : gameMonsters) {
                             if (victim.script.get() == caster) continue;
-                            if (!victim.script->alive() || victim.script->destroyed()) continue;
+                            if (!victim.script->alive() || victim.script->outOfWorld()) continue;
                             const float adx = victim.x - castX, ady = victim.y - castY;
                             if (std::sqrt(adx * adx + ady * ady) >
                                 static_cast<float>(sk_bindings::kAreaSpellRange)) {
@@ -5154,7 +5180,7 @@ int main(int argc, char** argv) {
                         setAnimClip(m, m.script->deathAnimation(), true);
                         continue;
                     }
-                    if (m.script->destroyed()) {
+                    if (m.script->outOfWorld()) {
                         setAnimClip(m, m.script->idleAnimation(), false);
                         continue;
                     }
@@ -5448,7 +5474,7 @@ int main(int argc, char** argv) {
                             // spreads out instead of stacking in one spot.
                             for (const MonsterInstance& other : gameMonsters) {
                                 if (&other == &m) continue;
-                                if (!other.script->alive() || other.script->destroyed()) continue;
+                                if (!other.script->alive() || other.script->outOfWorld()) continue;
                                 float ox = m.x - other.x, oy = m.y - other.y;
                                 float od = std::sqrt(ox * ox + oy * oy);
                                 if (od > 0.001f && od < kMonsterSeparation) {
@@ -5706,7 +5732,7 @@ int main(int argc, char** argv) {
                             break;
                         }
                         for (const MonsterInstance& m : gameMonsters) {
-                            if (!m.script->alive() || m.script->destroyed()) continue;
+                            if (!m.script->alive() || m.script->outOfWorld()) continue;
                             if (static_cast<int>(std::floor(m.x / sk::kTileScale)) != tx) continue;
                             if (static_cast<int>(std::floor(m.y / sk::kTileScale)) != ty) continue;
                             aimTarget = &m;
@@ -5884,7 +5910,7 @@ int main(int argc, char** argv) {
                     std::vector<sk_bindings::ProjectileTarget> projectileTargets;
                     projectileTargets.reserve(gameMonsters.size() + 1);
                     for (MonsterInstance& victim : gameMonsters) {
-                        if (!victim.script->alive() || victim.script->destroyed()) continue;
+                        if (!victim.script->alive() || victim.script->outOfWorld()) continue;
                         sk_bindings::ProjectileTarget entry;
                         entry.actor = victim.script.get();
                         entry.script = victim.script.get();
@@ -5949,7 +5975,7 @@ int main(int argc, char** argv) {
                     std::vector<sk_bindings::ArrowTarget> arrowTargets;
                     arrowTargets.reserve(gameMonsters.size() + 1);
                     for (MonsterInstance& victim : gameMonsters) {
-                        if (!victim.script->alive() || victim.script->destroyed()) continue;
+                        if (!victim.script->alive() || victim.script->outOfWorld()) continue;
                         arrowTargets.push_back({victim.script.get(), static_cast<int>(victim.x),
                                                  static_cast<int>(victim.y)});
                     }
@@ -6196,7 +6222,7 @@ int main(int argc, char** argv) {
                             static_cast<float>(sk_bindings::kPlayerMeleeVerticalLimit)) {
                             return nullptr;
                         }
-                        if (!found->script->alive() || found->script->destroyed() ||
+                        if (!found->script->alive() || found->script->outOfWorld() ||
                             found->script->invulnerable()) {
                             return nullptr;
                         }
@@ -6482,6 +6508,13 @@ int main(int argc, char** argv) {
                     DoorInstance* nearest = nullptr;
                     float bestDist = kInteractRange + 1.0f;
                     for (DoorInstance& d : gameDoors) {
+                        // M92: a hidden entity is not there to be used.
+                        // The engine reaches the same answer through the
+                        // actor list rather than a second test, but the
+                        // consequence is the one thing the census called
+                        // out: scripted set-pieces had props standing where
+                        // the script hid them, and they answered Use.
+                        if (d.script->entityHidden()) continue;
                         if (!d.script->usable()) continue;
                         if (!sk_bindings::InInteractRange(gameCamera.x, gameCamera.y,
                                                            gameCamera.yaw, d.x, d.y,
@@ -6515,7 +6548,7 @@ int main(int argc, char** argv) {
                     MonsterInstance* nearest = nullptr;
                     float bestDist = kInteractRange + 1.0f;
                     for (MonsterInstance& m : gameMonsters) {
-                        if (!m.script->alive() || m.script->destroyed() || !m.script->usable()) {
+                        if (!m.script->alive() || m.script->outOfWorld() || !m.script->usable()) {
                             continue;
                         }
                         if (!sk_bindings::InInteractRange(gameCamera.x, gameCamera.y,
@@ -6537,6 +6570,7 @@ int main(int argc, char** argv) {
                     PickupInstance* nearest = nullptr;
                     float bestDist = kInteractRange + 1.0f;
                     for (PickupInstance& p : gamePickups) {
+                        if (p.script->entityHidden()) continue;  // M92, see above
                         if (!p.script->usable()) continue;
                         if (!sk_bindings::InInteractRange(gameCamera.x, gameCamera.y,
                                                            gameCamera.yaw, p.x, p.y,
@@ -6724,10 +6758,10 @@ int main(int argc, char** argv) {
                 {
                     bool idTaken[256] = {};
                     for (const MonsterInstance& m : gameMonsters) {
-                        if (m.objectId > 0 && !m.script->destroyed()) idTaken[m.objectId] = true;
+                        if (m.objectId > 0 && !m.script->outOfWorld()) idTaken[m.objectId] = true;
                     }
                     for (MonsterInstance& m : gameMonsters) {
-                        if (m.script->destroyed()) {
+                        if (m.script->outOfWorld()) {
                             m.objectId = 0;
                             continue;
                         }
@@ -6749,7 +6783,7 @@ int main(int argc, char** argv) {
                     // killed monster simply blinked out of existence,
                     // which is also why the death clip every real monster
                     // script sets had nothing to play it.
-                    if (m.script->destroyed()) continue;
+                    if (m.script->outOfWorld()) continue;
                     // M86: `FUN_10064f08`, and it lives here for the same
                     // reason the engine puts it in `FUN_10064ffc` -- the
                     // flash is advanced by the *draw*, not by the AI tick,
@@ -6765,7 +6799,7 @@ int main(int argc, char** argv) {
                     // So a creature under a curse or on fire pulses green
                     // for as long as the effect lasts, re-armed every
                     // frame, where a hit flashes red once and stops.
-                    if (m.script->alive() && !m.script->destroyed()) {
+                    if (m.script->alive() && !m.script->outOfWorld()) {
                         bool cursed = m.script->actorStats().burning();
                         if (!cursed) {
                             for (const sk_bindings::Effect& e :
@@ -6789,7 +6823,16 @@ int main(int argc, char** argv) {
                     // Real per-instance appearance from the creature's own
                     // script (SetSkin/SetScale) -- see
                     // monster_executable.h.
-                    sk::PlacedEntity pe{m.x, m.y, m.z, m.modelArchiveIndex, m.facingYaw};
+                    // M92: SetModel(n) is a models.txt row and it wins
+                    // over the placement's entities.txt one -- that is how
+                    // `twilite/volstok_violet.s` turns Volstok into a
+                    // zombie (row 69) and how `monsters/ivgrizt.s` is a
+                    // goblin (row 61) rather than whatever its placement
+                    // says.
+                    const int monsterModel = m.script->modelOverride() >= 0
+                                                 ? m.script->modelOverride()
+                                                 : m.modelArchiveIndex;
+                    sk::PlacedEntity pe{m.x, m.y, m.z, monsterModel, m.facingYaw};
                     pe.rotA = m.rotA;  // M71
                     pe.rotB = m.rotB;
                     pe.skinIndex = m.script->skin();
@@ -6837,6 +6880,8 @@ int main(int argc, char** argv) {
                     }
                 }
                 for (const DoorInstance& d : gameDoors) {
+                    // M92: ShowEntity(false) -- see entity_base_ref.h.
+                    if (d.script->entityHidden()) continue;
                     // Real wall-facing heading from the .ent placement, plus
                     // whatever the script's own AddRotationTurn() has
                     // accumulated (the 90-degree swing door.s applies on
@@ -6862,6 +6907,10 @@ int main(int argc, char** argv) {
                 // handling above), so this naturally stops drawing one the
                 // instant it's gone.
                 for (const PickupInstance& p : gamePickups) {
+                    // M92: ShowEntity(false) -- `stouttp.s` hides the "old
+                    // trinket" until the shopkeeper mentions it, and
+                    // `lothna/loot_pilgrim.s` hides itself on Init().
+                    if (p.script->entityHidden()) continue;
                     sk::PlacedEntity pickup{p.x, p.y, p.z, p.modelArchiveIndex, p.placementYaw};
                     pickup.rotA = p.rotA;  // M71
                     pickup.rotB = p.rotB;
@@ -7001,7 +7050,7 @@ int main(int argc, char** argv) {
                                handRange(stack.player().rightItem())));
                 const MonsterInstance* facingMonster = nullptr;
                 for (const MonsterInstance& m : gameMonsters) {
-                    if (!m.script->alive() || m.script->destroyed() || !m.script->aggressive()) {
+                    if (!m.script->alive() || m.script->outOfWorld() || !m.script->aggressive()) {
                         continue;
                     }
                     if (!sk_bindings::InAttackRange(gameCamera.x, gameCamera.y, gameCamera.yaw, m.x,

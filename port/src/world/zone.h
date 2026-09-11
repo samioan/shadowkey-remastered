@@ -772,7 +772,7 @@ public:
     // even though the result is snapped: on a two-storey tile the argument
     // is what chooses which storey. On an ordinary tile it is discarded.
     //
-    // Only actors are snapped -- see EntityPositionRef's header for the
+    // Only actors are snapped -- see EntityBaseRef's header for the
     // `vtable[0xc8]` predicate that decides, and for the portcullis in
     // `gate.s` that depends on doors being exempt.
     float SnapActorToGround(float worldX, float worldY, float worldZ) const {

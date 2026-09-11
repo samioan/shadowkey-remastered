@@ -141,7 +141,7 @@ add_library(sk_bindings STATIC
   src/simkin_bindings/store.cpp
   src/assets/product_database.cpp
   src/simkin_bindings/row_owner_ref.cpp
-  src/simkin_bindings/entity_position_ref.cpp
+  src/simkin_bindings/entity_base_ref.cpp
   src/simkin_bindings/effect_entity.cpp
   src/simkin_bindings/script_delay.cpp
   src/simkin_bindings/table_executable.cpp
@@ -610,8 +610,8 @@ target_link_libraries(monster_ai_smoke PRIVATE sk_bindings sk_world)
 
 # See src/tests/m78_player_attack_smoke.cpp.
 add_executable(player_attack_smoke src/tests/m78_player_attack_smoke.cpp)
-target_link_libraries(player_attack_smoke PRIVATE sk_bindings sk_world)
-
+target_link_libraries(player_attack_smoke PRIVATE sk_bindings sk_world)
+
 # See src/tests/m80_tutorial_popup_smoke.cpp.
 add_executable(tutorial_popup_smoke src/tests/m80_tutorial_popup_smoke.cpp)
 target_link_libraries(tutorial_popup_smoke PRIVATE sk_bindings)
@@ -663,3 +663,7 @@ target_link_libraries(ingame_menu_smoke PRIVATE sk_bindings)
 # libraries.
 add_executable(aspect_viewport_smoke src/tests/aspect_viewport_smoke.cpp)
 target_include_directories(aspect_viewport_smoke PRIVATE src)
+
+# M92 milestone smoke test -- see src/tests/m92_entity_base_smoke.cpp.
+add_executable(entity_base_smoke src/tests/m92_entity_base_smoke.cpp)
+target_link_libraries(entity_base_smoke PRIVATE sk_bindings)

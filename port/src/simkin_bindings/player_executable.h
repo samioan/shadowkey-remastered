@@ -32,7 +32,7 @@
 #include "assets/save_records.h"
 #include "simkin_bindings/actor_stats.h"
 #include "simkin_bindings/amulet_flags.h"
-#include "simkin_bindings/entity_position_ref.h"
+#include "simkin_bindings/entity_base_ref.h"
 #include "simkin_bindings/store.h"
 #include "simkin_bindings/native_stub_executable.h"
 #include "simkin_bindings/spell_actor.h"
@@ -52,7 +52,7 @@ class ItemExecutable;
 class MenuStack;
 
 class PlayerExecutable : public NativeStubExecutable, public SpellActor,
-                          public EntityPositionRef {
+                          public EntityBaseRef {
 public:
     // M27: `sounds`/`audio` may be null (every test constructs a
     // PlayerExecutable without them, via MenuStack's own matching
@@ -262,7 +262,7 @@ public:
 
     // M62: the player is an actor, so a scripted `SetPosition` snaps them
     // to the surface of the tile they land on. See
-    // EntityPositionRef's header for the `vtable[0xc8]` predicate this is.
+    // EntityBaseRef's header for the `vtable[0xc8]` predicate this is.
     bool isActorForPositioning() const override { return true; }
 
     ItemExecutable* leftItem() const { return m_LeftItem; }
@@ -574,6 +574,14 @@ public:
     // is stored) through `stack`; a child whose script will not load is
     // skipped with a message rather than aborting the load.
     void ApplySaveRecord(const sk::SavedEntity& record, MenuStack& stack);
+
+protected:
+    // M92: PlaySound is a base binding. The player is the busiest receiver
+    // in the corpus (`GetPlayer().PlaySound(63)` on every door), and
+    // `GetOwner().PlaySound(id)` from an item's script lands here too --
+    // GetOwner() returns the player object directly.
+    sk::SoundArchive* entitySounds() const override { return m_Sounds; }
+    sk::AudioEngine* entityAudio() const override { return m_Audio; }
 
 private:
     const sk::StringTable* m_Strings;

@@ -272,7 +272,7 @@ bool MenuStack::ActuallySaveGame(int slot) {
     // SavedEntityBase) and the writer has always emitted them -- as
     // zeroes, because nothing filled them in, so every load put the
     // player back at the zone's own `.ent` start record instead of where
-    // they saved. x/y/z come off the player's EntityPositionRef, which
+    // they saved. x/y/z come off the player's EntityBaseRef, which
     // main.cpp mirrors the camera onto each tick; the heading is
     // playerHeadingUnits(). LoadGameFromSlot() reads all four back.
     record.entity.x = m_Player->positionX();

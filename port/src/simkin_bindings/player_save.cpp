@@ -16,6 +16,7 @@
 
 #include <cstdio>
 
+#include "simkin_bindings/entity_base_ref.h"
 #include "simkin_bindings/item_executable.h"
 #include "simkin_bindings/level_executable.h"
 #include "simkin_bindings/menu_stack.h"
@@ -278,11 +279,8 @@ void PlayerExecutable::ApplySaveRecord(const sk::SavedEntity& record, MenuStack&
             const int category = stack.level().EntityCategoryOf(child.typeId);
             if (category >= 0) item->SetEntityCategory(category);
             item->SetTemplateId(child.typeId);
-            skRValueArray args;
-            args.append(skRValue(0));
-            skRValue ret;
             skExecutableContext callCtxt(&stack.interpreter());
-            item->method(skString("Init"), args, ret, callCtxt);
+            RunEntityInit(*item, stack.scriptRoot(), callCtxt);
             const int quantity = child.kind == sk::SavedEntityKind::Weapon
                                      ? child.weapon.quantity
                                      : child.stackable.quantity;

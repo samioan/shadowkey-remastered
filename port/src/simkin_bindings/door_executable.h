@@ -67,7 +67,7 @@
 
 #include <string>
 
-#include "simkin_bindings/entity_position_ref.h"
+#include "simkin_bindings/entity_base_ref.h"
 #include "skScriptedExecutable.h"
 
 class skInterpreter;
@@ -76,7 +76,7 @@ namespace sk_bindings {
 
 class PlayerExecutable;
 
-class DoorExecutable : public skScriptedExecutable, public EntityPositionRef {
+class DoorExecutable : public skScriptedExecutable, public EntityBaseRef {
 public:
     // M67: the tile grid, reached through an interface for the same
     // layering reason LevelExecutable::ZoneRegions exists -- `sk_bindings`
@@ -143,7 +143,9 @@ public:
     // interpreter.
     int useTextId() const { return m_UseTextId; }
     float yawRadians() const;
-    bool passable() const { return m_Passable; }
+    // M92: SetPassable moved to the shared entity base with the rest of
+    // `0x14d08`; this stays as the host-side name main.cpp already reads.
+    bool passable() const { return entityPassable(); }
     // M75: `entity+0xd8`, the one byte that decides whether this door
     // offers a prompt and answers Use at all -- see use_prompt.h. A door
     // (category 11) is constructed unusable and turned on by its own
@@ -156,6 +158,13 @@ public:
     // triggered call outside any live script call frame.
     void InvokeOnUse();
 
+protected:
+    // M92: PlaySound is a base binding; a door reaches the mixer through
+    // the player's stack, the same way its OpenMenu() handler already
+    // does.
+    sk::SoundArchive* entitySounds() const override;
+    sk::AudioEngine* entityAudio() const override;
+
 private:
     // M38: object-valued script fields -- see setValue() above.
     std::map<std::string, skRValue> m_ObjectFields;
@@ -164,11 +173,15 @@ private:
 
     // M67: applies the current passability to the tile grid, at the
     // heading the door is at right now. See SetPassable's comment above.
+    //
+    // M92: a door is the one entity whose passability is also baked into
+    // the grid, so it is the one that overrides the base's hook. The
+    // ordering that makes this the only correct moment to restamp is
+    // unchanged -- see the class comment.
+    void OnPassableChanged() override { ApplyTileStamp(); }
     void ApplyTileStamp();
 
     int m_UseTextId = -1;
-    int m_RotationRaw = 0;  // accumulated AddRotationTurn() argument, raw units
-    bool m_Passable = false;
     bool m_Usable = false;  // M75: entity+0xd8, see usable() above
     bool m_MpUsable = false;  // SetMPUsable() -- stored but inert, no multiplayer in this port
 

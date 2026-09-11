@@ -44,7 +44,7 @@
 #include <vector>
 
 #include "simkin_bindings/actor_stats.h"
-#include "simkin_bindings/entity_position_ref.h"
+#include "simkin_bindings/entity_base_ref.h"
 #include "simkin_bindings/monster_ai.h"
 #include "simkin_bindings/store.h"
 #include "simkin_bindings/script_delay.h"
@@ -96,7 +96,7 @@ class PlayerExecutable;
 class ItemExecutable;
 
 class MonsterExecutable : public skScriptedExecutable, public SpellActor,
-                           public EntityPositionRef {
+                           public EntityBaseRef {
 public:
     // `strings` may be null, same fallback convention as ItemExecutable.
     MonsterExecutable(const skString& filename, skExecutableContext& ctxt,
@@ -261,7 +261,7 @@ public:
 
     // M39: a script-driven teleport (SummonMe()'s whole implementation).
     // M62: the storage, the setter and the three getters moved to the
-    // shared EntityPositionRef, which is where the engine keeps them -- one
+    // shared EntityBaseRef, which is where the engine keeps them -- one
     // implementation on the Object/Entity base class, not one per
     // subclass. `TakePendingPosition` is inherited unchanged, and main.cpp
     // drains it exactly as before; what is new is that a monster teleport
@@ -442,6 +442,15 @@ public:
     // triggers and consequences (this one never runs `InvokeOnKilled()`
     // or spawns loot).
     bool destroyed() const { return m_Destroyed; }
+
+    // M92: `ShowEntity(false)` is the reversible twin of the above -- the
+    // engine reaches the same state from both (`vtable[0x58]`, see
+    // entity_base_ref.h), and every one of main.cpp's "is this creature in
+    // the world" tests was already spelled `destroyed()`. This is the
+    // question those tests are actually asking; `destroyed()` stays the
+    // narrow flag, for the save record and the debug row that want to tell
+    // the two apart.
+    bool outOfWorld() const { return m_Destroyed || entityHidden(); }
 
     // M16: NPC-mode fields (see class comment) -- usable()/useTextId()
     // mirror door_executable.h's own accessors of the same name (same
@@ -760,6 +769,12 @@ public:
     ScriptDelay& delay() { return m_Delay; }
     const ScriptDelay& delay() const { return m_Delay; }
 
+protected:
+    // M92: PlaySound is a base binding now; the lookup is the same
+    // null-checked pair PlayNoise() has always used.
+    sk::SoundArchive* entitySounds() const override;
+    sk::AudioEngine* entityAudio() const override;
+
 private:
     ScriptDelay m_Delay;  // M53
     // M38: object-valued script fields -- see setValue() above.
@@ -780,8 +795,6 @@ private:
                                     // frame's context to reuse when the
                                     // host (not a script) triggers the call.
 
-    int m_NameId = -1;
-    std::string m_Id;
     int m_ExpWorth = 0;
     int m_Attack = 0;
     int m_Defense = 0;
@@ -790,7 +803,7 @@ private:
     int m_Will = 0;  // M37: stats+0x1a -- see spellResistance()
     int m_CreatureKind = kCreatureNormal;  // M37: monster+0x2d0
     // M39: see countsForZoneExperience(). M62: the position members that
-    // used to sit here moved to EntityPositionRef.
+    // used to sit here moved to EntityBaseRef.
     bool m_CountsForZoneExperience = false;
     int m_DamageMin = 0;
     int m_DamageMax = 0;
@@ -875,7 +888,7 @@ private:
     bool m_Destroyed = false;  // M23: see destroyed()'s comment.
     // M28: see PlayAttackNoise()'s comment -- -1 (SetXNoise() never
     // called, e.g. an NPC) is a real, harmless no-play case, same
-    // sentinel convention m_NameId/m_UseTextId already use.
+    // sentinel convention entityNameId()/m_UseTextId already use.
     int m_AttackNoiseId = -1;
     int m_DeathNoiseId = -1;
     int m_IsHitNoiseId = -1;

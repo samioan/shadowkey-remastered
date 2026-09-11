@@ -9,6 +9,7 @@
 #include "simkin_bindings/character_progression.h"
 #include "simkin_bindings/combat.h"
 #include "simkin_bindings/effects.h"
+#include "simkin_bindings/entity_base_ref.h"
 #include "simkin_bindings/game_constants.h"
 #include "simkin_bindings/item_executable.h"
 #include "simkin_bindings/level_executable.h"
@@ -76,11 +77,8 @@ void PlayerExecutable::LoadStartingInventory(MenuStack& stack) {
         try {
             auto item =
                 std::make_unique<ItemExecutable>(skString(fullPath.c_str()), loadCtxt, stack);
-            skRValueArray args;
-            args.append(skRValue(0));  // placeholder for Init's "(s)" parameter
-            skRValue ret;
             skExecutableContext callCtxt(&stack.interpreter());
-            item->method(skString("Init"), args, ret, callCtxt);
+            RunEntityInit(*item, stack.scriptRoot(), callCtxt);
             std::printf("PlayerExecutable: starting item '%s' -> \"%s\" (type=%d)\n", relPath,
                         item->name().c_str(), item->itemType());
             m_Inventory.push_back(std::move(item));
@@ -700,36 +698,6 @@ int PlayerExecutable::UpdateEquipStatus(ItemExecutable* item, bool equipping) {
 
 bool PlayerExecutable::method(const skString& methodName, skRValueArray& args,
                                skRValue& returnValue, skExecutableContext& context) {
-    if (methodName == skString("PlaySound") && args.entries() >= 1) {
-        // M27: `id` is the currently-loaded zone's own <zone>_sounds.txt
-        // slot index -- confirmed by real corpus cross-reference (e.g.
-        // door.s's real `GetPlayer().PlaySound(63)` on open / `PlaySound
-        // (62)` on close matches azra_sounds.txt's own `63 door_open.wav`
-        // / `62 door_close.wav` one-for-one; see assets/sound_archive.h's
-        // class comment for the full writeup). `GetOwner().PlaySound(id)`
-        // (a real item's real owner, ~50% of the corpus's real call sites)
-        // routes here too once an item's been picked up -- GetOwner()
-        // returns the player object directly (item_executable.cpp).
-        // M51: the real dispatcher is
-        // `PlaySound(id, volume = 100, directional = false, repeats = 1)`
-        // -- FUN_10061a60 case 0x25 builds three optional skRValues with
-        // exactly those defaults and hands them to FUN_1001b198. The
-        // corpus uses one argument 120 times and all four exactly once
-        // (twilite/steamsound.s's `PlaySound(65, 75, 1, 255)`: a quieter,
-        // directional, endlessly repeating steam hiss), which is what
-        // pinned the meaning of each.
-        //
-        // `directional` is not panning -- see sound_mixing.h; it asks for
-        // a small (<= 12.5%) cut based on the *emitter's* facing, and is
-        // applied by the caller that knows the geometry, not here.
-        if (m_Sounds && m_Audio) {
-            const sk::Sound* sound = m_Sounds->GetSound(args[0].intValue());
-            const int volume = args.entries() >= 2 ? args[1].intValue() : sk::kDefaultSoundVolume;
-            const int repeats = args.entries() >= 4 ? args[3].intValue() : sk::kDefaultSoundRepeats;
-            if (sound) m_Audio->PlaySfx(*sound, volume, repeats);
-        }
-        return true;
-    }
     if (methodName == skString("SetPlayerName") && args.entries() == 1) {
         m_Name = ToStdString(args[0].str());
         return true;
@@ -1406,14 +1374,19 @@ bool PlayerExecutable::method(const skString& methodName, skRValueArray& args,
         m_Stack->ReopenMenu("buysell");
         return true;
     }
-    // M62: Entity bindings 0x30/0x31/0x34/0x35/0x36, the base class every
-    // placed thing inherits (entity_position_ref.h). 44 of the corpus's 63
+    // The `0x14d08` Object/Entity base every placed thing inherits
+    // (entity_base_ref.h). M92 moved `PlaySound` here from the top of this
+    // method -- the id convention and the four arguments are documented in
+    // the base now, because a monster, an item and a door all make the
+    // identical call.
+    //
+    // M62: bindings 0x30/0x31/0x34/0x35/0x36. 44 of the corpus's 63
     // call sites are on the player -- `GetPlayer().SetPosition(...)` and
     // the bare-global `Player.SetPosition(...)` -- and they are how
     // `cheatmenu.s` teleports, how `broken2.s` moves the player between its
     // wings, and how `dstar_e/pit_boss_battle.s` places both fighters
     // before each round. All of them soft-failed until now.
-    if (HandleEntityPositionNative(methodName, args, returnValue)) return true;
+    if (HandleEntityBaseNative(methodName, args, returnValue)) return true;
     if (methodName == skString("SetCameraStart") && args.entries() == 6) {
         // M61: Player binding 0x39 -- the scripted spawn override. The
         // real case reads exactly six arguments and leaves (with the

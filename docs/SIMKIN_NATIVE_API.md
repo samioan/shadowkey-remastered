@@ -1302,6 +1302,70 @@ any tooling here, so the *magnitudes* are unverified even though the
 mapping is exact.
 
 
+## The rest of the Object/Entity base (M92)
+
+M62 above took five of `0x14d08`'s bindings. These are the other nine a
+shipped script actually calls, from the same dispatcher `FUN_10061a60`.
+
+| index | name | case, in one line |
+|---|---|---|
+| `0x04` | `RunScript(name)` | load `name` into this object (`vtable[0xa4]`), then call `Init` on it (`vtable[0xa8]`) |
+| `0x0e` | `ShowEntity(visible)` | `vtable[0x58](this, visible ^ 1)` -- the slot is `SetHidden` |
+| `0x11` | `GetID()` | the string buffer at `entity+0xcb` |
+| `0x13` | `SetID(name)` | `vtable[0x84](this, name)` |
+| `0x14` | `SetName(id)` | `vtable[0x88](this, (u16)id)`; a *string* argument gets a dialog instead |
+| `0x17` | `SetPassable(p)` | `entity+0xd5 = p`, then stamp/unstamp collision flag 4 if `vtable[0xac]()` |
+| `0x18` | `SetRotationTurn(raw)` | `entity+0xb6 = raw` (`0x1b` `AddRotationTurn` accumulates into the same field) |
+| `0x23` | `SetModel(row)` | `vtable[0x7c](this, row)`; returns immediately if `argc == 0` |
+| `0x25` | `PlaySound(id, vol=100, dir=false, rep=1)` | `FUN_1001b198(engine, id, x, y, vol, dir, entity+0xb6, rep, 1)` |
+| `0x32` | `MirrorMethod(name)` | **all inside `if (engine+0x5c0)`** -- `session->vtable[0x150](session, this, name)` |
+
+Four of these needed something outside the case to pin down.
+
+**What "hidden" means (`0x0e`).** The case only inverts a bool and hands it
+to `vtable[0x58]`. The engine's *other* caller of that slot says what it
+does: the monster tick's corpse-decay branch in `FUN_10082224` counts
+`+0x2ec` down, and on expiry calls `vtable[0x58](this, 1)` and then walks
+the actor list at `engine+0x64c` clearing every creature whose current
+target `+0x20c` was this one. A hidden entity is not drawn, not targeted
+and not usable.
+
+**What seeds `GetID` (`0x11`).** `lakvan/sdoor_trapa.s` is one script on
+four placements, distinguished by `if (GetID() = "11s")` / `"gg5"` /
+`"sdoor1"` / `"hh6"`, and each of those four strings appears exactly once
+in `lakvan.ent`. The id is the placement name.
+
+**`SetName` rejects a string (`0x14`).** The case tests the argument's
+rvalue type tag and, when it is `T_String`, calls
+`FUN_1000e02c(msg1, msg2)` -- a dialog -- instead of the setter. The two
+literals are at `0x100b1558` (**"SetName() invalid argument"**) and
+`0x100b1590` (**"You must pass in an ID# now"**). Only the integer form,
+a `stringtable.*` id, reaches `vtable[0x88]`.
+
+**`RunScript` re-runs `Init` (`0x04`).** The method name the case passes to
+`vtable[0xa8]` is the literal at `0x100b153c`, which decodes as the UTF-16
+string `"Init"`. The seven shipped sites are all upgraded spell variants
+(`spells/u_*.s`, `spells/ignitescroll.s`) that set what differs and then
+switch to the base spell's script -- so the object keeps the fields the
+variant's `Init()` already set, and gains everything the base script's
+`Init()` sets, including any field both of them write (the base wins).
+
+**`SetModel`'s argument is a `models.txt` row**, not an entities.txt type.
+The three live sites read straight off the manifest: `SetModel(61)` is
+`goblin.bin` (`monsters/ivgrizt.s`), `SetModel(23)` is
+`male_short_tunic.bin` (`twilite/volstok_convo.s`) and `SetModel(69)` is
+`zombie.bin` (`twilite/volstok_violet.s`).
+
+**Receivers in the corpus.** 1078 call sites over these nine names (94 of
+them the six that were never implemented anywhere; `SetName` alone is
+801), and **900 of the 1078 are bare** -- an entity acting on itself from
+its own script, dispatched on whatever class that script happens to be
+attached to. That is why these cannot be implemented per-class: the same
+line of the same script is a door in one placement and a creature in
+another. The 40 explicit receivers are `Level.GetEntity("...")` (a named
+prop), `GetOpener()` (a chest reaching back to whoever opened it),
+`GetPlayer()`, and a local assigned from one of those.
+
 ## Labels applied / tools
 
 No new Ghidra renames this pass (the 28 registration/dispatcher

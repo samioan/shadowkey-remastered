@@ -8482,6 +8482,125 @@ soft-fails 39 -> 39, all 14 tracked `.ppm` renders byte-identical,
       which is renderer work (M71's projection) rather than presentation
       work; deferred by decision.
 
+- [x] **M92 -- the `0x14d08` Object/Entity base, on every receiver that
+      inherits it.** The post-M91 census put 94 call sites on this one
+      class, more than any other, and its bindings split into two groups
+      that look different and are the same defect: six that were
+      unimplemented anywhere (`ShowEntity` 40 sites, `MirrorMethod` 33,
+      `GetID` 9, `RunScript` 7, `SetModel` 3, `SetRotationTurn` 2), and
+      three that existed but only on some of the four classes that inherit
+      them -- `SetName` on Item and Monster but not Door, `SetPassable` on
+      Door but not Monster, `PlaySound` on Monster and Player but not Item,
+      42 soft-fail lines between them. The engine has *one* implementation
+      of each, on the base class a player, a monster, a door, an item and a
+      prop all derive from. So this port has one too now.
+
+      M62 had already started that file for five position bindings and
+      called it `EntityPositionRef`. It is `EntityBaseRef`
+      (`port/src/simkin_bindings/entity_base_ref.h`) now, it carries the
+      whole base, and the four classes mix it in and answer two hooks: a
+      sound pair for `PlaySound`, and `OnPassableChanged()`, which only a
+      door overrides -- it is the only entity whose footprint is also baked
+      into the tile grid (M67).
+
+    - **`ShowEntity` is `SetHidden` inverted.** Case `0x0e` is
+      `entity->vtable[0x58](entity, arg ^ 1)`. What hidden *means* comes
+      from the engine's other caller of that slot, the monster tick's
+      corpse-decay branch (`FUN_10082224`): when the lifespan at `+0x2ec`
+      expires it calls `vtable[0x58](this, 1)` and then walks the actor
+      list clearing every creature whose target (`+0x20c`) was this one. So
+      a hidden entity is not drawn, not targeted and not usable -- exactly
+      what this port's `destroyed()` already meant (M23's own comment says
+      so in those words), except reversible.
+      `MonsterExecutable::outOfWorld()` is the two together, and it is what
+      main.cpp's seventeen "is this creature in the world" tests now ask;
+      `destroyed()` stays the narrow flag the debug row wants.
+
+      The corpus is unambiguous that "not interacted with" is part of it:
+      `dstar_w.s` and `fearfrst.s` pair every `ShowEntity` with the
+      matching `SetPassable` on the same entity one line later
+      (`Porliss.ShowEntity(false); Porliss.SetPassable(true);`), because a
+      vanished NPC you could still walk into is a wall in an empty room.
+      That pairing is 12 of the 42 cross-receiver soft-fail lines.
+    - **`MirrorMethod` does nothing here, correctly.** The entire case is
+      inside `if (engine->inMultiplayer /* +0x5c0 */)`: it asks the
+      Bluetooth session to invoke the named method on this entity's mirror
+      on the other handset. All 33 sites are no-ops in single player, the
+      same conclusion `DoorOpened`, `DestroyObjectMirror` and
+      `SetPositionMirror` already reached. Counted rather than ignored, so
+      a test can tell "ran and did nothing" from "never ran".
+    - **`GetID` is the `.ent` placement name.** Case `0x11` returns the
+      buffer at `entity+0xcb`. `lakvan/sdoor_trapa.s` settles what seeds
+      it: one script is shared by four placements and tells them apart with
+      `if (GetID() = "11s")`, `"gg5"`, `"sdoor1"`, `"hh6"` -- and each of
+      those four strings occurs exactly once in `lakvan.ent`. The host now
+      seeds it before `Init()`, the same way it seeds the position.
+    - **`SetName` takes an ID and rejects a string.** Case `0x14` branches
+      on the argument's type tag and, for a string, puts up a dialog
+      reading **"SetName() invalid argument" / "You must pass in an ID#
+      now"** (the two literals at `0x100b1558` and `0x100b1590`) without
+      setting anything. This port says the same on the console instead. No
+      shipped script trips it, which is presumably why the check survived.
+    - **`SetModel` is a `models.txt` row**, and the manifest reads the
+      three live sites straight: `monsters/ivgrizt.s`'s `SetModel(61)` is
+      `goblin.bin`; `twilite/volstok_convo.s`'s
+      `Level.GetEntity("volstok").SetModel(23)` is `male_short_tunic.bin`;
+      and `twilite/volstok_violet.s`'s `SetModel(69)` is `zombie.bin` --
+      Volstok turns into a zombie mid-conversation and back again. The
+      ~20 commented-out `//SetModel(202)` lines are a copy-paste header the
+      studio never enabled. The override wins over the placement's own
+      entities.txt model when the renderer builds the frame.
+    - **`RunScript` really swaps the script.** Case `0x04` loads the named
+      file into this object (`vtable[0xa4]`) and then calls `vtable[0xa8]`
+      with the literal at `0x100b153c` -- which is the UTF-16 string
+      **"Init"**. All seven sites are upgraded spell variants that set what
+      differs and defer to the base spell: `spells/u_blaze_lvl10.s` is
+      `SetLevel(10); SetSpellType(50); SetCost(756); SetMarketValue(265);
+      RunScript("Blaze")`, and `blaze.s`'s own `Init()` then supplies the
+      name, icon, use text, rating and `HitTarget`. (It also re-sets the
+      market value, so the variant's 265 does not survive. That is the
+      shipped game, not a port artefact.)
+
+      **The swap is deferred by one call.** `skTreeNodeObject::setNode()`
+      deletes both the old tree and the method cache, and `RunScript` is
+      called from inside the very `Init()` that lives in that tree -- doing
+      it on the spot would free the parse tree the interpreter is walking.
+      `RunEntityInit()` applies it after `Init()` returns, and all nine
+      sites that build an entity go through it -- a world placement, a
+      store purchase, a save restore, `Level.CreateItem`/`CreateCreature`,
+      the debug `give` -- so a spell is the same object wherever it came
+      from.
+
+    - **Test**: `port/src/tests/m92_entity_base_smoke.cpp`, 66 checks in
+      seven parts. Part 1 counts every site across all 1535 shipped scripts
+      and pins the census numbers (40/33/9/7/3/2). Part 2 is the milestone
+      itself: a real door, item, creature and the player are each handed
+      all nine natives with the soft-fail observer armed, and none of the
+      36 may miss. Part 3 drives the set-piece end to end -- `stouttp.s`
+      hides Old Trinket on zone Init(), and his own `ShowOG[]` handler
+      brings him back with ShowEntity + SetUsable + MirrorMethod. Parts 4-7
+      are `GetID` against the real `lakvan.ent`, the `u_blaze_lvl10` ->
+      `blaze` swap (checked both ways: what the variant set survives, what
+      the base script sets arrives, and `blaze.s`'s `HitTarget` is now
+      reachable on the object), `SetModel` against the real `models.txt`,
+      and the ShowEntity/SetPassable pairing plus `SetName`'s rejected
+      string form.
+    - **The suite**: 84 executables, 83 pass (`render_at_smoke` is the
+      argument-taking render tool, not a test). **Soft-fail lines 112 ->
+      49, and 23 distinct receiver+method pairs -> 14.** The whole
+      Object/Entity row is gone from `analyze_port_native_gaps.py`'s
+      per-class table: 55 unimplemented-and-called names -> 49, coverage
+      408 -> 414 of 648.
+    - **Live**: `zone stouttp` then `ents trinket` prints
+      `[0] monster trinket  hp 1/1  hidden/npc` -- Old Trinket is out of
+      the world on arrival, where before M92 he stood in the middle of the
+      trading post from the moment the zone loaded. Zero soft-fails across
+      that zone load, and zero across azra's (68 creatures, 7 doors, all
+      correctly solid). `give spells/u_blaze_lvl10.s` logs `[entity]
+      RunScript("Blaze") -- switched to .../blaze.s` and the item arrives
+      in the inventory named "Blaze", which only `blaze.s`'s `Init()` can
+      do. Repro: `port/debug/m92_entity_base.cfg`.
+
 ## Next milestones (not yet started)
 
 Roughly in priority order for reaching "actually playable," not commitments:
@@ -8659,6 +8778,10 @@ None of these needs new RE to *find*: every one has a known trie, index
 and dispatcher case in `SIMKIN_NATIVE_API.md`, so the work is reading a
 case and writing a handler.
 
+> **Superseded in part by M92**, which took the whole first row: the
+> Object/Entity base is gone from this table and the surface is **49
+> names**, coverage 414 of 648. The rest of the table stands.
+
 **3. The soft-fail log, which is the only measure that sees a name
 implemented on the wrong class.** Both tools above are
 receiver-agnostic, so a native this port handles on Monster but not on
@@ -8682,6 +8805,11 @@ things:
   The first three are `0x14d08` Object/Entity-base bindings, which every
   entity in the game answers; splitting them per-class is the defect, not
   the absence of an implementation.
+
+> **M92 closed 63 of the 112 lines** -- all three of those cross-receiver
+> holes and every Object/Entity-base name with them. The suite now produces
+> **49 lines over 14 pairs**, and `Item.Init` and
+> `Level.IsMultiplayerClient` are what is left of this third bucket.
 
 **A real play session hits almost none of it.** Two driven sessions
 through ghstpass -- the opening vignette, walking, the character manager
@@ -8721,14 +8849,8 @@ raising the menu.
 Ranked by call sites and by whether a player would notice, not by
 difficulty:
 
-- [ ] **The `0x14d08` Object/Entity base, on every receiver that inherits
-      it.** Two halves, and both are one milestone: the six unimplemented
-      names (`ShowEntity` 40 sites, `MirrorMethod` 33, `GetID` 9,
-      `RunScript` 7, `SetModel`, `SetRotationTurn`) and the three that
-      exist but only on some classes (`SetName`, `SetPassable`,
-      `PlaySound` -- 42 soft-fail lines between them). `ShowEntity` is the
-      one with visible consequences: scripted set-pieces still have props
-      standing where the script hid them.
+- [x] **The `0x14d08` Object/Entity base, on every receiver that inherits
+      it.** Done -- M92 above.
 - [ ] **`Item.SetCanDrop`**, 39 call sites and the only thing a real play
       session soft-fails on. Quest items can currently be dropped.
 - [ ] **The map overlay and the back key** (above). Small, and it is a

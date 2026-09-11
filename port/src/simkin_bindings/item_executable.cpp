@@ -23,9 +23,16 @@
 
 namespace sk_bindings {
 
+sk::SoundArchive* ItemExecutable::entitySounds() const { return m_Stack.sounds(); }
+sk::AudioEngine* ItemExecutable::entityAudio() const { return m_Stack.audio(); }
+
 ItemExecutable::ItemExecutable(const skString& filename, skExecutableContext& ctxt,
                                 MenuStack& stack)
     : skScriptedExecutable(filename, ctxt), m_Stack(stack), m_Interpreter(ctxt.getInterpreter()) {
+    // M92: RunScript() swaps this object's script file out from under it --
+    // which is how every upgraded spell in the game (spells/u_*.s) gets its
+    // behaviour. The base needs the skTreeNodeObject half of `this`.
+    AttachEntityScript(this);
     m_ScriptPath = ToStdString(filename);
     for (char& c : m_ScriptPath) {
         if (c == '\\') c = '/';
@@ -252,16 +259,12 @@ void ItemExecutable::InvokeHitTarget(skiExecutable* target) {
 }
 
 std::string ItemExecutable::name() const {
-    if (m_Stack.strings() && m_NameId >= 0) return m_Stack.strings()->Get(m_NameId);
-    return m_Id.empty() ? std::string("?") : m_Id;
+    if (m_Stack.strings() && entityNameId() >= 0) return m_Stack.strings()->Get(entityNameId());
+    return entityId().empty() ? std::string("?") : entityId();
 }
 
 bool ItemExecutable::method(const skString& methodName, skRValueArray& args,
                              skRValue& returnValue, skExecutableContext& context) {
-    if (methodName == skString("SetName") && args.entries() == 1) {
-        m_NameId = args[0].intValue();
-        return true;
-    }
     if (methodName == skString("SetShortName") && args.entries() == 1) {
         m_ShortNameId = args[0].intValue();
         return true;
@@ -278,10 +281,6 @@ bool ItemExecutable::method(const skString& methodName, skRValueArray& args,
         // M74's fallback for a script that never told us its category and
         // has nothing to do with the use prompt.
         m_Usable = kSetUseTextImpliesUsable;
-        return true;
-    }
-    if (methodName == skString("SetID") && args.entries() == 1) {
-        m_Id = ToStdString(args[0].str());
         return true;
     }
     if (methodName == skString("SetCost") && args.entries() == 1) {
@@ -1043,11 +1042,16 @@ bool ItemExecutable::method(const skString& methodName, skRValueArray& args,
         m_MarkedForRemoval = true;
         return true;
     }
-    // M62: Entity bindings 0x30/0x31/0x34/0x35/0x36 (entity_position_ref.h).
-    // A world pickup is a placed entity like any other -- `dstar_e`'s
+    // The whole `0x14d08` Object/Entity base (entity_base_ref.h) -- for an
+    // item that is `SetName`/`SetID` (M10/M39, which used to be written out
+    // above), the position group, and from M92 `PlaySound`, `ShowEntity`,
+    // `GetID`, `SetPassable`, `SetRotationTurn`, `SetModel`, `RunScript`
+    // and `MirrorMethod`.
+    //
+    // M62: a world pickup is a placed entity like any other -- `dstar_e`'s
     // `Herbs.SetPosition(...)` moves one. Like a door and unlike an actor,
     // it is not floor-snapped.
-    if (HandleEntityPositionNative(methodName, args, returnValue)) return true;
+    if (HandleEntityBaseNative(methodName, args, returnValue)) return true;
     if (skScriptedExecutable::method(methodName, args, returnValue, context)) {
         return true;
     }

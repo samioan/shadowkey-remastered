@@ -258,7 +258,7 @@ public:
 
     // M91: the player's live heading, in the engine's own `player+0xb6`
     // units ([0, 65536) to the turn). x/y/z already live on the player's
-    // EntityPositionRef, which main.cpp mirrors the camera onto every
+    // EntityBaseRef, which main.cpp mirrors the camera onto every
     // tick; this is the fourth channel a save needs and the one nothing
     // else had a home for. See ActuallySaveGame(), which writes all four
     // into the record's Entity layer, and LoadGameFromSlot(), which arms

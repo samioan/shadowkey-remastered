@@ -16,7 +16,21 @@ namespace sk_bindings {
 
 DoorExecutable::DoorExecutable(const skString& filename, skExecutableContext& ctxt,
                                 PlayerExecutable& player)
-    : skScriptedExecutable(filename, ctxt), m_Player(player), m_Interpreter(ctxt.getInterpreter()) {}
+    : skScriptedExecutable(filename, ctxt), m_Player(player), m_Interpreter(ctxt.getInterpreter()) {
+    // M92: RunScript() swaps this object's script file out from under it;
+    // the base needs the skTreeNodeObject half of `this` to do that.
+    AttachEntityScript(this);
+}
+
+sk::SoundArchive* DoorExecutable::entitySounds() const {
+    MenuStack* stack = m_Player.stack();
+    return stack ? stack->sounds() : nullptr;
+}
+
+sk::AudioEngine* DoorExecutable::entityAudio() const {
+    MenuStack* stack = m_Player.stack();
+    return stack ? stack->audio() : nullptr;
+}
 
 float DoorExecutable::yawRadians() const {
     constexpr float kTwoPi = 6.28318530718f;
@@ -28,7 +42,7 @@ float DoorExecutable::yawRadians() const {
     // heading: main.cpp composes this with DoorInstance::placementYaw
     // when it draws the door, and has since M15. headingRaw() below is
     // the composed one, for the stamp walk.
-    return static_cast<float>(m_RotationRaw) / 65536.0f * kTwoPi;
+    return static_cast<float>(rotationRaw()) / 65536.0f * kTwoPi;
 }
 
 void DoorExecutable::AttachTileStamp(TileStamp* stamp, int halfExtentX, int halfExtentY,
@@ -48,7 +62,7 @@ bool DoorExecutable::isTileStamped() const {
 }
 
 int DoorExecutable::headingRaw() const {
-    return (m_PlacementYawRaw + m_RotationRaw) & 0xffff;
+    return (m_PlacementYawRaw + rotationRaw()) & 0xffff;
 }
 
 void DoorExecutable::ApplyTileStamp() {
@@ -56,7 +70,7 @@ void DoorExecutable::ApplyTileStamp() {
     // Mask 4 and no other: that is what every real call site passes, and
     // it is the bit Zone::CircleHitsWall reads.
     m_TileStamp->StampEntityBox(positionX(), positionY(), headingRaw(), m_HalfExtentX,
-                                 m_HalfExtentY, 0x04, !m_Passable);
+                                 m_HalfExtentY, 0x04, !entityPassable());
 }
 
 void DoorExecutable::InvokeOnUse() {
@@ -126,21 +140,15 @@ bool DoorExecutable::method(const skString& methodName, skRValueArray& args, skR
         m_MpUsable = args[0].boolValue();
         return true;
     }
-    if (methodName == skString("SetPassable") && args.entries() == 1) {
-        // M67: the real case 0x17 -- assign, then stamp or unstamp the
-        // tile grid at the door's *current* heading. See the class
-        // comment for why the ordering inside door.s makes that the only
-        // correct moment to do it.
-        m_Passable = args[0].boolValue();
-        ApplyTileStamp();
-        return true;
-    }
-    if (methodName == skString("AddRotationTurn") && args.entries() == 1) {
-        m_RotationRaw += args[0].intValue();
-        return true;
-    }
-    // M62: Entity bindings 0x30/0x34/0x35/0x36 (entity_position_ref.h).
-    // A door is not only a thing that swings: `gate.s` is a **portcullis**,
+    // The whole `0x14d08` Object/Entity base (entity_base_ref.h) -- for a
+    // door that is `SetPassable` and `AddRotationTurn` (M67/M15, which
+    // used to be written out here), and from M92 also `SetName`,
+    // `PlaySound`, `ShowEntity`, `GetID`/`SetID`, `SetRotationTurn`,
+    // `SetModel`, `RunScript` and `MirrorMethod`. `Door.SetName` alone was
+    // 23 of the suite's soft-fail lines: the name exists on Item and on
+    // Monster, and a door is the same engine class as both.
+    //
+    // M62: a door is not only a thing that swings: `gate.s` is a **portcullis**,
     // and its entire open/close mechanism is
     //
     //     x = GetPositionX(); y = GetPositionY(); z = GetPositionZ() + 1200;
@@ -155,7 +163,7 @@ bool DoorExecutable::method(const skString& methodName, skRValueArray& args, skR
     // Crucially a door is **not** an actor (`vtable[0xc8]` is false for
     // it), so its teleport is exempt from the floor snap. A snapped
     // portcullis would drop straight back down and never open.
-    if (HandleEntityPositionNative(methodName, args, returnValue)) return true;
+    if (HandleEntityBaseNative(methodName, args, returnValue)) return true;
     if (methodName == skString("OpenDoor")) {
         // M38: a trapped door's trigger callback opens the door itself --
         // crypt1.s's `OnOpenDoor[ (trigger, who) ]` does

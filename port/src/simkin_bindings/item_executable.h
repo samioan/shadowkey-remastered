@@ -24,7 +24,7 @@
 #include <string>
 #include <vector>
 
-#include "simkin_bindings/entity_position_ref.h"
+#include "simkin_bindings/entity_base_ref.h"
 #include "simkin_bindings/native_stub_executable.h"
 #include "simkin_bindings/script_delay.h"
 #include "simkin_bindings/spell_actor.h"
@@ -40,7 +40,7 @@ namespace sk_bindings {
 
 class MenuStack;
 
-class ItemExecutable : public skScriptedExecutable, public EntityPositionRef {
+class ItemExecutable : public skScriptedExecutable, public EntityBaseRef {
 public:
     // M21: `stack` -- replaces M19's separate `strings`/`PlayerExecutable&`
     // parameters (a real script now also needs `GetPlayer()` *and*
@@ -415,7 +415,10 @@ public:
 
     // M39: a real script's own SetID() (e.g. "stooth") -- the key
     // PlayerExecutable::CountInventory() matches on.
-    const std::string& id() const { return m_Id; }
+    // M92: SetID/SetName moved to the shared entity base with the rest of
+    // `0x14d08`; these stay as the host-side names the rest of the port
+    // already reads.
+    const std::string& id() const { return entityId(); }
     int quantity() const { return m_Quantity; }
     // M50: restoring a saved stack (SavedStackable/SavedWeapon's +0x1c4).
     void SetQuantity(int quantity) { m_Quantity = quantity; }
@@ -455,6 +458,16 @@ public:
     ScriptDelay& delay() { return m_Delay; }
     const ScriptDelay& delay() const { return m_Delay; }
 
+protected:
+    // M92: PlaySound is a base binding, and `Item.PlaySound` was 7 of the
+    // suite's soft-fail lines -- the name existed on Monster and on Player
+    // and an item is the same engine class as both. `GetOwner().PlaySound
+    // (id)` already routed to the player; a bare `PlaySound(id)` inside an
+    // item's own script (stouttp/oldtrinket.s, twilite/steamsound.s) had
+    // nowhere to go.
+    sk::SoundArchive* entitySounds() const override;
+    sk::AudioEngine* entityAudio() const override;
+
 private:
     // M74: the M10 setter inference, demoted to a fallback. It runs only
     // for an object built straight from a script path, where no
@@ -480,11 +493,9 @@ private:
     int m_EntityCategory = -1;
     int m_EquipSlot = 2;        // +0x1c0, kEquipSlotNone
     int m_RestrictUseMask = 0;  // +0x1cc, RestrictUse's OR'd class bits
-    int m_NameId = -1;
     int m_ShortNameId = -1;
     int m_DescriptionId = -1;
     int m_UseTextId = -1;
-    std::string m_Id;
     int m_Cost = 0;
     int m_MarketValue = 0;
     int m_Icon = -1;

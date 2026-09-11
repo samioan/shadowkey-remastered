@@ -7,6 +7,7 @@
 #include "assets/sound_archive.h"
 #include "audio/audio_engine.h"
 #include "engine/screen_mode.h"
+#include "simkin_bindings/entity_base_ref.h"
 #include "simkin_bindings/game_constants.h"
 #include "simkin_bindings/item_executable.h"
 #include "simkin_bindings/menu_stack.h"
@@ -67,11 +68,8 @@ std::unique_ptr<MonsterExecutable> LevelExecutable::CreateCreature(int typeId) {
         auto monster = std::make_unique<MonsterExecutable>(skString(fullPath.c_str()), loadCtxt,
                                                             m_Stack.strings(), m_Stack.player(),
                                                             m_Stack);
-        skRValueArray initArgs;
-        initArgs.append(skRValue(0));  // Init's "(s)" placeholder
-        skRValue initRet;
         skExecutableContext callCtxt(&m_Stack.interpreter());
-        monster->method(skString("Init"), initArgs, initRet, callCtxt);
+        RunEntityInit(*monster, m_Stack.scriptRoot(), callCtxt);
         return monster;
     } catch (skParseException& e) {
         std::printf("Level: CreateCreature(%d) -- PARSE ERROR loading %s: %s\n", typeId,
@@ -131,11 +129,8 @@ std::unique_ptr<ItemExecutable> LevelExecutable::LoadItemScript(int typeId, int 
         // this port set it afterwards, which left every `Init()` looking at
         // a template id of -1.
         item->SetTemplateId(typeId);  // M36, see ItemExecutable::templateId()
-        skRValueArray initArgs;
-        initArgs.append(skRValue(0));  // placeholder for Init's "(s)" parameter
-        skRValue initRet;
         skExecutableContext callCtxt(&m_Stack.interpreter());
-        item->method(skString("Init"), initArgs, initRet, callCtxt);
+        RunEntityInit(*item, m_Stack.scriptRoot(), callCtxt);
         return item;
     } catch (skParseException& e) {
         std::printf("Level: %s(%d) -- PARSE ERROR loading %s: %s\n", what, typeId,
