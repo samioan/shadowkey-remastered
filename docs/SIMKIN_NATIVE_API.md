@@ -1366,6 +1366,81 @@ another. The 40 explicit receivers are `Level.GetEntity("...")` (a named
 prop), `GetOpener()` (a chest reaching back to whoever opened it),
 `GetPlayer()`, and a local assigned from one of those.
 
+## `SetCanDrop`, and the drop it guards (M93)
+
+Item (`0x14d74`, dispatcher `FUN_1002c848`) cases **2** and **1**, and they
+are three lines between them:
+
+```c
+case 2:  /* SetCanDrop(b) */   item->+0x1c9 = arg0.boolValue();
+case 1:  /* CanDrop()    */    return item->+0x1c9;
+```
+
+The item constructors write 1 into `+0x1c9`, so an item is droppable until
+its own script says otherwise. 39 shipped call sites, every one
+`SetCanDrop(false)` inside an `Init()`, every one a quest item.
+
+**The interesting part is who reads it.** Three places, and only one of
+them is a trie binding:
+
+1. `inventory.s`'s `SelectedInventoryItem[]`, which blanks the action
+   popup's Drop row with `UpdatePopupItem(2, "")`.
+2. `inventory.s`'s `DropInventoryItem[]`, which returns before raising the
+   confirmation popup.
+3. **`DropItem` itself**, in `FUN_100a4ce4` — the inventory *row* class's
+   `wcscmp` chain (the eight-name hand-added class, see the M60 section
+   above), matching the wide literal at `0x100ae9a4`, `"DropItem"`.
+
+That third one is the real gate, and it carries the whole drop:
+
+```c
+item = row->+0x3c;
+if (item && item->+0x1c9 /* canDrop */) {
+    player = engine->+0x618;
+    if (item->+0x1c4 /* quantity */ == 1) {
+        DropObject(item, 0);                    /* FUN_1002c3a8 */
+        player->vtable[0x174](player, item);    /* out of the inventory */
+        row->+0x3c = 0;  row->+0x38 = 0;
+    } else {
+        item->+0x1c4 -= 1;
+        copy = ItemFactory(engine->+0x470, item->templateId, 0, 0, 0);
+        if (copy) {
+            copy->+0x170 = item->+0x170;        /* same owner */
+            DropObject(copy, 0);
+        }
+    }
+}
+```
+
+**A stack drops one.** The quantity branch is not bookkeeping: above 1 the
+original stays in the bag one lighter and a *fresh single item* is built
+from the same template to be the thing on the floor.
+
+**And it does land on the floor.** `FUN_1002c3a8` is M81's `DropObject`,
+the same function the drop-gold case calls:
+
+```c
+bag = ItemFactory(engine->+0x470, /*typeId*/ 300, /*useTag*/ 1,
+                  "Loot_Dropped", 0);
+owner = item->+0x170;
+bag->vtable[0x14](bag, owner->x - 0x80, owner->y - 0x80, owner->z + 300);
+if (EntityTypeDescriptor_Lookup(engine->+0xbe34, 300)->category == 8) {
+    FUN_10028f98(bag, item);          /* the item goes in the bag */
+    bag->+0x180 = 1;  bag->+0x181 = 1;
+}
+```
+
+typeId 300 is `entities.txt` line 212, `300 30 8 !bag_loot` — category 8
+(container), model 30 (`bag_dropped.bin`). The script tag is the narrow
+literal at `0x100addf0`, **`Loot_Dropped`**, and `loot_dropped.s` is a real
+shipped script: `SetName(456)`, `SetUseText(457)`, `SetUsable(true)`, and an
+`OnUse()` of `OpenMenu("LootMenu")`. Half a tile on each axis from the
+owner is 181 world units diagonally, which is what a drop measures in the
+running port.
+
+The `+ 300` on the requested z is the same literal `FUN_10084438` puts on a
+creature's death drop — the height the floor snap probes from, not a final
+offset.
 ## Labels applied / tools
 
 No new Ghidra renames this pass (the 28 registration/dispatcher

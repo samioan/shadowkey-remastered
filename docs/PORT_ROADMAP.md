@@ -8601,6 +8601,91 @@ soft-fails 39 -> 39, all 14 tracked `.ppm` renders byte-identical,
       in the inventory named "Blaze", which only `blaze.s`'s `Init()` can
       do. Repro: `port/debug/m92_entity_base.cfg`.
 
+- [x] **M93 -- `Item.SetCanDrop`, and the drop it guards.** 39 call sites,
+      the largest single gap left after M92, and the only one a real driven
+      play session ever soft-failed on. All 39 pass `false`, all 39 sit in
+      an item's own `Init()`, and all 39 are quest items: the eleven
+      Shadowkey fragments, the delfhide cell keys and the bandit key, the
+      letters and the mages' roster, the Dark Star pass, the three raider
+      amulets, the five snowline herbs Rilora asks for, the twilite
+      scrolls. Nothing in the corpus ever passes `true`.
+
+      `CanDrop()` answered a hardcoded `true`, with the comment "no
+      quest-critical/undroppable item flag exists in this port's model".
+      One now does: `item+0x1c9`, which the item constructors set to 1 and
+      `SetCanDrop` clears (`FUN_1002c848` cases 2 and 1).
+
+      Reading the case that *consumes* it turned a one-byte milestone into
+      three fixes, because the flag's only real reader is the drop, and the
+      drop was wrong in two other ways as well.
+
+    - **The gate is native, not just scripted.** `inventory.s` checks
+      `CanDrop()` twice -- once in `SelectedInventoryItem[]`, where
+      `UpdatePopupItem(2, "")` blanks the Drop row (the third `AddItem`,
+      `AddItem(4016, "DropInventoryItem")`), and once at the top of
+      `DropInventoryItem[]` -- but the engine checks the byte a third time
+      inside `DropItem` itself. That native is not one of the 702 trie
+      bindings: the inventory row class is a plain `wcscmp` chain in
+      `FUN_100a4ce4` (the eight-name class M60 found), and the name it
+      compares against is the wide literal at `0x100ae9a4`, `"DropItem"`.
+      So a quest item is undroppable by every route, which is what this
+      port now models.
+    - **A stack drops one, not all of it.** The case branches on
+      `item+0x1c4`: at quantity 1 it removes the object from the
+      inventory, and above 1 it decrements and builds a *fresh* single
+      item from the same template. This port erased the whole row either
+      way, so dropping one of five arrows destroyed the other four.
+    - **A dropped item lands on the floor.** Both branches end in
+      `FUN_1002c3a8` -- **M81 already decoded this as `DropObject`**, the
+      same function the drop-gold case calls. It spawns typeId **300**
+      (`entities.txt` line 212, `300 30 8 !bag_loot`: category 8, model 30
+      `bag_dropped.bin`) with the script tag **`"Loot_Dropped"`** (the
+      literal at `0x100addf0`), places it at the owner's position minus
+      half a tile on each of x and y, and appends the item to it. And
+      `loot_dropped.s` is a real shipped script whose `OnUse()` opens
+      `LootMenu`. So a drop in this game is a bag you can turn round and
+      loot again -- it was a delete here.
+
+      The object is handed over rather than destroyed by the same
+      deferral the rest of the item lifetime already uses: `MarkForDrop()`
+      implies `MarkForRemoval()`, so every existing "is this still in the
+      inventory" test keeps its answer, and `PurgeRemovedItems()` moves
+      those items to `PlayerExecutable::TakePendingDrops()` instead of
+      erasing them. main.cpp drains that beside the purge and builds the
+      bag through the same `CreateEntityWithScript` path M81's creature
+      death drop uses. `kLootDropRise` moved to `game_constants.h` with
+      it, because both spawns use the same `+ 300` literal and they should
+      not be able to drift apart.
+
+    - **Test**: `port/src/tests/m93_can_drop_smoke.cpp`, 40 checks in six
+      parts. Part 1 counts the corpus: 39 setters, none passing true,
+      every one inside an `Init()`, and exactly two readers, both in
+      `inventory.s`. Part 2 is the flag on real scripts --
+      `items/shadowkey1.s` answers false and `items/bread.s` answers the
+      constructor's true, through the accessor and through the binding.
+      Parts 3-5 drive the **real inventory screen**: a game is started,
+      both items go into the bag, `inventory.s` is opened, and the rows are
+      selected through the real page callbacks -- the action popup offers
+      Drop for the bread and has no Drop row at all for the Shadowkey,
+      `DropInventoryItem[]` refuses to raise the confirmation,
+      `DropRow` on the quest item changes nothing and queues nothing, and
+      a 5-stack goes 5 -> 4 on the first drop and leaves the inventory
+      alive on its last. Part 6 checks the bag against the real
+      `entities.txt` row and the real `loot_dropped.s`.
+    - **The suite**: 85 executables, 84 pass (`render_at_smoke` is the
+      argument-taking render tool, not a test). Soft-fail lines 49 -> 39,
+      pairs 14 -> 13; `Item.SetCanDrop` was 10 of those lines and it is
+      gone. The gaps tool drops from 49 unimplemented-and-called names to
+      48 and from 46 Item sites to 7.
+    - **Live**: azra, driving the real screen from the console (Tab, then
+      the script's own handlers -- `port/debug/m93_can_drop.cfg`).
+      Dropping bread logs `[drop] Bread -> loot bag at (30218, 11776)`,
+      `inv` loses it, and `ents container` goes from 2 to 3 with a new
+      **model 30** entry at that exact position, 181 units away -- half a
+      tile on each axis. Running the identical sequence on Delfran's
+      Shadowkey does nothing at all: no `[drop]` line, no new container,
+      and the fragment is still in the bag.
+
 ## Next milestones (not yet started)
 
 Roughly in priority order for reaching "actually playable," not commitments:
@@ -8766,7 +8851,7 @@ surface is **55 names**, and they bucket by owning class like this:
 | sites | class | names |
 |---|---|---|
 | 94 | Object/Entity base (`0x14d08`) | `ShowEntity` (40), `MirrorMethod` (33), `GetID` (9), `RunScript` (7), `SetModel`, `SetRotationTurn` |
-| 46 | Item (`0x14d74`) | **`SetCanDrop` (39)**, `MoveToEmptyQueue`, `CastAzraWrath`, `MoveToLeftQueue`, `GetMarketValue`, `DisplayPopup` |
+| 46 | Item (`0x14d74`) | **`SetCanDrop` (39)**, `MoveToEmptyQueue`, `CastAzraWrath`, `MoveToLeftQueue`, `GetMarketValue`, `DisplayPopup` -- *M93 took `SetCanDrop`, leaving 7* |
 | 40 | GameEngine root (`0x14cf0`) | ~25 multiplayer/Bluetooth, plus `SetLanguage` (6), `ConfigKeysMenu` (3), `ConfigKeysDefault`, `SaveConfig` |
 | 35 | GameState (`0x14dbc`) | `DropGold` (9), `CanDisarmTrap` (9), `VisitStore` (5), `IsMenuActive` (3), `SetGhost`/`IsGhost`, `SetPositionMirrorAll`, `SetPlayerClassFlag`, `EnableCoords`, `CanAvoidTrap` |
 | 19 | trap/magic-damage mixin (`0x14e10`) | `SetMagicDamage` (6), `SetDormant` (6), `SetSpellLevel` (4), `DoMagicDamage` (3) |
@@ -8778,9 +8863,10 @@ None of these needs new RE to *find*: every one has a known trie, index
 and dispatcher case in `SIMKIN_NATIVE_API.md`, so the work is reading a
 case and writing a handler.
 
-> **Superseded in part by M92**, which took the whole first row: the
-> Object/Entity base is gone from this table and the surface is **49
-> names**, coverage 414 of 648. The rest of the table stands.
+> **Superseded in part by M92 and M93.** M92 took the whole first row
+> (the Object/Entity base is gone from this table) and M93 took
+> `SetCanDrop`, which was 39 of the Item row's 46 sites. The surface is
+> now **48 names**, coverage 415 of 648.
 
 **3. The soft-fail log, which is the only measure that sees a name
 implemented on the wrong class.** Both tools above are
@@ -8877,8 +8963,9 @@ difficulty:
 
 - [x] **The `0x14d08` Object/Entity base, on every receiver that inherits
       it.** Done -- M92 above.
-- [ ] **`Item.SetCanDrop`**, 39 call sites and the only thing a real play
-      session soft-fails on. Quest items can currently be dropped.
+- [x] **`Item.SetCanDrop`**, 39 call sites and the only thing a real play
+      session soft-fails on. Done -- M93 above, which also fixed the two
+      other things wrong with the drop it guards.
 - [x] **The map overlay and the back key** (above). Done -- see the
       "Fixed 2026-09-12" note in that section.
 - [ ] **The trap/magic-damage mixin `0x14e10`** -- `SetMagicDamage`,

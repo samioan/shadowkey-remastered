@@ -1,9 +1,13 @@
 #include "simkin_bindings/table_executable.h"
 
+#include <memory>
+#include <utility>
+
 #include "assets/product_database.h"
 #include "assets/string_table.h"
 #include "simkin_bindings/game_constants.h"
 #include "simkin_bindings/item_executable.h"
+#include "simkin_bindings/level_executable.h"
 #include "simkin_bindings/menu_executable.h"
 #include "simkin_bindings/native_binding_common.h"
 #include "simkin_bindings/player_executable.h"
@@ -327,16 +331,60 @@ void TableExecutable::RemoveRowAt(size_t rowIndex) {
 
 void TableExecutable::DropRow(size_t rowIndex) {
     if (rowIndex >= m_Rows.size()) return;
-    // Marks for removal (PlayerExecutable::PurgeRemovedItems erases it
-    // once this tick's script calls have fully unwound) rather than
-    // erasing right now -- see item_executable.h's markedForRemoval()
-    // comment for why an immediate erase here would be a use-after-free
-    // (inventory.s's UseItem() still holds a live reference to this same
-    // item on the line right after the RemoveRow() call that reaches
-    // here).
-    if (const TableCell* cell = PeekCell(rowIndex, 0)) {
-        if (ItemExecutable* item = cell->item) item->MarkForRemoval();
+    // M93: the real `DropItem` case, transcribed. It is not one of the 702
+    // trie natives -- the inventory row class is a plain `wcscmp` chain in
+    // `FUN_100a4ce4` (see this file's header comment), and its `DropItem`
+    // arm is:
+    //
+    //     if (item && item->canDrop /* +0x1c9 */) {
+    //         if (item->quantity /* +0x1c4 */ == 1) {
+    //             DropObject(item, 0);            // FUN_1002c3a8
+    //             player->vtable[0x174](player, item);   // out of the bag
+    //             row->item = 0;
+    //         } else {
+    //             item->quantity -= 1;
+    //             copy = ItemFactory(templateId);
+    //             if (copy) { copy->owner = item->owner; DropObject(copy, 0); }
+    //         }
+    //     }
+    //
+    // Three things this port did not do.
+    const TableCell* cell = PeekCell(rowIndex, 0);
+    ItemExecutable* item = cell ? cell->item : nullptr;
+    if (!item) {
+        RemoveRowAt(rowIndex);
+        return;
     }
+
+    // **One: the gate.** `inventory.s` already checks `CanDrop()` twice
+    // before it gets here, but the engine checks it again in the native,
+    // and so does this -- a quest item is not droppable by any route.
+    // Until M93 `CanDrop()` answered a hardcoded true, so all three checks
+    // passed and the eleven Shadowkey fragments could be thrown away.
+    if (!item->canDrop()) return;
+
+    // **Two: a stack drops one, not all of it.** The quantity branch is
+    // the whole difference between dropping one of five arrows and
+    // destroying the other four.
+    if (item->quantity() > 1) {
+        item->SetQuantity(item->quantity() - 1);
+        std::unique_ptr<ItemExecutable> one =
+            m_Owner.stackLevel().CreateItem(item->templateId());
+        if (one) m_Owner.stackPlayer().QueueDrop(std::move(one));
+        // The row stays: there is still a stack in it.
+        return;
+    }
+
+    // **Three: a dropped item lands on the floor.** MarkForDrop() implies
+    // MarkForRemoval(), so the deferral this has always relied on is
+    // unchanged -- PlayerExecutable::PurgeRemovedItems() runs once this
+    // tick's script calls have fully unwound (an immediate erase here
+    // would be a use-after-free: inventory.s's UseItem() still holds a
+    // live reference to this same item on the line right after the
+    // RemoveRow() that reaches here) -- but it now moves the object to
+    // the pending-drop list instead of destroying it, and main.cpp turns
+    // it into the `Loot_Dropped` bag the engine spawns.
+    item->MarkForDrop();
     RemoveRowAt(rowIndex);
 }
 

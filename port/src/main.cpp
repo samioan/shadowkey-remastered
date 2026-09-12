@@ -3355,6 +3355,48 @@ int main(int argc, char** argv) {
                 gameProjectiles.end());
         }
         stack.player().PurgeRemovedItems();
+        // M93: and whatever the purge just handed over becomes a loot bag
+        // on the floor. `FUN_1002c3a8` -- M81's DropObject, the same
+        // function the drop-gold case calls -- spawns typeId 300 with the
+        // script tag **"Loot_Dropped"** (the literal at `0x100addf0`, a
+        // real `loot_dropped.s` whose Init() is SetName(456)/
+        // SetUseText(457)/SetUsable(true) and whose OnUse() opens
+        // LootMenu), places it at the owner's position minus half a tile
+        // on each of x and y, and appends the dropped item to it. So a
+        // drop is a bag you can turn round and loot again -- it is not a
+        // delete, which is what this port used to do.
+        //
+        // The bag's own placement is `entity->vtable[0x14](x - 0x80,
+        // y - 0x80, z + 300)`; the +300 is M81's kLootDropRise, the height
+        // the floor snap probes from, and it is resolved through the same
+        // helper the creature death drop uses so the two agree.
+        if (gameZone) {
+            constexpr int kDropOffset = 0x80;  // half a tile, both axes
+            for (std::unique_ptr<sk_bindings::ItemExecutable>& dropped :
+                 stack.player().TakePendingDrops()) {
+                if (!dropped) continue;
+                std::unique_ptr<sk_bindings::ItemExecutable> bag =
+                    stack.level().CreateEntityWithScript(sk_bindings::kDroppedLootTypeId,
+                                                          sk_bindings::kDroppedLootScript);
+                if (!bag) continue;
+                PickupInstance inst;
+                inst.x = gameCamera.x - kDropOffset;
+                inst.y = gameCamera.y - kDropOffset;
+                inst.z = gameZone->SnapActorToGround(
+                    inst.x, inst.y,
+                    gameCamera.z - sk::kEyeHeightOffset + sk_bindings::kLootDropRise);
+                inst.modelArchiveIndex =
+                    stack.level().EntityModelIndexOf(sk_bindings::kDroppedLootTypeId);
+                inst.isContainer = true;  // the real case re-derives category == 8
+                bag->SetWorldPosition(static_cast<int>(inst.x), static_cast<int>(inst.y),
+                                       static_cast<int>(inst.z));
+                std::printf("  [drop] %s -> loot bag at (%.0f, %.0f)\n",
+                            dropped->name().c_str(), inst.x, inst.y);
+                bag->AddContent(std::move(dropped));
+                inst.script = std::move(bag);
+                gamePickups.push_back(std::move(inst));
+            }
+        }
         // M27: reaps one-shot SFX voices that finished playing -- see
         // AudioEngine::Update()'s own comment.
         audioEngine.Update();
@@ -5874,11 +5916,11 @@ int main(int argc, char** argv) {
                 //     something killed mid-air or on a slope still lands on
                 //     the floor rather than inside or above it.
                 //
-                // The constant below is `FUN_10084438`'s literal `+ 300` on
-                // the requested z: the height the floor snap probes *from*,
-                // not a final offset -- see Zone::SnapActorToGround for what
-                // the snap then does with it.
-                constexpr float kLootDropRise = 300.0f;
+                // The rise is `FUN_10084438`'s literal `+ 300` on the
+                // requested z: the height the floor snap probes *from*, not
+                // a final offset -- see Zone::SnapActorToGround for what the
+                // snap then does with it. M93 moved it to game_constants.h,
+                // because the inventory drop uses the same literal.
                 auto spawnLoot = [&](const MonsterInstance& m) {
                     if (m.script->lootTypeId() == 0) return;
                     std::unique_ptr<sk_bindings::ItemExecutable> bag =
@@ -5888,7 +5930,7 @@ int main(int argc, char** argv) {
                     PickupInstance inst;
                     inst.x = m.x;
                     inst.y = m.y;
-                    inst.z = gameZone ? gameZone->SnapActorToGround(m.x, m.y, m.z + kLootDropRise)
+                    inst.z = gameZone ? gameZone->SnapActorToGround(m.x, m.y, m.z + sk_bindings::kLootDropRise)
                                        : m.z;
                     inst.modelArchiveIndex =
                         stack.level().EntityModelIndexOf(m.script->lootTypeId());

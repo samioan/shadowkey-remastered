@@ -228,6 +228,8 @@ int MenuExecutable::PlayerCharacterClass() const {
 
 PlayerExecutable& MenuExecutable::stackPlayer() const { return m_Stack.player(); }
 
+LevelExecutable& MenuExecutable::stackLevel() const { return m_Stack.level(); }
+
 int MenuExecutable::ArmorSlotOfTemplate(int templateId) const {
     const sk::ProductRecord* record = m_Stack.products().Find(templateId);
     return record ? record->armorSlot : -1;

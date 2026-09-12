@@ -546,6 +546,22 @@ public:
         return p;
     }
 
+    // M93: the same channel in the other direction -- items the inventory
+    // screen dropped this tick, waiting to become a loot bag on the floor.
+    // PurgeRemovedItems() fills it (a dropped item is moved out of
+    // m_Inventory rather than destroyed) and main.cpp drains it, for the
+    // same reason the pickup above is deferred: the drop happens inside a
+    // live `inventory.s` call frame that is still holding references, and
+    // the object has to outlive it.
+    // Out of line, like every other member here that touches a
+    // unique_ptr<ItemExecutable>: the class only forward-declares it.
+    std::vector<std::unique_ptr<ItemExecutable>> TakePendingDrops();
+
+    // The other way in: one unit split off a stack, which was never in
+    // m_Inventory in the first place and so never passes through
+    // PurgeRemovedItems(). See TableExecutable::DropRow().
+    void QueueDrop(std::unique_ptr<ItemExecutable> item);
+
     // ---- M50: character.dat ----
     //
     // The real save's player record (`FUN_10043308`, see
@@ -672,6 +688,8 @@ private:
     ItemExecutable* m_RightItem = nullptr;
     // M19: see TakePendingPickupItem()'s comment.
     skiExecutable* m_PendingPickupItem = nullptr;
+    // M93: see TakePendingDrops().
+    std::vector<std::unique_ptr<ItemExecutable>> m_PendingDrops;
 
     // M23: see setValue()/getValue()'s comment above.
     std::map<std::string, skRValue> m_Fields;

@@ -116,6 +116,26 @@ constexpr int kSpellAnimationFrames = 5;
 constexpr int kDefaultReloadSpeed = 0x100;
 constexpr int kWeaponReloadSpeed = 0x300;
 
+// M93: the bag an inventory drop lands in. `FUN_1002c3a8` (M81's
+// DropObject, shared with the drop-gold case) builds it with a
+// hardcoded typeId **300** -- `entities.txt` line 212, `300 30 8
+// !bag_loot`, category 8 (container), model 30 (`bag_dropped.bin`) --
+// and the script tag **"Loot_Dropped"**, the literal at `0x100addf0`.
+// `loot_dropped.s` is a real shipped script: SetName(456),
+// SetUseText(457), SetUsable(true), and an OnUse() that opens
+// LootMenu. So a dropped item is recoverable, which is the whole
+// reason the drop is not a delete.
+constexpr int kDroppedLootTypeId = 300;
+constexpr const char* kDroppedLootScript = "Loot_Dropped";
+
+// M81/M93: the `+ 300` both loot spawns put on the requested z -- the
+// height the floor snap probes *from*, not a final offset (see
+// Zone::SnapActorToGround for what the snap then does with it). A creature
+// death drop (`FUN_10084438`) and an inventory drop (`FUN_1002c3a8`) use
+// the same literal; shared here so they cannot drift apart. M93 hoisted it
+// out of main.cpp's death handler, where M81 first wrote it.
+constexpr float kLootDropRise = 300.0f;
+
 // `entity+0x1c0`, from the same constructors -- which hand an item wants
 // when it is picked up (`FUN_1003d8e0`) or equipped
 // (`FUN_10033660` case 1). Not a preference the engine can be talked out

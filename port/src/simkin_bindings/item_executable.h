@@ -361,6 +361,25 @@ public:
     bool markedForRemoval() const { return m_MarkedForRemoval; }
     void MarkForRemoval() { m_MarkedForRemoval = true; }
 
+    // M93: `item+0x1c9`, SetCanDrop's byte. True unless the item's own
+    // Init() said otherwise -- see the handler for the 39 shipped sites,
+    // every one of them a quest item.
+    bool canDrop() const { return m_CanDrop; }
+
+    // M93: removal that hands the object to the world instead of deleting
+    // it. A dropped item does not vanish: `FUN_1002c3a8` (M81's
+    // DropObject, already this port's loot-bag spawn) puts it in a
+    // `Loot_Dropped` bag half a tile from the player's feet, which is a
+    // bag you can turn round and loot again. Implies MarkForRemoval(), so
+    // every existing "is this still in the inventory" test keeps its
+    // answer; PlayerExecutable::PurgeRemovedItems() moves these out to
+    // PlayerExecutable::TakePendingDrops() rather than destroying them.
+    bool markedForDrop() const { return m_MarkedForDrop; }
+    void MarkForDrop() {
+        m_MarkedForDrop = true;
+        m_MarkedForRemoval = true;
+    }
+
     // M21: real loot-bag support (loot_ratseye.s/loot_gold6-10.s etc. --
     // see docs/PORT_ROADMAP.md's M21 entry). A bag script's Init() calls
     // `Item = Level.CreateEntity(typeId); Item.SetQuantity(...);
@@ -423,6 +442,15 @@ public:
     // M50: restoring a saved stack (SavedStackable/SavedWeapon's +0x1c4).
     void SetQuantity(int quantity) { m_Quantity = quantity; }
     const std::vector<std::unique_ptr<ItemExecutable>>& contents() const { return m_Contents; }
+    // M93: the host-side way in. `AddObject(Item)` above is the
+    // script's -- a loot-bag script filling itself in its own Init()
+    // -- but a *dropped* bag has no script that knows what is in it:
+    // `FUN_1002c3a8` appends the item to the freshly spawned bag
+    // (`FUN_10028f98(bag, item)`) from C++, after the bag's Init()
+    // has run. Same Collection either way.
+    void AddContent(std::unique_ptr<ItemExecutable> item) {
+        if (item) m_Contents.push_back(std::move(item));
+    }
 
     // M22: a real spell script's own SetRating() (e.g. blaze.s's
     // SetRating(2)) -- confirmed NOT an exclusive spell-category signal
@@ -520,6 +548,10 @@ private:
     bool m_Equipped = false;
     skiExecutable* m_Owner = nullptr;
     bool m_MarkedForRemoval = false;
+    bool m_MarkedForDrop = false;  // M93, see markedForDrop()
+    // M93: the item constructors write 1 -- droppable until an Init() says
+    // otherwise. See the SetCanDrop handler.
+    bool m_CanDrop = true;
 
     // M21: see quantity()/contents()'s comment above.
     int m_Quantity = 1;

@@ -667,3 +667,7 @@ target_include_directories(aspect_viewport_smoke PRIVATE src)
 # M92 milestone smoke test -- see src/tests/m92_entity_base_smoke.cpp.
 add_executable(entity_base_smoke src/tests/m92_entity_base_smoke.cpp)
 target_link_libraries(entity_base_smoke PRIVATE sk_bindings)
+
+# M93 milestone smoke test -- see src/tests/m93_can_drop_smoke.cpp.
+add_executable(can_drop_smoke src/tests/m93_can_drop_smoke.cpp)
+target_link_libraries(can_drop_smoke PRIVATE sk_bindings)

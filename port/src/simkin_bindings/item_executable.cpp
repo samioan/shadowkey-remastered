@@ -858,10 +858,26 @@ bool ItemExecutable::method(const skString& methodName, skRValueArray& args,
         returnValue = skRValue(m_ItemType);
         return true;
     }
+    if (methodName == skString("SetCanDrop") && args.entries() == 1) {
+        // M93: Item binding 2 (`FUN_1002c848` case 2) -- `item+0x1c9`, one
+        // byte, and the item constructors write 1 into it, so an item is
+        // droppable until its own script says otherwise. All 39 shipped
+        // call sites pass `false` and all 39 are in an `Init()`: the eleven
+        // Shadowkey fragments, the quest keys, the letters and rosters, the
+        // three raider amulets, the five snowline herbs and the twilite
+        // scrolls. Nothing in the corpus ever passes true.
+        m_CanDrop = args[0].boolValue();
+        return true;
+    }
     if (methodName == skString("CanDrop") && args.entries() == 0) {
-        // No quest-critical/undroppable item flag exists in this port's
-        // model -- every real, owned item can be dropped.
-        returnValue = skRValue(true);
+        // Binding 1, the matching getter (case 1 reads the same byte).
+        // `inventory.s` is its only script-side reader, twice: once in the
+        // action popup's builder, where `UpdatePopupItem(2, "")` blanks the
+        // Drop row for an item that answers false, and once at the top of
+        // `DropInventoryItem[]` as a second guard. The native drop is
+        // gated on the same byte independently -- see
+        // TableExecutable::DropRow().
+        returnValue = skRValue(m_CanDrop);
         return true;
     }
     if (methodName == skString("CanTravel") && args.entries() == 0) {

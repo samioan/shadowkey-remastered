@@ -252,6 +252,9 @@ public:
     int PlayerCharacterClass() const;
     bool PlayerOwnsTemplate(int templateId) const;
     class PlayerExecutable& stackPlayer() const;
+    // M93: DropRow() needs the item factory to split a stack -- see
+    // TableExecutable::DropRow().
+    class LevelExecutable& stackLevel() const;
     // M60: `player+0xf8c + slot*4`, the eight worn-armour slots the store
     // table's comparison columns look up for an Armor row. This port has
     // no per-slot array, so the slot is resolved through products.dat --

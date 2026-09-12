@@ -210,15 +210,30 @@ ItemExecutable* PlayerExecutable::FindInventoryById(const std::string& id) const
     return nullptr;
 }
 
+std::vector<std::unique_ptr<ItemExecutable>> PlayerExecutable::TakePendingDrops() {
+    return std::move(m_PendingDrops);
+}
+
+void PlayerExecutable::QueueDrop(std::unique_ptr<ItemExecutable> item) {
+    if (item) m_PendingDrops.push_back(std::move(item));
+}
+
 void PlayerExecutable::PurgeRemovedItems() {
     for (auto& item : m_Inventory) {
         if (!item->markedForRemoval()) continue;
         if (m_LeftItem == item.get()) m_LeftItem = nullptr;
         if (m_RightItem == item.get()) m_RightItem = nullptr;
+        // M93: a *dropped* item is leaving the inventory but not existence
+        // -- it is about to be the contents of a loot bag on the floor, so
+        // it moves to the pending list instead of being destroyed with the
+        // rest. See TakePendingDrops().
+        if (item->markedForDrop()) m_PendingDrops.push_back(std::move(item));
     }
     m_Inventory.erase(std::remove_if(m_Inventory.begin(), m_Inventory.end(),
                                       [](const std::unique_ptr<ItemExecutable>& i) {
-                                          return i->markedForRemoval();
+                                          // A moved-from slot is one of the
+                                          // drops above; it goes too.
+                                          return !i || i->markedForRemoval();
                                       }),
                        m_Inventory.end());
 }
