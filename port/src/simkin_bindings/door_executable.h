@@ -68,6 +68,7 @@
 #include <string>
 
 #include "simkin_bindings/entity_base_ref.h"
+#include "simkin_bindings/trap_ref.h"
 #include "skScriptedExecutable.h"
 
 class skInterpreter;
@@ -76,7 +77,8 @@ namespace sk_bindings {
 
 class PlayerExecutable;
 
-class DoorExecutable : public skScriptedExecutable, public EntityBaseRef {
+class DoorExecutable : public skScriptedExecutable, public EntityBaseRef,
+                        public TrapRef {
 public:
     // M67: the tile grid, reached through an interface for the same
     // layering reason LevelExecutable::ZoneRegions exists -- `sk_bindings`
@@ -164,6 +166,13 @@ protected:
     // does.
     sk::SoundArchive* entitySounds() const override;
     sk::AudioEngine* entityAudio() const override;
+
+    // M94: the `0x14e10` trap mixin -- crypt1's five trapped doors are the
+    // only things in the game that actually cast a trap spell. See
+    // trap_ref.h.
+    MenuStack* trapStack() const override;
+    const std::string& trapEntityId() const override { return entityId(); }
+    skiExecutable* trapSelf() override { return this; }
 
 private:
     // M38: object-valued script fields -- see setValue() above.

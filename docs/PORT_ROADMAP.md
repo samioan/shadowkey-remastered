@@ -8686,6 +8686,130 @@ soft-fails 39 -> 39, all 14 tracked `.ppm` renders byte-identical,
       Shadowkey does nothing at all: no `[drop]` line, no new container,
       and the fragment is still in the bag.
 
+- [x] **M94 -- the trap/magic-damage mixin `0x14e10`, and the two saving
+      throws that decide whether it ever goes off.** Four bindings
+      (`SetMagicDamage` 6 sites, `SetSpellLevel` 4, `SetDormant` 6,
+      `DoMagicDamage` 3) over the trapped chests in delfhide and the
+      locked doors in crypt1 -- "the chests currently open without ever
+      hurting anyone".
+
+      **`CanDisarmTrap` came with it, and had to.** `Menus/UsePicks.s` is
+      the screen the whole chain hangs off, and its `Pick[]` handler is
+      `if (GetPlayer().CanDisarmTrap(GetOpener().resistDisarm) = true)
+      LockPicked(); else ... GetOpener().MagicDamage();`. With the roll
+      soft-failing to 0, *every* pick in the game already took the failure
+      branch; implementing the mixin on its own would have turned "no lock
+      can be picked and nothing happens" into "no lock can be picked and
+      the trap fires every time". The roadmap listed the rolls in the next
+      bucket but annotated them as "the rolls the trap chain above asks
+      for", which is exactly right. `CanAvoidTrap` (1 site) came along as
+      the same roll family.
+
+    - **`SetMagicDamage` is a spell template id, not a damage number.**
+      Case 0 stores its argument at `entity+0x184` and `DoMagicDamage`
+      hands that straight to the item factory. The corpus agrees: the four
+      values are 50 (`blaze.s`, the ignite template
+      `spells/u_blaze_lvl10.s` names in its own comment) and 4017 / 4021 /
+      4023 -- `spells/DoomHammer.s`, `spells/FeebleBlade.s` and
+      `spells/HarmArmor.s`.
+    - **`SetDormant` is what stops every trap firing on contact.**
+      `FUN_1002e5ec`, the trapped entity's own use handler, is three
+      lines: `if (!dormant) FireTrap(this); else RunOnUse(this);`. All six
+      shipped calls pass `true`, in an `Init()`. That is why a trapped
+      door opens its lock-picking screen instead of exploding when you
+      touch it, and why the trap only goes off through the explicit
+      `DoMagicDamage()` in the script's own `MagicDamage[]` handler.
+    - **`DoMagicDamage` builds a real spell, casts it, and throws it
+      away.** `FUN_1002e024`: notify the zone's trigger list with mode 1
+      and this entity; if nothing claims it, just run `OnUse`; otherwise
+      build the stored template through the item factory, set its level
+      (`spell+0x1d0`), set its owner to the trap (`spell+0x170`), call the
+      literal at `0x100adf7c` -- **`HitTarget`** -- with the player, and
+      destroy it. So a trap casts a real spell script at you and the
+      spell's own handler does the damage; `DoomHammer.s`'s whole
+      `HitTarget` is `DoAttackRoll(target, 2)`.
+
+      The trigger gate is real and it is satisfied: mode 1 is
+      `kNotifyDoorOpened` and the trigger matches on `entity+0xcb`, the
+      `.ent` placement name **M92 wired up two milestones ago**. The three
+      scripts that call `DoMagicDamage` are `lockeddoor_dh/_fb/_ha.s`,
+      `crypt1.ent` places them as `door1`..`door5`, and `crypt1.s`'s
+      `Init()` registers exactly those five names. Without M92's `GetID`
+      seeding, none of them would have matched.
+    - **19 sites are not 19 working traps**, and the writeup says so:
+      `lockeddoor_bl.s` and both delfhide chests arm a template and a
+      level and then damage the player directly
+      (`GetPlayer().DoDamage(20)`, `SetHealth(GetHealth() - 6)`). Their
+      `SetDormant` is still load-bearing.
+
+    - **The disarm roll** (`FUN_1003e438`) is a real stat formula, and
+      **M38 recorded it as deliberately not reproduced** -- "this port has
+      no stance model and no equipped-effect array". M56, M60 and M64 have
+      since given it both, so it is transcribed now:
+
+      ```
+      bonus  = (class == Thief) ? specialAbility : 0
+      bonus += 2  if stats.periodic2Kind == 3
+      bonus += 2  if holding template 618   (armor/Bandit_Gloves.s)
+      bonus += 8  if holding template 4500  (misc/silver_picks.s) and class is
+                  Thief or Nightblade, else += 3
+      skill     = agility / 5 + bonus
+      effective = (class is Thief or Nightblade) ? skill : skill / 2
+      roll      = min(Random(0, 0x100), 0xe6)
+      ratio     = (effective << 8) / (skill + resistDisarm)
+      fail if   level < resistDisarm / 2  ||  ratio < 0x41  ||  ratio < roll
+      ```
+
+      Three things fall out of it. **The level gate bites**: every shipped
+      door declares `resistDisarm[5]`, so a level-1 character cannot pick
+      a single lock in the game. **The class split is large**: Thief and
+      Nightblade are the only classes whose skill is not halved *and* the
+      only ones who get 8 rather than 3 from the silver picks. And
+      **`periodic2Kind == 3` is dead** -- the only kinds anything in the
+      binary ever arms are 4, 6, 7 and 8 (actor_stats.h's `PeriodicKind`),
+      so that term can never fire. Transcribed because it is in the
+      formula, marked because it is a leftover.
+
+      The equipped-item search is the one substitution: the engine scans
+      both hands and the eight slots at `player+0xf8c`, and this port has
+      no per-slot array, so "any equipped inventory item" stands in for
+      the slots -- the same substitution `EquippedArmorInSlot()` already
+      makes, and the same answer for a yes/no test.
+
+    - **Test**: `port/src/tests/m94_trap_magic_smoke.cpp`, 31 checks in
+      six parts, all on real data. The corpus census; the mixin's state
+      read back off `lockeddoor_dh.s` (template 4017, level 8, dormant)
+      and off `delfhide/chest_trap_gold.s` (template 50, dormant -- the
+      same mixin on the other class); the roll driven through the real
+      `SetLevel`/`ChooseCharacter`/`SetAgility` natives and measured over
+      hundreds of trials (level 1: **0/200**; level 2 Battlemage
+      **148/400** vs Thief **277/400**; agility 10 **0/400** vs agility
+      100 **155/400**); `CanAvoidTrap` (chance 0: 362/400, chance 10:
+      0/400 -- `Random(1, luck)/5` cannot exceed 10 at luck 50); and
+      `DoMagicDamage` end to end against **real crypt1 data** -- the
+      zone script loaded, its five triggers registered, a real door given
+      the placement name `door1`, and its `MagicDamage[]` handler fired.
+
+      One check is there specifically to separate two effects: crypt1.s
+      gives door1 `SetTrap(3, 23, 25)`, so a claiming trigger rolls its
+      own physical damage as well, and the 23 points the player loses are
+      both together. door3 and door4 are `SetTrap(0, 0, 25)` -- no
+      physical damage at all -- and firing there draws blood 20 times out
+      of 20, which is the spell alone.
+    - **The suite**: 86 executables, 85 pass (`render_at_smoke` is the
+      argument-taking render tool, not a test). **Soft-fail lines 39 ->
+      15, pairs 13 -> 10** -- and 5 of those 10 are the dead rows that
+      should stay (`Menu.MenuQuit`, `Menu.UpdateTextItems`,
+      `Menu.IsRightQueue`, `Monster.SetMagicResistable`, `Item.HitTarget`),
+      so the suite is down to five real receiver+method gaps. The gaps
+      tool: 48 unimplemented-and-called names -> **42**, coverage 415 ->
+      **421 of 648**.
+    - **Live**: crypt1. `sk player CanDisarmTrap(5)` answers false at
+      level 1 every time -- the gate -- and `call player SetLevel 5` makes
+      it start coming up true. `sk ent:<door1> DoMagicDamage()` prints
+      `[trap] "door1" casts template 50 at level 10` and `stats` shows
+      100 -> 77 health. Repro: `port/debug/m94_trap_magic.cfg`.
+
 ## Next milestones (not yet started)
 
 Roughly in priority order for reaching "actually playable," not commitments:
@@ -8863,10 +8987,11 @@ None of these needs new RE to *find*: every one has a known trie, index
 and dispatcher case in `SIMKIN_NATIVE_API.md`, so the work is reading a
 case and writing a handler.
 
-> **Superseded in part by M92 and M93.** M92 took the whole first row
-> (the Object/Entity base is gone from this table) and M93 took
-> `SetCanDrop`, which was 39 of the Item row's 46 sites. The surface is
-> now **48 names**, coverage 415 of 648.
+> **Superseded in part by M92, M93 and M94.** M92 took the whole first
+> row (the Object/Entity base is gone from this table), M93 took
+> `SetCanDrop` (39 of the Item row's 46 sites), and M94 took the whole
+> trap/magic-damage row plus `CanDisarmTrap`/`CanAvoidTrap` out of
+> GameState. The surface is now **42 names**, coverage 421 of 648.
 
 **3. The soft-fail log, which is the only measure that sees a name
 implemented on the wrong class.** Both tools above are
@@ -8968,13 +9093,14 @@ difficulty:
       other things wrong with the drop it guards.
 - [x] **The map overlay and the back key** (above). Done -- see the
       "Fixed 2026-09-12" note in that section.
-- [ ] **The trap/magic-damage mixin `0x14e10`** -- `SetMagicDamage`,
-      `SetDormant`, `SetSpellLevel`, `DoMagicDamage`, 19 sites, all of
-      them the trapped chests in delfhide and the magic doors. The chests
-      currently open without ever hurting anyone.
-- [ ] **GameState odds and ends** (35 sites): `DropGold` (the drop-gold
-      menu does nothing), `CanDisarmTrap`/`CanAvoidTrap` (the rolls the
-      trap chain above asks for), `VisitStore`, `IsMenuActive`.
+- [x] **The trap/magic-damage mixin `0x14e10`.** Done -- M94 above, which
+      also took `CanDisarmTrap`/`CanAvoidTrap` out of the bucket below,
+      because the chain does not work without them.
+- [ ] **GameState odds and ends** (25 sites, was 35): `DropGold` (the
+      drop-gold menu does nothing), `VisitStore`, `IsMenuActive`,
+      `SetGhost`/`IsGhost`, `SetPositionMirrorAll`, `SetPlayerClassFlag`,
+      `EnableCoords`. `CanDisarmTrap`/`CanAvoidTrap` left this bucket with
+      M94.
 - [ ] **`StatModXP`** (7 sites) -- the conversations that award experience
       award none.
 - [ ] **Options that don't apply**: `SetLanguage` (6), `ConfigKeysMenu`

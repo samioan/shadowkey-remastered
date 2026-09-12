@@ -28,6 +28,7 @@
 #include "simkin_bindings/native_stub_executable.h"
 #include "simkin_bindings/script_delay.h"
 #include "simkin_bindings/spell_actor.h"
+#include "simkin_bindings/trap_ref.h"
 #include "skScriptedExecutable.h"
 
 class skInterpreter;
@@ -40,7 +41,8 @@ namespace sk_bindings {
 
 class MenuStack;
 
-class ItemExecutable : public skScriptedExecutable, public EntityBaseRef {
+class ItemExecutable : public skScriptedExecutable, public EntityBaseRef,
+                        public TrapRef {
 public:
     // M21: `stack` -- replaces M19's separate `strings`/`PlayerExecutable&`
     // parameters (a real script now also needs `GetPlayer()` *and*
@@ -177,6 +179,14 @@ public:
     // scripts that call SetLevel and no plain spell does: a scroll's power
     // is fixed by the scroll, everything else scales with who cast it.
     int spellLevel() const { return m_SpellLevel; }
+    // M94: a trap casts its spell at its own SetSpellLevel, through
+    // `FUN_10047540(spell, entity->+0x188)` -- host-side, because the
+    // spell object the trap builds never runs a script that would set
+    // it. See trap_ref.h.
+    void SetSpellLevel(int level) { m_SpellLevel = level; }
+    // M94: `FUN_1006d510(spell, entity)` -- the caster of a trap's
+    // spell is the trap, not the player.
+    void SetOwner(skiExecutable* owner) { m_Owner = owner; }
     bool scroll() const { return m_Scroll; }
 
     // M48: the Spell class's fourth field, `SetRefireRate` (`+0x1d2`, the
@@ -495,6 +505,13 @@ protected:
     // nowhere to go.
     sk::SoundArchive* entitySounds() const override;
     sk::AudioEngine* entityAudio() const override;
+
+    // M94: the `0x14e10` trap mixin. The delfhide chests are containers,
+    // so they are Items -- `Item.SetMagicDamage` and `Item.SetDormant`
+    // were 9 soft-fail lines each. See trap_ref.h.
+    MenuStack* trapStack() const override { return &m_Stack; }
+    const std::string& trapEntityId() const override { return entityId(); }
+    skiExecutable* trapSelf() override { return this; }
 
 private:
     // M74: the M10 setter inference, demoted to a fallback. It runs only

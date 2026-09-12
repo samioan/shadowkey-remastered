@@ -1068,6 +1068,10 @@ bool ItemExecutable::method(const skString& methodName, skRValueArray& args,
     // `Herbs.SetPosition(...)` moves one. Like a door and unlike an actor,
     // it is not floor-snapped.
     if (HandleEntityBaseNative(methodName, args, returnValue)) return true;
+    // M94: and the trap mixin (`0x14e10`). A chest is a container, which
+    // is an Item here -- `delfhide/chest_trap_gold.s` and its conversation
+    // are the shipped callers.
+    if (HandleTrapNative(methodName, args, returnValue)) return true;
     if (skScriptedExecutable::method(methodName, args, returnValue, context)) {
         return true;
     }

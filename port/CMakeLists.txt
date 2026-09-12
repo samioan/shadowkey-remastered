@@ -145,6 +145,7 @@ add_library(sk_bindings STATIC
   src/simkin_bindings/effect_entity.cpp
   src/simkin_bindings/script_delay.cpp
   src/simkin_bindings/table_executable.cpp
+  src/simkin_bindings/trap_ref.cpp
   src/simkin_bindings/test_armor_executable.cpp
   src/simkin_bindings/text_area_executable.cpp
   src/simkin_bindings/weapon_viewmodel.cpp
@@ -671,3 +672,7 @@ target_link_libraries(entity_base_smoke PRIVATE sk_bindings)
 # M93 milestone smoke test -- see src/tests/m93_can_drop_smoke.cpp.
 add_executable(can_drop_smoke src/tests/m93_can_drop_smoke.cpp)
 target_link_libraries(can_drop_smoke PRIVATE sk_bindings)
+
+# M94 milestone smoke test -- see src/tests/m94_trap_magic_smoke.cpp.
+add_executable(trap_magic_smoke src/tests/m94_trap_magic_smoke.cpp)
+target_link_libraries(trap_magic_smoke PRIVATE sk_bindings sk_world)

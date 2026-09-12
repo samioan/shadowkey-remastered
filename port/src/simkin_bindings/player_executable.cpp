@@ -218,6 +218,79 @@ void PlayerExecutable::QueueDrop(std::unique_ptr<ItemExecutable> item) {
     if (item) m_PendingDrops.push_back(std::move(item));
 }
 
+namespace {
+
+// The two template ids the disarm roll searches for -- `entities.txt` rows
+// 618 `armor\\Bandit_Gloves.s` and 4500 `misc\\silver_picks.s`.
+constexpr int kBanditGlovesTemplate = 618;
+constexpr int kSilverPicksTemplate = 4500;
+
+// `FUN_100730c8(rng, min, max)` -- inclusive both ends.
+int RandomBetween(int lo, int hi) {
+    if (hi <= lo) return lo;
+    return lo + std::rand() % (hi - lo + 1);
+}
+
+// `entity+0x428` == the stats block's `+0x7c`. See the header: nothing in
+// the shipped binary ever arms kind 3, so this term is dead. Transcribed
+// anyway, because it is in the formula.
+constexpr int kDeadDisarmPeriodicKind = 3;
+
+}  // namespace
+
+// M94: `FUN_1003e438`. See the header for the whole formula and where each
+// term comes from.
+bool PlayerExecutable::CanDisarmTrap(int resistDisarm) const {
+    // The engine's three-place search for an equipped template: both hands
+    // and the eight slots at `player+0xf8c`. This port has no per-slot
+    // array (M60), so the slots stand in as "any equipped inventory item"
+    // -- the same substitution MenuExecutable::EquippedArmorInSlot()
+    // already makes, and the same answer for a yes/no test like this one.
+    auto holds = [this](int templateId) {
+        if (m_LeftItem && m_LeftItem->templateId() == templateId) return true;
+        if (m_RightItem && m_RightItem->templateId() == templateId) return true;
+        for (const auto& item : m_Inventory) {
+            if (item && item->equipped() && item->templateId() == templateId) return true;
+        }
+        return false;
+    };
+
+    const int charClass = m_CharacterClass;
+    const bool nimbleClass = charClass == kClassThief || charClass == kClassNightblade;
+
+    int bonus = charClass == kClassThief ? m_SpecialAbility : 0;
+    if (m_Stats.periodicKind() == kDeadDisarmPeriodicKind) bonus += 2;
+    if (holds(kBanditGlovesTemplate)) bonus += 2;
+    if (holds(kSilverPicksTemplate)) bonus += nimbleClass ? 8 : 3;
+
+    const int skill = m_Agility / 5 + bonus;
+    const int effective = nimbleClass ? skill : skill / 2;
+
+    int roll = RandomBetween(0, 0x100);
+    if (roll > 0xe5) roll = 0xe6;
+
+    const int denominator = skill + resistDisarm;
+    if (denominator == 0) return false;  // not reachable in shipped data
+    const int ratio = (effective << 8) / denominator;
+
+    // The level gate comes first in the real expression too, and it is the
+    // one that bites: every shipped door declares `resistDisarm[5]`.
+    if (m_Level < resistDisarm / 2) return false;
+    if (ratio < 0x41) return false;
+    if (ratio < roll) return false;
+    return true;
+}
+
+// M94: GameState case 0x30.
+bool PlayerExecutable::CanAvoidTrap(int chance) const {
+    if (chance > 0x11) chance = 0x12;
+    int value = RandomBetween(1, m_Luck);
+    if (m_CharacterClass == kClassThief) value += m_SpecialAbility;
+    value /= 5;
+    if (m_Stats.periodicKind() == kDeadDisarmPeriodicKind) value += 2;
+    return chance < value;
+}
+
 void PlayerExecutable::PurgeRemovedItems() {
     for (auto& item : m_Inventory) {
         if (!item->markedForRemoval()) continue;
@@ -713,6 +786,20 @@ int PlayerExecutable::UpdateEquipStatus(ItemExecutable* item, bool equipping) {
 
 bool PlayerExecutable::method(const skString& methodName, skRValueArray& args,
                                skRValue& returnValue, skExecutableContext& context) {
+    if ((methodName == skString("CanDisarmTrap") || methodName == skString("CanAvoidTrap")) &&
+        args.entries() == 1) {
+        // M94: GameState bindings 0x2f and 0x30 -- the two trap saving
+        // throws. Nine `CanDisarmTrap` call sites and one `CanAvoidTrap`,
+        // and every one is `if (GetPlayer().CanXTrap(...) = true)` at the
+        // top of a lock-picking screen. Soft-failing them to 0 meant every
+        // pick in the game failed: the delfhide chests could never be
+        // opened by picking, and crypt1's five trapped doors sprang every
+        // single time. See the declarations for the formulas.
+        const int arg = args[0].intValue();
+        returnValue = skRValue(methodName == skString("CanDisarmTrap") ? CanDisarmTrap(arg)
+                                                                       : CanAvoidTrap(arg));
+        return true;
+    }
     if (methodName == skString("SetPlayerName") && args.entries() == 1) {
         m_Name = ToStdString(args[0].str());
         return true;

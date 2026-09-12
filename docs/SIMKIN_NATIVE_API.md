@@ -1441,6 +1441,109 @@ running port.
 The `+ 300` on the requested z is the same literal `FUN_10084438` puts on a
 creature's death drop — the height the floor snap probes from, not a final
 offset.
+## The trap / magic-damage mixin, and the two saving throws (M94)
+
+Class `0x14e10` (registration `FUN_100150e8`, dispatcher `FUN_1002de24`) is
+four bindings and a lazily-allocated helper object at `entity+0x18c`:
+
+| index | name | case |
+|---|---|---|
+| `0x00` | `SetMagicDamage(templateId)` | `entity+0x184 = arg` |
+| `0x01` | `SetSpellLevel(level)` | `entity+0x188 = (u16)arg` |
+| `0x02` | `SetDormant(bool)` | `entity+0x190 = arg` |
+| `0x03` | `DoMagicDamage()` | `if (entity+0x184) FUN_1002e024(entity, engine->+0x618, 0)` |
+
+It is a **mixin**: the trie miss path forwards to `entity+0x18c`'s own
+chain and then to `FUN_10028594`, so a trapped thing is an ordinary door
+or container with these four bolted on.
+
+**`SetMagicDamage` is a spell template id.** `FUN_1002e024` hands
+`entity+0x184` to the item factory `FUN_100715a8` as a typeId. The corpus
+passes 50 (`blaze.s`), 4017 (`spells\DoomHammer.s`), 4021
+(`spells\FeebleBlade.s`) and 4023 (`spells\HarmArmor.s`).
+
+**`SetDormant` is the flag that keeps every trap asleep.** The trapped
+entity's own use handler, `FUN_1002e5ec`, is three lines:
+
+```c
+if (entity->+0x190 == 0) { FUN_1002e024(entity); }   /* fire */
+else                     { FUN_100646a8(entity); }   /* just OnUse */
+```
+
+— and `FUN_100646a8(entity)` is "if `entity+0xd8`, call the script's
+`OnUse`". All six shipped calls pass `true`, in an `Init()`.
+
+**`DoMagicDamage` (`FUN_1002e024`)** in full:
+
+```c
+if (!FUN_1007307c(engine->+0x470, /*mode*/ 1, entity)) {
+    FUN_100646a8(entity);                       /* nothing claims it */
+} else if (entity->+0x18c) {
+    PlaySound(61);
+    spell = FUN_100715a8(engine->+0x470, entity->+0x184, 0, 0, 0);
+    if (spell) {
+        FUN_10047540(spell, entity->+0x188);    /* spell+0x1d0 = level */
+        FUN_1006d510(spell, entity);            /* spell+0x170 = caster */
+        spell->vtable[0xa8](spell, "HitTarget", { player }, ...);
+        FUN_1001b484(engine, spell);            /* and destroy it */
+    }
+}
+```
+
+The method name is the wide literal at `0x100adf7c`, **`HitTarget`**.
+`FUN_1007307c` walks the zone's trigger list calling
+`FUN_10090818(trigger, 1, entity)`; mode 1 is the door-opened
+notification, and the trigger matches on `entity+0xcb` — the `.ent`
+placement name (see the M92 section above). `crypt1.s` registers
+`door1`..`door5` with `AddTrigger`/`SetTrap`, `crypt1.ent` places exactly
+those five names, and `lockeddoor_dh/_fb/_ha.s` are the three scripts that
+call `DoMagicDamage`. So the gate passes for every shipped caller.
+
+### `CanDisarmTrap` and `CanAvoidTrap` (GameState `0x2f` / `0x30`)
+
+`CanDisarmTrap` is `FUN_1003e438`:
+
+```c
+bonus  = (class == 8) ? player->+0xfb0 : 0;        /* Thief's ability rank */
+bonus += 2 if stats->+0x7c == 3;
+bonus += 2 if equipped(618);                       /* armor\Bandit_Gloves.s */
+bonus += (class == 4 || class == 8) ? 8 : 3        /* misc\silver_picks.s */
+         if equipped(4500);
+skill     = agility /*+0x3c4*/ / 5 + bonus;
+effective = (class == 4 || class == 8) ? skill : skill / 2;
+roll      = min(Random(0, 0x100), 0xe6);
+ratio     = (effective << 8) / (skill + resistDisarm);
+return !( (s16)player->+0x3e0 /*level*/ < resistDisarm / 2
+          || ratio < 0x41 || ratio < roll );
+```
+
+`equipped(t)` is the engine's own three-place search: `+0x3ac+0x48` and
+`+0x4c` (the two hands) and the eight slots at `player+0xf8c`.
+
+Classes 4 and 8 are **Nightblade** and **Thief**, the only two whose skill
+is not halved and the only two who get 8 rather than 3 from the picks.
+`player+0x3e0` is `stats+0x34`, the character level — confirmed
+independently by binding `0x2e` (`ChooseCharacter`), whose third line is
+`*(u16 *)(player + 0x3e0) = 1`. Every shipped door declares
+`resistDisarm[5]`, so **`level < 2` fails outright**.
+
+`stats->+0x7c == 3` is dead: the second periodic channel is only ever
+armed with 4, 6, 7 or 8 anywhere in the binary.
+
+`CanAvoidTrap` (case `0x30`) is the cheap version, and its only shipped
+caller is `traploot_gold.s`:
+
+```c
+n = min(arg, 0x12);
+v = Random(1, (u16)player->+0x3ce /* luck */);
+if (class == 8) v += player->+0xfb0;
+v /= 5;
+if (stats->+0x7c == 3) v += 2;
+return n < v;
+```
+
+Both divisions are the `0x66666667` magic-number `/5`, computed in fixed
+point (`>> 0x21` / `>> 0x29` then `>> 8`).
 ## Labels applied / tools
 
 No new Ghidra renames this pass (the 28 registration/dispatcher

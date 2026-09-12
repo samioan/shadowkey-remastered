@@ -22,6 +22,8 @@ DoorExecutable::DoorExecutable(const skString& filename, skExecutableContext& ct
     AttachEntityScript(this);
 }
 
+MenuStack* DoorExecutable::trapStack() const { return m_Player.stack(); }
+
 sk::SoundArchive* DoorExecutable::entitySounds() const {
     MenuStack* stack = m_Player.stack();
     return stack ? stack->sounds() : nullptr;
@@ -164,6 +166,10 @@ bool DoorExecutable::method(const skString& methodName, skRValueArray& args, skR
     // it), so its teleport is exempt from the floor snap. A snapped
     // portcullis would drop straight back down and never open.
     if (HandleEntityBaseNative(methodName, args, returnValue)) return true;
+    // M94: and the trap mixin (`0x14e10`) -- SetMagicDamage/SetSpellLevel/
+    // SetDormant/DoMagicDamage. `lockeddoor_dh.s`, `_fb.s` and `_ha.s` are
+    // doors, and they are the three scripts that really fire a trap.
+    if (HandleTrapNative(methodName, args, returnValue)) return true;
     if (methodName == skString("OpenDoor")) {
         // M38: a trapped door's trigger callback opens the door itself --
         // crypt1.s's `OnOpenDoor[ (trigger, who) ]` does

@@ -317,6 +317,55 @@ public:
     int strength() const { return m_Strength; }
     int intelligence() const { return m_Intelligence; }
     int agility() const { return m_Agility; }
+
+    // ---- M94: the two trap saving throws (GameState 0x2f / 0x30) ----
+    //
+    // `FUN_1003e438` and the dispatcher's own case 0x30. M38 recorded both
+    // as "not reproduced ... this port has no stance model and no
+    // equipped-effect array"; M56/M60/M64 have since given it both, so
+    // here they are.
+    //
+    //     bool CanDisarmTrap(resist) {
+    //         int bonus = 0;
+    //         if (class == 8)              bonus  = specialAbility;
+    //         if (stats.periodic2Kind == 3) bonus += 2;
+    //         if (holds(618))               bonus += 2;
+    //         if (holds(4500))              bonus += (class == 4 || class == 8) ? 8 : 3;
+    //         int skill     = agility / 5 + bonus;
+    //         int effective = (class == 4 || class == 8) ? skill : skill / 2;
+    //         int roll = Random(0, 0x100); if (roll > 0xe5) roll = 0xe6;
+    //         int ratio = (effective << 8) / (skill + resist);
+    //         return !(level < resist / 2 || ratio < 0x41 || ratio < roll);
+    //     }
+    //
+    // The two template ids are real items and they read exactly right:
+    // **618** is `armor/Bandit_Gloves.s` and **4500** is
+    // `misc/silver_picks.s`, and the picks are worth 8 instead of 3 to a
+    // Thief (class 8) or a Nightblade (class 4) -- who are also the only
+    // two classes that do not have their skill halved. `holds()` is the
+    // engine's own three-place search: the left hand, the right hand, and
+    // the eight equipment slots at `player+0xf8c`.
+    //
+    // `stats.periodic2Kind == 3` is transcribed and can never fire: the
+    // only kinds anything in the binary ever arms are 4, 6, 7 and 8
+    // (actor_stats.h's PeriodicKind), so 3 is a leftover. Kept because it
+    // is in the formula, marked because it is dead.
+    //
+    // `level < resist / 2` is a hard gate ahead of the roll -- every
+    // shipped door declares `resistDisarm[5]`, so you must be level 2 to
+    // pick any lock in the game at all.
+    bool CanDisarmTrap(int resistDisarm) const;
+
+    // Case 0x30, the cheaper roll, and the only shipped caller is
+    // `traploot_gold.s`:
+    //
+    //     n = min(arg, 0x12);
+    //     v = Random(1, luck);
+    //     if (class == 8)               v += specialAbility;
+    //     v /= 5;
+    //     if (stats.periodic2Kind == 3) v += 2;
+    //     return n < v;
+    bool CanAvoidTrap(int chance) const;
     int speed() const { return m_Speed; }
     int endurance() const { return m_Endurance; }
     int personality() const { return m_Personality; }
