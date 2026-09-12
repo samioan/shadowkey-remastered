@@ -8844,6 +8844,32 @@ key. `main.cpp` already stands the resume shortcut down while
 treatment on the other side of the pause, closing the map instead of
 raising the menu.
 
+**Fixed 2026-09-12** -- `main.cpp`'s gameplay key chain now takes the back
+key for the map before the main-menu branch can see it (the
+`ConsumeJustPressed` sits behind `gameMapOpen &&`, so an un-taken key
+still falls through untouched).
+
+Worth being explicit that this is a **port-side decision**, because the
+engine has no back-key handler for the map at all. The only writers of
+`player+0x3a4` are `FUN_1001ee50` (the bare toggle the map key calls) and
+the level-init clear in `FUN_1001f690`, and the real right softkey during
+gameplay does not raise the main menu either -- the only
+`FUN_100779b8(..., "MainMenu", 1, 0)` at screen mode 5 is the app's
+*foreground-return* handler `FUN_1002152c`, which is the path M91 mapped
+onto Esc in the first place. So what Esc does while an overlay is up is
+this port's to settle.
+
+It settles it the way the engine treats the map everywhere it *does* have
+an opinion: as exclusive. `FUN_1002c0e4` -- the HUD text layer, a column
+of `FUN_1008f8a4` draws at x=15 stepping 15px down -- opens with
+`if (player->mapOpen) return;` and draws nothing at all while the map is
+up. The map owns the screen; now it owns the back key with it.
+
+**Live**: azra, `where` on a bound key. `map open no` -> **M** ->
+`map open yes` -> **Esc** -> `map open no`, with no menu raised in
+between (the log has no `MainMenu` line at all). Before the fix the same
+three presses left `map open yes` with the front end drawn over it.
+
 ### The list, then
 
 Ranked by call sites and by whether a player would notice, not by
@@ -8853,9 +8879,8 @@ difficulty:
       it.** Done -- M92 above.
 - [ ] **`Item.SetCanDrop`**, 39 call sites and the only thing a real play
       session soft-fails on. Quest items can currently be dropped.
-- [ ] **The map overlay and the back key** (above). Small, and it is a
-      regression, so it should go first if anything here is played before
-      it is fixed.
+- [x] **The map overlay and the back key** (above). Done -- see the
+      "Fixed 2026-09-12" note in that section.
 - [ ] **The trap/magic-damage mixin `0x14e10`** -- `SetMagicDamage`,
       `SetDormant`, `SetSpellLevel`, `DoMagicDamage`, 19 sites, all of
       them the trapped chests in delfhide and the magic doors. The chests

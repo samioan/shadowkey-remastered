@@ -4178,6 +4178,41 @@ int main(int argc, char** argv) {
                 inGame = false;
                 gamePausedForMenu = true;
                 input.ClearPendingEdges();  // M90, see its comment
+            } else if (gameMapOpen &&
+                       input.ConsumeJustPressed(sk::ButtonSlot::RightSelectionKey)) {
+                // **A visible overlay owns the back key** -- the same rule
+                // M91 gave a popup on the other side of the pause, and a
+                // regression M91 itself introduced on this side. Before
+                // this, Esc with the map up fell straight through to the
+                // branch below: the main menu came up *over* the map with
+                // `gameMapOpen` still set, so Esc again resumed gameplay
+                // with the map still covering it, and it read from play as
+                // Esc toggling map <-> menu with no way back to the 3D
+                // view. `M` still closed it, so it was never a hard lock,
+                // but a player who reaches for the back key never finds
+                // that out.
+                //
+                // This is a port-side decision and worth saying so. The
+                // engine has no back-key handler for the map at all: the
+                // only writers of `player+0x3a4` are `FUN_1001ee50` (the
+                // bare toggle the map key calls) and the level-init clear
+                // in `FUN_1001f690`, and the real right softkey during
+                // gameplay does not raise the main menu -- the only
+                // `FUN_100779b8(..., "MainMenu", 1, 0)` at screen mode 5
+                // is the app's *foreground-return* handler
+                // (`FUN_1002152c`), which is what M91 mapped onto Esc.
+                // So what Esc does while an overlay is up is this port's
+                // to settle.
+                //
+                // It settles it the way the engine treats the map
+                // everywhere it does have an opinion: as exclusive.
+                // `FUN_1002c0e4` -- the HUD text layer, a column of
+                // `FUN_1008f8a4` draws at x=15 stepping 15px down --
+                // begins with `if (player->mapOpen) return;` and draws
+                // nothing at all while the map is up. The map owns the
+                // screen; here it owns the back key with it.
+                gameMapOpen = false;
+                input.ClearPendingEdges();  // M90, see its comment
             } else if (input.ConsumeJustPressed(sk::ButtonSlot::RightSelectionKey)) {
                 // M91: **the in-game main menu.** This used to be a bare
                 // `inGame = false`, which dropped the player onto
