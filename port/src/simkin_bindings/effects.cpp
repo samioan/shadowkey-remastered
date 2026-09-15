@@ -463,9 +463,10 @@ bool HandleEffectNative(SpellActor& actor, const skString& methodName, skRValueA
         // without applying anything at all (FUN_10049e78's first line) and
         // blocks weapon swaps, and kind 9 makes it skip damage from a
         // creature whose call site passes p5 = 1 -- its arrows and spells,
-        // not its melee, which passes 0 (M97 corrected this line; kind 4's
-        // gate is wired, kind 9's is not yet -- see SIMKIN_NATIVE_API.md's
-        // attacker table).
+        // not its melee, which passes 0 (M97 corrected this line). Both
+        // kinds also make DoAttackRoll refuse a spell outright, status
+        // effect and all. M98 wired kind 9's two gates (stats_damage.h,
+        // item_executable.cpp's DoAttackRoll).
         // Kinds 1/2/3/5 additionally each select a
         // line of HUD status text (FUN_1002c0e4's switch), and kind 3 adds
         // 2 to a radius two different range checks compute.

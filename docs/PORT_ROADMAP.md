@@ -4733,7 +4733,9 @@ algorithms.
       > the call site passes `p5 == 1`, which means its arrows and spells.
       > Creature melee (`FUN_100835b8`) passes 0 and still lands. And only
       > kind 4 was ever wired: nothing in the port reads kind 9. See
-      > `SIMKIN_NATIVE_API.md`'s attacker table.
+      > `SIMKIN_NATIVE_API.md`'s attacker table. **M98 wired it**, and found
+      > that both kinds also make `DoAttackRoll` refuse a spell outright,
+      > status effect and all.
 
     - **The `Equipped` duration is a feature that did not ship.** Nothing
       pushes onto the second list, no shipped script passes `Equipped`,
@@ -9136,6 +9138,139 @@ soft-fails 39 -> 39, all 14 tracked `.ppm` renders byte-identical,
       `entities.txt`, hence no model. Melee picks its target from the
       object-ID buffer, so a creature that is never drawn can never be hit.
       A swing at one counts in `combat.swings` and lands nothing.
+- [x] **M98 -- the damage function's attacker terms.** Found by M97.
+      `FUN_10049e78` reads the attacker four times besides the death call,
+      and the port reproduced none of them. The largest is the Strength term:
+      **every hit the player landed was a fifth of its Strength short**,
+      about 10 points at a typical 50, on every swing, arrow and damaging
+      spell in the game.
+
+    - **The function, in order** (checked against the disassembly, not only
+      the decompile):
+        1. `if (victim+0x7c == 4) return` -- Sanctuary, already wired (M58).
+        2. `victim->vt[0x1c](victim, &dmg, attacker)` -- the Knight.
+        3. `if (dmg < 0) dmg = 0`.
+        4. `if (attacker && attacker+0x14 > 4) dmg += (attacker+0x14 +
+           attacker+0x10) / 5` -- Strength plus the strength bonus,
+           `smull` by `0x66666667`, so C's truncation.
+        5. `if (attacker && owner is the player && owner+0xf38 == 0)
+           FUN_10044910` -- the Assassin, on the strength-inclusive figure.
+        6. `if (victim+0x7c == 9 && owner is a creature && victim+0x50 &&
+           p5 == 1) return` -- snowray.
+        7. `if (health <= dmg) { health = 0; vt[0x28](...) } else health
+           -= dmg`.
+
+      Everything is 16-bit: the damage parameter is a `short`.
+    - **The port's shape.** `simkin_bindings/stats_damage.h`'s
+      `ResolveStatsDamage(victim, damage, attacker, ranged)` is steps 2-6.
+      Both owners' `ApplyDamage` keep step 1 and step 7 and call it in
+      between. `SpellActor::ApplyActorDamage` gained the site's `p5` as
+      `ranged`, and three virtuals: `actorCharacterClass()` (`+0xf38`),
+      `actorSpecialAbility()` (`+0xfb0`) and `actorInvulnerable()`
+      (`+0x1e2`). The creature's `vt[0x1c]` is a bare return (`0x1004b770`),
+      so the Knight term tests `victim.isPlayerActor()`.
+    - **The terms, as they play:**
+      - **Strength.** A creature's stats block has Strength 0 (no creature
+        native writes `+0x14`), so this is the player's alone. It comes
+        after the armour: the melee site passes `(s16)(roll - armour)`,
+        the function clamps it to 0, *then* adds the term. **A swing the
+        armour fully absorbed still lands a fifth of the player's
+        Strength.** `MonsterExecutable::ApplyDamage` used to refuse
+        `amount <= 0` up front; that test moved after the terms.
+      - **The Assassin**: `dmg += (dmg*256 * (rank*13 + 25)) >> 16`,
+        +14.8% at rank 1, +19.9% at rank 2.
+      - **The Knight** (`FUN_10044950`): when `dmg > 0`,
+        `threshold = ((rank<<16) / ((rank+dmg)<<8)) * 100 >> 8`, and the hit
+        becomes `dmg - (dmg >> 1)` (rounding up) when `rand(0,100) >
+        threshold`. **The roll reads backwards**: the chance *falls* as the
+        rank rises and rises with the hit. A rank-1 Knight halves a
+        10-point hit 92 times in 101; a rank-10 one 50 in 101. Transcribed,
+        not corrected. Because it is the victim's slot it covers **every**
+        hit on the player, including unsourced ones: poison ticks, traps,
+        a script's `DoDamage`.
+      - **Snowray** refuses a creature's `p5 == 1` hit: an archer's arrow
+        (general sweep), `DoAttackRoll`, a projectile impact, AzraWrath.
+        Creature melee lands. It is refused *after* `FUN_10044814` has armed
+        the player's hurt timer, so the frame still flashes; the port's
+        `PlayerExecutable::ApplyDamage` now tests the timer on the damage as
+        passed, before the terms, to match.
+    - **Every damage site, checked for terms already folded in.** None had
+      any. The player's melee roll, the bow's `rand % max`, `DoAttackRoll`'s
+      pair and AzraWrath's figure are all raw. p5 per site:
+      - **1**: arrow general sweep, `DoAttackRoll`, spell projectile
+        impact, AzraWrath (`main.cpp`'s area loop).
+      - **0**: player melee, creature melee, the player's same-tile arrow
+        pass, and everything unsourced.
+
+      A census of every `vt[0x10]` call in `decomp_all.c` also turned up
+      two sites M97's table had not listed, both unsourced: the trap
+      trigger (`FUN_10090818`) and `FUN_10000498`. They matter only to the
+      Knight, and they reach the port's `PlayerExecutable::ApplyDamage`
+      like the rest.
+    - **Two more gates beside the terms:**
+      - **`DoAttackRoll`'s entry** (`FUN_100458e4`'s first test) returns
+        before the hit roll when the target is invulnerable (`+0x1e2`), under
+        Sanctuary (kind 4) or under snowray (kind 9), **whoever cast the
+        spell**. So those three refuse the whole spell, status effect
+        included. The port had none of it: a snowrayed player shrugged off
+        a creature's Poison damage and was still poisoned, and a player's
+        Fear still worked on an essential NPC.
+      - **A creature's projectile impact** (`FUN_1005f3c8`'s non-player
+        arm) only calls the damage slot when `target->vt[0xe4]()`, so it
+        never damages the player. `RunImpact` now tests it. No shipped
+        creature carries the greater blaze, so this does not show in play.
+    - **Also fixed on the way:** a player melee miss armed the target's red
+      flash and called `ApplyDamage(0)`. `PlayerMeleeResult` gained `hit`,
+      and a miss now stops before either. `combat.hits_by_player` still
+      counts every swing that found a target (the M84/M85 reach configs
+      read it that way); `combat.damage_dealt` now counts what came off
+      health, terms included.
+    - **Tests that moved.** Four suite tests asserted exact player damage
+      and now add the Strength term: `m32` and `m37` (Absorb), `m49`
+      (the player's arrow), `m97` (two set-up hits). `m75` killed a
+      creature with `ApplyDamage(100000)`, which the engine's `short` turns
+      into -31072, a no-op; it uses 30000.
+    - **Test**: `port/src/tests/m98_attacker_terms_smoke.cpp`, 39 checks:
+        1. **Arithmetic.** The Strength threshold (4 adds nothing, 5 adds
+           1), the bonus summed before the division, truncation toward zero
+           (-4/5 is 0); the Assassin at ranks 1 and 2; the Knight's
+           thresholds and its round-up halving.
+        2. **Through `ApplyDamage`.** 7 at Strength 50 is 17; at Strength 4
+           it is 7; a +5 bonus makes 18; an absorbed 0 still takes 10; a
+           negative remainder clamps before the term. An archer's and an
+           unsourced 7 stay 7. An Assassin: 10 -> 11, and with Strength
+           (10+10) -> 22, which pins the order.
+        3. **The Knight's roll**, over 20200 trials each: 0.909 halved at
+           rank 1 (92/101 is 0.911), 0.493 at rank 10 (50/101 is 0.495). A
+           Barbarian never halves; a zero hit is not rolled; halving comes
+           before Strength; the hurt timer arms either way.
+        4. **Snowray.** `SetSpellEffect(9, 7680)` arms it. A creature's
+           ranged hit is refused and the frame still flashes; its melee, an
+           unsourced ranged hit and a player source all land. Real sites:
+           an archer's volley lands arrows and takes nothing (and the same
+           volley unwarded does damage); a creature's `Poison.s` poisons
+           the player unwarded and never through the ward; the player's own
+           `blaze.s` is refused at a warded creature.
+        5. **The other gates.** The player's Poison takes on a rat but
+           never on one under Sanctuary or an invulnerable one. A creature's
+           50-point impact reaches the player and does nothing, takes 50
+           from a creature, and the player's takes 60. A certain hit into
+           1000 armour reports `hit` with 0 damage.
+    - **The suite**: 90 executables, 89 pass (`render_at_smoke` is the
+      render tool). Soft-fail lines unchanged at **18**. The gaps tool
+      doesn't move (33 names, 430 of 648; `GetPlayer` 97%).
+    - **Live** (azra, `port/debug/m98_attacker_terms.cfg`): god mode, AI
+      frozen, an Iron Mace (at most 28), an Azra Rat (23 health) spawned in
+      the crosshair and the attack held until it died, then `metrics
+      combat`.
+
+      | Step | `hits_by_player` | `damage_dealt` |
+      |---|---|---|
+      | `stat str 4`, kill a rat | 3 | 29 |
+      | `stat str 1000`, kill another | +1 | +209 |
+
+      One connecting swing at Strength 1000 took 209: a roll of 9 plus the
+      term of 200. No soft-fail line.
 
 ## Next milestones (not yet started)
 
@@ -9457,7 +9592,10 @@ difficulty:
         - the M81 sweep that catches area spells, `DoDamage` and `killall`
 
       Each needs the attacker the engine would have passed.
-- [ ] **The damage function's attacker terms.** Found by M97. None of
+- [x] **The damage function's attacker terms.** Done in M98, which also
+      found `DoAttackRoll`'s entry gate (invulnerable, Sanctuary and
+      snowray refuse a whole spell) and that the Knight's roll reads
+      backwards. Found by M97. None of
       these is a native gap, so neither tool can see them. `FUN_10049e78`
       reads the attacker four more times, and the port reproduces none of
       them:

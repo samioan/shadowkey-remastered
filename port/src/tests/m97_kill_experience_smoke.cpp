@@ -37,6 +37,7 @@
 #include "simkin_bindings/monster_executable.h"
 #include "simkin_bindings/player_executable.h"
 #include "simkin_bindings/spell_projectile.h"
+#include "simkin_bindings/stats_damage.h"
 #include "skExecutableContext.h"
 #include "skInterpreter.h"
 #include "skParseException.h"
@@ -369,9 +370,14 @@ int main(int argc, char** argv) {
             Check(!r6->alive() && r6->killer() == nullptr,
                   "a script's DoDamage (`vt[0x10](stats, n, 0, 0, 0)`) names nobody");
         }
+        // M98: the player's hits now carry its Strength term, so these two
+        // set-up hits take it off to leave the health they always left.
+        const int strengthTerm =
+            sk_b::StrengthDamageTerm(player.EffectStatValue(sk_b::kEffectStatStrengthProper),
+                                     player.EffectStatValue(sk_b::kEffectStatStrength));
         std::unique_ptr<Monster> r7 = rat();
         if (r7) {
-            r7->ApplyDamage(20, &player);  // 3 health left, and the player's hit
+            r7->ApplyDamage(20 - strengthTerm, &player);  // 3 health left, and the player's hit
             r7->actorStats().ApplyEffectFlag(sk_b::ActorStats::kEffectFlagPoison, 3, 10);
             for (int i = 0; i < 40 && r7->alive(); ++i) r7->TickAi(64);
             const int before = player.experience();
@@ -381,7 +387,7 @@ int main(int argc, char** argv) {
         }
         std::unique_ptr<Monster> r8 = rat();
         if (r8) {
-            r8->ApplyDamage(21, &player);
+            r8->ApplyDamage(21 - strengthTerm, &player);
             r8->actorStats().ApplyBurn(1, 10);
             for (int i = 0; i < 40 && r8->alive(); ++i) r8->TickAi(64);
             Check(!r8->alive() && r8->killer() == nullptr,

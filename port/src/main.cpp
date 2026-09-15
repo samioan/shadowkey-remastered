@@ -5213,7 +5213,9 @@ int main(int argc, char** argv) {
                             // M97: sourced to `FUN_1002fd30(caster)`, so
                             // every creature the wave kills pays the caster,
                             // one award (and at most one level) per corpse.
-                            victim.script->ApplyDamage(cast.areaDamage, caster);
+                            // M98: p5 = 1, and the caster's Strength term
+                            // lands on every creature the wave reaches.
+                            victim.script->ApplyDamage(cast.areaDamage, caster, /*ranged=*/true);
                         }
                     }
                     if (cast.conjureTypeId != 0) {
@@ -5550,7 +5552,17 @@ int main(int argc, char** argv) {
                                         sk_debug::Count("combat.damage_taken", dmg);
                                         sk_debug::Count("combat.hits_on_player");
 #endif
-                                        stack.player().ApplyDamage(dmg);
+                                        // M98: `if (0 < dmg) vtable[0x10](
+                                        // playerStats, dmg, self + 0x224, 0,
+                                        // 0)` -- the creature is the source
+                                        // (its Strength is 0, so what it
+                                        // changes is nothing), melee is p5 =
+                                        // 0, and the player's own term is the
+                                        // Knight's halving.
+                                        if (dmg > 0) {
+                                            stack.player().ApplyDamage(dmg, m.script.get(),
+                                                                       /*ranged=*/false);
+                                        }
                                         playWorldSound(m.script->attackNoiseId(), m.x, m.y);
                                     }
                                 }
@@ -6399,29 +6411,45 @@ int main(int argc, char** argv) {
                                 spiderBonus ? spiderBonus->max : 0,
                                 weapon->templateId() == sk_bindings::kTemplateMagickaEdgeAxe,
                                 stack.player().magicka());
-                        const int dmg = roll.damage;
                         if (roll.magickaSpent > 0) {
                             stack.player().SetActorMagicka(stack.player().magicka() -
                                                             roll.magickaSpent);
                         }
 #if SK_DEBUG_SUITE
-                        // SK_DEBUG_SUITE (M68)
-                        sk_debug::Count("combat.damage_dealt", dmg);
+                        // SK_DEBUG_SUITE (M68). Counted per swing that finds
+                        // a target, whatever the roll -- the M84/M85 reach
+                        // configs read it as "the swing reached".
                         sk_debug::Count("combat.hits_by_player");
 #endif
-                        // M86: `FUN_10081844`'s own `FUN_10067c3c(self,
-                        // 8, 0, 5)`, the red rows -- armed in the take-
-                        // damage handler, next to the damage and before it
-                        // is applied, so it fires for an absorbed hit as
-                        // well as a damaging one. This port has no single
-                        // such handler (M81 hit the same problem for
-                        // deaths), so it is armed at each of the four
-                        // places an attack damages a creature.
-                        target->flash.Arm(sk::kFlashPeriodUnits, sk::kFlashRedMin,
-                                           sk::kFlashRedMax);
-                        // M97: FUN_100425bc passes `player + 0x3ac` as the
-                        // source, so a killing swing pays the player.
-                        target->script->ApplyDamage(dmg, &stack.player());
+                        // M98: a miss ends here. It used to fall through
+                        // as a zero-damage hit, which flashed the target
+                        // red for a blow that never reached it.
+                        if (roll.hit) {
+                            // M86: `FUN_10081844`'s own `FUN_10067c3c(self,
+                            // 8, 0, 5)`, the red rows -- armed in the take-
+                            // damage handler, next to the damage and before
+                            // it is applied, so it fires for an absorbed hit
+                            // as well as a damaging one. This port has no
+                            // single such handler (M81 hit the same problem
+                            // for deaths), so it is armed at each of the four
+                            // places an attack damages a creature.
+                            target->flash.Arm(sk::kFlashPeriodUnits, sk::kFlashRedMin,
+                                               sk::kFlashRedMax);
+                            // M97: FUN_100425bc passes `player + 0x3ac` as
+                            // the source, so a killing swing pays the player.
+                            // M98: and melee is p5 = 0. The source is also
+                            // where the Strength term comes from -- added
+                            // after the armour, so an absorbed swing still
+                            // lands it.
+                            const int dealt = target->script->ApplyDamage(
+                                roll.damage, &stack.player(), /*ranged=*/false);
+#if SK_DEBUG_SUITE
+                            // What came off health, after the terms.
+                            sk_debug::Count("combat.damage_dealt", dealt);
+#else
+                            (void)dealt;
+#endif
+                        }
                     }
                     if (!target->script->alive()) handleDeath(*target);
                 };

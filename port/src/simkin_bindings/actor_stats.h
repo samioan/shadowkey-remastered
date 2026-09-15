@@ -97,6 +97,12 @@ public:
         kPeriodicFatigueRegen = 6,  // +0x2c += the actor's own level, once per second
         kPeriodicHealthRegen = 7,   // health += the actor's own level, clamped to max
         kPeriodicBurn = 8,          // health -= (+0x76), and kills at 0
+        // M98. `snowray_powder.s`'s `SetSpellEffect(9, 7680)`, and like 4 a
+        // pure duration with two readers: the stats DoDamage drops a
+        // creature's arrow or spell damage (p5 == 1, stats_damage.h), and
+        // DoAttackRoll refuses the whole spell, status effect included,
+        // whoever cast it (item_executable.cpp).
+        kPeriodicSnowrayWard = 9,
     };
 
     // ---- M58: the two effect lists (stats+0x58 and stats+0x64) ----

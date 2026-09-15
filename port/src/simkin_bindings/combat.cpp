@@ -90,6 +90,7 @@ PlayerMeleeResult RollPlayerMeleeDamage(int attackerAttack, int defenderDefense,
     // piece of the real to-hit this port still does not reproduce (see
     // RollMeleeHit).
     if (!RollMeleeHit(attackerAttack, defenderDefense)) return out;
+    out.hit = true;
 
     const int lo = (std::min)(dmgMin, dmgMax);
     const int hi = (std::max)(dmgMin, dmgMax);

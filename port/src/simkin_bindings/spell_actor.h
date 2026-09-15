@@ -147,10 +147,26 @@ public:
     // and the killer is who the creature's expWorth is paid to. Null is a
     // real value, not a default: a script's DoDamage, a poison tick and a
     // burn all pass 0, and their deaths pay nobody.
+    //
+    // M98: and its fifth, p5 -- `ranged` here. 1 at the ranged sites (an
+    // arrow's general sweep, DoAttackRoll, a projectile's impact, AzraWrath),
+    // 0 everywhere else, and read only by the snowray gate. The attacker
+    // itself now also feeds the damage: see stats_damage.h.
     virtual int actorHealth() const = 0;
     virtual void SetActorHealth(int value) = 0;
-    virtual void ApplyActorDamage(int amount, SpellActor* attacker) = 0;
+    virtual void ApplyActorDamage(int amount, SpellActor* attacker, bool ranged) = 0;
     virtual bool actorAlive() const = 0;
+
+    // M98: the two per-character fields FUN_10049e78's class terms read,
+    // `player+0xf38` (the class) and `player+0xfb0` (its ability rank). Both
+    // are reached only after a `vtable[0xcc]` player test, so a creature's
+    // answers never matter; -1 is simply no class at all.
+    virtual int actorCharacterClass() const { return -1; }
+    virtual int actorSpecialAbility() const { return 0; }
+
+    // M98: `entity+0x1e2`, SetInvulnerable -- one of DoAttackRoll's three
+    // entry refusals. Only a creature script ever sets it.
+    virtual bool actorInvulnerable() const { return false; }
 
     // M97: FUN_1004a104, `stats->vtable[0x20]` -- the one AddExperience,
     // shared unoverridden by every stats vtable in the image. The player's

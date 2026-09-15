@@ -531,7 +531,11 @@ public:
     // spell_actor.h). The fatal hit's attacker is kept as killer(), which
     // is everything the engine's death routine FUN_10083c04 knows about who
     // did it -- main.cpp's handleDeath pays it this creature's expWorth.
-    void ApplyDamage(int amount, SpellActor* attacker = nullptr);
+    //
+    // M98: the attacker also changes the damage (Strength, the Assassin) and
+    // `ranged` is the site's p5, for the snowray gate -- stats_damage.h.
+    // Returns what actually came off health, 0 for a refused or emptied hit.
+    int ApplyDamage(int amount, SpellActor* attacker = nullptr, bool ranged = false);
     // M97: whoever landed the blow that took health to zero, or null if
     // nothing did -- a DoDamage native, a poison or burn tick, the debug
     // console's killall, or a creature that has not died. Set once: a
@@ -567,9 +571,10 @@ public:
     int actorLevel() const override { return m_Level; }
     int actorHealth() const override { return m_CurrentHealth; }
     void SetActorHealth(int value) override;
-    void ApplyActorDamage(int amount, SpellActor* attacker) override {
-        ApplyDamage(amount, attacker);
+    void ApplyActorDamage(int amount, SpellActor* attacker, bool ranged) override {
+        ApplyDamage(amount, attacker, ranged);
     }
+    bool actorInvulnerable() const override { return m_Invulnerable; }
     void AddActorExperience(int amount) override;
     bool actorAlive() const override { return m_Alive && !m_Destroyed; }
     bool actorUndead() const override { return undead(); }

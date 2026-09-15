@@ -1656,6 +1656,9 @@ deaths pay experience, and to whom":
 | monster dispatcher `DoDamage` | a script damages a creature | **0** | 0 |
 | `FUN_10049780` | the poison tick | **0** | 0 |
 | `FUN_10049780` kind 8 | the burn: skips `vt[0x10]`, calls `vt[0x28](stats, 0, 0)` | **0** | — |
+| `FUN_10048244` case 0x16 | the player's `DoDamage` native | **0** | 0 |
+| `FUN_10090818` | a trap trigger firing (M98's census) | **0** | 0 |
+| `FUN_10000498` | an entity update, not yet attributed (M98's census) | **0** | 0 |
 | `FUN_10038470`, `FUN_1003857c` | multiplayer receivers | the remote player | — |
 
 `FUN_10049e78` itself uses the attacker for more than the death call:
@@ -1674,7 +1677,34 @@ deaths pay experience, and to whom":
   immune to a creature's **arrows and spells**, not to its melee, which
   passes p5 = 0.
 
-The port carries the attacker (M97) but reproduces none of these four yet.
+M98 reproduces all four (`port/src/simkin_bindings/stats_damage.h`). Details
+the disassembly settles:
+
+- The order is the Knight, the clamp to 0, Strength, the Assassin, then the
+  snowray gate. Strength therefore lands on a hit the armour fully absorbed.
+- The Strength division is `smull` by `0x66666667` with the sign fix:
+  truncation toward zero.
+- The Knight (`FUN_10044950`, only when `dmg > 0`):
+  `threshold = ((rank<<16) / ((rank+dmg)<<8)) * 100 >> 8`, and
+  `cmp roll, threshold; ble skip` with `roll = FUN_100730c8(rng, 0, 100)`.
+  The hit is halved (`dmg - (dmg>>1)`, rounding up) when the roll is
+  *greater*, so the halving chance falls as the rank rises.
+- The snowray gate also needs `victim+0x50` (the victim's owner) non-null.
+- The attacker test ahead of Strength is on the attacker alone; the
+  `ldr r4, [r6, #0x50]` between the compare and its branch does not set
+  flags.
+
+`DoAttackRoll` (`FUN_100458e4`) has its own entry refusal, before the hit
+roll and the status switch:
+
+```
+if ((target && target->vt[0xc8]() && target->+0x1e2) ||
+    (targetStats && (targetStats->+0x7c == 4 || targetStats->+0x7c == 9)))
+    return 0;
+```
+
+So invulnerability, Sanctuary and snowray each refuse a whole spell from any
+caster, status effect included.
 
 ## Labels applied / tools
 

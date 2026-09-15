@@ -21,7 +21,9 @@
 #include "simkin_bindings/item_executable.h"
 #include "simkin_bindings/menu_stack.h"
 #include "simkin_bindings/monster_executable.h"
+#include "simkin_bindings/effects.h"
 #include "simkin_bindings/player_executable.h"
+#include "simkin_bindings/stats_damage.h"
 #include "skExecutableContext.h"
 #include "skInterpreter.h"
 #include "skParseException.h"
@@ -393,8 +395,14 @@ int main(int argc, char** argv) {
             int casterBefore = stack.player().health();
             int hp0 = v->currentHealth();
             hit(*spell, *v);
+            // M98: plus the caster's Strength term, which the stats DoDamage
+            // adds after the branch -- so the heal below, computed from the
+            // branch's own 37, does not see it.
+            const int str = sk_bindings::StrengthDamageTerm(
+                stack.player().strength(),
+                stack.player().EffectStatValue(sk_bindings::kEffectStatStrength));
             Check(spell->statusEffect() == Item::kEffectAbsorb &&
-                      v->currentHealth() == hp0 - 37,
+                      v->currentHealth() == hp0 - 37 - str,
                   "Absorb deals its fixed magnitude+12 damage (25 + 12 = 37, no variance)");
             Check(stack.player().health() == casterBefore + 37 + 6,
                   "...and at the level cap transfers the whole hit, plus the real flat +6");

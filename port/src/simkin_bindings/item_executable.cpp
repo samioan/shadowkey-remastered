@@ -478,6 +478,27 @@ bool ItemExecutable::method(const skString& methodName, skRValueArray& args,
         // MonsterExecutable* and the caster was hardcoded to the player --
         // correct only for as long as nothing but the player cast anything.
         SpellActor* target = ResolveSpellActor(args[0].obj());
+        // M98: FUN_100458e4's first test, ahead of everything below:
+        //
+        //     if ((target && target->vtable[0xc8]() && target->+0x1e2) ||
+        //         (targetStats && (targetStats->+0x7c == 4 ||
+        //                          targetStats->+0x7c == 9)))
+        //         return 0;
+        //
+        // An invulnerable target, a Sanctuary and a snowray ward each refuse
+        // the *whole* spell -- the hit roll, the damage and the status
+        // effect -- whoever cast it. The stats DoDamage's own gates would
+        // have stopped only the damage (and snowray's only a creature's), so
+        // before this a snowrayed player could still be poisoned or
+        // paralysed by the spell whose damage it shrugged off, and an
+        // essential NPC could be feared.
+        if (target) {
+            const int kind = target->actorStats().periodicKind();
+            if (target->actorInvulnerable() || kind == ActorStats::kPeriodicSanctuaryTimer ||
+                kind == ActorStats::kPeriodicSnowrayWard) {
+                return true;
+            }
+        }
         if (target && target->actorAlive()) {
             StatusEffect effect = statusEffect();
             // `spell+0x170`. Null falls back to the player, which is what
@@ -620,8 +641,11 @@ bool ItemExecutable::method(const skString& methodName, skRValueArray& args,
             if (dmgMin != dmgMax) rolled = dmgMin + std::rand() % (dmgMax - dmgMin + 1);
             // M97: `stats->vtable[0x10](target, rolled, casterStats, 0, 1)`
             // -- sourced to the caster, so a spell that kills pays whoever
-            // owns it.
-            if (dmgMax > 0) target->ApplyActorDamage(rolled, caster);
+            // owns it. M98: the p5 = 1 is `ranged`, and the caster's
+            // Strength (and an Assassin's bonus) goes on in there: a
+            // player's Blaze lands a fifth of its caster's Strength more
+            // than the pair above says.
+            if (dmgMax > 0) target->ApplyActorDamage(rolled, caster, /*ranged=*/true);
 
             // M43: every status primitive below now runs on the target's
             // **stats block** rather than on a MonsterExecutable, which is
@@ -831,7 +855,7 @@ bool ItemExecutable::method(const skString& methodName, skRValueArray& args,
                     // (whose willpower is always 0, no creature script calls
                     // SetWillpower), and defined for the player as well.
                     int dmg = RollSpellDamage(m_Rating, targetResistance);
-                    target->ApplyActorDamage(dmg, caster);
+                    target->ApplyActorDamage(dmg, caster, /*ranged=*/true);
                     break;
                 }
             }

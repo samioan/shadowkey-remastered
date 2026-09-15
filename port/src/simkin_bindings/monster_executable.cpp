@@ -14,6 +14,7 @@
 #include "simkin_bindings/menu_stack.h"
 #include "simkin_bindings/native_binding_common.h"
 #include "simkin_bindings/player_executable.h"
+#include "simkin_bindings/stats_damage.h"
 #include "simkin_bindings/use_prompt.h"
 #include "skExecutableContext.h"
 #include "skParseException.h"
@@ -69,7 +70,7 @@ int MonsterExecutable::spellResistance() const {
 
 int MonsterExecutable::spellToHit() const { return SpellToHit(m_Spellcast, m_Will); }
 
-void MonsterExecutable::ApplyDamage(int amount, SpellActor* attacker) {
+int MonsterExecutable::ApplyDamage(int amount, SpellActor* attacker, bool ranged) {
     // m_Invulnerable (M16): real essential-NPC scripts (Tanyin Aldwyr and
     // the other named quest NPCs) call SetInvulnerable(true) in Init() --
     // honoring it here means main.cpp's melee target selection doesn't
@@ -81,8 +82,18 @@ void MonsterExecutable::ApplyDamage(int amount, SpellActor* attacker) {
     // is Sanctuary, whose channel M48 could only describe as "purely a
     // duration"; this is the gate it was for. It sits before every other
     // check because in the engine it is the whole function's `if`.
-    if (m_Stats.periodicKind() == ActorStats::kPeriodicSanctuaryTimer) return;
-    if (!m_Alive || amount <= 0 || m_Invulnerable) return;
+    if (m_Stats.periodicKind() == ActorStats::kPeriodicSanctuaryTimer) return 0;
+    if (!m_Alive || m_Invulnerable) return 0;
+    // M98: the attacker's terms (stats_damage.h). This used to refuse
+    // `amount <= 0` up front, which the engine does not: a player swing the
+    // armour fully absorbs still reaches FUN_10049e78 and still lands the
+    // strength term. What is left at zero changes nothing and makes no
+    // noise, as before.
+    const StatsDamage resolved = ResolveStatsDamage(*this, amount, attacker, ranged);
+    if (resolved.refused || resolved.damage == 0) return 0;
+    amount = resolved.damage;
+    // `if (health <= dmg) die; else health -= dmg` -- the same test as
+    // subtracting and checking for <= 0.
     m_CurrentHealth -= amount;
     if (m_CurrentHealth <= 0) {
         m_CurrentHealth = 0;
@@ -106,6 +117,7 @@ void MonsterExecutable::ApplyDamage(int amount, SpellActor* attacker) {
     } else {
         PlayNoise(m_IsHitNoiseId);
     }
+    return amount;
 }
 
 // M97: FUN_1004a104 on a creature's stats block. It is the same function

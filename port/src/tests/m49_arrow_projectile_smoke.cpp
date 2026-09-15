@@ -42,7 +42,9 @@
 #include "simkin_bindings/menu_stack.h"
 #include "simkin_bindings/monster_executable.h"
 #include "simkin_bindings/player_executable.h"
+#include "simkin_bindings/effects.h"
 #include "simkin_bindings/spell_projectile.h"
+#include "simkin_bindings/stats_damage.h"
 #include "simkin_bindings/weapon_viewmodel.h"
 #include "skExecutableContext.h"
 #include "skInterpreter.h"
@@ -481,7 +483,12 @@ int main(int argc, char** argv) {
             Check(impact.struck && !shot.alive, "an actor in the arrow's tile stops it");
             Check(impact.hit && impact.target == archer.get(),
                   "...and a heavily-favoured roll lands");
-            Check(archer->actorHealth() == before - 5,
+            // M98: "exactly" now includes the shooter's Strength term, which
+            // the stats DoDamage adds -- and still no armour.
+            const int str = sk_bindings::StrengthDamageTerm(
+                stack.player().strength(),
+                stack.player().EffectStatValue(sk_bindings::kEffectStatStrength));
+            Check(archer->actorHealth() == before - 5 - str,
                   "...for exactly the rolled damage: armour is not subtracted on the ranged path");
         }
 

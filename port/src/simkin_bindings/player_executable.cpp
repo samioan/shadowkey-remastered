@@ -17,6 +17,7 @@
 #include "simkin_bindings/monster_executable.h"
 #include "simkin_bindings/native_binding_common.h"
 #include "simkin_bindings/quest_table.h"
+#include "simkin_bindings/stats_damage.h"
 #include "simkin_bindings/vitals.h"
 #include "skInterpreter.h"
 #include "skParseException.h"
@@ -569,14 +570,13 @@ bool PlayerExecutable::actorHasSpellCostDiscount() const {
     return false;
 }
 
-void PlayerExecutable::ApplyDamage(int amount) {
+void PlayerExecutable::ApplyDamage(int amount, SpellActor* attacker, bool ranged) {
     // M58: FUN_10049e78's first line -- the stats block's own DoDamage
     // refuses outright while the second periodic channel's kind is 4. That
     // is Sanctuary, whose channel M48 could only describe as "purely a
     // duration"; this is the gate it was for. It sits before every other
     // check because in the engine it is the whole function's `if`.
     if (m_Stats.periodicKind() == ActorStats::kPeriodicSanctuaryTimer) return;
-    if (amount <= 0) return;
     // M86: `FUN_10044814`'s other statement, and the whole of what the
     // player sees when something lands on them -- `engine->+0x28->+0x17c
     // = 0x40`, the hurt timer the HUD reads to draw the red slash and to
@@ -585,9 +585,19 @@ void PlayerExecutable::ApplyDamage(int amount) {
     // damage itself, which is why it is here rather than at the four
     // call sites: unlike a creature's flash, the player has exactly one
     // DoDamage in this port as in the engine. See main.cpp's RenderHud.
-    m_HurtTimer = kHurtTimerUnits;
-    m_Health -= amount;
-    if (m_Health < 0) m_Health = 0;
+    //
+    // M98: that test is on the damage as the *site* passed it, before
+    // FUN_10049e78 runs -- so a hit the Knight halves, or snowray refuses,
+    // still flashes the frame.
+    if (static_cast<int16_t>(amount) > 0) m_HurtTimer = kHurtTimerUnits;
+    const StatsDamage resolved = ResolveStatsDamage(*this, amount, attacker, ranged);
+    if (resolved.refused) return;
+    // `if (health <= dmg) { health = 0; die; } else health -= dmg`.
+    if (m_Health <= resolved.damage) {
+        m_Health = 0;
+    } else {
+        m_Health -= resolved.damage;
+    }
 }
 
 void PlayerExecutable::SetHealth(int value) {

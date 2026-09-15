@@ -179,7 +179,9 @@ int main(int argc, char** argv) {
             skExecutableContext c1(&interpreter);
             brawler->method(skString("SetUseText"), a1, r1, c1);
             Check(brawler->usable(), "a creature turned usable at runtime reports so");
-            brawler->ApplyDamage(100000);
+            // M98: not 100000 -- the engine's damage is a short (FUN_10049e78's
+            // local), and 100000 truncates to -31072, which clamps to nothing.
+            brawler->ApplyDamage(30000);
             Check(!brawler->alive() && !brawler->usable(), "  ...and death clears it again");
         }
 

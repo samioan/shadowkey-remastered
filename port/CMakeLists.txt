@@ -138,6 +138,7 @@ add_library(sk_bindings STATIC
   src/simkin_bindings/arrow_projectile.cpp
   src/simkin_bindings/spell_cast.cpp
   src/simkin_bindings/spell_projectile.cpp
+  src/simkin_bindings/stats_damage.cpp
   src/simkin_bindings/store.cpp
   src/assets/product_database.cpp
   src/simkin_bindings/row_owner_ref.cpp
@@ -688,3 +689,7 @@ target_link_libraries(stat_mod_xp_smoke PRIVATE sk_bindings sk_world)
 # M97 milestone smoke test -- see src/tests/m97_kill_experience_smoke.cpp.
 add_executable(kill_experience_smoke src/tests/m97_kill_experience_smoke.cpp)
 target_link_libraries(kill_experience_smoke PRIVATE sk_bindings sk_world)
+
+# M98 milestone smoke test -- see src/tests/m98_attacker_terms_smoke.cpp.
+add_executable(attacker_terms_smoke src/tests/m98_attacker_terms_smoke.cpp)
+target_link_libraries(attacker_terms_smoke PRIVATE sk_bindings sk_world)

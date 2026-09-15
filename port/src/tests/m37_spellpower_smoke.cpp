@@ -27,10 +27,12 @@
 
 #include "assets/string_table.h"
 #include "simkin_bindings/combat.h"
+#include "simkin_bindings/effects.h"
 #include "simkin_bindings/item_executable.h"
 #include "simkin_bindings/menu_stack.h"
 #include "simkin_bindings/monster_executable.h"
 #include "simkin_bindings/player_executable.h"
+#include "simkin_bindings/stats_damage.h"
 #include "skExecutableContext.h"
 #include "skInterpreter.h"
 #include "skParseException.h"
@@ -188,13 +190,19 @@ int main() {
             hit(*absorb, *v);
             return hp0 - v->currentHealth();
         };
+        // M98: what reaches health also carries the caster's Strength term,
+        // added in the stats DoDamage after this branch has rolled -- a
+        // constant here, so it shifts every figure and changes no slope.
+        const int str = sk_bindings::StrengthDamageTerm(
+            stack.player().strength(),
+            stack.player().EffectStatValue(sk_bindings::kEffectStatStrength));
         int atOne = castAtLevel(1);
         int atTwelve = castAtLevel(12);
-        Check(atOne == 13 && atTwelve == 24,
+        Check(atOne == 13 + str && atTwelve == 24 + str,
               "Absorb's damage is casterLevel + 12 -- it moves with the caster, not the spell");
 
         // The clamp: `if (0x18 < mag) mag = 0x19`.
-        Check(castAtLevel(25) == 37 && castAtLevel(99) == 37,
+        Check(castAtLevel(25) == 37 + str && castAtLevel(99) == 37 + str,
               "...and the caster's level is clamped to 25, so a level-99 caster gains nothing");
     }
 

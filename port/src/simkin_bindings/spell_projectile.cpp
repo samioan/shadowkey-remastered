@@ -32,12 +32,26 @@ Rect BoundsOf(int x, int y, int halfWidth, int halfDepth) {
 // M97: that damage is sourced. Both arms of the real second half pass the
 // caster's stats (`caster + 0x3ac` when the caster is the player, `caster +
 // 0x224` otherwise), so a greater blaze's impact that kills pays the caster.
+//
+// M98: the two arms are not the same test. The player's resolves the target
+// through FUN_1002fd30, so it damages a creature or a player; the other arm
+// resolves it too but only *calls* when `target->vtable[0xe4]()`, the
+// creature predicate:
+//
+//     else { stats = FUN_1002fd30(target);
+//            if (target->vtable[0xe4]()) stats->vtable[0x10](stats, dmg,
+//                                                          caster + 0x224, 0, 1); }
+//
+// so a creature's impact damage never touches the player. Both pass p5 = 1.
+// No shipped creature carries the greater blaze, which is the only spell
+// with impact damage, so this is unobservable in the retail game.
 void RunImpact(SpellProjectile& projectile, const ProjectileTarget& target) {
     if (projectile.invokeHitTarget && projectile.spell) {
         projectile.spell->InvokeHitTarget(target.script);
     }
     if (projectile.impactDamage > 0 && projectile.owner && target.actor) {
-        target.actor->ApplyActorDamage(projectile.impactDamage, projectile.owner);
+        if (!projectile.owner->isPlayerActor() && !target.actor->isMonsterActor()) return;
+        target.actor->ApplyActorDamage(projectile.impactDamage, projectile.owner, /*ranged=*/true);
     }
 }
 

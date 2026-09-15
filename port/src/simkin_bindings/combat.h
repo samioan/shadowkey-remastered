@@ -136,7 +136,16 @@ constexpr int kPlayerMeleeVerticalLimit = 0x180;
 //
 // Returned together because the caller has to pay the magicka: `damage` is
 // what to hand ApplyDamage, `magickaSpent` what to take off the player.
+//
+// M98: `hit` is whether the to-hit gate passed, which `damage == 0` cannot
+// say: the engine calls DoDamage for every swing that connects, with
+// `(s16)(damage - armour)` even when the armour eats all of it, and the
+// stats DoDamage then clamps to zero and adds the player's Strength term.
+// A miss never gets there. `damage` stays floored at 0 -- the same clamp,
+// one step early, which the creature victim's no-op `vtable[0x1c]` makes
+// equivalent.
 struct PlayerMeleeResult {
+    bool hit = false;
     int damage = 0;
     int magickaSpent = 0;
 };

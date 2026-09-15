@@ -136,8 +136,9 @@ ArrowImpact TickArrowProjectile(ArrowProjectile& arrow, const ArrowCellQuery& ce
             if (RollArrowHit(arrow.attackSkill, target)) {
                 // M97: this pass hard-codes its source as `engine+0x618`'s
                 // stats -- the player, which is who owns any arrow that
-                // gets here.
-                target.actor->ApplyActorDamage(arrow.damage, arrow.owner);
+                // gets here. M98: and passes p5 = 0, the only arrow site
+                // that does (moot for snowray: the source is the player).
+                target.actor->ApplyActorDamage(arrow.damage, arrow.owner, /*ranged=*/false);
                 out.hit = true;
                 out.target = target.actor;
                 out.damage = arrow.damage;
@@ -270,7 +271,12 @@ ArrowImpact TickArrowProjectile(ArrowProjectile& arrow, const ArrowCellQuery& ce
         // if the shooter is the player, `shooter + 0x224` otherwise -- so
         // an archer's stray arrow that kills another creature pays the
         // archer.
-        target.actor->ApplyActorDamage(arrow.damage, arrow.owner);
+        //
+        // M98: with p5 = 1, so an archer's arrow is one of the hits the
+        // snowray ward refuses; and the arrow's damage is the bow's roll
+        // alone, so the shooter's Strength term is added in the stats
+        // DoDamage and nowhere earlier.
+        target.actor->ApplyActorDamage(arrow.damage, arrow.owner, /*ranged=*/true);
         out.hit = true;
         out.target = target.actor;
         out.damage = arrow.damage;

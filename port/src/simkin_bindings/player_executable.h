@@ -331,7 +331,10 @@ public:
     // it isn't duplicated between the script-facing path and this one.
     int armorRating() const;
     // Clamps m_Health at 0 -- mirrors MonsterExecutable::ApplyDamage().
-    void ApplyDamage(int amount);
+    // M98: the attacker and the site's p5 (`ranged`) feed FUN_10049e78's
+    // terms -- the Knight's halving, a creature's Strength (always 0), the
+    // snowray gate. See stats_damage.h.
+    void ApplyDamage(int amount, SpellActor* attacker = nullptr, bool ranged = false);
 
     // M86: the real `+0x17c` hit timer -- see ApplyDamage's own comment
     // and main.cpp's RenderHud. Counted down by the HUD draw, exactly
@@ -520,11 +523,15 @@ public:
     int actorLevel() const override { return m_Level; }
     int actorHealth() const override { return m_Health; }
     void SetActorHealth(int value) override { SetHealth(value); }
-    // M97: the attacker is dropped here. The player's death slot is its own
-    // routine, not FUN_10083c04, and pays nobody -- the attacker matters to
-    // a player victim only through FUN_10049e78's damage modifiers, which
-    // this port does not reproduce yet (see PORT_ROADMAP).
-    void ApplyActorDamage(int amount, SpellActor* /*attacker*/) override { ApplyDamage(amount); }
+    // M97: the player's death slot is its own routine, not FUN_10083c04, and
+    // pays nobody -- the attacker matters to a player victim only through
+    // FUN_10049e78's damage terms (M98).
+    void ApplyActorDamage(int amount, SpellActor* attacker, bool ranged) override {
+        ApplyDamage(amount, attacker, ranged);
+    }
+    // M98: `+0xf38` and `+0xfb0`, for the Knight and Assassin terms.
+    int actorCharacterClass() const override { return m_CharacterClass; }
+    int actorSpecialAbility() const override { return m_SpecialAbility; }
     void AddActorExperience(int amount) override { AddExperience(amount); }
     bool actorAlive() const override { return m_Health > 0; }
     // M48: the two pools the real cast reads and writes (spell_cast.h).
