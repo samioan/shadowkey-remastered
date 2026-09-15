@@ -7,9 +7,14 @@
 #include <fstream>
 #include <sstream>
 
+#include "assets/game_config.h"
 #include "assets/save_archive.h"
 #include "assets/save_records.h"
+#include "assets/string_table.h"
+#include "audio/audio_engine.h"
+#include "engine/input_state.h"
 #include "simkin_bindings/game_constants.h"
+#include "simkin_bindings/language.h"
 #include "simkin_bindings/level_executable.h"
 #include "simkin_bindings/menu_executable.h"
 #include "simkin_bindings/player_executable.h"
@@ -67,7 +72,7 @@ std::string ScriptNameOf(const std::string& simkinPath) {
 }  // namespace
 
 MenuStack::MenuStack(std::string scriptRoot, skInterpreter& interpreter,
-                      const sk::StringTable* strings, sk::SoundArchive* sounds, sk::AudioEngine* audio)
+                      sk::StringTable* strings, sk::SoundArchive* sounds, sk::AudioEngine* audio)
     : m_ScriptRoot(std::move(scriptRoot)),
       m_Interpreter(interpreter),
       m_Strings(strings),
@@ -361,6 +366,46 @@ void MenuStack::DeleteGame(int slot) {
 
 void MenuStack::DeleteAllGames() {
     for (int i = 0; i < kSaveSlotCount; ++i) DeleteGame(i);
+    // M99: the same case goes on to unlink its seven named files
+    // (game_config.h lists them), of which this build only ever writes
+    // `dragonstar.set`, and then raises `engine+0x14a78` so nothing writes
+    // it back this session.
+    if (!m_ConfigPath.empty()) std::remove(m_ConfigPath.c_str());
+    m_ConfigSaveDisabled = true;
+}
+
+bool MenuStack::SetLanguage(int language) {
+    const int previous = m_Language;
+    m_Language = language;
+    if (!m_Strings) return true;
+    sk::StringTable loaded;
+    if (!loaded.Load(m_ScriptRoot + "/stringtable." + LanguageFileSuffix(language))) {
+        m_Language = previous;
+        return false;
+    }
+    *m_Strings = std::move(loaded);
+    return true;
+}
+
+bool MenuStack::SaveConfig() {
+    if (m_ConfigSaveDisabled) return true;
+    // No settings file attached -- every headless test. Nothing to keep, so
+    // nothing failed; reporting failure would turn each QuitGame() into the
+    // SaveConfigFailed screen.
+    if (m_ConfigPath.empty()) return true;
+    sk::GameConfig config;
+    if (m_Input) {
+        config.CaptureBindings(*m_Input);
+    } else {
+        config.CaptureBindings(sk::InputState());
+    }
+    config.language = m_Language;
+    if (m_Audio) {
+        config.soundVolume = m_Audio->sfxVolumePercent();
+        config.musicVolume = m_Audio->musicVolumePercent();
+    }
+    config.muteOnCall = m_MuteOnCall;
+    return config.Save(m_ConfigPath);
 }
 
 std::string MenuStack::GetSavedTimeStr(int slot) const {

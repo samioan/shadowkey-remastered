@@ -9271,6 +9271,134 @@ soft-fails 39 -> 39, all 14 tracked `.ppm` renders byte-identical,
 
       One connecting swing at Strength 1000 took 209: a roll of 9 plus the
       term of 200. No soft-fail line.
+- [x] **M99 -- the Options screen's rows land on something.** The last
+      open item on the post-M91 list. Options offered a language popup and a
+      Customize Controls screen, and neither did anything: the popup's six
+      handlers called `SetLanguage`, and `configkeys.s` is a script that
+      only asks a native for its rows, so the key screen opened empty.
+
+    - **`SetLanguage` (GameEngine case 0x72).** The language is an index at
+      `engine+0x14a4c`; three six-arm switches decode it
+      (`simkin_bindings/language.h`): `FUN_1001b708` the file suffix
+      (eng/spa/ger/fre/ita/euk, formatted into `StringTable.%s`),
+      `FUN_1001b680` the language's own name, and case 6 a per-language
+      prefix. The case stores the index, reads the whole file, and on
+      failure puts the old index back without touching the old table;
+      on success frees the old table and parses the new one.
+      `MenuStack::SetLanguage` loads into a spare and swaps it into the one
+      shared `sk::StringTable`, so every holder sees the new language.
+      options.s then runs `ClearMenu(); Init();`, which redraws it.
+      `stringtable.euk` is byte-identical to `.eng`.
+    - **`GetLanguageStr` was wrong.** It returns `"Language: English"` (the
+      prefix, then the name), not the `"ENGLISH"` the port returned. So
+      options.s's `if (GameActive() and langStr = "ENGLISH")` God Mode row
+      **never appears in the shipped game**; the port had been offering it.
+      Out of range, the suffix and name fall to eng/English and the prefix
+      to nothing: `SetLanguage(9)` loads English and reads `"English"`.
+    - **The string table is Latin-1 now, not ASCII.** The four other tables
+      are full of accents, all below U+0100, and the real menu font
+      (`LatinBold12`) has those glyphs. The loader was folding them to '?'.
+    - **The key screen: three natives and a menu mode.**
+      - `ConfigKeysMenu(page)` (case 0x12, `FUN_100780f8`) clears the rows
+        and builds five action rows a page (`first = (page-1)*5`,
+        `last = first+4`, clamped to 15 once past 16, so page 4 is action
+        15 alone), each calling `ConfigKeySelected`. Then a blank, Next Page
+        unless `last` is 15, Previous Page unless `first` is 0, Reset to
+        Defaults (`DefaultKeys`) and Back to Options (`OptionsMenu`).
+        Actions come in the engine's own order (M57): Look Down is 5, Jump
+        8.
+      - `ConfigKeySelected` (case 0x13, `FUN_10078890`) works out the
+        action from the *highlighted row's position*: `(row - firstActionRow)
+        + (page-1)*5`. It shows the name, "Current Definition:", the bound
+        key's name (an item made unselectable), Redefine and Back to Key
+        Config.
+      - `Redefine` (case 0x14, `FUN_10078c08`) shows "Press a key to use /
+        for this action." and sets `menu+0x60`.
+      - **The capture** is `FUN_10075bdc`'s first branch, which takes the
+        whole tick while `+0x60` is set (`MenuExecutable::TickKeyCapture`,
+        run by `main.cpp` ahead of popups and navigation). It waits for
+        Key 5 to be up. A fresh right softkey cancels into the script's
+        `ConfigKeysBack`. Otherwise the lowest *held* slot 0..0x14 whose
+        registration flag (`engine+0x548`) is set -- the sixteen
+        keypad/d-pad slots, never a softkey -- goes to `FUN_1001a610` and
+        the script's `BackToConfig` rebuilds the page. `FUN_1001a610` is a
+        swap: the first other action (of 0..15) already on that key gets
+        the action's old key (`InputState::RedefineBinding`).
+      - The builder also compares each action's name against
+        `L"Rechten Gegenstand benutzen"`, and on a match builds a wrapping
+        item plus four blank lines. No shipped table has that string
+        (German's action 15 is "Rechte Aktion benutzen"), so it is dead
+        and not reproduced.
+    - **`ConfigKeysDefault`** (case 0x11) is `FUN_1001a220(engine+0x488)`,
+      the startup bindings again: sixteen stores of (action, key, name id),
+      nothing else (`InputState::RestoreDefaultBindings`).
+    - **`SaveConfig` and who else writes the file.** Case 0x71 is
+      `FUN_10019c04`, M52's `dragonstar.set` writer, now with the whole
+      state behind it (bindings, language, both volumes, mute-on-call).
+      Its first test is `engine+0x14a78`: set, it writes nothing and
+      returns **true**. The engine calls it from three more places:
+      - **`Quit`** (case 0x32), first line, result unused -- every screen
+        that closes writes the file;
+      - **`QuitGame([save])`** (case 0x34): `if (disabled || !save ||
+        SaveConfig()) quit; else OpenMenu("SaveConfigFailed")`.
+        saveconfigfailed.s retries or calls `QuitGame(false)`, which used to
+        soft-fail for having an argument;
+      - the application-exit event (`FUN_100209c8`), which is where the
+        port's window-close write already sat; it now goes through
+        `MenuStack::SaveConfig` and honours the flag.
+
+      `engine+0x14a78` is raised by **`DeleteAllGames`**, after it unlinks
+      `dragonstar.set` with the saves. The port's `DeleteAllGames` now does
+      both, so deleting everything is not undone by the next quit.
+    - **Mute-on-call starts true.** The GameEngine constructor stores
+      `+0x14a79 = 1` on the line before the settings loader; the port had
+      false.
+    - **Startup reads the language.** `main.cpp` sets the config path on
+      the stack and, after loading the file, calls `SetLanguage` with the
+      saved index, the order the constructor runs them in.
+    - **Movement reads the bindings.** Forward/back and the two turns read
+      raw d-pad slots, so a rebinding changed only the other twelve
+      actions. They go through `GetBoundButton` now, as `FUN_1001c9c0`
+      polls them; the defaults are the same slots.
+    - **Not done:** `CycleLanguage` (case 0x4c) and `GetConfigPage` /
+      `SetConfigPage` (4/5) have no shipped caller.
+    - **Test**: `port/src/tests/m99_options_smoke.cpp`, 35 checks:
+        1. **Languages.** The suffix table. `GetLanguageStr` is
+           `"Language: English"` and options.s builds no God Mode row.
+           options.s's own `SetGerman` loads German (`"Nächste Seite"`, the
+           umlaut intact), reads `"Sprache: Deutsch"`, and relabels
+           Customize Controls. `SetFrench`; `SetLanguage(9)`; `SetLanguage()`
+           is 0. A missing table leaves the index and the old table alone.
+           `LatinBold12` has glyphs for ä ç ñ ü.
+        2. **configkeys.s end to end.** Pages 1, 2 and 4 row for row.
+           Page 2's third row is action 7, bound to Key 6. Redefine arms the
+           capture; nothing is taken while Key 5 is held; a held selection
+           key is ignored; Key 3 is taken, Use (which had it) gets Key 6,
+           and page 2 comes back with no stray edge. A right-softkey cancel
+           changes nothing and `ConfigKeysBack` lands on page 1.
+           `ConfigKeysDefault` restores all sixteen.
+        3. **dragonstar.set.** `SaveConfig` writes the rebinding, LANGUAGE
+           and MUTEONCALL 1. `Quit` writes the file. `QuitGame` saves and
+           quits; with an unwritable path it opens SaveConfigFailed instead,
+           whose `QuitGame(false)` quits. `DeleteAllGames` unlinks the file
+           and `SaveConfig` then reports success and writes nothing.
+    - **The suite**: 91 executables, 90 pass (`render_at_smoke` is the
+      render tool). Soft-fail lines **18 -> 16**. The gaps tool: **29
+      names**, 436 of 648 (four called names gone, plus
+      `ConfigKeySelected`/`Redefine`).
+    - **Live** (`port/debug/m99_options.cfg`, from the main menu, with the
+      settings file backed up and restored afterwards):
+      - `GetLanguageStr` read `Language: English`.
+      - Customize Controls listed Move Forward .. Look Up, Next Page, Reset
+        to Defaults, Back to Options.
+      - Enter on Move Forward, Enter on Redefine, then E (Key 3): the
+        action's screen read "Key 3", and the file written on quit had
+        action 0 on slot 6 and Use (13) on slot 2 -- the swap.
+      - Options, then options.s's `SetGerman`: "Sprache: Deutsch", and the
+        rows drawn in German with their umlauts.
+      - Relaunch: the main menu came up in German ("Neues Spiel", "Spiel
+        löschen") and Move Forward still read "Taste 3".
+      - No soft-fail line.
 
 ## Next milestones (not yet started)
 
@@ -9456,6 +9584,9 @@ case and writing a handler.
 > GameState. The surface is now **42 names**, coverage 421 of 648.
 > **M95** took the rest of the GameState row: **34 names**, 429 of 648.
 > **M96** took `StatModXP`: **33 names**, 430 of 648.
+> **M99** took the four options natives off the root row: **29 names**,
+> 436 of 648 (`ConfigKeySelected` and `Redefine`, which only the native
+> rows call, are the other two).
 
 **3. The soft-fail log, which is the only measure that sees a name
 implemented on the wrong class.** Both tools above are
@@ -9616,9 +9747,9 @@ difficulty:
       folded any of these into its own roll. The table is in
       `SIMKIN_NATIVE_API.md`. Also there, and smaller: a creature's
       projectile impact damage should skip non-creature targets.
-- [ ] **Options that don't apply**: `SetLanguage` (6), `ConfigKeysMenu`
+- [x] **Options that don't apply**: `SetLanguage` (6), `ConfigKeysMenu`
       (3), `ConfigKeysDefault`, `SaveConfig`. The screens exist and build
-      their rows; the rows land on nothing.
+      their rows; the rows land on nothing. Done in M99.
 - **Explicitly not planned: multiplayer and Bluetooth** (~25 of the 55).
   `JoinGame`, `MPPreHost`, `GetBluetoothName`, `RejectClient` and the rest
   need an N-Gage Bluetooth session this port has no counterpart for, and

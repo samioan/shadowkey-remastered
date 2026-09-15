@@ -191,6 +191,50 @@ public:
         holdTicks_.fill(0);
     }
 
+    // M99: `ConfigKeysDefault` (GameEngine binding 0x11) is one call,
+    // `FUN_1001a220(engine + 0x488)` -- the very function that seeds the
+    // table at startup, run again. It makes sixteen `FUN_1001a784(input,
+    // action, slot, nameId)` stores and touches nothing else, so unlike the
+    // constructor's fill it leaves a 17th action's slot alone. Nothing binds
+    // one, so the two agree in practice.
+    void RestoreDefaultBindings() {
+        AssignDefaultBindings();
+    }
+
+    // M99: `FUN_1001a610`, what the key-capture screen does with the key it
+    // caught. The action takes the new slot, and the first *other* action
+    // (of the first sixteen) already on that slot is given the action's old
+    // one -- a swap, so two actions never share a key and none is left
+    // unbound:
+    //
+    //     if (action < 0x11) {
+    //         old = map[action];  map[action] = slot;
+    //         for (i = 0; i < 0x10; i++)
+    //             if (i != action && map[i] == slot) { map[i] = old; return; }
+    //     }
+    void RedefineBinding(Action action, ButtonSlot slot) {
+        const int a = static_cast<int>(action);
+        if (a < 0 || a > 0x10) return;
+        const int old = bindingOffset_[static_cast<size_t>(a)];
+        bindingOffset_[static_cast<size_t>(a)] = static_cast<int>(slot);
+        for (int i = 0; i < 0x10; ++i) {
+            if (i != a && bindingOffset_[static_cast<size_t>(i)] == static_cast<int>(slot)) {
+                bindingOffset_[static_cast<size_t>(i)] = old;
+                return;
+            }
+        }
+    }
+
+    // M99: the per-slot byte at `engine+0x548` (`InputState+0xc0`), the
+    // flag argument of `InputState_RegisterBinding` -- 1 for the sixteen
+    // keypad/d-pad slots, 0 for the two selection keys and the unused tail.
+    // The capture loop only accepts a slot whose flag is set, so a softkey
+    // can never be bound to an action.
+    static bool slotIsBindable(ButtonSlot slot) {
+        const int i = static_cast<int>(slot);
+        return i >= 0 && i <= 15;
+    }
+
     void Rebind(Action action, ButtonSlot slot) {
         bindingOffset_[static_cast<size_t>(action)] = static_cast<int>(slot);
     }
@@ -230,6 +274,17 @@ public:
         return 0xd15;            // slots 18 and 20 reuse "Left Selection Key"
     }
 
+    // M99: an action's own name -- `InputState+0xd8[action]`, the fourth
+    // argument of each of FUN_1001a220's stores, which FUN_1001a5c4 resolves
+    // for the key-configuration rows. -1 for anything past the sixteenth.
+    static int actionNameStringId(Action action) {
+        static constexpr int kNames[16] = {0xced, 0xcee, 0xcef, 0xcf0, 0xcf1, 0xcf4,
+                                           0xcf2, 0xcf3, 0xcf6, 0xd04, 0xcfd, 0xcfe,
+                                           0xcff, 0xd01, 0xd02, 0xd03};
+        const int i = static_cast<int>(action);
+        return i >= 0 && i < 16 ? kNames[i] : -1;
+    }
+
     // The name of whatever key `action` is bound to *right now* -- the
     // engine's own `FUN_1001a578(out, input, ResolveBindingOffset(input,
     // action))`, which resolves the action through the remappable table
@@ -243,6 +298,10 @@ public:
 private:
     void InitDefaultBindings() {
         bindingOffset_.fill(-1);
+        AssignDefaultBindings();
+    }
+    // FUN_1001a220's sixteen stores.
+    void AssignDefaultBindings() {
         Rebind(Action::MoveForward, ButtonSlot::Up);
         Rebind(Action::MoveBackward, ButtonSlot::Down);
         Rebind(Action::TurnLeft, ButtonSlot::Left);

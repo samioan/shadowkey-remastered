@@ -3007,6 +3007,9 @@ int main(int argc, char** argv) {
     config.CaptureBindings(input);
     config.soundVolume = audioEngine.sfxVolumePercent();
     config.musicVolume = audioEngine.musicVolumePercent();
+    config.muteOnCall = stack.muteOnCall();
+    config.language = stack.language();
+    stack.SetConfigPath(configPath);
     if (config.Load(configPath)) {
         config.ApplyBindings(input);
         audioEngine.SetSfxVolumePercent(config.soundVolume);
@@ -3014,24 +3017,23 @@ int main(int argc, char** argv) {
         stack.SetMuteOnCall(config.muteOnCall);
         std::printf("loaded %s\n", configPath.c_str());
     }
-    // The real `SaveConfig` is a script binding the options screen calls,
-    // so writing on exit is not what the engine does -- but the engine
-    // also cannot be closed by a window button. Capture-then-write keeps
-    // the file in step with whatever the Options screen changed.
+    // M99: the GameEngine constructor loads the settings, *then* builds the
+    // string table's path from the language they named. The English table
+    // is already loaded above for everything that ran before this; swap it
+    // for the saved one now.
+    if (config.language != stack.language() && !stack.SetLanguage(config.language)) {
+        std::printf("language %d has no string table; staying on English\n", config.language);
+    }
+    // M99: the engine's application-exit handler (`FUN_100209c8`, events
+    // 0x100 and 0xbc1) runs `if (!saveDisabled) FUN_10019c04()` -- and a PC
+    // window has a close button where the handset had that event, so this
+    // is the same write at the same moment. Quit and QuitGame write too.
     struct ConfigWriter {
-        sk::GameConfig& cfg;
-        const sk::InputState& input;
-        sk::AudioEngine& audio;
         sk_bindings::MenuStack& stack;
-        std::string path;
         ~ConfigWriter() {
-            cfg.CaptureBindings(input);
-            cfg.soundVolume = audio.sfxVolumePercent();
-            cfg.musicVolume = audio.musicVolumePercent();
-            cfg.muteOnCall = stack.muteOnCall();
-            cfg.Save(path);
+            if (!stack.configSaveDisabled()) stack.SaveConfig();
         }
-    } configWriter{config, input, audioEngine, stack, configPath};
+    } configWriter{stack};
 
     window.SetKeyCallback([&](int vkCode, bool down) {
 #if SK_DEBUG_SUITE
@@ -4305,8 +4307,11 @@ int main(int argc, char** argv) {
                 // yaw's forward vector rotates toward -right as yaw increases
                 // (see render3d/zone_renderer.cpp's forward/right basis), so
                 // turning right means *decreasing* yaw.
-                if (input.GetButton(sk::ButtonSlot::Left)) gameCamera.yaw += kTurnSpeed;
-                if (input.GetButton(sk::ButtonSlot::Right)) gameCamera.yaw -= kTurnSpeed;
+                // M99: through the binding table, as FUN_1001c9c0 polls them
+                // (actions 2/3), so the key-configuration screen's changes
+                // reach the game. The defaults are these same two slots.
+                if (input.GetBoundButton(sk::Action::TurnLeft)) gameCamera.yaw += kTurnSpeed;
+                if (input.GetBoundButton(sk::Action::TurnRight)) gameCamera.yaw -= kTurnSpeed;
                 // The real default control scheme's own LookUp/LookDown
                 // (Key2/Key8, docs/INPUT_HANDLING.md) -- decoded long ago
                 // but never wired to anything, because the renderer had no
@@ -4516,8 +4521,9 @@ int main(int argc, char** argv) {
                         gameCamera.y = ny;
                     }
                 };
-                if (input.GetButton(sk::ButtonSlot::Up)) tryMove(dx, dy);
-                if (input.GetButton(sk::ButtonSlot::Down)) tryMove(-dx, -dy);
+                // M99: actions 0/1 through the bindings, likewise.
+                if (input.GetBoundButton(sk::Action::MoveForward)) tryMove(dx, dy);
+                if (input.GetBoundButton(sk::Action::MoveBackward)) tryMove(-dx, -dy);
                 // The real default scheme binds these to Key4/Key6
                 // (docs/INPUT_HANDLING.md) -- previously decoded but never
                 // wired up; Up/Down/Left/Right above stayed on the raw
@@ -7265,8 +7271,11 @@ int main(int argc, char** argv) {
         // over it and no way to answer. That is the "menus collide with
         // popups" shape exactly. The regular menu tick below already
         // routes the key to PopupMenuExecutable::GoBack().
+        // M99: so does a key-configuration screen waiting for a key -- the
+        // right softkey is its cancel (MenuExecutable::TickKeyCapture).
         const bool popupOwnsBackKey =
-            stack.currentMenu() != nullptr && stack.currentMenu()->activePopup() != nullptr;
+            stack.currentMenu() != nullptr && (stack.currentMenu()->activePopup() != nullptr ||
+                                               stack.currentMenu()->awaitingKey());
         if (gamePausedForMenu && !popupOwnsBackKey &&
             input.ConsumeJustPressed(sk::ButtonSlot::RightSelectionKey)) {
             // See gamePausedForMenu's declaration comment -- resumes
@@ -7355,7 +7364,11 @@ int main(int argc, char** argv) {
             menu->EnsureValidSelection();
             sk_bindings::MenuExecutable* before = menu;
             try {
-                if (sk_bindings::PopupMenuExecutable* popup = menu->activePopup()) {
+                if (menu->awaitingKey()) {
+                    // M99: FUN_10075bdc's first branch, ahead of popups and
+                    // navigation alike -- see TickKeyCapture.
+                    menu->TickKeyCapture(input);
+                } else if (sk_bindings::PopupMenuExecutable* popup = menu->activePopup()) {
                     // A visible confirmation popup captures input ahead of
                     // the underlying menu's own row navigation.
                     if (input.ConsumeJustPressedOrRepeat(sk::ButtonSlot::Up)) {

@@ -273,6 +273,46 @@ public:
 
     const std::string& prevMenuPath() const { return m_PrevMenuPath; }
 
+    // ---- M99: the key-configuration screen (configkeys.s) ----
+    //
+    // Three GameEngine natives build this screen's rows in C++ -- the script
+    // only asks for a page -- and the menu tick has a fourth mode for it.
+    //
+    //   ConfigKeysMenu(page)  FUN_100780f8: five actions a page, as rows
+    //                         calling ConfigKeySelected, then Next/Previous
+    //                         Page, Reset to Defaults and Back to Options.
+    //   ConfigKeySelected     case 0x13 -> FUN_10078890: one action's screen,
+    //                         "Current Definition:", its key, Redefine.
+    //   Redefine              FUN_10078c08: the "press a key" screen, and
+    //                         `menu+0x60 = 1`, which is what awaitingKey()
+    //                         answers.
+    //
+    // While a key is awaited the engine's menu tick (FUN_10075bdc) does
+    // nothing else at all -- no navigation, no activation, no back key --
+    // until TickKeyCapture() below has either bound a key or been cancelled.
+    bool awaitingKey() const { return m_AwaitingKey; }
+    // FUN_10075bdc's `menu+0x60` branch. Call once a tick instead of the
+    // screen's ordinary input handling while awaitingKey().
+    //
+    //   1. `menu+0x61 == 0`: wait for slot 8 (Key 5, the handset's select)
+    //      to be up -- the press that chose Redefine must not bind itself.
+    //   2. A fresh right softkey cancels: `menu+0x60 = 0`, then the script's
+    //      own ConfigKeysBack.
+    //   3. Otherwise the lowest slot, 0..0x14, that is held *and* bindable
+    //      (InputState::slotIsBindable) goes to FUN_1001a610 -- the swap in
+    //      InputState::RedefineBinding -- and the script's BackToConfig runs.
+    //
+    // Held, not newly pressed: a key already down when step 1 finishes is
+    // taken at once. The port also drops every pending edge each capture
+    // tick, because its edges are latches that outlive a tick (see
+    // InputState::SetButton) where the engine's are a current/previous pair
+    // that do not; without it the key just bound would also move the
+    // rebuilt page's highlight on the next tick.
+    void TickKeyCapture(sk::InputState& input);
+    // `menu+0x58` and `menu+0x5c`, for the smoke test.
+    int configKeysPage() const { return m_ConfigKeysPage; }
+    int configKeysAction() const { return m_ConfigKeysAction; }
+
     enum class RowKind {
         MenuItem,
         StaticItem,
@@ -496,6 +536,18 @@ public:
 private:
     MenuRow& AddRow(RowKind kind, int textId, const std::string& callback, bool selectable);
 
+    // M99: the three key-configuration builders and their shared pieces.
+    // A natively built row is one centred widget, never wrapped
+    // (FUN_1007fa20 for a static line, FUN_1007e458 for an item) -- unlike
+    // the script's AddStaticItem, which wraps and left-aligns.
+    void ClearNativeRows();
+    MenuRow& AddNativeStatic(int textId, const std::string& literal = std::string());
+    MenuRow& AddNativeItem(int textId, const std::string& callback);
+    void SelectFirstSelectableRow();
+    void BuildConfigKeysPage(int page);
+    void BuildKeyDefinition(int action);
+    void BuildRedefine();
+
     MenuStack& m_Stack;
     skiExecutable* m_Opener = nullptr;
     int m_BackgroundId = kDefaultMenuBackground;  // see the constant's comment
@@ -535,6 +587,13 @@ private:
     // re-runs the last one, which is what m_CurrentPage remembers.
     ScreenMode m_ScreenMode = ScreenMode::Inventory;
     int m_CurrentPage = 0;
+
+    // M99: the key-configuration screen's fields -- see awaitingKey().
+    int m_ConfigKeysPage = 0;            // menu+0x58
+    int m_ConfigKeysFirstActionRow = 0;  // menu+0x54, a row index
+    int m_ConfigKeysAction = 0;          // menu+0x5c
+    bool m_AwaitingKey = false;          // menu+0x60
+    bool m_KeyReleased = false;          // menu+0x61
 };
 
 }  // namespace sk_bindings

@@ -7,6 +7,7 @@
 #include "assets/string_table.h"
 #include "assets/zone_display_names.h"
 #include "audio/audio_engine.h"
+#include "engine/input_state.h"
 #include "simkin_bindings/action_text.h"
 #include "simkin_bindings/button_executable.h"
 #include "simkin_bindings/combo_box_executable.h"
@@ -15,6 +16,7 @@
 #include "simkin_bindings/game_constants.h"
 #include "simkin_bindings/item_button_executable.h"
 #include "simkin_bindings/item_executable.h"
+#include "simkin_bindings/language.h"
 #include "simkin_bindings/menu_item_handle.h"
 #include "simkin_bindings/native_binding_common.h"
 #include "simkin_bindings/player_executable.h"
@@ -170,6 +172,177 @@ MenuExecutable::MenuRow& MenuExecutable::AddRow(RowKind kind, int textId,
     row.selectable = selectable;
     m_Rows.push_back(std::move(row));
     return m_Rows.back();
+}
+
+// ---- M99: the key-configuration screen ----
+
+namespace {
+
+// The stringtable ids FUN_100780f8/FUN_10078890/FUN_10078c08 read, each as
+// `engine->stringTable[id]` at a literal offset (0x3f00 / 4 = 4032, ...).
+constexpr int kTextNextPage = 4032;         // "Next Page"
+constexpr int kTextPrevPage = 4033;         // "Previous Page"
+constexpr int kTextResetDefaults = 4034;    // "Reset to Defaults"
+constexpr int kTextBackToOptions = 4035;    // "Back to Options"
+constexpr int kTextRedefine = 4036;         // "Redefine"
+constexpr int kTextBackToKeyConfig = 4037;  // "Back to Key Config"
+constexpr int kTextCurrentDefinition = 4049;  // "Current Definition:"
+constexpr int kTextRedefining = 4050;       // ": Redefining :"
+constexpr int kTextPressAKey = 4051;        // "Press a key to use"
+constexpr int kTextForThisAction = 4052;    // "for this action."
+
+constexpr int kActionsPerPage = 5;
+// `if (0x10 < last) last = 0xf` -- the last action a page can list.
+constexpr int kLastConfigurableAction = 0xf;
+
+// Every blank line the three builders add is the one-space literal at
+// 0x100b33c8.
+const char* const kBlankLine = " ";
+
+}  // namespace
+
+void MenuExecutable::ClearNativeRows() {
+    // `for each widget in menu+0x34: delete; list.clear(); +0x30 = 0;
+    // +0x40 = 0` -- the same teardown ClearMenu's native does, without
+    // ClearMenu's extras (title, text entry, popups), none of which the
+    // engine's list loop touches either.
+    m_Rows.clear();
+    m_SelectedItem = 0;
+}
+
+MenuExecutable::MenuRow& MenuExecutable::AddNativeStatic(int textId, const std::string& literal) {
+    MenuRow& row = AddRow(RowKind::StaticItem, textId, "", false);
+    row.literalText = literal;
+    row.centered = true;
+    return row;
+}
+
+MenuExecutable::MenuRow& MenuExecutable::AddNativeItem(int textId, const std::string& callback) {
+    MenuRow& row = AddRow(RowKind::MenuItem, textId, callback, true);
+    row.widget.reset(new MenuItemHandle(*this, m_Rows.size() - 1));
+    return m_Rows.back();
+}
+
+void MenuExecutable::SelectFirstSelectableRow() {
+    // `if (menu+0x40 == 0 && widget+0x5c) menu+0x40 = widget` on every add:
+    // the first row that was selectable at the moment it was added.
+    for (size_t i = 0; i < m_Rows.size(); ++i) {
+        if (m_Rows[i].selectable) {
+            m_SelectedItem = static_cast<int>(i) + 1;
+            return;
+        }
+    }
+}
+
+void MenuExecutable::BuildConfigKeysPage(int page) {
+    ClearNativeRows();
+    m_ConfigKeysPage = page;
+    const int first = (page - 1) * kActionsPerPage;
+    int last = first + kActionsPerPage - 1;
+    if (last > 0x10) last = kLastConfigurableAction;
+    for (int action = first; action <= last; ++action) {
+        // FUN_1001a5c4 names the action. The builder then compares that name
+        // against the literal L"Rechten Gegenstand benutzen" and, on a match,
+        // builds a wrapping item followed by four blank lines. No shipped
+        // table contains the string -- German's action 15 reads "Rechte
+        // Aktion benutzen" -- so the branch is dead in this build and not
+        // reproduced.
+        AddNativeItem(sk::InputState::actionNameStringId(static_cast<sk::Action>(action)),
+                      "ConfigKeySelected");
+        if (action == first) m_ConfigKeysFirstActionRow = static_cast<int>(m_Rows.size()) - 1;
+    }
+    AddNativeStatic(-1, kBlankLine);
+    if (last < kLastConfigurableAction) {
+        AddNativeItem(kTextNextPage, "NextPage");
+    } else {
+        AddNativeStatic(-1, kBlankLine);
+    }
+    if (first == 0) {
+        AddNativeStatic(-1, kBlankLine);
+    } else {
+        AddNativeItem(kTextPrevPage, "PrevPage");
+    }
+    AddNativeItem(kTextResetDefaults, "DefaultKeys");
+    AddNativeItem(kTextBackToOptions, "OptionsMenu");
+    SelectFirstSelectableRow();
+}
+
+void MenuExecutable::BuildKeyDefinition(int action) {
+    ClearNativeRows();
+    const bool known = action >= 0 && action < 16;
+    const sk::Action a = static_cast<sk::Action>(action);
+    AddNativeStatic(known ? sk::InputState::actionNameStringId(a) : -1);
+    AddNativeStatic(-1, kBlankLine);
+    AddNativeStatic(kTextCurrentDefinition);
+    // The key's name, through `InputState_ResolveBindingOffset` and then the
+    // slot's label (FUN_1001a578) -- a row built as an item and then made
+    // unselectable, with an unidentified byte `+0x34 = 1` besides. No
+    // callback.
+    int keyName = -1;
+    if (known) {
+        if (const sk::InputState* input = m_Stack.input()) {
+            keyName = input->bindingNameStringId(a);
+        } else {
+            keyName = sk::InputState().bindingNameStringId(a);
+        }
+    }
+    MenuRow& key = AddNativeItem(keyName, "");
+    key.selectable = false;
+    key.centered = true;
+    AddNativeStatic(-1, kBlankLine);
+    AddNativeStatic(-1, kBlankLine);
+    AddNativeItem(kTextRedefine, "Redefine");
+    AddNativeStatic(-1, kBlankLine);
+    AddNativeItem(kTextBackToKeyConfig, "BackToConfig");
+    m_ConfigKeysAction = action;
+    SelectFirstSelectableRow();
+}
+
+void MenuExecutable::BuildRedefine() {
+    ClearNativeRows();
+    // Four of these lines are made selectable after they are added
+    // (`widget+0x5c = 1`), which leaves the selection on the action's name
+    // -- the only one selectable when it went in. Nothing reads either:
+    // the capture mode below takes the tick before any navigation.
+    AddNativeStatic(kTextRedefining).selectable = true;
+    const bool known = m_ConfigKeysAction >= 0 && m_ConfigKeysAction < 16;
+    int nameId = known ? sk::InputState::actionNameStringId(
+                             static_cast<sk::Action>(m_ConfigKeysAction))
+                       : -1;
+    AddNativeItem(nameId, "");
+    AddNativeStatic(-1, kBlankLine);
+    AddNativeStatic(-1, kBlankLine);
+    AddNativeStatic(kTextPressAKey).selectable = true;
+    AddNativeStatic(kTextForThisAction).selectable = true;
+    AddNativeStatic(-1, kBlankLine);
+    m_SelectedItem = 2;
+    m_AwaitingKey = true;
+    m_KeyReleased = false;
+}
+
+void MenuExecutable::TickKeyCapture(sk::InputState& input) {
+    if (!m_AwaitingKey) return;
+    if (!m_KeyReleased) {
+        if (!input.GetButton(sk::ButtonSlot::Key5)) m_KeyReleased = true;
+        input.ClearPendingEdges();
+        return;
+    }
+    if (input.ConsumeJustPressed(sk::ButtonSlot::RightSelectionKey)) {
+        m_AwaitingKey = false;
+        input.ClearPendingEdges();
+        InvokeCallback("ConfigKeysBack");
+        return;
+    }
+    for (int slot = 0; slot < static_cast<int>(sk::ButtonSlot::kCount); ++slot) {
+        const sk::ButtonSlot s = static_cast<sk::ButtonSlot>(slot);
+        if (!input.GetButton(s) || !sk::InputState::slotIsBindable(s)) continue;
+        input.RedefineBinding(static_cast<sk::Action>(m_ConfigKeysAction), s);
+        m_AwaitingKey = false;
+        input.ClearPendingEdges();
+        InvokeCallback("BackToConfig");
+        return;
+    }
+    input.ClearPendingEdges();
 }
 
 void MenuExecutable::SetRowSelectable(size_t rowIndex, bool selectable) {
@@ -794,6 +967,11 @@ bool MenuExecutable::method(const skString& methodName, skRValueArray& args,
         return true;
     }
     if (methodName == skString("Quit") && args.entries() == 0) {
+        // M99: case 0x32 opens with `if (!engine->saveDisabled)
+        // FUN_10019c04()`, result unused -- every screen that closes writes
+        // the settings file. That is how an Options change or a rebinding
+        // survives without the player ever seeing a "save" row.
+        if (!m_Stack.configSaveDisabled()) m_Stack.SaveConfig();
         // See MenuStack::closeMenuRequested(). Deliberately does not
         // navigate here: a real Quit() is often followed immediately by an
         // OpenMenu(...) in the same handler (charactermanager.s's
@@ -931,10 +1109,64 @@ bool MenuExecutable::method(const skString& methodName, skRValueArray& args,
     // on both: GetLanguageStr() gates the God Mode row (`GameActive() and
     // langStr = "ENGLISH"`) and also fills the language popup's first,
     // non-selectable line; MuteOnCall() picks between the Mute On/Mute Off
-    // row. This port ships the English stringtable (stringtable.eng), so
-    // "ENGLISH" is the honest answer rather than a guess.
+    // row.
+    //
+    // M99: **the real answer is "Language: English"**, not the "ENGLISH"
+    // this returned (GameEngine case 6: a per-language prefix, then
+    // FUN_1001b680's name -- see language.h). So options.s's God Mode row
+    // is never offered in the shipped game; the string it compares against
+    // is a leftover. The popup's title line reads "Language: English".
     if (methodName == skString("GetLanguageStr") && args.entries() == 0) {
-        returnValue = skRValue(skString("ENGLISH"));
+        returnValue = skRValue(skString(LanguageDisplayString(m_Stack.language()).c_str()));
+        return true;
+    }
+    // M99: GameEngine case 0x72. `SetLanguage()` with no argument is
+    // `SetLanguage(0)` -- the case reads an argument only when there is
+    // exactly one. See MenuStack::SetLanguage for the reload. options.s
+    // follows every call with `ClearMenu(); Init();`, which is what redraws
+    // the screen in the new language.
+    if (methodName == skString("SetLanguage") && args.entries() <= 1) {
+        m_Stack.SetLanguage(args.entries() == 1 ? args[0].intValue() : 0);
+        return true;
+    }
+    // M99: case 0x71, `FUN_10019c04`. saveconfigfailed.s's Try is the one
+    // script caller; the engine's own callers are Quit and QuitGame below
+    // and the application's exit event.
+    if (methodName == skString("SaveConfig") && args.entries() == 0) {
+        returnValue = skRValue(m_Stack.SaveConfig());
+        return true;
+    }
+    // M99: case 0x11, `FUN_1001a220(engine + 0x488)` -- the startup
+    // bindings, again. configkeys.s's ActuallyDefaultKeys, behind its "are
+    // you sure" popup.
+    if (methodName == skString("ConfigKeysDefault") && args.entries() == 0) {
+        if (sk::InputState* input = m_Stack.mutableInput()) input->RestoreDefaultBindings();
+        return true;
+    }
+    // M99: case 0x12, `FUN_100780f8(menu, page)`. The row list is rebuilt
+    // from scratch: a page is five actions (the fourth has one), each a row
+    // whose callback is the native ConfigKeySelected below.
+    if (methodName == skString("ConfigKeysMenu") && args.entries() == 1) {
+        BuildConfigKeysPage(args[0].intValue());
+        return true;
+    }
+    // M99: case 0x13. Which action a row is comes from the *selected row's
+    // position*, not from anything stored on it:
+    //
+    //     index = position of menu+0x40 in the row list (or -1);
+    //     FUN_10078890(menu, (index - menu+0x54) + (menu+0x58 - 1) * 5);
+    //
+    // menu+0x54 being the first action row of the page on show.
+    if (methodName == skString("ConfigKeySelected") && args.entries() == 0) {
+        const int index = m_SelectedItem - 1;
+        BuildKeyDefinition((index - m_ConfigKeysFirstActionRow) +
+                           (m_ConfigKeysPage - 1) * kActionsPerPage);
+        return true;
+    }
+    // M99: case 0x14, `FUN_10078c08`. Arms the capture -- see
+    // TickKeyCapture.
+    if (methodName == skString("Redefine") && args.entries() == 0) {
+        BuildRedefine();
         return true;
     }
     if (methodName == skString("MuteOnCall") && args.entries() == 0) {
@@ -1163,8 +1395,23 @@ bool MenuExecutable::method(const skString& methodName, skRValueArray& args,
         returnValue = skRValue(0);  // no host process to hand off to -- always single-player
         return true;
     }
-    if (methodName == skString("QuitGame") && args.entries() == 0) {
-        m_Stack.RequestQuit();
+    if (methodName == skString("QuitGame") && args.entries() <= 1) {
+        // M99: case 0x34 saves the settings on the way out, and a failed
+        // save stops the quit:
+        //
+        //     save = (argc == 1) ? arg : true;
+        //     if (saveDisabled || !save || FUN_10019c04()) { ...quit... }
+        //     else OpenMenu("SaveConfigFailed");
+        //
+        // saveconfigfailed.s is that screen: "Try" calls SaveConfig again,
+        // and its other row is `QuitGame(false)`, the one call that skips
+        // the save. It used to soft-fail, having an argument.
+        const bool save = args.entries() == 1 ? args[0].boolValue() : true;
+        if (m_Stack.configSaveDisabled() || !save || m_Stack.SaveConfig()) {
+            m_Stack.RequestQuit();
+        } else {
+            m_Stack.OpenMenu("SaveConfigFailed");
+        }
         return true;
     }
     // M54: the other half of that pair, and the one real scripts reach

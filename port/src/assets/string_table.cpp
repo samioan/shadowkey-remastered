@@ -8,12 +8,17 @@ namespace sk {
 
 namespace {
 
-std::string Utf16LeToAscii(const std::vector<uint16_t>& units) {
+// M99: Latin-1, not ASCII. The four other languages SetLanguage can load are
+// full of accented letters (German's "Nächste Seite", French's "Français"),
+// and every one of them is below U+0100. The text renderer already treats
+// each byte as a codepoint into the real N-Gage font (bitmap_font.cpp), which
+// carries the Latin-1 block, so keeping the byte is all it takes to draw them.
+std::string Utf16LeToLatin1(const std::vector<uint16_t>& units) {
     std::string out;
     out.reserve(units.size());
     for (uint16_t u : units) {
         if (u == 0) break;  // trailing NUL
-        out.push_back(u < 128 ? static_cast<char>(u) : '?');
+        out.push_back(u < 0x100 ? static_cast<char>(static_cast<unsigned char>(u)) : '?');
     }
     return out;
 }
@@ -52,7 +57,7 @@ bool StringTable::Load(const std::string& path) {
                 return false;
             }
         }
-        entries_.push_back(Utf16LeToAscii(units));
+        entries_.push_back(Utf16LeToLatin1(units));
     }
     return true;
 }

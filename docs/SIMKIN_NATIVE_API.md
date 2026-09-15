@@ -1706,6 +1706,30 @@ if ((target && target->vt[0xc8]() && target->+0x1e2) ||
 So invulnerability, Sanctuary and snowray each refuse a whole spell from any
 caster, status effect included.
 
+### The options natives (M99)
+
+GameEngine-root cases, for the Options and key-configuration screens:
+
+| case | name | body |
+|---|---|---|
+| 4 / 5 | `GetConfigPage` / `SetConfigPage` | `menu+0x8c`; no shipped caller |
+| 6 | `GetLanguageStr` | per-language prefix + `FUN_1001b680`'s name: `"Language: English"`, `"Sprache: Deutsch"`, ... |
+| 0x11 | `ConfigKeysDefault` | `FUN_1001a220(engine+0x488)`, the startup bindings |
+| 0x12 | `ConfigKeysMenu(page)` | `FUN_100780f8`: clear, five action rows (`ConfigKeySelected`), page rows |
+| 0x13 | `ConfigKeySelected` | action = `(selected row - menu+0x54) + (menu+0x58 - 1) * 5`; `FUN_10078890` |
+| 0x14 | `Redefine` | `FUN_10078c08`: press-a-key screen, `menu+0x60 = 1` |
+| 0x32 | `Quit` | opens with `if (!engine+0x14a78) FUN_10019c04()` |
+| 0x34 | `QuitGame([save])` | `if (+0x14a78 \|\| !save \|\| FUN_10019c04()) quit; else OpenMenu("SaveConfigFailed")` |
+| 0x4c | `CycleLanguage` | `FUN_1001b65c` (index + 1, wrapping at 6), the same reload, then a row rebuild not read; no shipped caller |
+| 0x71 | `SaveConfig` | `FUN_10019c04`; returns 1 at once when `+0x14a78` is set |
+| 0x72 | `SetLanguage(n)` | `FUN_1001b64c`, read `StringTable.<FUN_1001b708 suffix>`, revert the index on failure |
+
+The key capture is the menu tick's `menu+0x60` branch (`FUN_10075bdc`): wait
+for slot 8 to be up; a fresh slot 0x11 cancels into `ConfigKeysBack`;
+otherwise the lowest held slot 0..0x14 with `engine+0x548[slot]` set goes to
+`FUN_1001a610(input, menu+0x5c, slot)`, a swap with whichever action already
+had that slot, and `BackToConfig` runs.
+
 ## Labels applied / tools
 
 No new Ghidra renames this pass (the 28 registration/dispatcher

@@ -43,6 +43,10 @@
 //     MUTEONCALL
 //     <0 or 1>
 //
+// M99: the writer runs from the `SaveConfig` binding, from `Quit` and
+// `QuitGame`, and from the application-exit event -- MenuStack::SaveConfig
+// is all four in this port.
+//
 // Writer `FUN_10019c04` (`SaveConfig`, GameEngine binding 0x71): opens the
 // path `"wt"` and `fprintf`s each key with its own trailing newline and
 // each value through `"%d\n"`. Reader `FUN_100199e0`: opens `"rt"` and

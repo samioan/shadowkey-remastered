@@ -21,9 +21,11 @@ public:
     // Returns false (logged) on any read/format failure.
     bool Load(const std::string& path);
 
-    // Returns the string at `id`, folded from UTF-16LE to ASCII (non-ASCII
-    // codepoints become '?' -- the placeholder bitmap font is ASCII-only
-    // anyway, see graphics/bitmap_font.h). Out-of-range ids return "?".
+    // Returns the string at `id`, folded from UTF-16LE to Latin-1: one byte
+    // per codepoint below U+0100, '?' above (M99 -- it was ASCII, which
+    // turned every accent in the four non-English tables into '?'). The
+    // real font draws the Latin-1 block; the placeholder font does not.
+    // Out-of-range ids return "?".
     std::string Get(int id) const;
 
     size_t count() const { return entries_.size(); }

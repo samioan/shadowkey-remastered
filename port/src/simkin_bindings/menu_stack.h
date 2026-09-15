@@ -63,8 +63,11 @@ public:
     // PlayerExecutable's own constructor (it's built here, not given a
     // MenuStack& to pull them from later, unlike LevelExecutable/
     // MonsterExecutable/ItemExecutable which already hold one).
+    // M99: `strings` is no longer const -- SetLanguage() below swaps its
+    // contents in place, so every holder of the pointer sees the new
+    // language without being told.
     MenuStack(std::string scriptRoot, skInterpreter& interpreter,
-              const sk::StringTable* strings = nullptr, sk::SoundArchive* sounds = nullptr,
+              sk::StringTable* strings = nullptr, sk::SoundArchive* sounds = nullptr,
               sk::AudioEngine* audio = nullptr);
     ~MenuStack();
 
@@ -79,6 +82,43 @@ public:
     // to mute on PC.
     bool muteOnCall() const { return m_MuteOnCall; }
     void SetMuteOnCall(bool mute) { m_MuteOnCall = mute; }
+
+    // ---- M99: the Options screen's language and the settings file ----
+
+    // `engine+0x14a4c`, see language.h.
+    int language() const { return m_Language; }
+    // GameEngine binding 0x72, `SetLanguage(n)`:
+    //
+    //     old = engine->language;
+    //     engine->language = n;                       // FUN_1001b64c
+    //     sprintf(path, "z:\\system\\apps\\6R51\\StringTable.%s", suffix);
+    //     data = FUN_10027468(path, &size);           // read the whole file
+    //     if (!data) engine->language = old;          // keep the old table
+    //     else { FUN_1001b5e8(engine);                // free the old table
+    //            FUN_10015878(engine, data, size); }  // parse the new one
+    //
+    // The file is read first and the old table freed only once it has been,
+    // so a missing table changes nothing at all. Returns whether the new
+    // table loaded. With no string table attached (most tests) only the
+    // index moves.
+    bool SetLanguage(int language);
+
+    // Where `dragonstar.set` lives. Empty (every test) makes SaveConfig a
+    // success that writes nothing -- the port's own case, not the engine's.
+    void SetConfigPath(std::string path) { m_ConfigPath = std::move(path); }
+    const std::string& configPath() const { return m_ConfigPath; }
+    // `FUN_10019c04`, GameEngine binding 0x71: write the action map, the
+    // language, both volumes and mute-on-call (assets/game_config.h has the
+    // format). Returns false for a file that will not open. With
+    // saving disabled (below) it writes nothing and returns **true** -- the
+    // writer's first test jumps straight to its success return.
+    bool SaveConfig();
+    // `engine+0x14a78`. `DeleteAllGames` unlinks `dragonstar.set` along with
+    // the saves and then raises this, and every writer -- SaveConfig, the
+    // application-exit handler, `Quit`, `QuitGame` -- checks it first, so a
+    // "delete everything" is not undone by the next quit writing the file
+    // straight back. Nothing lowers it again this session.
+    bool configSaveDisabled() const { return m_ConfigSaveDisabled; }
 
     // M53: the engine's script-timer clock (`engine+0x470 -> +0x460`),
     // 8.8 fixed-point seconds accumulated per frame and zeroed on a level
@@ -174,8 +214,11 @@ public:
     // set one, which that function reads as "the engine defaults", the
     // same bindings the tutorial text was written against. Set by
     // main.cpp once, right after the InputState it points at is built.
-    void SetInput(const sk::InputState* input) { m_Input = input; }
+    // M99: not const any more -- ConfigKeysDefault and the key-capture
+    // screen write the bindings through it.
+    void SetInput(sk::InputState* input) { m_Input = input; }
     const sk::InputState* input() const { return m_Input; }
+    sk::InputState* mutableInput() const { return m_Input; }
 
     // M80: does the interpreter have a global of this name? Zone scripts
     // need this to stop shadowing `Level` -- see
@@ -471,11 +514,17 @@ private:
 
     std::string m_ScriptRoot;
     skInterpreter& m_Interpreter;
-    const sk::StringTable* m_Strings;
-    const sk::InputState* m_Input = nullptr;  // M80, see SetInput()
+    sk::StringTable* m_Strings;
+    sk::InputState* m_Input = nullptr;  // M80, see SetInput()
+    int m_Language = 0;                 // M99, engine+0x14a4c
+    std::string m_ConfigPath;           // M99, see SetConfigPath()
+    bool m_ConfigSaveDisabled = false;  // M99, engine+0x14a78
     sk::SoundArchive* m_Sounds;  // M27: see sounds()/audio()'s own comment above
     sk::AudioEngine* m_Audio;
-    bool m_MuteOnCall = false;  // M28: see muteOnCall() above
+    // M28: see muteOnCall() above. M99: **true** until a settings file says
+    // otherwise -- the GameEngine constructor stores `engine+0x14a79 = 1`
+    // on the line before it runs the config loader.
+    bool m_MuteOnCall = true;
     GameClock m_GameClock;      // M53: see gameClock() above
     bool m_CloseMenuRequested = false;  // M30: see closeMenuRequested() above
     bool m_MenuActive = false;          // M95: see menuActive() above
