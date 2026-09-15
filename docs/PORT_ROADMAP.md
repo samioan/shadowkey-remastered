@@ -8927,6 +8927,81 @@ soft-fails 39 -> 39, all 14 tracked `.ppm` renders byte-identical,
       real keys. Drive a screen from the console only once a real key has
       put a menu up.
 
+- [x] **M96 -- `StatModXP`, and where experience actually comes from.**
+      Character stats (`0x14db0`, `FUN_10048244`) binding 58, 7 live sites,
+      every one `GetPlayer().StatModXP(n)`: six conversation rewards
+      (`almatheaconvo.s` 1500, `ghstpass/trailslag_convo.s` and
+      `violet_convo.s` 600 each, `lothna/get_quest400_convo.s`,
+      `get_quest44_convo.s` and `pilgrim_convo.s` 2250 each) and
+      `ratherb.s`'s `OnKilled` (40). Every one soft-failed, so each of those
+      handlers closed its quest, paid its gold and awarded nothing else.
+      Eight more calls are commented out in the corpus and stay dead.
+
+    - **`StatModXP` is `AddExperience`, instruction for instruction.** Case
+      0x3a (`0x10048fcc`) against case 0x3b (`0x10049054`) in the raw
+      disassembly: the same 16-bit `AtomToInt`, the same `stats->vtable[0x20]`
+      call, the same multiplayer mirror with kind 0. Slot 0x20 is
+      `FUN_1004a104` in all five vtables that carry it, with no override. So
+      M64's `AddExperience` -- the triangular-number curve, the strict test,
+      one level per call, the 16-bit wrap -- is the whole implementation, and
+      the handler is one call. The neighbouring case 0x39, `StatModGold`,
+      is the one that differs: a full-int add to `stats+0x38`, mirror kind 1.
+      This port's version already matched.
+    - **Every entry into `FUN_1004a104`, and the one this port is
+      missing.** A scan for the virtual call (`ldr rX, [rY, #0x80]` then
+      `ldr ip, [rX, #0x20]`, plus direct `bl`s, of which there are none)
+      finds three: the two natives above and `0x100394d0`, the multiplayer
+      receiver for that mirror (kind 0 adds experience, kind 1 adds gold).
+      The fourth caller, which the pattern scan missed because the registers
+      differ, is **the creature death routine `FUN_10083c04`**:
+      `if (attacker && monster+0x2e8 == 0)
+      attacker->AddExperience(monster.stats+0x0e)`. That is the `expWorth`
+      M39's `SetZone` share writes, and **this port never pays it**: nothing
+      on the C++ side calls `AddExperience`, so a creature kill awards no
+      experience at all. It is a gap of its own, recorded in the list below,
+      because it needs a killer attributed at each of this port's death
+      paths. `StatModXP` doesn't depend on it.
+    - **Test**: `port/src/tests/m96_stat_mod_xp_smoke.cpp`, 40 checks in
+      four parts:
+        1. The census: 7 live sites, all on `GetPlayer()`, plus the 8
+           commented-out calls.
+        2. `StatModXP` and `AddExperience` side by side on two players fed
+           the same eight awards (the exact threshold, one past it, a jump
+           across six thresholds, a negative that still levels, a 16-bit
+           wrap), compared after every step. This also re-checks the three
+           quirks directly.
+        3. The six conversations, opened by path. The real `Olpac_Trailslag.s`
+           and `ghstpass/violet.s` are registered under the names the
+           conversations look up. Each paying handler is driven, and the test
+           checks that the experience lands, that the level and points match
+           an independent transcription of `FUN_1004a104`, and that the rest
+           of the handler runs with no soft-fail and no script error. From a
+           fresh Thief the six take the character to level 5 on 9450
+           experience, and quests 2, 13, 17, 43 and 44 close.
+        4. `ratherb.s`'s `OnKilled` pays 40 and solves quest 1.
+    - **Found and left alone**: `ratherb.s`'s `OnKilled` also soft-fails
+      `Level.IsMultiplayer()`, a cross-receiver hole of the same kind as
+      `Level.IsMultiplayerClient`. Its 0 is the single-player branch it
+      should take, so the behaviour is right. It also soft-fails
+      `herbhurrah.s`'s `DelayOnEnter`, the menu/popup row. The test pins both
+      names, so a third name there fails it.
+    - **The suite**: 88 executables, 87 pass (`render_at_smoke` is the
+      render tool). Soft-fail lines **16 -> 18** over **12 pairs**. The two
+      new lines are the pair above, surfaced by part 4 on purpose. The gaps
+      tool: unimplemented-and-called names 34 -> **33**, coverage 429 ->
+      **430 of 648**. `analyze_port_native_coverage.py`: `GetPlayer()`
+      2126 -> **2133** handled sites (96% -> 97%), unhandled names 15 -> 14.
+    - **Live** (azra, `port/debug/m96_stat_mod_xp.cfg`):
+
+      | Step | experience | to next level |
+      |---|---|---|
+      | start (level 1, a 1200-base class) | 0 | 1200 |
+      | `StatModXP(1500)` | 1500 | 2100 (level 2) |
+      | `StatModXP(2250)` | 3750 | 3450 (level 3) |
+      | `StatModXP(2250)` | 6000 | 1200 (no level: 6000 is under 7200) |
+
+      No soft-fail line in the log.
+
 ## Next milestones (not yet started)
 
 Roughly in priority order for reaching "actually playable," not commitments:
@@ -9110,6 +9185,7 @@ case and writing a handler.
 > trap/magic-damage row plus `CanDisarmTrap`/`CanAvoidTrap` out of
 > GameState. The surface is now **42 names**, coverage 421 of 648.
 > **M95** took the rest of the GameState row: **34 names**, 429 of 648.
+> **M96** took `StatModXP`: **33 names**, 430 of 648.
 
 **3. The soft-fail log, which is the only measure that sees a name
 implemented on the wrong class.** Both tools above are
@@ -9220,8 +9296,29 @@ difficulty:
       `EnableCoords`. `CanDisarmTrap`/`CanAvoidTrap` left this bucket with
       M94. Done -- M95 above, which also fixed the numerical combo box and
       every store screen's title.
-- [ ] **`StatModXP`** (7 sites) -- the conversations that award experience
-      award none.
+- [x] **`StatModXP`** (7 sites) -- the conversations that award experience
+      award none. Done -- M96 above.
+- [ ] **Creature kills award no experience.** Found by M96, and not a native
+      gap, so neither tool can see it. The chain in the engine:
+        1. The stats damage virtual (`vt[0x10]`, `FUN_10049e78`) takes the
+           attacker's stats. When health reaches 0 it calls `vt[0x28]`.
+        2. In a creature vtable that is the thunk `0x100a4314`, which calls
+           `FUN_10083c04(monster, attackerStats)`.
+        3. That pays `attackerStats->AddExperience(monster expWorth)`,
+           unless `monster+0x2e8` (`GuardPlayer`'s side pointer, no shipped
+           caller) is set.
+
+      `FUN_1002fd30` turns the attacker into stats: the player gives
+      `+0x3ac`, a creature gives `+0x224`, anything else gives null (no
+      award). The `expWorth` is already right (M39's `SetZone` share). What's
+      missing is a killer at each of this port's death paths in `main.cpp`:
+        - player melee
+        - arrows
+        - spell projectiles
+        - the M34 effect-tick deaths
+        - the M81 sweep that catches area spells, `DoDamage` and `killall`
+
+      Each needs the attacker the engine would have passed.
 - [ ] **Options that don't apply**: `SetLanguage` (6), `ConfigKeysMenu`
       (3), `ConfigKeysDefault`, `SaveConfig`. The screens exist and build
       their rows; the rows land on nothing.

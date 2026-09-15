@@ -1600,6 +1600,43 @@ by the combo draw `FUN_1008e974`: set, the option is formatted with `"%d"`
 (`0x100f78d4`); clear, it is a string-table id. `dropgoldmenu.s` is its only
 caller.
 
+## Experience: `StatModXP` and every caller of `AddExperience` (M96)
+
+Character stats trie `0x14db0`, dispatcher `FUN_10048244` (jump table at
+`0x1004829c`):
+
+| case | binding | what it does |
+|---|---|---|
+| `0x39` | `StatModGold(n)` | `stats+0x38 += n`, a full-int add; mirror `session->vtable[0x120](1, n)` inside `engine+0x5c0`. |
+| `0x3a` | `StatModXP(n)` | `stats->vtable(+0x80)[0x20](stats, (short)n)`; mirror `vtable[0x120](0, n)`. |
+| `0x3b` | `AddExperience(n)` | identical to `0x3a`, instruction for instruction (`0x10048fcc` vs `0x10049054`). |
+
+Slot `0x20` is `FUN_1004a104` (M64's experience add and level-up trigger) in
+all five vtables that carry it: `0x100fcee0`, `0x100fd2e4`, `0x100fd9fc`,
+`0x100fe514` and `0x100ffd50`. None overrides it.
+
+**Every way experience enters the game.** No direct `bl` reaches
+`FUN_1004a104`. The virtual calls are:
+
+- the two natives above;
+- `0x100394d0`, the multiplayer receiver for their mirror. Its byte `+4`
+  picks the action: 0 adds experience through the slot, 1 adds straight
+  to `stats+0x38`;
+- **the creature death routine `FUN_10083c04`**. Reached from the stats
+  damage virtual `FUN_10049e78` (`vt[0x10]`), which at health ≤ 0 calls
+  `vt[0x28](stats, attacker, …)`. In a creature vtable that slot is the
+  thunk `0x100a4314` (`sub r0, #0x224; b 0x10083c04`). The routine does
+  `if (attacker && monster+0x2e8 == 0) attacker->vt[0x20](attacker,
+  monster.stats+0x0e)`, paying the dead creature's `expWorth`.
+
+  The attacker comes from `FUN_1002fd30`: `+0x224` for a creature (`vt[0xe4]`),
+  `+0x3ac` for the player (`vt[0xcc]`), otherwise null.
+
+  `+0x2e8` is the pointer `GuardPlayer` writes, and no shipped script calls
+  `GuardPlayer`. A scan finds five `str …, #0x2e8]` sites in all
+  (`0x10021438`, `0x100219e8`, `0x10081648`, `0x10085948`, `0x10086f64`);
+  they are not yet attributed.
+
 ## Labels applied / tools
 
 No new Ghidra renames this pass (the 28 registration/dispatcher

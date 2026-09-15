@@ -1085,6 +1085,17 @@ bool PlayerExecutable::method(const skString& methodName, skRValueArray& args,
         AddExperience(args[0].intValue());
         return true;
     }
+    if (methodName == skString("StatModXP") && args.entries() == 1) {
+        // M96: case 0x3a, the quest-reward spelling (7 live sites -- the
+        // conversations that pay out experience, and ratherb.s's kill).
+        // It is AddExperience (0x3b) instruction for instruction: the same
+        // 16-bit AtomToInt, the same `stats->vtable[0x20]` (FUN_1004a104,
+        // unoverridden in all five vtables that carry it), the same
+        // multiplayer mirror with kind 0. Not "mod the stat and let
+        // something else notice" -- the level-up trigger rides along.
+        AddExperience(args[0].intValue());
+        return true;
+    }
     // M64: `levelup.s`'s two counters, and `cheatmenu.s`'s LevelUp().
     if (methodName == skString("GetLevelUpPoints") && args.entries() == 0) {
         returnValue = skRValue(m_LevelUpPoints);

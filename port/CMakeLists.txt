@@ -680,3 +680,7 @@ target_link_libraries(trap_magic_smoke PRIVATE sk_bindings sk_world)
 # M95 milestone smoke test -- see src/tests/m95_gamestate_smoke.cpp.
 add_executable(gamestate_smoke src/tests/m95_gamestate_smoke.cpp)
 target_link_libraries(gamestate_smoke PRIVATE sk_bindings sk_world)
+
+# M96 milestone smoke test -- see src/tests/m96_stat_mod_xp_smoke.cpp.
+add_executable(stat_mod_xp_smoke src/tests/m96_stat_mod_xp_smoke.cpp)
+target_link_libraries(stat_mod_xp_smoke PRIVATE sk_bindings sk_world)
