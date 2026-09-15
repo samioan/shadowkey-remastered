@@ -618,7 +618,10 @@ bool ItemExecutable::method(const skString& methodName, skRValueArray& args,
             // from dealing 0 damage and printing a damage message.
             int rolled = dmgMin;
             if (dmgMin != dmgMax) rolled = dmgMin + std::rand() % (dmgMax - dmgMin + 1);
-            if (dmgMax > 0) target->ApplyActorDamage(rolled);
+            // M97: `stats->vtable[0x10](target, rolled, casterStats, 0, 1)`
+            // -- sourced to the caster, so a spell that kills pays whoever
+            // owns it.
+            if (dmgMax > 0) target->ApplyActorDamage(rolled, caster);
 
             // M43: every status primitive below now runs on the target's
             // **stats block** rather than on a MonsterExecutable, which is
@@ -828,7 +831,7 @@ bool ItemExecutable::method(const skString& methodName, skRValueArray& args,
                     // (whose willpower is always 0, no creature script calls
                     // SetWillpower), and defined for the player as well.
                     int dmg = RollSpellDamage(m_Rating, targetResistance);
-                    target->ApplyActorDamage(dmg);
+                    target->ApplyActorDamage(dmg, caster);
                     break;
                 }
             }

@@ -176,7 +176,7 @@ int main(int argc, char** argv) {
         sk_b::MenuStack stackB(root, interpreterB, &strings);
         sk_b::PlayerExecutable& a = stackA.player();
         sk_b::PlayerExecutable& b = stackB.player();
-        Call(a, "ChooseCharacter", Args(skRValue(1)), interpreterA);  // Thief: base 900
+        Call(a, "ChooseCharacter", Args(skRValue(1)), interpreterA);  // Barbarian: base 900
         Call(b, "ChooseCharacter", Args(skRValue(1)), interpreterB);
 
         // Exactly the threshold, one past it, a jump across several

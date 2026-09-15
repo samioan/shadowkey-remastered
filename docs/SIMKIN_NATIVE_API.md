@@ -1637,6 +1637,45 @@ all five vtables that carry it: `0x100fcee0`, `0x100fd2e4`, `0x100fd9fc`,
   (`0x10021438`, `0x100219e8`, `0x10081648`, `0x10085948`, `0x10086f64`);
   they are not yet attributed.
 
+### Who the attacker is at each damage site (M97)
+
+Every call of the damage slot `vt[0x10](victim, damage, attacker, p4, p5)`
+in the image, with the attacker it names. The fatal hit's attacker is the
+only killer the death routine ever sees, so this table is also "which
+deaths pay experience, and to whom":
+
+| site | what | attacker | p5 |
+|---|---|---|---|
+| `FUN_100425bc` | player melee | `player + 0x3ac` | 0 |
+| `FUN_100835b8` | creature melee | `monster + 0x224` | 0 |
+| `FUN_10007214` | arrow, the player's same-tile pass | `engine+0x618` (the player) `+ 0x3ac` | 0 |
+| `FUN_10007214` | arrow, the general sweep | shooter: `+0x3ac` if it is the player, else `+0x224` | 1 |
+| `FUN_100458e4` | a spell's `DoAttackRoll` damage | `FUN_1002fd30(spell+0x170)`, the caster | 1 |
+| `FUN_1005f3c8` | spell projectile impact damage | caster `+0x3ac` if the player; else `+0x224`, **and a creature target only** | 1 |
+| `FUN_1004720c` | AzraWrath's area damage | `FUN_1002fd30(caster)` | 1 |
+| monster dispatcher `DoDamage` | a script damages a creature | **0** | 0 |
+| `FUN_10049780` | the poison tick | **0** | 0 |
+| `FUN_10049780` kind 8 | the burn: skips `vt[0x10]`, calls `vt[0x28](stats, 0, 0)` | **0** | — |
+| `FUN_10038470`, `FUN_1003857c` | multiplayer receivers | the remote player | — |
+
+`FUN_10049e78` itself uses the attacker for more than the death call:
+
+- `victim->vt[0x1c](victim, &damage, attacker)`: a no-op (`0x1004b770`)
+  for a creature. For the player it is `FUN_10044950`, the **Knight's**
+  (`+0xf38 == 3`) chance to halve an incoming hit on its special-ability
+  rank.
+- `if (attacker->+0x14 > 4) damage += (attacker+0x14 + attacker+0x10) / 5`.
+  That is **Strength plus the strength bonus, over five**, added to every
+  hit an attacker with Strength above 4 lands. A creature's Strength is 0.
+- `if (attacker owner is the player && owner+0xf38 == 0)
+  FUN_10044910`: the **Assassin's** `damage += damage * (rank*13 + 25) / 256`.
+- `if (victim+0x7c == 9 && attacker owner is a creature && p5 == 1)
+  return 0`. `snowray_powder.s`'s `SetSpellEffect(9, …)` makes the player
+  immune to a creature's **arrows and spells**, not to its melee, which
+  passes p5 = 0.
+
+The port carries the attacker (M97) but reproduces none of these four yet.
+
 ## Labels applied / tools
 
 No new Ghidra renames this pass (the 28 registration/dispatcher

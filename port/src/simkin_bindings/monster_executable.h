@@ -526,7 +526,24 @@ public:
     // MarkForRemoval()'s split between "mutate state now" and "let the
     // host decide when to react to it" (main.cpp calls InvokeOnKilled()
     // explicitly once it observes alive() go false).
-    void ApplyDamage(int amount);
+    //
+    // M97: `attacker` is the stats-damage slot's third argument (see
+    // spell_actor.h). The fatal hit's attacker is kept as killer(), which
+    // is everything the engine's death routine FUN_10083c04 knows about who
+    // did it -- main.cpp's handleDeath pays it this creature's expWorth.
+    void ApplyDamage(int amount, SpellActor* attacker = nullptr);
+    // M97: whoever landed the blow that took health to zero, or null if
+    // nothing did -- a DoDamage native, a poison or burn tick, the debug
+    // console's killall, or a creature that has not died. Set once: a
+    // corpse takes no more damage, so no later hit can overwrite it.
+    SpellActor* killer() const { return m_Killer; }
+    // M97: FUN_10083c04's award, which main.cpp's handleDeath runs once per
+    // death, before OnKilled and the loot, as the engine does. Pays the
+    // killer this creature's expWorth *as it stands at death*; does nothing
+    // if there is no killer.
+    void PayKillExperience();
+    // M97: `stats+0x30`, the experience total AddActorExperience banks.
+    int experience() const { return m_Experience; }
 
     // ---- M43: SpellActor (spell_actor.h) ----
     //
@@ -550,7 +567,10 @@ public:
     int actorLevel() const override { return m_Level; }
     int actorHealth() const override { return m_CurrentHealth; }
     void SetActorHealth(int value) override;
-    void ApplyActorDamage(int amount) override { ApplyDamage(amount); }
+    void ApplyActorDamage(int amount, SpellActor* attacker) override {
+        ApplyDamage(amount, attacker);
+    }
+    void AddActorExperience(int amount) override;
     bool actorAlive() const override { return m_Alive && !m_Destroyed; }
     bool actorUndead() const override { return undead(); }
     void SetActorAiPackageTimed(int package, int durationUnits) override {
@@ -796,6 +816,9 @@ private:
                                     // host (not a script) triggers the call.
 
     int m_ExpWorth = 0;
+    // M97: see killer() / experience().
+    SpellActor* m_Killer = nullptr;
+    int m_Experience = 0;
     int m_Attack = 0;
     int m_Defense = 0;
     int m_Spellcast = 0;

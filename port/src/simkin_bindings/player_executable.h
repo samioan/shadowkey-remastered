@@ -520,7 +520,12 @@ public:
     int actorLevel() const override { return m_Level; }
     int actorHealth() const override { return m_Health; }
     void SetActorHealth(int value) override { SetHealth(value); }
-    void ApplyActorDamage(int amount) override { ApplyDamage(amount); }
+    // M97: the attacker is dropped here. The player's death slot is its own
+    // routine, not FUN_10083c04, and pays nobody -- the attacker matters to
+    // a player victim only through FUN_10049e78's damage modifiers, which
+    // this port does not reproduce yet (see PORT_ROADMAP).
+    void ApplyActorDamage(int amount, SpellActor* /*attacker*/) override { ApplyDamage(amount); }
+    void AddActorExperience(int amount) override { AddExperience(amount); }
     bool actorAlive() const override { return m_Health > 0; }
     // M48: the two pools the real cast reads and writes (spell_cast.h).
     // Both setters are the real clamping ones -- FUN_1004bb20 against

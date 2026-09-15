@@ -418,7 +418,14 @@ void RegisterDebugCommands(CommandContext& context) {
     add("killall", "killall [filter]", "entities", "kill every live creature (or those matching)",
         [&host](const std::vector<std::string>& args) -> std::string {
             std::string message;
-            host.KillAll(args.empty() ? std::string() : args[0], message);
+            host.KillAll(args.empty() ? std::string() : args[0], false, message);
+            return message;
+        });
+    add("slay", "slay [filter]", "entities",
+        "killall, but each kill is the player's -- it pays the creature's experience",
+        [&host](const std::vector<std::string>& args) -> std::string {
+            std::string message;
+            host.KillAll(args.empty() ? std::string() : args[0], true, message);
             return message;
         });
 

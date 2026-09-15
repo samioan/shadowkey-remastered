@@ -139,10 +139,24 @@ public:
     virtual int actorDefenseRating() const { return 0; }
 
     // FUN_1004bb88 (clamped into [0, max]) and the DoDamage vtable slot.
+    //
+    // M97: the slot's third argument, which this port dropped. The engine's
+    // is `stats->vtable[0x10](stats, damage, attackerStats, p4, p5)`, and
+    // FUN_10049e78 hands `attackerStats` on to the death slot (`vt[0x28]`)
+    // when the hit is fatal -- that is the only way a killer is ever known,
+    // and the killer is who the creature's expWorth is paid to. Null is a
+    // real value, not a default: a script's DoDamage, a poison tick and a
+    // burn all pass 0, and their deaths pay nobody.
     virtual int actorHealth() const = 0;
     virtual void SetActorHealth(int value) = 0;
-    virtual void ApplyActorDamage(int amount) = 0;
+    virtual void ApplyActorDamage(int amount, SpellActor* attacker) = 0;
     virtual bool actorAlive() const = 0;
+
+    // M97: FUN_1004a104, `stats->vtable[0x20]` -- the one AddExperience,
+    // shared unoverridden by every stats vtable in the image. The player's
+    // is PlayerExecutable::AddExperience; a creature's is the same function
+    // taking its other arm (see MonsterExecutable::AddActorExperience).
+    virtual void AddActorExperience(int amount) = 0;
 
     // The DeadToDust guard (`vtable+0xe4` then FUN_10086f88). Only a
     // creature can be undead, so the player's answer is always false.

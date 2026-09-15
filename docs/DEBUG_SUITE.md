@@ -100,6 +100,7 @@ standing in the air or inside the floor.
 | `entinfo <index>` | everything about one, including its model's collision box and whether it is tile-stamped |
 | `spawn <script\|typeId> [count] [distance]` | spawn creatures in front of you |
 | `killall [filter]` | kill every creature, or those matching |
+| `slay [filter]` | `killall` with the player as the attacker, so each kill pays its experience (M97) |
 
 `spawn arat.s 3` and `spawn 202 3` do the same thing: `entities.txt`'s
 fourth column *is* the script path, so a script name is resolved back to
@@ -116,6 +117,11 @@ than looping — `count` ticks, 40ms each — and says so in its reply.
 `killall` goes through `ApplyDamage`, not by zeroing health, so death runs
 the real path — loot drops, kill counters, zone triggers. Those are the
 things worth debugging.
+
+It passes no attacker, though, and since M97 that decides whether a death
+pays experience: `killall` pays none, exactly like a script's `DoDamage`,
+which is the engine's rule. `slay` is the same kill with the player named
+as the source, so it pays what a real kill would.
 
 ### items
 

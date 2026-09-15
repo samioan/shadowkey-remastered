@@ -732,7 +732,7 @@ public:
     bool Spawn(const std::string& what, int count, float distance, std::string& message) override;
     bool Give(const std::string& what, int count, std::string& message) override;
     bool Equip(const std::string& what, int hand, std::string& message) override;
-    bool KillAll(const std::string& filter, std::string& message) override;
+    bool KillAll(const std::string& filter, bool asPlayer, std::string& message) override;
 
     // ---- the native bridge -------------------------------------------------
 
@@ -1834,11 +1834,16 @@ bool LiveDebugHost::Equip(const std::string& what, int hand, std::string& messag
     return true;
 }
 
-bool LiveDebugHost::KillAll(const std::string& filter, std::string& message) {
+bool LiveDebugHost::KillAll(const std::string& filter, bool asPlayer, std::string& message) {
     if (!InGame() || !m_Refs.monsters) {
         message = "not in a zone";
         return false;
     }
+    // M97: `killall` is unsourced, like a script's DoDamage -- the console
+    // is not an attacker, so it pays no experience. `slay` names the player
+    // as the source of every blow, which is what a real kill does.
+    sk_bindings::SpellActor* attacker =
+        asPlayer && m_Refs.stack ? &m_Refs.stack->player() : nullptr;
     int killed = 0;
     for (MonsterInstance& m : *m_Refs.monsters) {
         if (!m.script || !m.script->alive() || m.script->outOfWorld()) continue;
@@ -1846,10 +1851,10 @@ bool LiveDebugHost::KillAll(const std::string& filter, std::string& message) {
         // Through ApplyDamage, not by zeroing health: death has to run the
         // real path (loot drop, kill counters, zone triggers), because those
         // are exactly the things worth debugging.
-        m.script->ApplyDamage(m.script->currentHealth() + 1);
+        m.script->ApplyDamage(m.script->currentHealth() + 1, attacker);
         ++killed;
     }
-    message = "killed " + std::to_string(killed) +
+    message = std::string(asPlayer ? "slew " : "killed ") + std::to_string(killed) +
                (filter.empty() ? std::string(" creature(s)")
                                 : " creature(s) matching `" + filter + "`");
     sk_debug::Log("world", message);
@@ -5205,7 +5210,10 @@ int main(int argc, char** argv) {
                             }
                             victim.flash.Arm(sk::kFlashPeriodUnits, sk::kFlashRedMin,
                                               sk::kFlashRedMax);  // M86
-                            victim.script->ApplyDamage(cast.areaDamage);
+                            // M97: sourced to `FUN_1002fd30(caster)`, so
+                            // every creature the wave kills pays the caster,
+                            // one award (and at most one level) per corpse.
+                            victim.script->ApplyDamage(cast.areaDamage, caster);
                         }
                     }
                     if (cast.conjureTypeId != 0) {
@@ -5984,6 +5992,10 @@ int main(int argc, char** argv) {
                 auto handleDeath = [&](MonsterInstance& dead) {
                     if (dead.deathHandled) return;
                     dead.deathHandled = true;
+                    // M97: the kill's experience, in the death routine's
+                    // own position -- before OnKilled runs and before the
+                    // loot. See MonsterExecutable::PayKillExperience.
+                    dead.script->PayKillExperience();
                     dead.script->InvokeOnKilled();
                     spawnLoot(dead);
                     // M24: a real zone-root script's own kill-count trigger
@@ -6407,7 +6419,9 @@ int main(int argc, char** argv) {
                         // places an attack damages a creature.
                         target->flash.Arm(sk::kFlashPeriodUnits, sk::kFlashRedMin,
                                            sk::kFlashRedMax);
-                        target->script->ApplyDamage(dmg);
+                        // M97: FUN_100425bc passes `player + 0x3ac` as the
+                        // source, so a killing swing pays the player.
+                        target->script->ApplyDamage(dmg, &stack.player());
                     }
                     if (!target->script->alive()) handleDeath(*target);
                 };

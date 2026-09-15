@@ -130,7 +130,10 @@ public:
     virtual bool Give(const std::string& what, int count, std::string& message) = 0;
     // `hand`: 0 = whichever is free, 1 = left, 2 = right, -1 = unequip.
     virtual bool Equip(const std::string& what, int hand, std::string& message) = 0;
-    virtual bool KillAll(const std::string& filter, std::string& message) = 0;
+    // `asPlayer` sources each killing blow to the player (M97), so the kill
+    // pays its experience the way a real one does; `killall` passes false,
+    // `slay` true.
+    virtual bool KillAll(const std::string& filter, bool asPlayer, std::string& message) = 0;
 
     // ---- the native bridge -------------------------------------------
 

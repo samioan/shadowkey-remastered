@@ -28,12 +28,16 @@ Rect BoundsOf(int x, int y, int halfWidth, int halfDepth) {
 // and calls the *spell script's* `HitTarget` through the standard scripted-
 // call slot -- the UTF-16 literal at 0x100b105c. The second applies the
 // projectile's own flat damage, which only the greater blaze carries.
+//
+// M97: that damage is sourced. Both arms of the real second half pass the
+// caster's stats (`caster + 0x3ac` when the caster is the player, `caster +
+// 0x224` otherwise), so a greater blaze's impact that kills pays the caster.
 void RunImpact(SpellProjectile& projectile, const ProjectileTarget& target) {
     if (projectile.invokeHitTarget && projectile.spell) {
         projectile.spell->InvokeHitTarget(target.script);
     }
     if (projectile.impactDamage > 0 && projectile.owner && target.actor) {
-        target.actor->ApplyActorDamage(projectile.impactDamage);
+        target.actor->ApplyActorDamage(projectile.impactDamage, projectile.owner);
     }
 }
 

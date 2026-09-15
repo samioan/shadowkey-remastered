@@ -4729,6 +4729,11 @@ algorithms.
       (which `snowray_powder.s` arms) skips damage whose source is a
       creature's melee. Both are now wired; the port's two
       `ApplyDamage` entry points carry the kind-4 gate.
+      > **Corrected by M97, twice.** Kind 9 skips a creature's damage when
+      > the call site passes `p5 == 1`, which means its arrows and spells.
+      > Creature melee (`FUN_100835b8`) passes 0 and still lands. And only
+      > kind 4 was ever wired: nothing in the port reads kind 9. See
+      > `SIMKIN_NATIVE_API.md`'s attacker table.
 
     - **The `Equipped` duration is a feature that did not ship.** Nothing
       pushes onto the second list, no shipped script passes `Equipped`,
@@ -8976,7 +8981,8 @@ soft-fails 39 -> 39, all 14 tracked `.ppm` renders byte-identical,
            checks that the experience lands, that the level and points match
            an independent transcription of `FUN_1004a104`, and that the rest
            of the handler runs with no soft-fail and no script error. From a
-           fresh Thief the six take the character to level 5 on 9450
+           fresh Barbarian (`ChooseCharacter(1)`; M97 corrected "Thief",
+           which is class 8) the six take the character to level 5 on 9450
            experience, and quests 2, 13, 17, 43 and 44 close.
         4. `ratherb.s`'s `OnKilled` pays 40 and solves quest 1.
     - **Found and left alone**: `ratherb.s`'s `OnKilled` also soft-fails
@@ -9001,6 +9007,135 @@ soft-fails 39 -> 39, all 14 tracked `.ppm` renders byte-identical,
       | `StatModXP(2250)` | 6000 | 1200 (no level: 6000 is under 7200) |
 
       No soft-fail line in the log.
+
+- [x] **M97 -- a kill pays its experience.** Found by M96. Every creature
+      the player killed was worth nothing: the port stored each creature's
+      `expWorth` (and M39's `SetZone` share wrote it correctly) and then
+      never paid it. Nothing on the C++ side called `AddExperience`, because
+      nothing on the C++ side knew who had landed the killing blow.
+
+    - **The engine's chain.** The stats damage slot is
+      `vt[0x10](victim, damage, attackerStats, p4, p5)`. `FUN_10049e78`
+      hands `attackerStats` to the death slot `vt[0x28]` when the hit takes
+      health to zero. For a creature that slot is `0x100a4314`, a
+      `this -= 0x224` thunk into `FUN_10083c04`, whose only experience line
+      is `if (attacker && monster+0x2e8 == 0) attacker->vt[0x20](attacker,
+      stats.expWorth)`. It sits before the `OnKilled` call and before the
+      loot. So the killer is exactly the attacker of the fatal hit, and
+      nothing is remembered from earlier hits.
+    - **The port's shape.** `SpellActor::ApplyActorDamage` gained that third
+      argument, and `MonsterExecutable::ApplyDamage(amount, attacker)`
+      records it as `killer()` on the fatal hit. A corpse takes no further
+      damage, so no later hit can overwrite it.
+      `MonsterExecutable::PayKillExperience()` is `FUN_10083c04`'s line.
+      `main.cpp`'s `handleDeath` calls it first, ahead of `OnKilled`, as
+      the routine orders them. Because the award rides on the death rather
+      than on the call site, M81's sweep needs no change: an area-spell
+      death that it catches still pays whoever cast the spell.
+    - **Every damage site, and the attacker the engine names there.** The
+      full table, with `p5`, is in `SIMKIN_NATIVE_API.md` under "Who the
+      attacker is at each damage site". Against the port:
+      - **Player melee** (`FUN_100425bc`): the player.
+      - **Arrows** (`FUN_10007214`), both passes: the shooter.
+      - **Spell damage** (`DoAttackRoll`, `FUN_100458e4`): the caster. The
+        port's "unowned means the player's" fallback is the same answer,
+        since the engine never casts an ownerless spell.
+      - **Spell projectile impact** (`FUN_1005f3c8`): the caster.
+      - **AzraWrath** (`FUN_1004720c`): the caster.
+      - **Unsourced, and these are engine facts rather than omissions**:
+        - a script's `DoDamage` passes 0;
+        - the poison tick in `FUN_10049780` passes 0;
+        - the burn (kind 8) skips the damage slot and calls
+          `vt[0x28](stats, 0, 0)`.
+
+      **So a creature poisoned or burned to death is worth nothing.** A
+      Blaze or IgniteFoe hit that kills outright pays; a hit that only sets
+      the creature burning pays nothing when the burn finishes it. The
+      roadmap item listed "the M34 effect-tick deaths" as needing a killer.
+      The killer they need is null.
+    - **A creature can be the killer.** A creature's stats vtable carries
+      the same `FUN_1004a104` at slot 0x20, and it takes the function's
+      other arm. The class-table threshold is guarded by the player
+      predicate, so a creature's threshold is `(level + 1) * 1000`. Its
+      level-up slot `0x24` is `0x100a17dc`, a bare `bx lr`, so the level
+      goes up and nothing else happens. That is
+      `MonsterExecutable::AddActorExperience`, and it gave `stats+0x30` a
+      field on the creature, where it had none before. In this port only a
+      creature's stray arrow or spell can reach it, because creature melee
+      has one target, the player.
+    - **Why `+0x2e8` never refuses.** It is `GuardPlayer`'s side pointer. No
+      shipped script calls `GuardPlayer`, and the port stores nothing for
+      it. The routine's other early exit, `vt[0xf0]`, answers true only for
+      the category-13 creature class (`0x100fee0c`), which no zone places.
+    - **Debug console**:
+      - `killall` stays unsourced, like `DoDamage`.
+      - The new `slay [filter]` is `killall` with the player as the source
+        of every blow, so a kill pays its experience without a fight.
+      - `DebugHost::KillAll` took an `asPlayer` flag to support it.
+    - **Found and recorded, not changed** (both are in the new list item
+      below):
+      - **`FUN_10049e78` does four things with the attacker besides the
+        death call, and the port does none of them.** Every hit gains
+        `(Strength + strength bonus) / 5` when the attacker's Strength is
+        above 4. The Assassin gets a damage bonus on its ability rank. The
+        Knight gets a chance to halve incoming hits. Kind 9 gives immunity
+        to a creature's ranged and spell damage. With the attacker now
+        carried to `ApplyDamage`, each is a local change.
+      - **M58's reading of kind 9 was inverted.** `snowray_powder.s`'s
+        effect blocks a creature's `p5 == 1` damage (arrows, spells,
+        impacts), not its melee (`p5 == 0`). Also, only kind 4 was ever
+        wired. The M58 entry and `effects.cpp` both carry the correction.
+      - **A creature's projectile impact damage hits creatures only.**
+        `FUN_1005f3c8`'s non-player arm tests `vt[0xe4]` on the target
+        before applying it; the port's `RunImpact` applies it to anyone.
+        No shipped creature carries a greater blaze, so nothing in play
+        shows it.
+    - **Also corrected**: M96 called `ChooseCharacter(1)` the Thief. Class
+      1 is the Barbarian; the Thief is 8. Both have a base of 900, so none
+      of M96's numbers move.
+    - **Test**: `port/src/tests/m97_kill_experience_smoke.cpp`, 24 checks:
+        1. **The killer record.** A non-fatal hit names nobody. The fatal
+           hit's attacker is the killer even when someone else did more
+           damage. A corpse keeps its killer. An invulnerable creature and
+           one under Sanctuary are neither killed nor credited.
+        2. **The award.** 23 `Azra_Rat.s` kills pay 40 each, matched after
+           every kill against an independent transcription of
+           `FUN_1004a104`: 920 experience, and level 2 exactly on the 23rd.
+           A `+25` ExpWorth effect pays 65, because the worth is read at
+           death. A `SetZone`-style share pays the share. A death with no
+           attacker pays nothing.
+        3. **The creature arm.** An archer that kills a rat banks 40. The
+           archer (level 2) does not level at exactly 3000. Crossing
+           several thresholds still gains one level. The award wraps at 16
+           bits.
+        4. **Every site, through the port's real code.**
+           - These name their source: `blaze.s`'s `DoAttackRoll`, both for
+             the player and with `SetSpellOwner(archer)`; a greater blaze's
+             50-point impact; the player's arrow (same-tile pass); an
+             archer's arrow (general sweep).
+           - These name nobody: `DoDamage`, a poison death, and a burn
+             death, each of the last two after the player had already hit
+             the creature.
+    - **The suite**: 89 executables, 88 pass (`render_at_smoke` is the
+      render tool). Soft-fail lines unchanged at **18** over 12 pairs. The
+      gaps tool doesn't move (33 names, 430 of 648): this was never a
+      native.
+    - **Live** (azra, `port/debug/m97_kill_experience.cfg`, keys posted to
+      the window). On load the log reads `SetZone(1, 2000) -> 52
+      creature(s) worth 38 each`, which is azra's real share.
+
+      | Step | experience |
+      |---|---|
+      | start | 0 |
+      | spawn 3 `monsters/arat.s` (worth 40, a spawn keeps its script's worth) | 0 |
+      | `killall arat` (unsourced) | 0 |
+      | spawn 3 more, `slay arat` | 120 |
+      | give a mace, spawn an Azra Rat 450 units ahead, hold attack until it dies | 160 |
+
+      No soft-fail line. One thing cost a run: `arat.s` has no entry in
+      `entities.txt`, hence no model. Melee picks its target from the
+      object-ID buffer, so a creature that is never drawn can never be hit.
+      A swing at one counts in `combat.swings` and lands nothing.
 
 ## Next milestones (not yet started)
 
@@ -9298,7 +9433,10 @@ difficulty:
       every store screen's title.
 - [x] **`StatModXP`** (7 sites) -- the conversations that award experience
       award none. Done -- M96 above.
-- [ ] **Creature kills award no experience.** Found by M96, and not a native
+- [x] **Creature kills award no experience.** Done -- M97 above. The
+      original description, kept for the record (one line of it turned out
+      wrong: the M34 effect-tick deaths need *no* killer, since the engine
+      passes 0). Found by M96, and not a native
       gap, so neither tool can see it. The chain in the engine:
         1. The stats damage virtual (`vt[0x10]`, `FUN_10049e78`) takes the
            attacker's stats. When health reaches 0 it calls `vt[0x28]`.
@@ -9319,6 +9457,27 @@ difficulty:
         - the M81 sweep that catches area spells, `DoDamage` and `killall`
 
       Each needs the attacker the engine would have passed.
+- [ ] **The damage function's attacker terms.** Found by M97. None of
+      these is a native gap, so neither tool can see them. `FUN_10049e78`
+      reads the attacker four more times, and the port reproduces none of
+      them:
+        1. `victim->vt[0x1c](victim, &damage, attacker)`. For a player
+           victim this is `FUN_10044950`: a **Knight** (`+0xf38 == 3`)
+           halves a hit when `rand(0,100)` beats `rank / (rank + damage)`.
+        2. `if (attacker.Strength > 4) damage += (Strength + StrengthBonus)
+           / 5`, on every hit from such an attacker.
+        3. An **Assassin** attacker (`+0xf38 == 0`) gets `FUN_10044910`:
+           `damage += damage * (rank*13 + 25) / 256`.
+        4. `if (victim kind == 9 && attacker is a creature && p5 == 1)` the
+           hit does nothing. That is `snowray_powder.s` against creature
+           arrows and spells.
+
+      Item 2 moves every fight the player is in. Each is local now that
+      `ApplyDamage` carries the attacker, but 4 also needs the call site's
+      `p5`, and every damage site needs checking that it hasn't already
+      folded any of these into its own roll. The table is in
+      `SIMKIN_NATIVE_API.md`. Also there, and smaller: a creature's
+      projectile impact damage should skip non-creature targets.
 - [ ] **Options that don't apply**: `SetLanguage` (6), `ConfigKeysMenu`
       (3), `ConfigKeysDefault`, `SaveConfig`. The screens exist and build
       their rows; the rows land on nothing.

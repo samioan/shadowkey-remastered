@@ -69,7 +69,7 @@ int MonsterExecutable::spellResistance() const {
 
 int MonsterExecutable::spellToHit() const { return SpellToHit(m_Spellcast, m_Will); }
 
-void MonsterExecutable::ApplyDamage(int amount) {
+void MonsterExecutable::ApplyDamage(int amount, SpellActor* attacker) {
     // m_Invulnerable (M16): real essential-NPC scripts (Tanyin Aldwyr and
     // the other named quest NPCs) call SetInvulnerable(true) in Init() --
     // honoring it here means main.cpp's melee target selection doesn't
@@ -87,6 +87,10 @@ void MonsterExecutable::ApplyDamage(int amount) {
     if (m_CurrentHealth <= 0) {
         m_CurrentHealth = 0;
         m_Alive = false;
+        // M97: FUN_10049e78's fatal branch, `stats->vtable[0x28](stats,
+        // attacker, p4)` -- the attacker of *this* hit goes to the death
+        // routine, and it is the only record of a killer the engine keeps.
+        m_Killer = attacker;
         // M75: a corpse offers no use prompt. The engine's own fatal-hit
         // tail (0x10083e2c, inside the creature damage path 0x10083c04)
         // writes `entity+0xd8 = 0` right beside the `+0xd5` dead flag.
@@ -102,6 +106,47 @@ void MonsterExecutable::ApplyDamage(int amount) {
     } else {
         PlayNoise(m_IsHitNoiseId);
     }
+}
+
+// M97: FUN_1004a104 on a creature's stats block. It is the same function
+// the player's AddExperience transcribes; what differs is which arm it
+// takes. The class-table threshold is guarded by `owner->vtable[0xcc]()`,
+// the player predicate, so a creature keeps the function's opening value:
+//
+//     threshold = (stats->level + 1) * 1000;
+//
+// And the level-up slot it then calls, `stats->vtable[0x24]`, is 0x100a17dc
+// in the creature's stats vtable -- a bare `bx lr`. So a creature's level
+// (the halfword the regeneration channels add per second) goes up and
+// nothing else happens: no point, no sound, no recompute.
+//
+// A creature only ever gets here as a killer, and in this port that means
+// its arrow or spell killed another creature -- the port's creature melee
+// has exactly one target, the player, whose death is not this path.
+void MonsterExecutable::AddActorExperience(int amount) {
+    const int delta = static_cast<int16_t>(amount);
+    const int threshold = (static_cast<int16_t>(m_Level) + 1) * 1000;
+    if (threshold < m_Experience + delta) m_Level = static_cast<int16_t>(m_Level + 1);
+    m_Experience += delta;
+}
+
+// M97: FUN_10083c04, the creature death routine, and the one line of it
+// that is about experience:
+//
+//     if (attacker != 0 && monster->+0x2e8 == 0)
+//         attacker->vtable[0x20](attacker, (short)monster->stats.expWorth);
+//
+// `expWorth` is the stats block's `+0x0e`, read at the moment of death, so
+// what gets paid is M39's SetZone share if the zone applied one, and it
+// includes any ExpWorth effect still running. `+0x2e8` is GuardPlayer's
+// "whose side am I on" pointer: a creature fighting for the player pays
+// nothing for dying. No shipped script calls GuardPlayer and this port
+// stores nothing for it, so the guard never refuses here.
+//
+// The routine's other early exit, `vtable[0xf0]`, answers true only for
+// the category-13 creature class, which no shipped zone places.
+void MonsterExecutable::PayKillExperience() {
+    if (m_Killer) m_Killer->AddActorExperience(m_ExpWorth);
 }
 
 void MonsterExecutable::InvokeOnUse() {
@@ -416,6 +461,13 @@ void MonsterExecutable::TickAi(int deltaUnits) {
     // regeneration is real -- and a creature *can* arm it, because
     // `spells\AzraSustenance.s` is an ordinary spell entity that a script
     // could hand to one with AddSpell.
+    // M97: the damage callback passes no attacker, and that is the engine's
+    // answer too. FUN_10049780's poison tick calls the damage slot with
+    // `(stats, n, 0, 0, 0)`, and its burn arm (kind 8) skips the damage slot
+    // altogether and calls the death slot with `(stats, 0, 0)`. The spell
+    // that set either one does not own it. A creature poisoned or burned to
+    // death is worth nothing to anyone, even though the same spell's own
+    // hit would have paid in full.
     m_Stats.Tick(
         *this, deltaUnits, [this](int damage) { ApplyDamage(damage); },
         [this](int kind) {
@@ -428,9 +480,10 @@ void MonsterExecutable::TickAi(int deltaUnits) {
 }
 
 // M58: FUN_1004ad40's field map for a creature -- see spell_actor.h. The
-// eight attributes and the three 32-bit tail fields have no storage here,
-// which makes an `AddEffect(..., Luck, ...)` on a creature a no-op; in the
-// engine it writes a field nothing reads, which is the same thing.
+// eight attributes and the 32-bit tail fields other than experience have no
+// storage here, which makes an `AddEffect(..., Luck, ...)` on a creature a
+// no-op; in the engine it writes a field nothing reads, which is the same
+// thing. M97 gave experience storage, because AddActorExperience reads it.
 int* MonsterExecutable::EffectStatSlot(int stat) {
     switch (stat) {
         case kEffectStatAttack: return &m_Attack;                   // +0x00
@@ -446,6 +499,7 @@ int* MonsterExecutable::EffectStatSlot(int stat) {
         case kEffectStatHealth: return &m_CurrentHealth;            // +0x2a
         case kEffectStatFatigue: return &m_Fatigue;                 // +0x2c
         case kEffectStatMagicka: return &m_Magicka;                 // +0x2e
+        case kEffectStatExperience: return &m_Experience;           // +0x30, M97
         case kEffectStatLevel: return &m_Level;                     // +0x34
         default: return nullptr;
     }
@@ -552,7 +606,8 @@ bool MonsterExecutable::method(const skString& methodName, skRValueArray& args,
     // DoDamage (20 scripts): `stats->vtable[0x10](stats, n, 0, 0, 0)` --
     // the creature damages *itself*, unsourced. Routed through ApplyDamage
     // so invulnerability, death and OnKilled all behave as they would from
-    // any other source.
+    // any other source. M97: "unsourced" is the null attacker, so a
+    // creature a script kills this way is worth no experience to anyone.
     if (methodName == skString("DoDamage") && args.entries() >= 1) {
         ApplyDamage(args[0].intValue());
         return true;

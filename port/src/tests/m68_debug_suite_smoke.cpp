@@ -160,8 +160,8 @@ public:
         message = "equipped";
         return true;
     }
-    bool KillAll(const std::string& filter, std::string& message) override {
-        calls.push_back("KillAll:" + filter);
+    bool KillAll(const std::string& filter, bool asPlayer, std::string& message) override {
+        calls.push_back((asPlayer ? "Slay:" : "KillAll:") + filter);
         message = "killed";
         return true;
     }

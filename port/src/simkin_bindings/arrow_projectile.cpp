@@ -134,7 +134,10 @@ ArrowImpact TickArrowProjectile(ArrowProjectile& arrow, const ArrowCellQuery& ce
             arrow.alive = false;
             out.struck = true;
             if (RollArrowHit(arrow.attackSkill, target)) {
-                target.actor->ApplyActorDamage(arrow.damage);
+                // M97: this pass hard-codes its source as `engine+0x618`'s
+                // stats -- the player, which is who owns any arrow that
+                // gets here.
+                target.actor->ApplyActorDamage(arrow.damage, arrow.owner);
                 out.hit = true;
                 out.target = target.actor;
                 out.damage = arrow.damage;
@@ -262,7 +265,12 @@ ArrowImpact TickArrowProjectile(ArrowProjectile& arrow, const ArrowCellQuery& ce
         // Note what is *not* here: the melee path fetches the target's
         // armour rating and subtracts it before applying damage. The arrow's
         // impact passes the rolled damage straight through.
-        target.actor->ApplyActorDamage(arrow.damage);
+        //
+        // M97: and it names the shooter as the source -- `shooter + 0x3ac`
+        // if the shooter is the player, `shooter + 0x224` otherwise -- so
+        // an archer's stray arrow that kills another creature pays the
+        // archer.
+        target.actor->ApplyActorDamage(arrow.damage, arrow.owner);
         out.hit = true;
         out.target = target.actor;
         out.damage = arrow.damage;
