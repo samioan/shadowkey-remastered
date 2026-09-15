@@ -3,6 +3,7 @@
 #include <cctype>
 #include <cstdio>
 #include <cstdlib>
+#include <ctime>
 
 #include "assets/sound_archive.h"
 #include "assets/string_table.h"
@@ -70,6 +71,14 @@ int MonsterExecutable::spellResistance() const {
 
 int MonsterExecutable::spellToHit() const { return SpellToHit(m_Spellcast, m_Will); }
 
+namespace {
+// M100: entities.txt `1015 140 2 lothna\fortifyingcrystal.s`, the one typeId
+// FUN_10081844 tests.
+constexpr int kFortifyingCrystalTypeId = 0x3f7;
+// M100: FindPathNode's `monster->z += 300` after the surface snap.
+constexpr int kPathNodeSurfaceLift = 300;
+}  // namespace
+
 int MonsterExecutable::ApplyDamage(int amount, SpellActor* attacker, bool ranged) {
     // m_Invulnerable (M16): real essential-NPC scripts (Tanyin Aldwyr and
     // the other named quest NPCs) call SetInvulnerable(true) in Init() --
@@ -84,6 +93,36 @@ int MonsterExecutable::ApplyDamage(int amount, SpellActor* attacker, bool ranged
     // check because in the engine it is the whole function's `if`.
     if (m_Stats.periodicKind() == ActorStats::kPeriodicSanctuaryTimer) return 0;
     if (!m_Alive || m_Invulnerable) return 0;
+    // M100: FUN_10081844, the creature's own damage slot, between its gates
+    // and the stats function:
+    //
+    //     if (monster->+0x2e8 == 0 && attacker && monster->typeId != 0x3f7) {
+    //         ...take the attacker as the target, package 3...
+    //         if (attacker == player + 0x3ac) {
+    //             if (monster->vtable[0xf0]()) return 0;
+    //             args = { (int)damage };
+    //             script->OnHit(args);
+    //         }
+    //     }
+    //     ...hit noise, red flash...
+    //     return FUN_10049e78(stats, damage, attacker, p4, p5);
+    //
+    // So OnHit hears only the *player's* hits, before any of the damage is
+    // applied and before the attacker's terms, with the site's damage as its
+    // one argument (every shipped handler declares none, which Simkin
+    // allows). Type 0x3f7 is `lothna\fortifyingcrystal.s`. `+0x2e8` is
+    // GuardPlayer's pointer (M97: never set) and `vtable[0xf0]` answers true
+    // only for the unplaced category-13 class, so neither is modelled.
+    //
+    // Whatever the handler does, the damage still lands: the gates above ran
+    // before it. A handler that marks the creature dead (Umbra Keth's
+    // SetDead(true)) makes the hit that follows unable to kill it -- see the
+    // fatal branch below.
+    if (attacker && attacker->isPlayerActor() && m_EntityTypeId != kFortifyingCrystalTypeId) {
+        skRValueArray hitArgs;
+        hitArgs.append(skRValue(static_cast<int>(static_cast<int16_t>(amount))));
+        InvokeScriptEvent("OnHit", hitArgs);
+    }
     // M98: the attacker's terms (stats_damage.h). This used to refuse
     // `amount <= 0` up front, which the engine does not: a player swing the
     // armour fully absorbs still reaches FUN_10049e78 and still lands the
@@ -97,7 +136,12 @@ int MonsterExecutable::ApplyDamage(int amount, SpellActor* attacker, bool ranged
     m_CurrentHealth -= amount;
     if (m_CurrentHealth <= 0) {
         m_CurrentHealth = 0;
+        // M100: the death routine's first line, `if (+0x1e4) return;`. A
+        // creature its own OnHit just marked dead takes the health loss and
+        // nothing else.
+        if (!m_Alive) return amount;
         m_Alive = false;
+        m_DeathOwed = true;
         // M97: FUN_10049e78's fatal branch, `stats->vtable[0x28](stats,
         // attacker, p4)` -- the attacker of *this* hit goes to the death
         // routine, and it is the only record of a killer the engine keeps.
@@ -118,6 +162,52 @@ int MonsterExecutable::ApplyDamage(int amount, SpellActor* attacker, bool ranged
         PlayNoise(m_IsHitNoiseId);
     }
     return amount;
+}
+
+// M100: see the header for FUN_10005d60, FUN_10068480 and FUN_1006410c.
+void MonsterExecutable::SetDead(bool dead, int decaySeconds) {
+    m_Alive = !dead;
+    if (!dead) {
+        m_DecayArmed = false;
+        return;
+    }
+    if (decaySeconds != 0) {
+        m_DecayArmed = true;
+        const long long now = m_WallClock ? m_WallClock() : static_cast<long long>(std::time(nullptr));
+        m_DecayDeadline = now + decaySeconds;
+    }
+}
+
+bool MonsterExecutable::TakeDeathOwed() {
+    const bool owed = m_DeathOwed;
+    m_DeathOwed = false;
+    return owed;
+}
+
+bool MonsterExecutable::TickDecay() {
+    if (!m_DecayArmed) return false;
+    const long long now = m_WallClock ? m_WallClock() : static_cast<long long>(std::time(nullptr));
+    if (now < m_DecayDeadline) return false;
+    m_DecayArmed = false;
+    // FUN_1001b484 -- the same world removal an arrow's despawn and
+    // DestroyObjectMirror use, which this port spells m_Destroyed.
+    m_Destroyed = true;
+    InvokeScriptEvent("OnDecay", skRValueArray());
+    return true;
+}
+
+void MonsterExecutable::InvokeScriptEvent(const char* name, const skRValueArray& args) {
+    if (!m_Interpreter) return;
+    skRValueArray callArgs = args;
+    skRValue ret;
+    skExecutableContext ctxt(m_Interpreter);
+    try {
+        skScriptedExecutable::method(skString(name), callArgs, ret, ctxt);
+    } catch (skParseException& e) {
+        std::printf("MonsterExecutable: PARSE ERROR in %s(): %s\n", name, e.toString().ptr());
+    } catch (skRuntimeException& e) {
+        std::printf("MonsterExecutable: RUNTIME ERROR in %s(): %s\n", name, e.toString().ptr());
+    }
 }
 
 // M97: FUN_1004a104 on a creature's stats block. It is the same function
@@ -652,8 +742,33 @@ bool MonsterExecutable::method(const skString& methodName, skRValueArray& args,
     // The `.pth` format is still undecoded past its header
     // (docs/ZONE_FORMAT.md), so this returns the engine's own
     // node-not-found result, 0, rather than pretending.
+    //
+    // M100: decoded (path_table.h), so no longer always 0. Case 5:
+    //
+    //     path = FUN_1001ada0(engine, name);               // by strcmp
+    //     if (!path) return 0;
+    //     if (!monster->target) monster->target = player;  // +0x20c
+    //     wp = FUN_10086970(monster, path, target);        // nearest to target
+    //     if (!wp) return 0;
+    //     monster->vtable[0x14](wp.x, wp.y, 0);            // move
+    //     FUN_100686e0(monster, tile);  monster->z += 300; // onto the surface
+    //     return 1;
+    //
+    // The target is the player in this port whatever the AI thinks, because
+    // the player is the only thing a creature ever targets here. Umbra
+    // Keth's DelayReached is the one caller, and it is what brings the boss
+    // back from its fake death: the path is `UmbraKeth` in all three crypts.
     if (methodName == skString("FindPathNode") && args.entries() >= 1) {
-        returnValue = skRValue(0);
+        int found = 0;
+        if (const PathNode* path =
+                FindPath(m_Stack.level().paths(), ToStdString(args[0].str()))) {
+            if (const PathWaypoint* wp =
+                    NearestWaypoint(*path, m_Player.positionX(), m_Player.positionY())) {
+                RequestSurfaceMove(wp->x, wp->y, kPathNodeSurfaceLift);
+                found = 1;
+            }
+        }
+        returnValue = skRValue(found);
         return true;
     }
     // SetState(package, seconds) (0 scripts) is the script-callable form of
@@ -1149,6 +1264,23 @@ bool MonsterExecutable::method(const skString& methodName, skRValueArray& args,
     // two-argument form outright), and the three matching getters
     // `GetPositionX/Y/Z` exist and were missing here.
     if (HandleEntityBaseNative(methodName, args, returnValue)) return true;
+    // M100: Actor dispatcher `FUN_10003810` case 0x20. The seconds are read
+    // only when a second argument is present, and default to 0 -- no decay.
+    // Umbra Keth is the one caller: SetDead(true) to fake its death in
+    // OnHit, SetDead(false) to come back in DelayReached.
+    if (methodName == skString("SetDead") && args.entries() >= 1) {
+        SetDead(args[0].boolValue(), args.entries() >= 2 ? args[1].intValue() : 0);
+        return true;
+    }
+    // M100: the Character-stats `GetHealth`, stats+0x2a. A creature owns the
+    // same stats block the player does and answers it the same way; the port
+    // had it on the player only, so a creature's own `GetHealth()` soft-failed
+    // to 0. `monsters\umbra_keth.s`'s OnHit tests `GetHealth() < 375`, and
+    // `fearfrst\sergeant_convo2.s` reads the sergeant's.
+    if (methodName == skString("GetHealth") && args.entries() == 0) {
+        returnValue = skRValue(m_CurrentHealth);
+        return true;
+    }
     if (methodName == skString("DestroyObjectMirror")) {
         // M23: see destroyed()'s comment -- azra.s's own
         // `M1.DestroyObjectMirror(M1)` (self-passed, network/replication

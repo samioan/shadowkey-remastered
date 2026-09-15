@@ -131,6 +131,7 @@ add_library(sk_bindings STATIC
   src/simkin_bindings/menu_stack.cpp
   src/simkin_bindings/monster_executable.cpp
   src/simkin_bindings/native_binding_common.cpp
+  src/simkin_bindings/path_table.cpp
   src/simkin_bindings/player_executable.cpp
   src/simkin_bindings/player_save.cpp
   src/simkin_bindings/popup_menu_executable.cpp
@@ -698,3 +699,7 @@ target_link_libraries(attacker_terms_smoke PRIVATE sk_bindings sk_world)
 # M99 milestone smoke test -- see src/tests/m99_options_smoke.cpp.
 add_executable(options_smoke src/tests/m99_options_smoke.cpp src/assets/gdr_font.cpp)
 target_link_libraries(options_smoke PRIVATE sk_bindings sk_world)
+
+# M100 milestone smoke test -- see src/tests/m100_hit_decay_smoke.cpp.
+add_executable(hit_decay_smoke src/tests/m100_hit_decay_smoke.cpp)
+target_link_libraries(hit_decay_smoke PRIVATE sk_bindings sk_world)

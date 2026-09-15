@@ -76,6 +76,7 @@
 
 #include "simkin_bindings/effect_entity.h"
 #include "simkin_bindings/native_stub_executable.h"
+#include "simkin_bindings/path_table.h"
 #include "skRValue.h"
 
 namespace sk {
@@ -215,6 +216,11 @@ public:
         virtual void LightRect(int x0, int y0, int x1, int y1, int level) = 0;
     };
     void SetZoneRegions(ZoneRegions* regions) { m_ZoneRegions = regions; }
+
+    // M100: the zone's `.pth` paths (path_table.h), loaded by the host with
+    // the zone and read by a creature's FindPathNode.
+    void SetPaths(std::vector<PathNode> paths) { m_Paths = std::move(paths); }
+    const std::vector<PathNode>& paths() const { return m_Paths; }
 
     // ---- M44: `Vignette(n)` ----
     //
@@ -426,6 +432,7 @@ private:
     const sk::EntityTypeTable* m_EntityTypes = nullptr;
     std::unique_ptr<ItemExecutable> m_PendingCreatedEntity;
     ZoneRegions* m_ZoneRegions = nullptr;  // M44: see SetZoneRegions()
+    std::vector<PathNode> m_Paths;         // M100: see SetPaths()
     VignetteDefinition m_PendingVignette;
     bool m_PendingVignettePending = false;
     PendingCreature m_PendingCreature;

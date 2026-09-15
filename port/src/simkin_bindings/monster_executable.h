@@ -1,5 +1,6 @@
 #pragma once
 
+#include <functional>
 #include <map>
 #include <string>
 
@@ -50,6 +51,7 @@
 #include "simkin_bindings/script_delay.h"
 #include "simkin_bindings/spell_actor.h"
 #include "simkin_bindings/spell_cast.h"
+#include "skRValueArray.h"
 #include "skScriptedExecutable.h"
 
 class skInterpreter;
@@ -786,6 +788,68 @@ public:
     // including one call chain it still can't reach).
     void InvokeOnKilled();
 
+    // ---- M100: the dead flag, the corpse's decay, OnHit and OnDecay ----
+    //
+    // `entity+0x1e4` is the dead flag -- `alive()` here -- and one function
+    // sets it, the entity vtable's slot 0x178, `FUN_10005d60(entity, dead,
+    // decaySeconds)`:
+    //
+    //     entity->+0x1e4 = dead;
+    //     if (!dead) { +0x114 = 0; +0x60 &= ~1; }        // cancel the decay
+    //     else {
+    //         if (!vtable[0xac]()) { zero the motion fields; +0xd5 = 1; }
+    //         +0x1f4 = 0xffff;
+    //         if (entity != player && decaySeconds)
+    //             vtable[0x94](entity, decaySeconds, 0); // FUN_10068480
+    //     }
+    //
+    // FUN_10068480 arms the decay: `+0x114 = 1; +0x118 = time(NULL) +
+    // seconds` -- **wall-clock seconds**, not game ticks. The second half of
+    // the entity timer tick (`FUN_1006410c`) checks it every frame:
+    //
+    //     if (+0x114 && +0x118 <= time(NULL)) {
+    //         +0x114 = 0;
+    //         FUN_1001b484(engine, entity);   // out of the world
+    //         script->OnDecay();
+    //     }
+    //
+    // The creature death routine (`FUN_10083c04`) calls the slot as
+    // `(entity, 1, 5)`, so **every corpse leaves the world five seconds after
+    // it dies, and its OnDecay runs then** -- which is where the bosses keep
+    // their quest progress. Scripts reach the slot through the Actor binding
+    // `SetDead(dead [, seconds])` (dispatcher `FUN_10003810` case 0x20),
+    // which omits the decay unless given one.
+    //
+    // The routine's own first line is `if (+0x1e4) return;`, so a creature a
+    // script has already marked dead does not die again when its health
+    // then reaches zero: no OnKilled, no loot, no experience. Umbra Keth
+    // relies on exactly that.
+    void SetDead(bool dead, int decaySeconds = 0);
+    // (kCorpseDecaySeconds, below the class, is the routine's 5.)
+    // The death routine is owed: the fatal hit landed on a creature that
+    // was not already dead. Answers true once and clears -- main.cpp's
+    // handleDeath is the one taker. Replaces M81's per-instance
+    // `deathHandled`, which also fired for a creature marked dead by script.
+    bool TakeDeathOwed();
+    bool deathOwed() const { return m_DeathOwed; }
+    // `+0x114` / `+0x118`.
+    bool decayArmed() const { return m_DecayArmed; }
+    long long decayDeadline() const { return m_DecayDeadline; }
+    // FUN_1006410c's second half. Call every entity tick; on the tick the
+    // deadline is reached it takes the creature out of the world (the same
+    // state `DestroyObjectMirror` leaves) and runs OnDecay. Returns whether
+    // it did.
+    bool TickDecay();
+    // The clock behind +0x118: `time(NULL)` unless a test supplies another.
+    void SetWallClock(std::function<long long()> clock) { m_WallClock = std::move(clock); }
+
+    // M100: the entities.txt typeId this creature was made from, for the one
+    // place the damage path names one (see ApplyDamage: type 0x3f7, the
+    // Lothna fortifying crystal, is never aggroed and never sent OnHit).
+    // 0 when the host did not say.
+    void SetEntityTypeId(int typeId) { m_EntityTypeId = typeId; }
+    int entityTypeId() const { return m_EntityTypeId; }
+
     // M53: the entity script timer (script_delay.h). Category 2 is the
     // other half of where the shipped `DelayReached` scripts live, and
     // the busier half: monsters/azra_rat.s has 35 placements in azra
@@ -809,6 +873,16 @@ private:
     // (monster_executable.cpp), just reusable for a host-triggered call
     // instead of a script one.
     void PlayNoise(int soundId);
+    // M100: a host-fired script event, quietly (a script without the
+    // handler is the common case) -- the InvokeOnKilled shape.
+    void InvokeScriptEvent(const char* name, const skRValueArray& args);
+
+    // M100: see SetDead().
+    bool m_DeathOwed = false;
+    bool m_DecayArmed = false;
+    long long m_DecayDeadline = 0;
+    std::function<long long()> m_WallClock;
+    int m_EntityTypeId = 0;
 
     const sk::StringTable* m_Strings;
     PlayerExecutable& m_Player;
@@ -921,5 +995,9 @@ private:
     int m_DeathNoiseId = -1;
     int m_IsHitNoiseId = -1;
 };
+
+// M100: FUN_10083c04's `vtable[0x178](monster, 1, 5)` -- a killed creature's
+// corpse leaves the world five wall-clock seconds after it dies.
+constexpr int kCorpseDecaySeconds = 5;
 
 }  // namespace sk_bindings

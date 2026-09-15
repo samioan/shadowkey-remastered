@@ -220,6 +220,25 @@ public:
         return true;
     }
 
+    // M100: how far above the surface an actor's pending move lands, and
+    // the one other move that asks for a different height. SetPosition's
+    // snap adds 0x80; FindPathNode's (`vtable[0x14](x, y, 0)`, the same
+    // FUN_100686e0 snap, then `z += 300`) adds 300. Read with the pending
+    // position and reset to 0x80 when taken.
+    void RequestSurfaceMove(int x, int y, int lift) {
+        m_X = x;
+        m_Y = y;
+        m_Z = 0;
+        m_PositionDirty = true;
+        m_PendingSurfaceLift = lift;
+    }
+    int TakePendingSurfaceLift() {
+        const int lift = m_PendingSurfaceLift;
+        m_PendingSurfaceLift = kSetPositionSurfaceLift;
+        return lift;
+    }
+    static constexpr int kSetPositionSurfaceLift = 0x80;
+
     // `vtable[0xc8]`: is this entity a member of the engine's actor list,
     // and therefore floor-snapped on a teleport? See the header comment.
     virtual bool isActorForPositioning() const { return false; }
@@ -322,6 +341,7 @@ private:
     int m_Y = 0;
     int m_Z = 0;
     bool m_PositionDirty = false;
+    int m_PendingSurfaceLift = kSetPositionSurfaceLift;  // M100
 
     std::string m_Id;
     int m_NameId = -1;

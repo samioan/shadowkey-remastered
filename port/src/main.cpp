@@ -472,7 +472,9 @@ struct MonsterInstance {
     // range), a script's own `DoDamage`, the debug console's `killall` --
     // died silently: no loot, no trigger, no OnKilled. The flag makes the
     // handling idempotent so a single sweep can back-stop all of them.
-    bool deathHandled = false;
+    // M100: that flag now lives on the creature itself, as
+    // MonsterExecutable::TakeDeathOwed -- a script's SetDead(true) also
+    // clears alive(), and must not read as a death.
 };
 
 // M28: advances one live creature's vertex animation by a tick and
@@ -3601,6 +3603,12 @@ int main(int argc, char** argv) {
                 // which `Entity::Init` copies onto every placement of it.
                 gameModelCollision.Load(scriptRoot, stack.requestedZone());
                 gameZone = std::move(zone);
+                // M100: `<zone>.pth`, which GameEngine_InitLevel reads just
+                // after the placements -- the named paths FindPathNode walks
+                // (simkin_bindings/path_table.h). Before the zone script's
+                // Init, like the engine's.
+                stack.level().SetPaths(sk_bindings::LoadPathTable(
+                    std::string(scriptRoot) + "/" + stack.requestedZone() + ".pth"));
                 // M91: the level pointer GameActive() *is* -- see
                 // MenuStack::gameActive(). Set here, where the level
                 // becomes real, and cleared with it in the QuitToMenu
@@ -3988,6 +3996,7 @@ int main(int argc, char** argv) {
                             inst.modelArchiveIndex = desc->modelArchiveIndex;
                             inst.typeId = e.typeId;
                             inst.script = std::move(monster);
+                            inst.script->SetEntityTypeId(inst.typeId);  // M100
                             stack.level().RegisterEntity(e.name, inst.script.get());
                             gameMonsters.push_back(std::move(inst));
                         } catch (skParseException& ex) {
@@ -4549,6 +4558,7 @@ int main(int argc, char** argv) {
                                           float& y, float& z) {
                     float nx = 0, ny = 0, nz = 0;
                     if (!script.TakePendingPosition(nx, ny, nz)) return false;
+                    const int lift = script.TakePendingSurfaceLift();  // M100
                     x = nx;
                     y = ny;
                     z = nz;
@@ -4558,7 +4568,10 @@ int main(int argc, char** argv) {
                     if (script.isActorForPositioning() && gameZone &&
                         gameZone->InBounds(static_cast<int>(std::floor(nx / sk::kTileScale)),
                                             static_cast<int>(std::floor(ny / sk::kTileScale)))) {
-                        z = gameZone->SnapActorToGround(nx, ny, nz);
+                        // SnapActorToGround is the 0x80 lift; FindPathNode
+                        // asks for 300 on the same surface.
+                        z = gameZone->SnapActorToGround(nx, ny, nz) +
+                            static_cast<float>(lift - sk_bindings::EntityBaseRef::kSetPositionSurfaceLift);
                     }
                     return true;
                 };
@@ -4669,6 +4682,7 @@ int main(int argc, char** argv) {
                         inst.modelArchiveIndex = desc ? desc->modelArchiveIndex : -1;
                         inst.typeId = req.typeId;
                         inst.script = std::move(script);
+                        inst.script->SetEntityTypeId(inst.typeId);  // M100
                         std::printf("shadowkey-port: CreateEntity(%d) spawned \"%s\" at "
                                     "(%d, %d, %d)\n",
                                     req.typeId, inst.script->name().c_str(), req.x, req.y, req.z);
@@ -4785,6 +4799,7 @@ int main(int argc, char** argv) {
                                 inst.encounter = &encounter;
                                 inst.encounterRegion = regionIndex;
                                 inst.script = std::move(script);
+                                inst.script->SetEntityTypeId(inst.typeId);  // M100
                                 std::printf("shadowkey-port: encounter spawned typeId %d \"%s\" in "
                                             "region \"%s\" at tile (%d, %d)\n",
                                             entry.typeId, inst.script->name().c_str(),
@@ -5291,9 +5306,13 @@ int main(int argc, char** argv) {
 #endif
                     m.script->TickAi(sk_bindings::kAiFrameDeltaUnits);
                     // M34: TickAi() is now a path that can actually kill.
-                    if (wasAliveBeforeTick && !m.script->alive()) {
+                    if (wasAliveBeforeTick && m.script->deathOwed()) {
                         gameDiedFromEffect.push_back(monsterIndex);
                     }
+                    // M100: FUN_1006410c's second half, after its first (the
+                    // script Delay, which TickAi ran). A corpse whose five
+                    // seconds are up leaves the world and runs OnDecay.
+                    m.script->TickDecay();
                     // M23: destroyed() (a real zone-root script's
                     // DestroyObjectMirror()) removes an entity from play
                     // as fully as death does, everywhere alive() is
@@ -6003,13 +6022,19 @@ int main(int argc, char** argv) {
                 };
 
                 // M81: everything a creature's death owes, in one place --
-                // `FUN_10083c04`. Idempotent (MonsterInstance::deathHandled),
+                // `FUN_10083c04`. Idempotent (M100: MonsterExecutable::TakeDeathOwed),
                 // so the places that know they just killed something can
                 // call it immediately and the sweep below can back-stop
                 // every other way a creature can reach zero health.
                 auto handleDeath = [&](MonsterInstance& dead) {
-                    if (dead.deathHandled) return;
-                    dead.deathHandled = true;
+                    // M100: owed, not "not alive" -- a creature a script
+                    // marked dead with SetDead is not dead the way a killed
+                    // one is, and gets none of this.
+                    if (!dead.script->TakeDeathOwed()) return;
+                    // The routine's slot-0x178 call, `(entity, 1, 5)`: the
+                    // corpse leaves the world in five seconds and its OnDecay
+                    // runs then (MonsterExecutable::SetDead / TickDecay).
+                    dead.script->SetDead(true, sk_bindings::kCorpseDecaySeconds);
                     // M97: the kill's experience, in the death routine's
                     // own position -- before OnKilled runs and before the
                     // loot. See MonsterExecutable::PayKillExperience.
@@ -6577,7 +6602,7 @@ int main(int argc, char** argv) {
                 // trigger. handleDeath() is idempotent, so the four callers
                 // that already report their own kills cost nothing here.
                 for (MonsterInstance& m : gameMonsters) {
-                    if (m.script && !m.script->alive() && !m.deathHandled) handleDeath(m);
+                    if (m.script && m.script->deathOwed()) handleDeath(m);
                 }
                 // M30: the viewmodel now shows the equipped weapon *all
                 // the time*, not only for the moment after an attack key.

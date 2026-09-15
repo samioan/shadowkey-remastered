@@ -77,10 +77,20 @@ fallback). `GameEngine_InitLevel` loads them in this order:
    0x84 (132 bytes) per room slot. **Record layout now fully decoded** (see
    below): four `u16` header fields at `+0x00/+0x02/+0x04/+0x06` followed by
    a 64-byte name at `+0x08`.
-4. **`<zone>.pth`** — AI monster spawn + patrol-path data: `u16` count, then
-   per-monster a 0x44-byte (68-byte) header record (creates an object via
-   `FUN_1001ae8c`) followed by a variable-length list of 8-byte waypoint
-   entries (count read from the header, consumed via `FUN_1001ad2c`).
+4. **`<zone>.pth`** — named paths: `u16` count, then per path a 0x44-byte
+   (68-byte) header record (creates an object via `FUN_1001ae8c`) followed by
+   a variable-length list of 8-byte waypoint entries (count read from the
+   header, consumed via `FUN_1001ad2c`).
+   **Fully decoded in M100** (`port/src/simkin_bindings/path_table.h`): the
+   header is the path's NUL-terminated name at `+0x00` (strcpy'd into slot
+   `+0x34`) and a `u16` waypoint count at `+0x40`; each waypoint is `int32 x,
+   int32 y` in world units. The engine holds 48 paths (`engine+0xdf98`,
+   0x178 bytes each) of up to 32 waypoints (`+0x78`). All 21 shipped files
+   parse to the byte, and only one path has waypoints: `UmbraKeth`, in
+   crypt1/2/3 (32/31/23 waypoints). Its one reader is the Monster binding
+   `FindPathNode(name)` (dispatcher `FUN_10084924` case 5), which moves the
+   creature to the waypoint nearest its target (`FUN_10086970`, distance
+   `FUN_100683a8`) and 300 units above the surface there.
 5. **`<zone>.ent`** — static/dynamic **entity placement**: `u32` count, then
    count × 0x48-byte (72-byte) records. **This is where a placed object's
    model gets assigned** (see below).

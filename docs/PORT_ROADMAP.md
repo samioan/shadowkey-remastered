@@ -9399,6 +9399,98 @@ soft-fails 39 -> 39, all 14 tracked `.ppm` renders byte-identical,
       - Relaunch: the main menu came up in German ("Neues Spiel", "Spiel
         löschen") and Move Forward still read "Taste 3".
       - No soft-fail line.
+- [x] **M100 -- OnHit, OnDecay, and the corpse that leaves.** Items 1 and 2
+      of the post-M99 audit (below). The engine fires two script events on
+      a creature that the port never did, and the story hangs off one of
+      them.
+
+    - **Corpses decay, and `OnDecay` is when.** The creature death routine
+      `FUN_10083c04` calls entity vtable slot 0x178 as `(monster, 1, 5)`.
+      That slot is `FUN_10005d60`, the **dead flag** (`+0x1e4`, which is
+      this port's `alive()`), and its third argument arms
+      `FUN_10068480`: `+0x114 = 1; +0x118 = time(NULL) + 5` -- wall-clock
+      seconds. The entity tick `FUN_1006410c` runs the script `Delay` first
+      and then `if (+0x114 && +0x118 <= time(NULL))`: clear it, take the
+      entity out of the world (`FUN_1001b484`), call `OnDecay()`. So every
+      corpse vanishes five seconds after death, and the fifteen `OnDecay`
+      handlers run then:
+      - `devron.s` and `wulfbris.s` solve quests 33 and 35 and complete 33
+        or 34;
+      - `umbra_keth.s` sets `GetPlayer().saved_EndGame = 1`, which
+        all three crypt zone scripts (crypt2's `end_game` region among
+        them), `azra.s` and three conversations read -- the ending;
+      - both `pergan_asuul.s` open `pergan_killed`, the five Dragonstar pit
+        monsters open `Pit_Boss_reward` and set `saved_pitopen`.
+
+      The port kept every corpse forever and ran none of them.
+      `MonsterExecutable::SetDead` / `TickDecay`; `main.cpp`'s creature tick
+      calls `TickDecay()` after `TickAi()`, the engine's order.
+    - **`OnHit(damage)`** is `FUN_10081844`, the creature's damage slot,
+      after its dead/invulnerable gates and before the stats function:
+      only for the **player's** hits (`attacker == player + 0x3ac`), never
+      for type 0x3f7 (`lothna\fortifyingcrystal.s`), with the site's damage
+      as its argument -- before the M98 terms. The damage still lands after
+      it. `chef.s` hands over the cell key when struck; `devron`/`wulfbris`
+      stop being talkable; Umbra Keth fakes its death.
+    - **The death routine's first line is `if (+0x1e4) return;`**, so a
+      creature a script marked dead is not killed by the hit that follows:
+      no OnKilled, loot or experience. M81's `deathHandled` could not see
+      that -- it keyed on `!alive()`, which a script's `SetDead(true)` also
+      produces -- so the owed death moved onto the creature
+      (`TakeDeathOwed`), set only by a fatal hit on a creature not already
+      dead.
+    - **`SetDead(dead [, seconds])`** is Actor case 0x20: the slot, seconds
+      defaulting to 0 (no decay). `SetDead(false)` revives and cancels a
+      decay. **`GetHealth()`** on a creature is its health; it soft-failed
+      to 0.
+    - **Umbra Keth needed `.pth`.** Its `OnHit` fakes death under 375
+      health (hidden, passable, dead, `umbra_disappear`, a Delay), and its
+      `DelayReached(1)` brings it back at 225 **only if**
+      `FindPathNode("UmbraKeth")` is true -- which the port hard-coded to 0,
+      the `.pth` table being undecoded. So wiring OnHit alone would have
+      made the final boss vanish for good. Decoded now
+      (`simkin_bindings/path_table.h`): a `u16` count, then per path a
+      0x44-byte header (NUL-terminated name, `u16` waypoint count at `+0x40`)
+      and that many `int32 x, int32 y` waypoints, capacities 48 and 32. All
+      21 shipped files parse to the byte; the only real path is `UmbraKeth`
+      (crypt1 32 waypoints, crypt2 31, crypt3 23). `FindPathNode` (Monster
+      case 5) takes the waypoint nearest its target by `FUN_100683a8`'s
+      `(dy*dy >> 8) + (dx*dx >> 8)`, moves there and lands 300 above the
+      surface (`EntityBaseRef::RequestSurfaceMove`; SetPosition's lift is
+      0x80).
+    - **The fight's own loop is by design.** Under 375 with
+      `Level.saved_Umbra` still 0, every hit fakes the death again, forever.
+      `crypt2.s` sets `saved_Umbra = 1` when the crystals work, and only
+      then can Umbra die. The smoke test walks exactly that.
+    - **Not done:** the decay is not saved -- the save record has the fields
+      (`SavedEntity::timerArmed`/`timerDeadline`) but the port does not save
+      world entities at all. `SetCanTeleport`'s node search (`FUN_10086a18`)
+      could use the same table and still lands on the player.
+    - **Test**: `port/src/tests/m100_hit_decay_smoke.cpp`, 34 checks:
+        1. **.pth**: all 21 files exact, three real paths, the UmbraKeth
+           counts and crypt1's first waypoint, strcmp lookup, the nearest
+           search and its tie.
+        2. **OnHit**: a probe script shows `OnHit(40)` for a player hit of
+           40 (health loses 40 plus Strength); nothing for a creature, an
+           unsourced hit, type 0x3f7 or an invulnerable creature. `chef.s`'s
+           real handler sets the key loot and turns off use.
+        3. **Death and decay**: owed once; the (1, 5) decay due at +5;
+           nothing at +4; out of the world and OnDecay at +5, once.
+           `SetDead(true)` owes nothing and refuses damage; `SetDead(true,
+           30)`; `SetDead(false)`; creature `GetHealth`. `devron.s`'s decay
+           solves quest 33.
+        4. **Umbra Keth, its real script**: fights on at 600; at 300 fakes
+           death in OnHit and survives the 1000 that follows; returns at 225
+           on crypt2's waypoint nearest the player, 300 up; fakes again while
+           `saved_Umbra` is 0; dies for real once it is 1; its OnDecay sets
+           `saved_EndGame`. With no path table it stays gone.
+    - **The suite**: 92 executables, 91 pass. Soft-fail lines unchanged at
+      16. Gaps tool: **28 names**, 437 of 648 (`SetDead`).
+    - **Live** (azra, `port/debug/m100_hit_decay.cfg`): spawned Devron
+      (type 285), `slay devron`. `ents` read `DEAD` for the next few
+      seconds and then `destroyed`; `QuestSolved 33` read false before and
+      true after. No soft-fail line. (With `set freezeai 1` nothing decays:
+      the flag stops the whole creature tick.)
 
 ## Next milestones (not yet started)
 
@@ -9750,6 +9842,70 @@ difficulty:
 - [x] **Options that don't apply**: `SetLanguage` (6), `ConfigKeysMenu`
       (3), `ConfigKeysDefault`, `SaveConfig`. The screens exist and build
       their rows; the rows land on nothing. Done in M99.
+
+### The post-M99 audit (2026-09-15)
+
+With the census list empty, three measures the census does not use:
+
+- **Engine-fired script events.** Every `Name[` handler the corpus defines,
+  against the UTF-16 literals in the image and the names the port invokes.
+  `OnUse`, `OnKilled`, `OnDetect`, `OnDisplay`, `DelayReached` and
+  `OnRightSoftKey` are wired; the other names are script-to-script
+  callbacks (`OnComboSel`, `OnTableSel`, ...) with no literal in the image.
+  Three literals the engine calls and the port never did: `OnHit`
+  (`FUN_10081844`), `OnDecay` (`FUN_1006410c`) and `OnMsgPopupClosed`
+  (`FUN_1002fd94`). `OnDeath` is a literal nothing references.
+- **A per-receiver sweep.** Both tools count a name as done when *any*
+  class handles it. A scratch script classed each script by what it calls
+  and checked every native it calls against that class's real `method()`
+  chain (mixins included), then each hit was confirmed by hand.
+- **The coverage tool's "implemented on another receiver" rows**, checked
+  against the mixins. `GetPlayer().PlaySound`, `GetPosition*` and
+  `SetPositionMirror` are false positives (the player mixes in
+  `EntityBaseRef`), as are `Level.AddCrystal`/`saved_Dawn` (zone-script
+  method and field, which Level routes).
+
+What it found, most serious first:
+
+- [x] **1. `OnHit` and `OnDecay` are never called.** Done in M100. 15 scripts define
+      each. `OnDecay` is where boss deaths advance the story -- `devron.s`
+      and `wulfbris.s` solve quests 33-35, `umbra_keth.s` sets
+      `saved_EndGame`, both `pergan_asuul.s` open their killed screens, the
+      five Dragonstar pit monsters open the pit reward. `OnHit` is how NPCs
+      react to being struck (`chef.s` drops the cell key) and how Umbra
+      Keth's fake-death phase starts. And the corpses they hang off never
+      decay: the death routine arms a five-second removal the port does not
+      have.
+- [x] **2. Umbra Keth: creature `GetHealth` and `SetDead`.** Done in M100,
+      which also found it needed `FindPathNode` and decoded `.pth` for it.
+      Neither exists
+      on a creature. Its `OnHit` tests `GetHealth() < 375`, which a
+      soft-fail answers with 0, so the moment `OnHit` is wired the final
+      boss would fake its death on the first hit.
+- [ ] **3. Player natives implemented only on other classes**:
+      `SetInvulnerable`/`GetInvulnerable` (cheat menu God Mode),
+      `SetMaxHealth` (two Lothna chests), `ModHealthBonus` (Lothna
+      treasure), `SetMaxMagicka` (cheat menu), `DestroyObject`
+      (`riloraconvo.s`'s five herbs), `DestroyObjectMirror` (the Crypt
+      caretaker), `Random` (`ghchestgold.s`), `MoveToLeftQueue`
+      (`removequeue.s`). The three `0x14d08` names belong on
+      `EntityBaseRef`.
+- [ ] **4. Creature natives**: `WalkTo` (`bbrawler_talkrun.s`),
+      `AddInventoryItem` (`highwaymage_cskye.s`, 4 soft-fail lines in the
+      suite).
+- [ ] **5. Item natives**: `CastAzraWrath` (both vermin bombs),
+      `MoveToEmptyQueue` (`olpac_pack.s`, `pilgrim_body.s`),
+      `GetMarketValue` (`buysell.s`'s sell price), `DisplayPopup`
+      (Trothgar's magicka potion).
+- [ ] **6. Menu natives and the third event**: `SetFocus` x2
+      (`buysell.s`), `GetMessagePopup` (`inventory.s`), `DelayOnEnter`
+      (`herbhurrah.s`), and `OnMsgPopupClosed` (`inventory.s`).
+- [ ] **7. `IsMultiplayer`/`IsMultiplayerClient` off the menu class.**
+      About 40 calls from Level, zone scripts, creatures and items
+      soft-fail and read 0 -- which picks the single-player branch, so the
+      behaviour is right by accident and the log is noisy. The names are
+      registered on Level (`0x14d38`) and the sprite-attach mixin
+      (`0x14d14`) as well as the root.
 - **Explicitly not planned: multiplayer and Bluetooth** (~25 of the 55).
   `JoinGame`, `MPPreHost`, `GetBluetoothName`, `RejectClient` and the rest
   need an N-Gage Bluetooth session this port has no counterpart for, and
