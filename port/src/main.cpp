@@ -46,6 +46,7 @@
 #include "simkin_bindings/entity_base_ref.h"
 #include "simkin_bindings/floating_sprite_executable.h"
 #include "simkin_bindings/game_constants.h"
+#include "simkin_bindings/ghost_mode.h"
 #include "simkin_bindings/item_button_executable.h"
 #include "simkin_bindings/item_executable.h"
 #include "simkin_bindings/level_executable.h"
@@ -2427,7 +2428,10 @@ void RenderMenu(sk::Backbuffer& backbuffer, sk_bindings::MenuExecutable& menu,
             case RowKind::ComboBox: {
                 auto* combo = static_cast<sk_bindings::ComboBoxExecutable*>(row.widget.get());
                 int value = combo->currentOptionValue();
-                std::string label = value >= 0 ? ("< " + strings.Get(value) + " >") : "< -- >";
+                // M95: a numerical combo draws the number itself.
+                const std::string text =
+                    combo->numericalMode() ? std::to_string(value) : strings.Get(value);
+                std::string label = value >= 0 ? ("< " + text + " >") : "< -- >";
                 sk::BitmapFont::DrawString(backbuffer, 12, y, label, color);
                 y += lineHeight;
                 break;
@@ -3669,6 +3673,11 @@ int main(int argc, char** argv) {
                 gameVelZ = 0.0f;
                 onGround = true;
                 inGame = true;
+                // M95: the front end's menus are gone (the engine's level
+                // start switches screens, FUN_1002c274, which drops
+                // `mgr+0x48`). Before any placement's Init() runs, so a
+                // script that opens a menu during the load still counts.
+                stack.SetMenuActive(false);
 
                 // Resolve every placed .ent record to a model archive
                 // index via entities.txt -- same two-step chain the real
@@ -4320,9 +4329,14 @@ int main(int argc, char** argv) {
                 // pool is empty -- exactly half speed. The engine's step is
                 // in a fixed-point unit this port's float movement does not
                 // share (see vitals.h), so only the ratio carries over.
+                // M95: and a ghost (`SetGhost(true)`, the cheat menu's
+                // "Make Ghost") walks at about half speed -- its move arm
+                // never restores the velocity it quarters. ghost_mode.h.
+                static const float kGhostSpeedScale = sk_bindings::GhostMoveSpeedScale();
                 const float moveSpeed =
                     kMoveSpeed *
-                    sk_bindings::ExhaustedSpeedScale(stack.player().actorFatigue());
+                    sk_bindings::ExhaustedSpeedScale(stack.player().actorFatigue()) *
+                    (stack.player().ghost() ? kGhostSpeedScale : 1.0f);
                 float dx = std::cos(gameCamera.yaw) * moveSpeed;
                 float dy = std::sin(gameCamera.yaw) * moveSpeed;
                 // right = (sinYaw, -cosYaw), matching zone_renderer.cpp's
@@ -4471,6 +4485,21 @@ int main(int argc, char** argv) {
                         return;
                     }
 #endif
+                    // M95: the engine's own noclip. A ghost's move arm
+                    // (`FUN_10000c64`) tests no wall and its push-out slot
+                    // (`FUN_100455c8`) returns before testing any entity --
+                    // only the map edge holds, `[r + 0x100, (w-1)*0x100 - r]`
+                    // on each axis, the clamp every actor move applies
+                    // first. The floor and ceiling clamp is the vertical
+                    // block's below, which this port runs for everyone.
+                    if (stack.player().ghost()) {
+                        const float lo = kPlayerRadius + sk::kTileScale;
+                        const float hiX = (gameZone->width() - 1) * sk::kTileScale - kPlayerRadius;
+                        const float hiY = (gameZone->height() - 1) * sk::kTileScale - kPlayerRadius;
+                        gameCamera.x = (std::min)((std::max)(gameCamera.x + mx, lo), hiX);
+                        gameCamera.y = (std::min)((std::max)(gameCamera.y + my, lo), hiY);
+                        return;
+                    }
                     float nx = gameCamera.x + mx;
                     if (!gameZone->CircleHitsWall(nx, gameCamera.y, kPlayerRadius) &&
                         !blockedByEntity(nx, gameCamera.y)) {
@@ -7097,6 +7126,20 @@ int main(int argc, char** argv) {
                     RenderAutomapOverlay(backbuffer, *gameZone, gameExplored, gameCamera,
                                           spriteArchive, strings, stack.currentLevelName());
                 }
+                // M95: `EnableCoords()` -- `FUN_1002c104`, drawn straight
+                // after the map in `FUN_10029cb0` (and so over it; unlike the
+                // HUD text layer it has no map-open early-out). Its whole
+                // body is `sprintf("%d %d", player->x, player->y)` handed
+                // to the UI text draw at (0x14, 0x14) in 0xfff, raw world
+                // units -- the same numbers a script's SetPosition takes,
+                // which is the point of a teleport cheat's readout.
+                if (stack.player().coordsEnabled()) {
+                    char coords[32];
+                    std::snprintf(coords, sizeof(coords), "%d %d",
+                                  static_cast<int>(gameCamera.x), static_cast<int>(gameCamera.y));
+                    sk::BitmapFont::DrawString(backbuffer, 0x14, 0x14, coords,
+                                                sk::PackRGB565(255, 255, 255));
+                }
                 // Minimal combat/interact feedback -- name + HP of
                 // whatever *aggressive* monster is currently in the
                 // player's actual attack range/facing cone, else the
@@ -7228,6 +7271,11 @@ int main(int argc, char** argv) {
             }
             gamePausedForMenu = false;
             inGame = true;
+            // M95: this shortcut closes the screen without a script Quit(),
+            // so it drops the engine's menu-open flag itself -- otherwise
+            // IsMenuActive() would keep answering true in the 3D view and
+            // ratherb.s/pergan_asuul.s would never start their scenes.
+            stack.SetMenuActive(false);
             zoneRenderer.Render(backbuffer, *gameZone, gameCamera, gameEntities, &modelArchive);
             // M79: the viewmodel under the HUD here too -- see the main
             // in-game draw above for FUN_10029cb0's own order.
@@ -7368,6 +7416,7 @@ int main(int argc, char** argv) {
                     if (gamePausedForMenu && gameZone) {
                         gamePausedForMenu = false;
                         inGame = true;
+                        stack.SetMenuActive(false);  // M95: already false after a Quit()
                     } else if (!menu->prevMenuPath().empty()) {
                         stack.OpenMenu(menu->prevMenuPath());
                         menu = stack.currentMenu();

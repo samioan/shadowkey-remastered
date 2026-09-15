@@ -218,6 +218,61 @@ void PlayerExecutable::QueueDrop(std::unique_ptr<ItemExecutable> item) {
     if (item) m_PendingDrops.push_back(std::move(item));
 }
 
+bool PlayerExecutable::DropGold(int amount) {
+    // Strictly less than -- see the declaration. The engine takes the gold
+    // before it builds the object, and keeps it taken if the factory comes
+    // back empty (`if (item == 0) return 1;`), so this does too.
+    if (!(amount < m_Gold)) return false;
+    m_Gold -= amount;
+    if (!m_Stack) return true;
+    // `FUN_100715a8(level, 0x34, 0, 0, 0)` is the *plain* factory call --
+    // no category filter -- which is CreateItem's second argument.
+    std::unique_ptr<ItemExecutable> gold = m_Stack->level().CreateItem(kTemplateGold, false);
+    if (!gold) return true;
+    gold->SetOwner(this);      // FUN_1006d510, +0x170
+    gold->SetQuantity(amount);  // FUN_1002ecd8, +0x1c4
+    // FUN_1002c3a8(item, 1) -- DropObject, the bag at the player's feet.
+    // main.cpp drains this exactly as it drains an inventory drop (M93).
+    QueueDrop(std::move(gold));
+    return true;
+}
+
+void PlayerExecutable::VisitStore(int category) {
+    if (!m_Stack) return;
+    // "removed old merchant": the previous God Vendor is destroyed first,
+    // whatever page it was left on.
+    if (m_Merchant == m_GodVendor.get()) m_Merchant = nullptr;
+    m_GodVendor = std::make_unique<Store>();
+    m_GodVendor->SetDatabase(&m_Stack->products());
+    m_GodVendor->SetStrings(m_Stack->strings() ? m_Stack->strings() : m_Strings);
+
+    // The engine walks the descriptor tree by typeId 0..7999 and asks each
+    // one's `+0x10` category. Category 5 also takes 14 -- the same
+    // "a scroll is a spell" rule the inventory search at the top of this
+    // dispatcher documents. No other merge: a VisitStore(4) does not offer
+    // the category-16 unique weapons, and VisitStore(6) not the shields
+    // (the cheat menu has a separate row for 15).
+    constexpr int kQuantity = 99;
+    constexpr int kTypeIdLimit = 8000;
+    for (int typeId = 0; typeId < kTypeIdLimit; ++typeId) {
+        const int itemCategory = m_Stack->level().EntityCategoryOf(typeId);
+        if (itemCategory < 0) continue;
+        if (itemCategory != category && !(category == 5 && itemCategory == 14)) continue;
+        const Store::StockEntry* line = m_GodVendor->Add(typeId, kQuantity);
+        if (!line) continue;  // not in products.dat -- Add() logged the miss
+        m_GodVendor->ZeroLinePrice(line);
+        m_Stack->mutableProducts().ZeroPrice(typeId);
+    }
+    std::printf("  Player: God Vendor contains %zu items\n", m_GodVendor->stock().size());
+
+    // `player+0xf84 = f88`, then FUN_10034f38(screen, 1) and
+    // FUN_1002c274(controller, 5) -- the buy page of the store screen, the
+    // same two steps BuyFromMerchant takes.
+    m_Merchant = m_GodVendor.get();
+    m_Stack->SetPendingScreenMode(1);
+    m_Stack->ReopenMenu("buysell");
+}
+
 namespace {
 
 // The two template ids the disarm roll searches for -- `entities.txt` rows
@@ -800,6 +855,71 @@ bool PlayerExecutable::method(const skString& methodName, skRValueArray& args,
                                                                        : CanAvoidTrap(arg));
         return true;
     }
+    // ---- M95: the GameState odds and ends (FUN_1003f130) ----
+    //
+    // Nine names, 25 shipped sites. The two a player can reach without the
+    // cheat code are `DropGold` (charactermanager.s's gold row ->
+    // dropgoldmenu.s, which did nothing) and `SetPlayerClassFlag` (every
+    // New Game); `IsMenuActive` guards two scripted conversations; the
+    // rest belong to cheatmenu.s and crypt2.s's Port11/Port6a arrival.
+    if (methodName == skString("DropGold") && args.entries() == 1) {
+        // Case 0. No return value is written on either path.
+        DropGold(args[0].intValue());
+        return true;
+    }
+    if (methodName == skString("IsMenuActive") && args.entries() == 0) {
+        // Case 1: `mgr+0x48 != 0 || controller->vtable[0x20]() != 0`.
+        // `+0x48` is raised by every FUN_100779b8 open and dropped by Quit;
+        // slot 0x20 (resolved through the controller's vtable at
+        // 0x100fb908) is `ldr r0, [r0, #0x140]; bx lr` -- the native screen
+        // (character manager, store) being shown, cleared each tick once
+        // neither is up. This port builds both kinds as MenuExecutables on
+        // one stack, so both halves are MenuStack::menuActive(). Not
+        // `currentMenu() != nullptr`: the port never nulls that on a Quit,
+        // and it would answer true for the rest of the session.
+        //
+        // The shipped callers (ratherb.s, twilite/pergan_asuul.s) use it not
+        // to open a conversation over one that is already on screen.
+        returnValue = skRValue(m_Stack != nullptr && m_Stack->menuActive());
+        return true;
+    }
+    if (methodName == skString("SetPositionMirrorAll") && args.entries() >= 2) {
+        // Case 2 is the base's `SetPosition` (case 0x30) instruction for
+        // instruction -- the same argc-3 branch, the same zeroed deltas, the
+        // same actor snap -- with one extra step inside `engine+0x5c0`:
+        // mirror the move to the other handset. Single player never takes
+        // it. crypt2.s's two calls place the player on arrival at Port11 and
+        // Port6a.
+        return HandleEntityBaseNative(skString("SetPosition"), args, returnValue);
+    }
+    if (methodName == skString("EnableCoords") && args.entries() == 0) {
+        // Case 0x18: `+0xfc0 ^= 1`. A toggle, not a set -- cheatmenu.s's
+        // "View Coords" row turns the readout off again the second time.
+        m_CoordsEnabled = !m_CoordsEnabled;
+        return true;
+    }
+    if (methodName == skString("VisitStore") && args.entries() == 1) {
+        if (!m_Stack) return SoftFailNativeCall("Player", methodName, args, returnValue);
+        VisitStore(args[0].intValue());
+        return true;
+    }
+    if (methodName == skString("IsGhost") && args.entries() == 0) {
+        returnValue = skRValue(m_Ghost);  // case 0x1b
+        return true;
+    }
+    if (methodName == skString("SetGhost") && args.entries() == 1) {
+        m_Ghost = args[0].boolValue();  // case 0x1c
+        return true;
+    }
+    if (methodName == skString("SetPlayerClassFlag") && args.entries() == 1) {
+        // Case 0x1d writes `+0xf35` -- the byte `HasCreatedCharacter` reads,
+        // `UpdateAttributes` raises and the save carries. mainmenu.s's New
+        // Game clears it, which is what greys out newgamemenu.s's "Start
+        // Game" row until a character has been made again.
+        m_HasCreatedCharacter = args[0].boolValue();
+        return true;
+    }
+
     if (methodName == skString("SetPlayerName") && args.entries() == 1) {
         m_Name = ToStdString(args[0].str());
         return true;

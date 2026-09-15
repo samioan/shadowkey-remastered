@@ -1544,6 +1544,62 @@ return n < v;
 
 Both divisions are the `0x66666667` magic-number `/5`, computed in fixed
 point (`>> 0x21` / `>> 0x29` then `>> 8`).
+
+## The GameState odds and ends (M95)
+
+The last eight unhandled names on trie `0x14dbc` (dispatcher
+`FUN_1003f130`), 25 shipped sites. Every `sprintf` + `User::After(10000)`
+pair in these cases is a stripped debug print; the format strings are
+quoted where they name something.
+
+| case | binding | what it does |
+|---|---|---|
+| `0x00` | `DropGold(n)` | `if (n < gold)` — **strictly** — `gold -= n`; build template `0x34` (`gold.s`) via `FUN_100715a8`, owner `+0x170` = player, quantity `+0x1c4` = n; `FUN_1002c3a8(item, 1)`, the DropObject that makes a `Loot_Dropped` bag. |
+| `0x01` | `IsMenuActive()` | `mgr+0x48 != 0 \|\| controller->vtable[0x20]() != 0` ("EIsMenuActive %d"). |
+| `0x02` | `SetPositionMirrorAll(x, y[, z])` | the base `SetPosition` (case `0x30`) instruction for instruction, plus `session->vtable[0x154](x, y, z, 1)` inside `engine+0x5c0`. |
+| `0x18` | `EnableCoords()` | `player+0xfc0 ^= 1`. |
+| `0x1a` | `VisitStore(category)` | the "God Vendor" — below. |
+| `0x1b` / `0x1c` | `IsGhost()` / `SetGhost(b)` | `player+0x10a1`. |
+| `0x1d` | `SetPlayerClassFlag(b)` | `player+0xf35`, the byte `HasCreatedCharacter` reads. |
+
+**`IsMenuActive`'s two halves.** `mgr+0x48` is written 1 by every
+`FUN_100779b8` open and 0 by the stack menu's `Quit` (`FUN_100801fc` case 4:
+`root+0x48 = 0; root->current = 0`). The controller object is
+`engine+0x28`, vtable word at `0x100296e8` → `0x100fb908`; slot `0x20` is
+`0x100a1524`, `ldr r0, [r0, #0x140]; bx lr` — the native screen object
+`FUN_1002c274` installs for modes 1..8, cleared by `FUN_10029cb0` on any tick
+where neither a menu nor a screen is up.
+
+**`VisitStore`.** Frees any previous `player+0xf88` ("removed old
+merchant"), news a `0x34`-byte store (`FUN_10036038`), and walks
+`EntityTypeDescriptor_Lookup(i)` for i in `0..7999`, taking every
+descriptor whose `+0x10` category equals the argument — or is 14 when the
+argument is 5 — through `FUN_10035a48(store, descriptor+8 /* typeId */, 99)`,
+then writing **0 into the returned node's `+4`**. The node *is* the shared
+`products.dat` record, so that zero is the catalogue price, for every
+merchant, for the rest of the session (`+8`, the base price, survives).
+"God Vendor contains %d items"; then `player+0xf84 = f88`,
+`FUN_10034f38(screen5, 1)` (buy page) and `FUN_1002c274(controller, 5)`.
+
+**The ghost's two readers** — found by a capstone scan for the split
+constant `mov rN, #0x1080; add rN, rN, #0x21`, which is why Ghidra shows only
+one xref. `0x100455cc` is the player's slot `0x1f4`, whose entire body is
+"return if ghost, else tail-call the entity push-out `FUN_100017c8`";
+`0x10001184` is inside the actor move `FUN_10000c64`, which for a ghost
+player clamps z to the tile's floor/ceiling and adds six more velocity
+steps with no wall test. See `port/src/simkin_bindings/ghost_mode.h` for
+why that nets out slower, not faster.
+
+**`EnableCoords`' reader** is `FUN_10029cb0`'s in-game arm, after the map:
+`if (player+0xfc0) FUN_1002c104(this)` — `sprintf("%d %d", +0x94, +0x9c)`
+(`0x100ad9e4`) drawn at (0x14, 0x14) in `0xfff`. Its neighbour `+0x10a0`
+gates `FUN_1002c100`, which is a bare `bx lr`: a compiled-out debug draw.
+
+**`SetNumericalMode`** (combo box trie `0x14cd8`, case 3, `+0xb2`) is read
+by the combo draw `FUN_1008e974`: set, the option is formatted with `"%d"`
+(`0x100f78d4`); clear, it is a string-table id. `dropgoldmenu.s` is its only
+caller.
+
 ## Labels applied / tools
 
 No new Ghidra renames this pass (the 28 registration/dispatcher

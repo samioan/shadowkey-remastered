@@ -29,6 +29,12 @@ public:
                    ? m_Options[static_cast<size_t>(m_Selection)]
                    : -1;
     }
+    // M95: `SetNumericalMode(true)` (case 3, `+0xb2`). The draw
+    // (`FUN_1008e974`) tests it and, when set, formats the option with the
+    // literal "%d" at 0x100f78d4 instead of looking it up in the string
+    // table -- so dropgoldmenu.s's `AddOption(25)` reads "25", not string 25
+    // ("Medium Bow"), which is what this port drew until the menu worked.
+    bool numericalMode() const { return m_Numerical; }
     const std::string& onChangeCallback() const { return m_OnChangeCallback; }
     const std::string& onEnterCallback() const { return m_OnEnterCallback; }
 

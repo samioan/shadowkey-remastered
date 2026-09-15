@@ -122,4 +122,13 @@ const ProductRecord* ProductDatabase::Find(int templateId) const {
     return nullptr;
 }
 
+void ProductDatabase::ZeroPrice(int templateId) {
+    for (ProductRecord& p : m_Records) {
+        if (p.templateId == templateId) {
+            p.price = 0;
+            return;
+        }
+    }
+}
+
 }  // namespace sk

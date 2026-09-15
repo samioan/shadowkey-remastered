@@ -86,6 +86,11 @@ public:
     // Returns the entry, or null on a miss.
     const StockEntry* Add(int templateId, int quantity);
 
+    // M95: `VisitStore`'s `entry+4 = 0`, applied to the line Add() just
+    // returned (the pointer is only good until the next Add). The shared
+    // record half of the same write is ProductDatabase::ZeroPrice.
+    void ZeroLinePrice(const StockEntry* entry);
+
     // FUN_10035fa4: drop every line. The category counters are **not**
     // reset -- the real function frees the list nodes and zeroes the head,
     // count and tail, and never touches `+0x24..+0x2c`. That is a real

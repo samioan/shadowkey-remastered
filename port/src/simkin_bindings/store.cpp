@@ -40,6 +40,15 @@ const Store::StockEntry* Store::Add(int templateId, int quantity) {
     return &m_Stock.back();
 }
 
+void Store::ZeroLinePrice(const StockEntry* entry) {
+    for (StockEntry& e : m_Stock) {
+        if (&e == entry) {
+            e.price = 0;
+            return;
+        }
+    }
+}
+
 void Store::Clear() {
     // Deliberately only the list -- see the header. The counters and the
     // price reduction survive, as they do in FUN_10035fa4.

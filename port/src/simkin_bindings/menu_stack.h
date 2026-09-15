@@ -98,6 +98,18 @@ public:
     // opened from the 3D view, otherwise fall back to the screen's own
     // SetPrevMenu target -- so this only records the request.
     bool closeMenuRequested() const { return m_CloseMenuRequested; }
+    // M95: and the engine's own record of the same thing, which the script
+    // *can* see. The menu manager's `+0x48` is raised by every open
+    // (`FUN_100779b8` writes 1 after the parse) and dropped by the stack
+    // class's `Quit` (case 4 of `FUN_100801fc`: `root+0x48 = 0`, current =
+    // null) -- so a `Quit(); OpenMenu(...)` handler ends with it raised, as
+    // it should. `IsMenuActive()` reads it. This port does not null
+    // `currentMenu()` on a Quit (the host still needs the screen to decide
+    // where "close" goes), which is why the flag is separate; the host also
+    // drops it on the one resume path that closes a screen without a script
+    // Quit, the back-key shortcut.
+    bool menuActive() const { return m_MenuActive; }
+    void SetMenuActive(bool active) { m_MenuActive = active; }
     void RequestCloseMenu() { m_CloseMenuRequested = true; }
     void ClearCloseMenuRequest() { m_CloseMenuRequested = false; }
 
@@ -177,6 +189,9 @@ public:
     // already holds. Loaded once by the constructor; empty (and every
     // AddProduct a no-op with a logged miss) if the file is absent.
     const sk::ProductDatabase& products() const { return m_Products; }
+    // M95: the one writer -- `VisitStore` zeroes the price on the shared
+    // catalogue record, not on a copy (PlayerExecutable::VisitStore).
+    sk::ProductDatabase& mutableProducts() { return m_Products; }
 
     // M59/M60: which side of the counter `buysell.s` is showing. In the
     // real engine `BuyFromMerchant()` and `SellToMerchant()` both call
@@ -463,6 +478,7 @@ private:
     bool m_MuteOnCall = false;  // M28: see muteOnCall() above
     GameClock m_GameClock;      // M53: see gameClock() above
     bool m_CloseMenuRequested = false;  // M30: see closeMenuRequested() above
+    bool m_MenuActive = false;          // M95: see menuActive() above
     std::map<std::string, std::unique_ptr<MenuExecutable>> m_Menus;
     std::unique_ptr<PlayerExecutable> m_Player;
     std::unique_ptr<LevelExecutable> m_Level;

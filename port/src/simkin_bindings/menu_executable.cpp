@@ -185,12 +185,23 @@ void MenuExecutable::SetWidgetSelectable(const skiExecutable* widget, bool selec
     }
 }
 
+// M95: `SetItemText` and `SetLocalizedText` write one slot, so each has to
+// displace the other. They did not: a row built from a literal kept drawing
+// it after a `SetLocalizedText` (the renderer prefers a literal), which is
+// why every store screen was titled "(Weapons)" -- `buysell.s` builds its
+// title as `AddFloatingText("(Weapons)", ...)` and each page handler then
+// retitles it with `SetLocalizedText(2990..2994)`. Found through the God
+// Vendor's armour page.
 void MenuExecutable::SetRowTextId(size_t rowIndex, int textId) {
-    if (rowIndex < m_Rows.size()) m_Rows[rowIndex].textId = textId;
+    if (rowIndex >= m_Rows.size()) return;
+    m_Rows[rowIndex].textId = textId;
+    m_Rows[rowIndex].literalText.clear();
 }
 
 void MenuExecutable::SetRowLiteralText(size_t rowIndex, const std::string& text) {
-    if (rowIndex < m_Rows.size()) m_Rows[rowIndex].literalText = text;
+    if (rowIndex >= m_Rows.size()) return;
+    m_Rows[rowIndex].literalText = text;
+    m_Rows[rowIndex].textId = -1;
 }
 
 void MenuExecutable::SetRowWidth(size_t rowIndex, int w) {
@@ -789,6 +800,9 @@ bool MenuExecutable::method(const skString& methodName, skRValueArray& args,
         // OnRightSoftKey does exactly that), and acting instantly would
         // fight that second call.
         m_Stack.RequestCloseMenu();
+        // M95: the flag half of the real Quit does happen on the spot --
+        // see MenuStack::menuActive().
+        m_Stack.SetMenuActive(false);
         return true;
     }
     if (methodName == skString("SetPrevMenu") && args.entries() == 1) {

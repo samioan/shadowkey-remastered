@@ -128,6 +128,13 @@ public:
     // product %d, not found in product file."* on a miss and adds nothing.
     const ProductRecord* Find(int templateId) const;
 
+    // M95: `VisitStore`'s `entry+4 = 0`. A store line *is* its catalogue
+    // record in the engine, so the God Vendor's free prices land here, on
+    // the first record with this id, and every merchant stocked afterwards
+    // inherits them. `basePrice` is untouched, which is what a later
+    // `ReducePrices` recomputes from -- the engine's `+0x08` survives too.
+    void ZeroPrice(int templateId);
+
 private:
     std::vector<ProductRecord> m_Records;
     int m_Version = 0;

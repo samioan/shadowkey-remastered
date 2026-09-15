@@ -676,3 +676,7 @@ target_link_libraries(can_drop_smoke PRIVATE sk_bindings)
 # M94 milestone smoke test -- see src/tests/m94_trap_magic_smoke.cpp.
 add_executable(trap_magic_smoke src/tests/m94_trap_magic_smoke.cpp)
 target_link_libraries(trap_magic_smoke PRIVATE sk_bindings sk_world)
+
+# M95 milestone smoke test -- see src/tests/m95_gamestate_smoke.cpp.
+add_executable(gamestate_smoke src/tests/m95_gamestate_smoke.cpp)
+target_link_libraries(gamestate_smoke PRIVATE sk_bindings sk_world)

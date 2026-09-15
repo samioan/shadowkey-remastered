@@ -189,6 +189,7 @@ void MenuStack::OpenMenu(const std::string& simkinPath, skiExecutable* opener) {
     // opener should still apply to a subsequent GetOpener() call).
     if (opener) menu->SetOpener(opener);
     m_Current = menu;
+    m_MenuActive = true;  // M95: FUN_100779b8's `mgr+0x48 = 1`
     // M56: same containment as Init() above -- OnDisplay() is script too.
     // The screen is already current and already drew its rows in Init(),
     // so a failure here logs and leaves it up rather than unwinding.

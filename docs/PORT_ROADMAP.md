@@ -8810,6 +8810,123 @@ soft-fails 39 -> 39, all 14 tracked `.ppm` renders byte-identical,
       `[trap] "door1" casts template 50 at level 10` and `stats` shows
       100 -> 77 health. Repro: `port/debug/m94_trap_magic.cfg`.
 
+- [x] **M95 -- the GameState odds and ends, and three things that were
+      wrong behind them.** The last eight unhandled names on the
+      Player/GameState trie (`0x14dbc`, `FUN_1003f130`), 25 shipped
+      sites: `DropGold` (9), `VisitStore` (5), `IsMenuActive` (3),
+      `SetGhost`/`IsGhost` (2+2), `SetPositionMirrorAll` (2),
+      `SetPlayerClassFlag` (1), `EnableCoords` (1). The class is now fully
+      covered for every name a shipped script calls. Case-by-case table in
+      `SIMKIN_NATIVE_API.md`'s "The GameState odds and ends (M95)".
+
+    - **`DropGold` is M93's drop with a purse in it.** `if (n < gold)`,
+      strictly, then build template 52 (`gold.s`) with owner = player and
+      quantity = n and hand it to `FUN_1002c3a8` -- the DropObject M81
+      named and M93 wired. So the coins land in a `Loot_Dropped` bag at
+      your feet and come back through M82's template-52 fold when you loot
+      it. The strict `<` is load-bearing in the scripts: you can never drop
+      your last coin, and `dropgoldmenu.s` only offers an amount when
+      `GetGold() > amount`.
+    - **The drop-gold screen drew "Medium Bow".** `dropgoldmenu.s` calls
+      `SetNumericalMode(true)` and `AddOption(25)`; this port stored the
+      flag and never read it, so the combo looked string 25 up. The engine's
+      combo draw (`FUN_1008e974`) tests `+0xb2` and formats with the `"%d"`
+      at `0x100f78d4`. Nobody had seen it because the menu did nothing.
+    - **`IsMenuActive` needed a flag, not `currentMenu()`.** The case is
+      `mgr+0x48 || controller->vtable[0x20]()`; slot 0x20 resolves (vtable
+      `0x100fb908`) to `ldr r0, [r0, #0x140]`, the native screen, and
+      `+0x48` is raised by every open and dropped by the stack menu's
+      `Quit` (case 4). The obvious port answer, `currentMenu() != nullptr`,
+      is **wrong for the whole session**: this port never nulls the current
+      menu on a Quit (the host still needs it to decide where "close"
+      goes), so the first draft answered true in the 3D view forever --
+      and `ratherb.s`'s herb scene and `twilite/pergan_asuul.s`'s
+      conversation, both guarded by `IsMenuActive() = false`, would never
+      have started again after the first menu of the game. The smoke test
+      caught it. `MenuStack::menuActive()` is the engine's flag: raised in
+      `OpenMenu`, dropped in the menu `Quit` native, and dropped by the host
+      on the two paths that close a screen without a script Quit (the back
+      key shortcut and a zone start).
+    - **`VisitStore` is the cheat menu's "God Vendor", and its prices leak.**
+      The engine's own debug line names it ("God Vendor contains %d
+      items"). A second store at `player+0xf88`, stocked with 99 of every
+      entities.txt template of the category (5 also takes 14, the scrolls)
+      that `products.dat` knows, each line's `+4` written 0 -- and a store
+      line *is* the shared catalogue record (M59), so those items are free
+      at every merchant stocked afterwards. Reproduced
+      (`ProductDatabase::ZeroPrice`), with one departure that predates this
+      milestone: this port's store lines copy the price, so merchants
+      already stocked before the visit keep theirs. Armour: 89 lines,
+      spells: 38 (7 of them scrolls), zero `products.dat` misses.
+    - **Every store screen was titled "(Weapons)".** Found on the God
+      Vendor's armour page. `buysell.s` builds its title as
+      `AddFloatingText("(Weapons)")` and each page handler retitles it with
+      `SetLocalizedText(2990..2994)`; M60 documented that `SetItemText` and
+      `SetLocalizedText` "write the same slot so the later call wins", but
+      the setters did not displace each other and the renderer prefers a
+      literal. Fixed in `MenuExecutable::SetRowTextId`/`SetRowLiteralText`;
+      the page now reads "Armor", "Spells", ... at every merchant.
+    - **A ghost is slower, not faster.** `+0x10a1` has two readers, and
+      Ghidra shows one: the constant is built as `#0x1080 + #0x21`, found by
+      a capstone scan. The player's push-out slot (`FUN_100455c8`) returns
+      at once, and the actor move (`FUN_10000c64`) takes an arm with **no
+      wall test** that adds six velocity steps where the normal arm's
+      substeps add four. But the move quarters the player's velocity first
+      and only the normal arm restores it, and the velocity persists across
+      ticks under a `x0.6875` friction, so the quartering compounds: steady
+      state is `7/5 * (1-f)/(1-f/4)` = **0.53** of walking speed.
+      `ghost_mode.h` runs the engine's own integer chain for the ratio.
+      This is a derivation, not a device measurement, and says so.
+      In the port a ghost skips `CircleHitsWall` and the entity test,
+      clamps to the map edge the way every actor move does, and keeps the
+      shared floor/ceiling block.
+    - **`SetPositionMirrorAll` is `SetPosition`** (case 2 against case 0x30,
+      instruction for instruction, plus a Bluetooth mirror), so it is routed
+      to the entity base's handler rather than written a second time.
+      `EnableCoords` is a toggle of `+0xfc0`, drawn by `FUN_1002c104` as
+      `"%d %d"` at (20, 20) after the map. `SetPlayerClassFlag` writes
+      `+0xf35`, the `HasCreatedCharacter` byte, and `mainmenu.s`'s New Game
+      clears it.
+
+    - **Test**: `port/src/tests/m95_gamestate_smoke.cpp`, 60 checks in eight
+      parts: the census (25 sites, measured); `DropGold`'s gate on the bare
+      native and then through the real `dropgoldmenu.s` (options at 600
+      gold are exactly 25/50/100/500; index 3 drops a 500 purse; looting it
+      restores 600); the God Vendor against an independent count from
+      entities.txt + products.dat, every price 0 on the line *and* the
+      shared record, base price intact against a pristine reload, a free
+      `BuyItem`, and the store title; `IsMenuActive` through a real Quit and
+      a `Quit(); OpenMenu()` pair; `SetPositionMirrorAll` against
+      `SetPosition`; `cheatmenu.s`'s own `MakeGhost` row; `mainmenu.s`'s
+      `MenuNewGame`; and the ghost ratio against its closed form.
+    - **The suite**: 87 executables, 86 pass (`render_at_smoke` is the
+      argument-taking render tool). Soft-fail lines **15 -> 16**, pairs
+      flat at 10 -- the new test drives `cheatmenu.s`'s `More3`, which
+      surfaces `Player.GetInvulnerable` once more; that is an Actor-bucket
+      name, left there. The gaps tool: unimplemented-and-called names
+      42 -> **34**, coverage 421 -> **429 of 648**, and the GameState row
+      is gone from its per-class table. `analyze_port_native_coverage.py`:
+      `GetPlayer()` 2078 -> **2126** handled sites (94% -> 96%), unhandled
+      names 23 -> 15.
+    - **Live** (azra, driven with posted keys and `PrintWindow` captures):
+      Tab -> the gold row -> Enter opens "Drop" with `< 25 >`; D steps
+      25/50/100/500; Enter prints `[drop] Gold Pieces -> loot bag at
+      (30218, 11776)` and the character manager comes back reading Gold 575
+      / 75. The cheat menu's Visit Merchants -> Armor opens "Buy Armor" at
+      `GP : 0 Qty: 99`. `SetGhost(true)` walked from tile (118,46) to
+      (123,39) through the house wall in four seconds -- ~21 units a tick
+      against the normal 40. `EnableCoords()` puts `30371 11873` over the
+      compass. `IsMenuActive()` read true with the store up and false after
+      Esc and after the tutorial popups closed. Repro:
+      `port/debug/m95_gamestate.cfg`.
+    - **A debug-console trap, not a game bug**: `sk menu DropGold()` (a
+      `Quit(); OpenMenu(...)` handler) run from the console leaves the Quit
+      request for the host's next menu tick, which then closes the menu the
+      handler opened; and `sk player VisitStore(6)` typed during gameplay
+      opens the store without pausing into it. Both paths are fine through
+      real keys. Drive a screen from the console only once a real key has
+      put a menu up.
+
 ## Next milestones (not yet started)
 
 Roughly in priority order for reaching "actually playable," not commitments:
@@ -8992,6 +9109,7 @@ case and writing a handler.
 > `SetCanDrop` (39 of the Item row's 46 sites), and M94 took the whole
 > trap/magic-damage row plus `CanDisarmTrap`/`CanAvoidTrap` out of
 > GameState. The surface is now **42 names**, coverage 421 of 648.
+> **M95** took the rest of the GameState row: **34 names**, 429 of 648.
 
 **3. The soft-fail log, which is the only measure that sees a name
 implemented on the wrong class.** Both tools above are
@@ -9096,11 +9214,12 @@ difficulty:
 - [x] **The trap/magic-damage mixin `0x14e10`.** Done -- M94 above, which
       also took `CanDisarmTrap`/`CanAvoidTrap` out of the bucket below,
       because the chain does not work without them.
-- [ ] **GameState odds and ends** (25 sites, was 35): `DropGold` (the
+- [x] **GameState odds and ends** (25 sites, was 35): `DropGold` (the
       drop-gold menu does nothing), `VisitStore`, `IsMenuActive`,
       `SetGhost`/`IsGhost`, `SetPositionMirrorAll`, `SetPlayerClassFlag`,
       `EnableCoords`. `CanDisarmTrap`/`CanAvoidTrap` left this bucket with
-      M94.
+      M94. Done -- M95 above, which also fixed the numerical combo box and
+      every store screen's title.
 - [ ] **`StatModXP`** (7 sites) -- the conversations that award experience
       award none.
 - [ ] **Options that don't apply**: `SetLanguage` (6), `ConfigKeysMenu`

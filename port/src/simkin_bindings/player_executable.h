@@ -239,6 +239,51 @@ public:
     void SetMerchant(Store* store) { m_Merchant = store; }
     Store* merchant() const { return m_Merchant; }
 
+    // ---- M95: the GameState odds and ends ----
+    //
+    // `DropGold(amount)`, case 0 -- the whole of it:
+    //
+    //     if (amount < gold) {
+    //         gold -= amount;
+    //         item = CreateEntity(0x34 /* gold.s */);
+    //         item->owner    /* +0x170 */ = this;
+    //         item->quantity /* +0x1c4 */ = amount;
+    //         DropObject(item, 1);          // FUN_1002c3a8, M81/M93
+    //     }
+    //
+    // The comparison is **strict**: you can never drop your last coin, and
+    // `dropgoldmenu.s` is written around exactly that -- it offers 50 only
+    // when `GetGold() > 50`, and `charactermanager.s` enables the row only
+    // above 25. The dropped purse is a real `Loot_Dropped` bag at your feet,
+    // the same one M93's inventory drop makes, and picking the coins back up
+    // folds them into the purse through M82's template-52 test. Returns
+    // false when the gate refused (nothing changes).
+    bool DropGold(int amount);
+
+    // `VisitStore(category)`, case 0x1a -- the cheat menu's **"God Vendor"**
+    // (the engine's own debug line is "God Vendor contains %d items").
+    // `player+0xf88` is a second store the player owns; the case frees any
+    // previous one, builds a fresh one, and walks every entities.txt typeId
+    // below 8000 whose category matches (a spell visit, 5, also takes the
+    // scrolls, 14), stocking 99 of each that `products.dat` knows. Every line
+    // it stocks gets **price 0** -- written onto the catalogue record itself,
+    // which is shared (store.h), so those items stay free at every merchant
+    // stocked afterwards in the session. Then `player+0xf84 = f88` and the
+    // store screen opens on its buy page, exactly as `BuyFromMerchant` does.
+    void VisitStore(int category);
+    const Store* godVendor() const { return m_GodVendor.get(); }
+
+    // `EnableCoords()`, case 0x18: `player+0xfc0 ^= 1`. While it is set the
+    // in-game HUD draws the player's raw x/y (`"%d %d"`, `FUN_1002c104`).
+    bool coordsEnabled() const { return m_CoordsEnabled; }
+
+    // `SetGhost` / `IsGhost`, cases 0x1c / 0x1b: `player+0x10a1`. Read in
+    // exactly two places (the split `#0x1080 + #0x21` is why only one shows
+    // up as a Ghidra xref): the player's entity push-out slot returns before
+    // doing anything, and the actor move function takes a separate arm that
+    // never tests a wall. See ghost_mode.h for what that arm does to speed.
+    bool ghost() const { return m_Ghost; }
+
     // FUN_1003e030. Returns the code buysell.s branches on:
     //   0 not enough gold (or no store / no such product / stock gone)
     //   1 bought
@@ -731,6 +776,10 @@ private:
     KeyItemFlags m_KeyItemFlags;
     // M59: player+0xf84 -- see SetMerchant() above.
     Store* m_Merchant = nullptr;
+    // M95: player+0xf88, the God Vendor -- see VisitStore().
+    std::unique_ptr<Store> m_GodVendor;
+    bool m_CoordsEnabled = false;  // M95: +0xfc0, EnableCoords
+    bool m_Ghost = false;          // M95: +0x10a1, SetGhost
     // M56: see AttachStack(). Null in every standalone construction.
     MenuStack* m_Stack = nullptr;
     ItemExecutable* m_LeftItem = nullptr;
