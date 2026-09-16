@@ -76,6 +76,30 @@ constexpr int kStaticItemX = 9;
 // converts to this port's RGB565.
 constexpr unsigned short kTextShadowColor444 = 0x0b96;
 
+// M108: the menu's own three text colours, which live on the menu object
+// and are seeded by its constructor (`FUN_10073bd8`):
+//
+//     menu+0x90 = 0x733   an unselected *menu item*  (widget+0x5c != 0)
+//     menu+0x92 = 0x752   a *static* item            (widget+0x5c == 0)
+//     menu+0x94 = 0xddd   whichever row is selected
+//
+// `FUN_10076b64` picks between them in exactly that order. Kept here in
+// RGB444 rather than as packed RGB565 because that is the form the engine
+// stores and the form `FUN_1008f8a4` unpacks -- and because the unpack is
+// **`nibble << 4`**, not the `nibble * 17` "replicate" expansion, so a
+// full nibble is 0xf0 and never 0xff. Before M108 all three were eyeballed
+// off a screenshot and all three were wrong.
+constexpr unsigned short kMenuItemColor444 = 0x733;
+constexpr unsigned short kStaticItemColor444 = 0x752;
+constexpr unsigned short kSelectedItemColor444 = 0xddd;
+
+// M108: `AddTitle`'s default y (case 7 of `FUN_1003136c`: `uVar6 = 10;
+// if (argc > 1) uVar6 = arg[1];`, then `widget+0x7c = uVar6`). A title is
+// absolutely positioned and its widget kind (10) takes the menu draw's
+// `default:` arm, which leaves the row cursor alone -- so a title never
+// pushes the list down.
+constexpr int kTitleDefaultY = 10;
+
 // Post-M80 -- **every menu opened by name starts on `global.spr` slot 20,
 // the parchment.** `FUN_100779b8`, the routine behind every script-level
 // `OpenMenu(name)`, clears the widget list and then writes
@@ -419,7 +443,10 @@ public:
     // cursor and still advances it, so nothing else moves.
     struct MenuTitle {
         int textId = -1;
-        int y = -1;
+        // M108: the engine's own default -- see kTitleDefaultY. An
+        // `AddTitle(id)` with no position sits at y=10, not wherever the
+        // row cursor happens to be. See RenderMenu().
+        int y = kTitleDefaultY;
     };
     const std::vector<MenuTitle>& titles() const { return m_Titles; }
     int selectedItem() const { return m_SelectedItem; }  // 1-based, 0 = none

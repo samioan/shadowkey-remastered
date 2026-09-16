@@ -10113,6 +10113,118 @@ a table callback the engine never fires.
   no-argument invoke turned check 2 red, and restoring the guard turned
   it green again.
 
+## M108 -- menu layout, read out of the engine instead of off a screenshot
+
+The menus worked and did not look right, and there was no way to find out
+why: menu *layout* had no coverage and no means of getting any. The
+positions are not in the scripts. Only ~250 calls in the whole corpus
+carry a coordinate (95 `SetFontNum`, 95 `AddFloatingTextJustify`, 14
+`AddButton`, 11 `AddTitle`, 6 `AddTable`, 4 `AddFloatingSprite` and a
+handful more); the ~500 menus built from bare `AddMenuItem` /
+`AddStaticItem` get every position from `FUN_10076b64`. So the spec for
+"looks right" is in the decompile, and comparing screenshots was never
+the best evidence available.
+
+- **`SK_DUMP_MENUS=<dir>`** renders **every menu script in the game** to a
+  .ppm in that directory and exits, without opening a window. It walks the
+  script root and `menus/`, takes every `.s` that contains a menu-building
+  call (rather than a hand-written list, which would go stale), opens each
+  through `MenuStack::OpenMenu` and draws it with the real `RenderMenu` on
+  the real boot path -- real string table, real sprites, real font. 95
+  menus, no failures. Menus whose `OnDisplay` needs game state this early
+  are caught and reported rather than aborting the sweep. This is the
+  missing half: the rules are readable, but checking them needed a picture
+  of every screen, and producing those by hand was the bottleneck.
+
+- **Confirmed, not changed** -- worth recording, because each ruled out a
+  whole class of suspicion:
+    - Menu items really are **centred across the full 176px**.
+      `AddMenuItem` (case 0x6d of `FUN_10078de4`) builds its widget with
+      kind `+0x58 = 0` -- the same case a static item takes -- and never
+      writes `+0x94`, which the constructor `FUN_1007e458` has zeroed. The
+      draw passes `param_7 = (widget+0x94) ^ 1`, so a menu item gets 1:
+      `FUN_1008f97c`, the arm with no x parameter, landing in
+      `FUN_10022d48` -> `TRect(0, y, 0xb0, y + fontHeight)` with Symbian
+      `DrawText` alignment 1 (ECenter).
+    - The row pitch really is **0xc**. The `+ 0x18` arm beside it is dead
+      code: it is taken only when `FUN_1007f49c` returns non-zero, and
+      every path of that function ends `return 0`.
+    - Static items really are left-aligned at **x=9** with a (+1,+1)
+      shadow, and `AddStaticItem(id,false)` / `---` separators really are
+      centred -- `+0x94` is the second argument, and `param_7` is its
+      inverse.
+    - The default background really is slot **20**, and the default start
+      row really is **y=50**.
+
+- **The three text colours were eyeballed and all three were wrong.** They
+  live on the menu object, seeded by its constructor `FUN_10073bd8` as
+  RGB444 words: `menu+0x90 = 0x733` (an unselected menu item),
+  `menu+0x92 = 0x752` (a static item), `menu+0x94 = 0xddd` (the selected
+  row). `FUN_10076b64` picks between them in exactly that order. The port
+  had (140,40,40) for what is really (112,48,48), (110,95,75) for
+  (112,80,32) and (235,235,235) for (208,208,208). They now live in
+  menu_executable.h in the engine's own RGB444 form.
+
+- **The 4-bit expansion was wrong too.** `FUN_1008f8a4` splits a colour
+  word as `(c & 0xf00) >> 4`, `c & 0xf0`, `(c & 0xf) << 4` -- **nibble <<
+  4**, so a full nibble is 0xf0 and never 0xff. This port used the
+  `nibble * 17` "replicate" expansion, which is right for a generic 444
+  source and wrong for this hardware: every shadow, and with the corrected
+  palette every text colour, was up to 6% brighter than the device ever
+  drew.
+
+- **Centred rows had no shadow.** `FUN_1007f49c`'s centred arm calls
+  `FUN_1008f97c` with its shadow flag set, which draws the string one
+  pixel *below* (no x offset) in RGB(0xb1,0x9c,0x65) before drawing it in
+  the row's own colour. Every main-menu entry, every
+  `AddStaticItem(id,false)` and every `---` separator in the game has one,
+  and this port drew none of them -- only the left-aligned arm's (+1,+1)
+  shadow was implemented, which is why just the centred rows looked flat.
+
+- **Titles were placed three ways wrong.** `AddTitle` is case 7 of
+  `FUN_1003136c`: `uVar6 = 10; if (argc > 1) uVar6 = arg[1];` then
+  `widget+0x7c = uVar6`, with widget kind `+0x58 = 10`.
+    - Its **default y is 10**, not the row cursor. This port drew a
+      title with no explicit y at the shared cursor.
+    - Kind 10 takes the menu draw's `default:` arm, which calls the
+      widget's own vtable slot and leaves the row cursor alone
+      (`uVar9 = uVar8`), so **a title never advances the list**. This port
+      advanced it by 14, pushing every row of every titled screen down.
+    - The title's own draw slot is `FUN_1003559c`, four arguments wide,
+      and it passes `param_7 = 1` -- so a title is **centred, with a
+      shadow**, and the literal `5` it passes as x never reaches the
+      screen. This port drew titles left-aligned at x=4 with no shadow.
+
+- **New `m108_menu_layout_smoke`** (19 checks, three parts): the row-flow
+  constants (pitch, static x, default background, both wrap widths); the
+  three colours, the shadow colour, and the expansion pinned explicitly so
+  that 0xfff comes out 0xf0 and not 0xff; and titles, both the bare
+  `AddTitle(3783)` in `choosecharactermenu.s` landing at y=10 and
+  `questlog.s`'s two explicitly positioned ones keeping their own.
+
+- **The suite**: 100 executables, 99 pass. Soft-fail stays at **5**.
+
+### Still open
+
+The contact sheet makes these obvious, and none is fixed yet:
+
+- **The title colour.** It is `*(ushort *)(engine->+0x28 + 8)` -- a word
+  in a global UI palette object, not one of the menu's own three, and it
+  is in none of the shipped data files (`6r51.cfg` is the game-manager
+  XML stub, not a palette). `kTitleColor` is still the old eyeballed blue,
+  which is certainly wrong -- nothing else in this UI is blue -- but
+  replacing one guess with another is not progress. The same object
+  supplies `+0x28 + 10`, the override `FUN_1007f49c` applies when its
+  `param_4` is set.
+- **`statsscreen` overlaps two rows** -- "Speed: 50" is drawn on top of
+  the line above it.
+- **Text clips the right edge** on `choosecharactermenu` ("considerabl",
+  "quie"), so the `SetTextWidth(27)` -> pixel conversion is off.
+- **`SetFontNum` is still ignored** (95 call sites). `FUN_10022b20` gates
+  on it: != 1 uses the ROM legend font (LatinBold12, which this port
+  has), == 1 builds a `"Swiss"` typeface at size 0xd5 with bold/italic
+  flags.
+
 ## Next milestones (not yet started)
 
 Roughly in priority order for reaching "actually playable," not commitments:

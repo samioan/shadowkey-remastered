@@ -728,6 +728,10 @@ target_link_libraries(action_queue_smoke PRIVATE sk_bindings sk_world)
 add_executable(popup_selectable_smoke src/tests/m106_popup_selectable_smoke.cpp)
 target_link_libraries(popup_selectable_smoke PRIVATE sk_bindings sk_world)
 
+# M108 milestone smoke test -- see src/tests/m108_menu_layout_smoke.cpp.
+add_executable(menu_layout_smoke src/tests/m108_menu_layout_smoke.cpp)
+target_link_libraries(menu_layout_smoke PRIVATE sk_bindings sk_world)
+
 # M107 milestone smoke test -- see src/tests/m107_clean_start_smoke.cpp. Part 3
 # reads DebugOverlay's construction defaults, so it needs the debug suite; the
 # other two parts are plain bindings tests.

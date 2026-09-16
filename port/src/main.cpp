@@ -97,16 +97,37 @@ namespace {
 // kBackgroundColor is a placeholder -- only the flat fallback fill for
 // when a real MenuBackground() sprite fails to load (docs/
 // GRAPHICS_FORMAT.md); the real backgrounds themselves are decoded
-// sprite art, not a color. The menu text colors below, though, are
-// real values sampled directly off a real screenshot (unselected =
-// dark red, selected = near-white, static/disabled kept as a muted
-// tone distinct from both -- not confirmed against a real disabled
-// row, no screenshot of one on hand, but at minimum no longer
-// identical-looking to the enabled colors).
+// sprite art, not a color.
+//
+// M108: the menu text colors are the **engine's own**, not sampled off a
+// screenshot any more. They live on the menu object and the menu
+// constructor (`FUN_10073bd8`) seeds all three, as 12-bit RGB444 words:
+//
+//     menu+0x90 = 0x733   // an unselected *menu item*   (widget+0x5c != 0)
+//     menu+0x92 = 0x752   // a *static* item             (widget+0x5c == 0)
+//     menu+0x94 = 0xddd   // whichever row is selected
+//
+// `FUN_10076b64` picks between them exactly that way, and `FUN_1008f8a4`
+// expands each nibble with **`nibble << 4`** -- so the channel maxes at
+// 0xf0, not 0xff. The old values here were eyeballed from a screenshot
+// and every one of them was off: (140,40,40) for what is really
+// (112,48,48), (110,95,75) for (112,80,32), (235,235,235) for
+// (208,208,208). Small individually; together they are most of why the
+// menus read as "close but not right".
+constexpr uint16_t MenuColor444(int rgb444) {
+    return sk::PackRGB565(((rgb444 >> 8) & 0xF) << 4, ((rgb444 >> 4) & 0xF) << 4,
+                          (rgb444 & 0xF) << 4);
+}
 constexpr uint16_t kBackgroundColor = sk::PackRGB565(16, 16, 32);
-constexpr uint16_t kTextColor = sk::PackRGB565(140, 40, 40);
-constexpr uint16_t kSelectedTextColor = sk::PackRGB565(235, 235, 235);
-constexpr uint16_t kStaticTextColor = sk::PackRGB565(110, 95, 75);
+constexpr uint16_t kTextColor = MenuColor444(sk_bindings::kMenuItemColor444);
+constexpr uint16_t kSelectedTextColor = MenuColor444(sk_bindings::kSelectedItemColor444);
+constexpr uint16_t kStaticTextColor = MenuColor444(sk_bindings::kStaticItemColor444);
+// M108: the shadow under a *centred* row. `FUN_1008f97c`'s shadow arm
+// passes the channels literally -- `FUN_10022d48(env, text, y + 1, 0xb1,
+// 0x9c, 0x65, ...)` -- rather than an RGB444 word, so this one is not a
+// MenuColor444(). Note the offset is **+1 in y only**; the left-aligned
+// arm's shadow (`FUN_1007f49c`, colour 0xb96) is offset in x as well.
+constexpr uint16_t kCenteredShadowColor = sk::PackRGB565(0xb1, 0x9c, 0x65);
 constexpr uint16_t kTitleColor = sk::PackRGB565(140, 180, 255);
 constexpr uint16_t kPopupBgColor = sk::PackRGB565(40, 40, 60);
 constexpr uint16_t kPopupBorderColor = sk::PackRGB565(90, 90, 130);
@@ -2067,6 +2088,66 @@ void RenderWeaponViewmodel(sk::Backbuffer& backbuffer, const sk_bindings::Weapon
 // M25: a plain outline rectangle -- ButtonExecutable's real ShowBorder
 // (true) (charactermanager.s's Stats/Equip/Quest buttons, docs/
 // PORT_ROADMAP.md's M25 entry) drawn using the row's own real w/h.
+// M108: the two helpers behind SK_DUMP_MENUS (see main()).
+
+void WriteBackbufferPpm(const sk::Backbuffer& bb, const std::string& path) {
+    std::ofstream f(path, std::ios::binary);
+    if (!f) {
+        std::printf("  could not open %s for writing\n", path.c_str());
+        return;
+    }
+    f << "P6\n" << sk::Backbuffer::kWidth << " " << sk::Backbuffer::kHeight << "\n255\n";
+    for (int y = 0; y < sk::Backbuffer::kHeight; ++y) {
+        const uint16_t* row = bb.Row(y);
+        for (int x = 0; x < sk::Backbuffer::kWidth; ++x) {
+            const uint16_t c = row[x];
+            f.put(static_cast<char>(((c >> 11) & 0x1f) << 3));
+            f.put(static_cast<char>(((c >> 5) & 0x3f) << 2));
+            f.put(static_cast<char>((c & 0x1f) << 3));
+        }
+    }
+}
+
+// Every .s file under the script root (and its `menus/` subdirectory)
+// that actually builds a menu, named the way MenuStack::OpenMenu wants
+// them -- root-relative, no extension, forward slashes.
+//
+// The test is the presence of a menu-building call rather than a
+// hand-written list: the corpus has 514 files that touch a menu and no
+// naming convention that separates them from item/monster scripts, and a
+// list would go stale the first time one was renamed.
+std::vector<std::string> EnumerateMenuScripts(const std::string& scriptRoot) {
+    namespace fs = std::filesystem;
+    std::vector<std::string> out;
+    const char* kMarkers[] = {"ClearMenu(", "AddMenuItem(", "AddStaticItem(", "MenuBackground("};
+    for (const char* sub : {"", "menus"}) {
+        const fs::path dir = sub[0] ? fs::path(scriptRoot) / sub : fs::path(scriptRoot);
+        std::error_code ec;
+        if (!fs::is_directory(dir, ec)) continue;
+        for (const fs::directory_entry& e : fs::directory_iterator(dir, ec)) {
+            if (!e.is_regular_file()) continue;
+            const fs::path& p = e.path();
+            if (p.extension() != ".s") continue;
+            std::ifstream in(p, std::ios::binary);
+            const std::string body((std::istreambuf_iterator<char>(in)),
+                                    std::istreambuf_iterator<char>());
+            bool isMenu = false;
+            for (const char* marker : kMarkers) {
+                if (body.find(marker) != std::string::npos) {
+                    isMenu = true;
+                    break;
+                }
+            }
+            if (!isMenu) continue;
+            std::string name = p.stem().string();
+            if (sub[0]) name = std::string(sub) + "/" + name;
+            out.push_back(name);
+        }
+    }
+    std::sort(out.begin(), out.end());
+    return out;
+}
+
 void DrawRectOutline(sk::Backbuffer& backbuffer, int x0, int y0, int w, int h, uint16_t color) {
     int x1 = x0 + w, y1 = y0 + h;
     for (int x = x0; x < x1; ++x) {
@@ -2157,15 +2238,45 @@ void RenderMenu(sk::Backbuffer& backbuffer, sk_bindings::MenuExecutable& menu,
     // A title with no y keeps the old behaviour exactly -- drawn at the
     // shared cursor, and advancing it -- so every screen that adds a
     // single untitled-position header renders unchanged.
+    //
+    // M108: a title is **absolutely positioned and does not consume a
+    // row**. `AddTitle` (case 7 of `FUN_1003136c`) defaults its second
+    // argument to **10** and stores it in `widget+0x7c`, and builds the
+    // widget with kind `+0x58 = 10` -- which the menu draw's switch sends
+    // to `default:`, the arm that calls the widget's own vtable slot and,
+    // crucially, leaves the row cursor (`uVar9 = uVar8`) untouched. So a
+    // title never pushes the list down. This port drew a title with no
+    // explicit y at the shared cursor and then advanced it by 14, which
+    // moved every row of every titled screen down and put the title where
+    // the first row belongs. `MenuTitle::y` now defaults to 10 (see
+    // menu_executable.h) so the `title.y >= 0` arm is the only one left.
+    // And it is **centred**, with a shadow. The title widget's own draw
+    // slot is `FUN_1003559c`, all of four arguments wide:
+    //
+    //     FUN_1007f49c(5, widget+0x7c, widget+0x48, isSelected,
+    //                  widget+0x70, palette, 1, 0, 0);
+    //                                        ^ param_7
+    //
+    // -- and `param_7 == 1` is the arm that discards x entirely and goes
+    // to `FUN_1008f97c`, centred across the full 176px with a shadow one
+    // pixel below. The literal `5` never reaches the screen. This port
+    // drew titles left-aligned at x=4 with no shadow, so every titled
+    // screen in the game had its heading in the wrong place.
+    //
+    // NOT resolved: the colour. It is `*(ushort *)(engine->+0x28 + 8)` --
+    // a word in a global UI palette object, not one of the three colours
+    // the menu itself carries, and nothing in the shipped data files
+    // holds it. kTitleColor below is still the old eyeballed blue, which
+    // is certainly wrong (nothing else in this UI is blue) but replacing
+    // one guess with another is not progress. This is the next thing to
+    // chase; the palette object also supplies `+0x28 + 10`, the override
+    // `FUN_1007f49c` applies when its param_4 is set.
     for (const auto& title : menu.titles()) {
         if (title.textId < 0) continue;
         const std::string text = strings.Get(title.textId);
-        if (title.y >= 0) {
-            sk::BitmapFont::DrawString(backbuffer, 4, title.y, text, kTitleColor);
-        } else {
-            sk::BitmapFont::DrawString(backbuffer, 4, y, text, kTitleColor);
-            y += lineHeight + 2;
-        }
+        const int titleX = (sk::Backbuffer::kWidth - sk::BitmapFont::TextWidth(text)) / 2;
+        sk::BitmapFont::DrawString(backbuffer, titleX, title.y + 1, text, kCenteredShadowColor);
+        sk::BitmapFont::DrawString(backbuffer, titleX, title.y, text, kTitleColor);
     }
 
     for (size_t rowIndex = 0; rowIndex < menu.rows().size(); ++rowIndex) {
@@ -2252,10 +2363,16 @@ void RenderMenu(sk::Backbuffer& backbuffer, sk_bindings::MenuExecutable& menu,
                     // `AddStaticItem(id, false)`) takes instead. Wrapping
                     // already happened in the binding, so each row here is
                     // one line.
-                    constexpr uint16_t kShadow = sk::PackRGB565(
-                        ((sk_bindings::kTextShadowColor444 >> 8) & 0xF) * 17,
-                        ((sk_bindings::kTextShadowColor444 >> 4) & 0xF) * 17,
-                        (sk_bindings::kTextShadowColor444 & 0xF) * 17);
+                    // M108: expanded the engine's way. `FUN_1008f8a4`
+                    // splits an RGB444 word as `(c & 0xf00) >> 4`,
+                    // `c & 0xf0`, `(c & 0xf) << 4` -- i.e. **nibble << 4**,
+                    // so a full nibble is 0xf0 and never 0xff. This used
+                    // `* 17` (the "replicate the nibble" expansion), which
+                    // is the right idea for a generic 444 source and the
+                    // wrong one here: it made every shadow, and with the
+                    // M108 palette every text colour, up to 6% brighter
+                    // than the hardware ever drew.
+                    constexpr uint16_t kShadow = MenuColor444(sk_bindings::kTextShadowColor444);
                     sk::BitmapFont::DrawString(backbuffer, sk_bindings::kStaticItemX + 1, y + 1,
                                                 label, kShadow);
                     sk::BitmapFont::DrawString(backbuffer, sk_bindings::kStaticItemX, y, label,
@@ -2264,11 +2381,35 @@ void RenderMenu(sk::Backbuffer& backbuffer, sk_bindings::MenuExecutable& menu,
                 } else {
                     // Real menu item rows (mainmenu.s etc., no real x/y of
                     // their own -- AddMenuItem never takes one) are
-                    // centered on screen -- confirmed against a real
-                    // screenshot, which also shows no left-margin arrow
-                    // glyph on the selected row (selection is color-only,
-                    // kSelectedTextColor).
+                    // centered on screen, and selection is color-only (no
+                    // left-margin arrow glyph).
+                    //
+                    // M108 -- now confirmed from the engine rather than a
+                    // screenshot, and it holds. `AddMenuItem` (case 0x6d of
+                    // `FUN_10078de4`) builds its widget with kind
+                    // `+0x58 = 0` -- the *same* case a static item takes --
+                    // and never writes `+0x94`, which the widget
+                    // constructor `FUN_1007e458` has already zeroed. The
+                    // draw passes `param_7 = (widget+0x94) ^ 1`, so a menu
+                    // item gets 1: `FUN_1008f97c`, the arm with no x
+                    // parameter at all, which lands in `FUN_10022d48` ->
+                    // `TRect(0, y, 0xb0, y + fontHeight)` with Symbian's
+                    // `DrawText` alignment 1 (ECenter). Centred across the
+                    // full 176px screen -- identical to the
+                    // `(kWidth - textW) / 2` below.
+                    //
+                    // What was missing is the **shadow**. `FUN_1008f97c` is
+                    // called with its shadow flag set, so before the text
+                    // it draws the same string one pixel lower in
+                    // RGB(0xb1,0x9c,0x65). Every centred row in the game --
+                    // every main-menu entry, every `AddStaticItem(id,false)`
+                    // and every `---` separator -- has one, and this port
+                    // drew none of them. The left-aligned arm above always
+                    // had its (+1,+1) shadow, which is why only the centred
+                    // rows looked flat.
                     int textX = (sk::Backbuffer::kWidth - textW) / 2;
+                    sk::BitmapFont::DrawString(backbuffer, textX, y + 1, label,
+                                                kCenteredShadowColor);
                     sk::BitmapFont::DrawString(backbuffer, textX, y, label, color);
                     y += lineHeight;
                 }
@@ -2981,6 +3122,58 @@ int main(int argc, char** argv) {
     } catch (skRuntimeException& e) {
         std::printf("shadowkey-port: RUNTIME ERROR running mainmenu.s: %s\n", e.toString().ptr());
         return 2;
+    }
+
+    // M108: `SK_DUMP_MENUS=<dir>` renders every menu script in the game to
+    // a .ppm in that directory and exits, without opening a window.
+    //
+    // This exists because menu *layout* had no way of being checked at
+    // all. The layout rules are not in the scripts -- only ~250 of the
+    // corpus's calls carry a coordinate, and the ~500 menus built from
+    // bare `AddMenuItem`/`AddStaticItem` get their positions from the
+    // engine (`FUN_10076b64`). So the way to verify a screen is to read
+    // those rules out of the decompile and compare them against what this
+    // port actually draws -- which needs a picture of what it draws, for
+    // every screen, without driving the game by hand.
+    //
+    // It renders through `RenderMenu` on the real boot path (real string
+    // table, real sprites, real font), so what lands in the directory is
+    // exactly what the game would put on screen. Menus whose OnDisplay
+    // needs game state this early throw; those are caught and reported
+    // rather than aborting the sweep.
+    if (const char* dumpDir = std::getenv("SK_DUMP_MENUS")) {
+        sk::Backbuffer shot;
+        int written = 0, failed = 0;
+        for (const std::string& name : EnumerateMenuScripts(scriptRoot)) {
+            try {
+                stack.OpenMenu(name);
+                sk_bindings::MenuExecutable* m = stack.currentMenu();
+                if (!m) {
+                    ++failed;
+                    std::printf("  SKIP %-40s (no menu)\n", name.c_str());
+                    continue;
+                }
+                RenderMenu(shot, *m, stack.player(), strings, spriteArchive);
+                std::string flat = name;
+                for (char& c : flat) {
+                    if (c == '/' || c == '\\') c = '_';
+                }
+                WriteBackbufferPpm(shot, std::string(dumpDir) + "/" + flat + ".ppm");
+                ++written;
+            } catch (skParseException& e) {
+                ++failed;
+                std::printf("  FAIL %-40s parse: %s\n", name.c_str(), e.toString().ptr());
+            } catch (skRuntimeException& e) {
+                ++failed;
+                std::printf("  FAIL %-40s runtime: %s\n", name.c_str(), e.toString().ptr());
+            } catch (...) {
+                ++failed;
+                std::printf("  FAIL %-40s (unknown)\n", name.c_str());
+            }
+        }
+        std::printf("SK_DUMP_MENUS: %d menu(s) written to %s, %d skipped\n", written, dumpDir,
+                    failed);
+        return 0;
     }
 
     sk::Window window(sk::Backbuffer::kWidth * 3, sk::Backbuffer::kHeight * 3,
