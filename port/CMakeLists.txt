@@ -723,3 +723,7 @@ target_link_libraries(last_natives_smoke PRIVATE sk_bindings sk_world)
 # M105 milestone smoke test -- see src/tests/m105_action_queue_smoke.cpp.
 add_executable(action_queue_smoke src/tests/m105_action_queue_smoke.cpp)
 target_link_libraries(action_queue_smoke PRIVATE sk_bindings sk_world)
+
+# M106 milestone smoke test -- see src/tests/m106_popup_selectable_smoke.cpp.
+add_executable(popup_selectable_smoke src/tests/m106_popup_selectable_smoke.cpp)
+target_link_libraries(popup_selectable_smoke PRIVATE sk_bindings sk_world)

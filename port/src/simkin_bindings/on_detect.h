@@ -186,8 +186,19 @@ inline bool DetectionNoticed(int missPercent, int roll) { return roll >= missPer
 // shifted right by 8 -- as FUN_10004d70's distance budget, and that budget
 // is in **tiles**: FUN_100182d0 loops `while (travelled < budget * 0x100)`
 // adding 0x80 per half-tile step. The constructor default 0x6a4 therefore
-// buys 6 tiles of sight, which is what every creature in the game uses --
-// no shipped script calls SetAttackRange.
+// buys 6 tiles of sight.
+//
+// M106 correction: this comment used to end "which is what every creature
+// in the game uses -- no shipped script calls SetAttackRange", and that is
+// simply false. **27 shipped scripts call it** (a 28th, `yelnicin.s`, has
+// the call commented out), almost all of them ranged attackers giving
+// themselves far more sight than the melee default:
+// `SetAttackRange(12000)` (46 tiles) is the standard archer/mage value,
+// `lakvan/deadeye.s` asks for 50000 (195 tiles), and `sergeant.s` 2300.
+// Only the wording was ever wrong -- MonsterExecutable stores the real
+// value and main.cpp marches `SightRangeTiles(attackRangeRaw())`, not a
+// constant -- but the claim is the kind that gets cited later, so it is
+// corrected here rather than left as a harmless-looking aside.
 //
 // Mixing a squared unit with a tile count is the engine's own arithmetic,
 // not a transcription slip: `+0x2dc` is compared as a squared distance

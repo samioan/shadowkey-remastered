@@ -9910,6 +9910,93 @@ soft-fails 39 -> 39, all 14 tracked `.ppm` renders byte-identical,
       the screen's own `HidePopup -> OnDisplay -> UpdateTextItems` redraw
       showing the new order.
 
+- [x] **M106 -- a popup row the script switched off, and two claims that
+  were simply false.** An audit milestone rather than a feature one: with
+  the native list closed except for multiplayer, the question was what is
+  left that the three existing measures cannot see. A fourth measure
+  found one real, player-reachable bug; re-testing the port's own
+  confident comments found two false ones.
+    - **The new measure: argument counts.** The gaps tool and the
+      coverage tool are both **name-only**, and the soft-fail log only
+      sees what a test actually runs. So a native whose handler is
+      `args.entries() == 1`, called by a shipped script with two
+      arguments, falls straight through the chain in silence.
+      `shadowkey/ghidra/scripts/analyze_port_native_arity.py` pairs each
+      `skString("Name")` guard in the port against every call site in the
+      corpus. Five rows on the first run; four were the receiver-pooling
+      false positive its own caveats describe. The fifth was real.
+    - **`SetSelectable(idx, flag)` was ignored.** This port matched the
+      name, had only the one-argument widget form in mind, no-opped the
+      two-argument popup call, and derived "is this row selectable" from
+      "does it have a callback". The decompiled evidence says otherwise at
+      every step: the popup item constructor (`FUN_100875e8`) writes
+      `item+0x5c = 1` for **every** item it builds, callback or not; case
+      3 of `FUN_10087a60` is the only thing that clears it; and activation
+      (`FUN_10088a40`) fires a callback only when that byte is set *and*
+      the item has one. Selectability is a stored flag, never a derived
+      one.
+    - **Why it mattered.** The derivation holds for a popup built once and
+      used once, and breaks on the one built once and **reused**.
+      `buysell.s` -- the shop -- creates `msgPopup` with all three rows
+      carrying callbacks (`CloseMsgPopup` / `ForcePurchase` /
+      `CloseMsgPopup`), then overwrites rows 0 and 1 with plain text
+      ("Item(s) bought: ..." / "Amount: N") and switches them off with
+      `SetSelectable(i,false)`. That call was the only thing making them
+      inert, so row 1 stayed live **with `ForcePurchase` still attached**:
+      moving the cursor up onto the "Amount" line and pressing select
+      bought the item again and charged for it again.
+    - **One divergence kept, deliberately.** The engine tolerates the
+      cursor *resting* on a switched-off row -- move-down
+      (`FUN_10088664`) requires only that the row have text, and it is
+      activation that refuses. This port skips such rows in navigation
+      instead, so the cursor never lands where nothing can happen. Same
+      reachable outcome, different cursor position; recorded rather than
+      reworked, because changing popup navigation would churn behaviour
+      four milestones have live-verified.
+    - **Two false claims, both corrected in place.** `on_detect.h` ended
+      its `SightRangeTiles` note with "which is what every creature in the
+      game uses -- no shipped script calls SetAttackRange". **27 scripts
+      call it** (a 28th has it commented out), nearly all ranged: 12000 is
+      the standard archer/mage value -- 46 tiles of sight against the
+      melee default's 6 -- and `lakvan/deadeye.s` asks for 50000. Only the
+      wording was ever wrong; the code stores and marches each creature's
+      own value. And `monster_executable.cpp` claimed seven natives
+      (`SetWalkAnimation`, `SetScale`, `AiDetect`, ...) "fall through to
+      the soft-fail below"; every one has had a real handler for
+      milestones. Both are the M105 failure mode -- a claim that outlives
+      the code it described and then gets cited -- so both were corrected
+      rather than deleted.
+    - **What was checked and found sound**, so it is not re-checked later:
+      the `RemoveObject`-without-`PickupItem` claim (all 7 sites are
+      preceded by one), `SetReloadSpeed` / `GuardPlayer` /
+      `SetAttackSpeed` (zero callers), the two spell-scoped `SetRange` /
+      `SetWeaponSprite` claims, and "no shipped script calls `SaveGame()`"
+      (all four occurrences are commented out). `AutoSave` stays
+      unimplemented and that stays correct: `savegamefailedauto.s` is the
+      *retry* screen for an autosave that already failed, and this port
+      does not autosave. `broken2/perosius_temp.s`'s zero-argument
+      `AiAttack()` is a dev leftover whose only reference is commented
+      out, and the engine would `Leave` on it too.
+    - **New `m106_popup_selectable_smoke`** (29 checks, five parts): the
+      constructor default on an item with and without a callback; clear,
+      restore and an out-of-range index; activation refused on a cleared
+      row and allowed on the same row restored, through `savegamemenu.s`'s
+      real `DoneSave` handler; `buysell.s`'s own three `AddItem` lines and
+      its `//reset`; and the `SetAttackRange` count with `archer.s`'s
+      12000 and `deadeye.s`'s 50000 surviving into the port.
+    - **The suite**: 98 executables, 97 pass. Soft-fail stays at **5**,
+      all still accounted for as not-real.
+    - **Live** (`dstar_w`, `port/debug/m106_popup_selectable.cfg`, through
+      the real placed weapons merchant): bought a Daedric Mace, gold
+      5000 -> 4047, and the confirmation popup showed "Item(s) bought:
+      Daedric Mace / Amount: 1 / **Back**" with the cursor on Back.
+      Pressing Up did not move it, and select closed the popup -- gold
+      still 4047, one mace in the bag. Rebuilt with the flag removed from
+      `IsSelectable` as a control, the same keystrokes moved the highlight
+      onto **"Amount: 1"** and select re-entered `ForcePurchase`, which
+      answered with the shop's own **"Not enough gold!"** -- the second
+      purchase, caught in the act.
+
 ## Next milestones (not yet started)
 
 Roughly in priority order for reaching "actually playable," not commitments:
@@ -10346,12 +10433,19 @@ screen's four `wcscmp`-chain natives, at the end of the M104 entry above.
   everywhere (M91), which is what routes every script down its
   single-player branch. Listed so nobody counts them as a gap twice.
 
-Re-run both tools rather than trusting this list to stay current:
+Re-run all three tools rather than trusting this list to stay current:
 
 ```
 python shadowkey/ghidra/scripts/analyze_port_native_coverage.py .
 python shadowkey/ghidra/scripts/analyze_port_native_gaps.py .
+python shadowkey/ghidra/scripts/analyze_port_native_arity.py .
 ```
+
+The third (M106) is the only one that looks at **argument counts** rather
+than names, which is how `SetSelectable(idx, flag)` sat unimplemented
+behind a matching name. Read its caveats before acting on a row: it pools
+receivers, so most of what it prints is a name handled with one arity on
+one class and another arity on another.
 
 
 ## Verification approach

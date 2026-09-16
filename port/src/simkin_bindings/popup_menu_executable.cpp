@@ -16,12 +16,14 @@ bool PopupMenuExecutable::method(const skString& methodName, skRValueArray& args
                                   skRValue& returnValue, skExecutableContext& context) {
     if (methodName == skString("AddItem") && args.entries() >= 1) {
         // Every observed popup's first AddItem() is a bare prompt/title
-        // with no callback (e.g. "Do you really wish to quit?"),
-        // followed by the real Yes/No-style choices, each with one --
-        // matching every SetSelectable(0,false) call seen in the corpus
-        // exactly, so "has a callback" doubles as "is selectable"
-        // (IsSelectable() above) without needing to separately track the
-        // SetSelectable() calls.
+        // with no callback (e.g. "Do you really wish to quit?"), followed
+        // by the real Yes/No-style choices, each with one.
+        //
+        // M106: that pattern is real but it is **not** what makes an item
+        // selectable, and this port used to treat it as if it were. The
+        // engine's item constructor (`FUN_100875e8`) sets `item+0x5c = 1`
+        // for every item it builds, callback or no callback; only
+        // `SetSelectable` clears it. See that handler below.
         Item item;
         item.textId = args[0].intValue();
         item.callback = args.entries() >= 2 ? ToStdString(args[1].str()) : "";
@@ -117,12 +119,40 @@ bool PopupMenuExecutable::method(const skString& methodName, skRValueArray& args
         returnValue = skRValue(m_Visible);
         return true;
     }
-    if (methodName == skString("SetSelectable") || methodName == skString("SetBackground") ||
-        methodName == skString("SetAutoAdjust") || methodName == skString("SetToWidget")) {
-        // SetSelectable: see the AddItem() comment above -- selectability
-        // is derived from having a callback, this call doesn't need to
-        // change any state. SetBackground/SetAutoAdjust/SetToWidget are
-        // purely cosmetic (real background images/precise pixel
+    if (methodName == skString("SetSelectable") && args.entries() >= 2) {
+        // M106: `SetSelectable(idx, flag)` -- case 3 of `FUN_10087a60`,
+        // which walks `idx` links from the item list head and writes the
+        // flag into `item+0x5c`.
+        //
+        // This port used to no-op the call and derive selectability from
+        // "has a callback". That holds for a popup built once and used
+        // once, and breaks on the one built once and **reused**:
+        // `buysell.s` creates `msgPopup` with all three items carrying
+        // callbacks --
+        //     msgPopup.AddItem(3297,"CloseMsgPopup");  // 0
+        //     msgPopup.AddItem(3297,"ForcePurchase");  // 1
+        //     msgPopup.AddItem(3297,"CloseMsgPopup");  // 2
+        // -- and then repurposes 0 and 1 as plain message lines
+        // ("You bought X" / "for N gold"), with `SetSelectable(i,false)`
+        // as the *only* thing making them inert. Ignoring it left item 1
+        // live with `ForcePurchase` still attached, so selecting the
+        // "for N gold" line bought the item a second time.
+        //
+        // The engine tolerates the cursor *resting* on a cleared item
+        // (move-down, `FUN_10088664`, only requires the item have text);
+        // it is activation, `FUN_10088a40`, that tests `+0x5c` before
+        // firing the callback. This port skips such items in navigation
+        // instead, so the cursor never lands where nothing can happen --
+        // a cosmetic difference with the same reachable outcome.
+        const int index = args[0].intValue();
+        if (index >= 0 && static_cast<size_t>(index) < m_Items.size()) {
+            m_Items[static_cast<size_t>(index)].selectable = args[1].boolValue();
+        }
+        return true;
+    }
+    if (methodName == skString("SetBackground") || methodName == skString("SetAutoAdjust") ||
+        methodName == skString("SetToWidget")) {
+        // Purely cosmetic (real background images/precise pixel
         // repositioning are out of scope, see main.cpp's RenderMenu()).
         return true;
     }
@@ -216,6 +246,14 @@ void PopupMenuExecutable::ActivateSelected() {
         m_Owner.TryInvoke(item.callback);
         return;
     }
+    // M106: `FUN_10088a40` fires the callback only when `item+0x5c` is set
+    // *and* the item has one. MoveSelection() already refuses to land on an
+    // unselectable row, but `SetSelectedItem`/`SetFocus` point straight at
+    // an index without consulting the flag -- and `buysell.s` aims the
+    // cursor *before* clearing rows, so this is the guard that holds.
+    // (Scoped to the scripted popup class; the engine-made message popup
+    // above goes through `FUN_1002fd94`, which has no such test.)
+    if (!IsSelectable(item)) return;
     // M91: a popup row is a row -- InvokeCallback, not TryInvoke. See
     // MenuExecutable::InvokeCallback(). Every one-button popup in the
     // corpus ("Okay" over a message) is `AddItem(id, "Quit")`.

@@ -36,11 +36,24 @@ public:
         // to remember what the callback used to be), it's just excluded
         // from selection/rendering while blanked is true.
         bool blanked = false;
+        // M106: the real `item+0x5c` byte. The item constructor
+        // (`FUN_100875e8`) sets it to **1 unconditionally** -- it is not
+        // derived from whether a callback was passed -- and the popup
+        // dispatcher's `SetSelectable(idx, flag)` (case 3 of
+        // `FUN_10087a60`) is the only thing that clears it. Activation
+        // (`FUN_10088a40`) fires a callback only when this byte is set
+        // *and* the item has one, which is what makes a repurposed
+        // message line inert. See the .cpp's SetSelectable handler for
+        // the bug this port shipped while deriving it instead.
+        bool selectable = true;
     };
-    // True if this item can currently be selected/activated -- has a real
-    // callback from AddItem() and isn't currently blanked via
-    // UpdatePopupItem(index, "").
-    static bool IsSelectable(const Item& item) { return !item.callback.empty() && !item.blanked; }
+    // True if this item can currently be selected/activated. The engine's
+    // activation test is `item+0x5c && item+0x54` -- the explicit flag and
+    // a callback; `blanked` is this port's model of an item whose text was
+    // cleared, which the engine's own navigation also skips.
+    static bool IsSelectable(const Item& item) {
+        return item.selectable && !item.callback.empty() && !item.blanked;
+    }
     const std::vector<Item>& items() const { return m_Items; }
     bool visible() const { return m_Visible; }
     // 1-based index into **all** items (`m_Items[selectedItem()-1]`), not

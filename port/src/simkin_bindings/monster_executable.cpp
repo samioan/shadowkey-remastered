@@ -1333,13 +1333,15 @@ bool MonsterExecutable::method(const skString& methodName, skRValueArray& args,
         m_IsHitNoiseId = args[0].intValue();
         return true;
     }
-    // SetWalkAnimation/SetSwingAnimation/SetDeathAnimation/
-    // SetIdleAnimation/PlayAnimationOffset/SetScale/AiDetect -- azra_rat.s
-    // calls all of these, but this port has no skeletal animation and
-    // renders every entity at a fixed scale/skin (consistent with every
-    // prior milestone -- see docs/PORT_ROADMAP.md's M12 entry), so they
-    // fall through to the soft-fail below rather than getting dedicated
-    // no-op handlers -- there's nothing meaningful to store them into yet.
+    // M106: this used to say that SetWalkAnimation/SetSwingAnimation/
+    // SetDeathAnimation/SetIdleAnimation/PlayAnimationOffset/SetScale/
+    // AiDetect "fall through to the soft-fail below rather than getting
+    // dedicated no-op handlers". Every one of them has had a real handler
+    // for milestones now (AiDetect at ~1036, the animation setters from
+    // ~1144, SetScale at ~1182) -- the note simply outlived the code it
+    // described. Left corrected rather than deleted because the soft-fail
+    // census reads these comments as its map of what is deliberately not
+    // stored.
     if (skScriptedExecutable::method(methodName, args, returnValue, context)) {
         return true;
     }
