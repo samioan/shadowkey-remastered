@@ -9997,6 +9997,122 @@ soft-fails 39 -> 39, all 14 tracked `.ppm` renders byte-identical,
       answered with the shop's own **"Not enough gold!"** -- the second
       purchase, caught in the act.
 
+## M107 -- what a new character actually starts with
+
+Two things the player sees before doing anything: a starting inventory
+that was never the game's, and a debug readout drawn over the view. Both
+were the port's, not the original's. Fixing the first exposed a third --
+a table callback the engine never fires.
+
+- **The starting kit was a test fixture.** `MenuStack::RequestGameStart`
+  called `PlayerExecutable::LoadStartingInventory`, which handed every new
+  character `weapons/club.s`, `armor/chain_coif.s` and `items/bread.s`.
+  That list is M10's, and M10's own comment said what it was -- "a small,
+  curated starting kit ... not an attempt at the real game's actual
+  starting inventory" -- but it was wired into the New Game path anyway
+  and stayed there for 97 milestones, so a club and a loaf were the first
+  things a player ever saw in their bag.
+
+  **The original grants nothing.** Four independent places agree:
+
+  - `menus/newgamemenu.s`'s whole `StartGame` is `NewGameHook()` then
+    `NewGame()`. Neither it nor any menu reaching it touches the
+    inventory.
+  - `ChooseCharacter(classId)` -- case 0x2e of the Player dispatcher
+    (`FUN_1003f130`) -- writes the class (`+0xf38`), a portrait id
+    (`+0xf40 = classId*2 + 0x1f`) and `+0x3e0 = 1`. No factory call, no
+    inventory write. `ChooseRace` is the same shape.
+  - the item factory `FUN_100715a8` is reached with a *literal* template
+    id from exactly two places in the whole image: `0x34` (gold, the
+    GiveGold path) and `300` (the corpse/loot bag `FUN_1002c3a8` drops).
+    Neither is a starting kit.
+  - no shipped script grants one either. All 29 `GiveItem()` calls in the
+    corpus are `cheatmenu.s` (27, behind the hidden cheat code) and
+    `lothna/treasure_menu.s`.
+
+  The dagger and the Blaze spell a new character does end up with are
+  **world pickups placed in Azra's Crossing**: `azra.ent` carries a
+  `Loot_Dagger.s` placement and an entity named `blaze` running
+  `blaze.s`. Those are entities.txt rows 55 and 50 -- the two item
+  scripts that sit at the script root rather than under `weapons/` or
+  `spells/`, which is what marks them out. `azra.s`'s `EnterZone` opens
+  the `daggerhelp` tutorial from a trigger region for the same reason: it
+  fires where the dagger is, not at spawn.
+
+  So `RequestGameStart` now grants nothing, and the loader survives as
+  `LoadItemScripts(stack, paths)` -- a **test fixture only**, with the
+  three paths spelled out at the four call sites that wanted them.
+  `m_StartingInventoryLoaded` is gone with it.
+
+- **A stale comment corrected.** `item_executable.cpp` claimed Blaze is
+  "the one spell the game hands out at the very start (menus/
+  newgamemenu.s gives it to every new character)". `newgamemenu.s` grants
+  nothing; Blaze is a placement. Same failure mode as M105's and M106's:
+  a claim that outlived the code it described and then got cited.
+
+- **The debug overlay started on.** `DebugOverlay::m_MiniBar` defaulted to
+  `true`, so every launch -- including a plain "play the game" one -- drew
+  the fps/position/tile readout over the 3D view before the player asked
+  for anything. `m_Page` has always defaulted to `""`, so with the mini
+  bar off the suite now renders nothing at all until asked. Shift+F1 and
+  the `mini` console command still turn it on; this is a default, not a
+  removal.
+
+- **The bug an empty inventory exposed.** With every category now empty on
+  a new character, pressing Enter on one raised
+  `Inventory.s:SelectedInventoryItem:1-Method GetAssociatedObject not
+  found` out of the interpreter. The handler's first two lines are
+
+      activeInventoryItem = inventoryTable.GetSelectedRow();
+      inv = activeInventoryItem.GetAssociatedObject();
+
+  -- with no row there is nothing to call `GetAssociatedObject` on. The
+  script's own `if (inv != null)` two lines further down is the tell: the
+  author expected to be called only with a real row in hand.
+
+  `FUN_1008d978` is the engine's whole activate path and settles it:
+
+      if (table->+0xd0 == 0) return;              // no SetCallback
+      cell = 0;
+      if (table->+0xdc < table->+0xc8) {          // selected < rowCount
+          row = walk(table->+0xc0, table->+0xdc);
+          if (row->cellCount > 0) cell = row->cells[0];
+      }
+      if (cell != 0) { ...invoke the callback... }
+
+  An empty table has rowCount 0, fails the first test, leaves `cell` zero
+  and falls straight out -- **the callback is never invoked**. The same
+  guard shape as the popup's `FUN_10088a40` (M106). This port instead
+  called the callback with *no argument* in that branch, a leftover from
+  before M60 added the cell argument to the valid case. Now it returns,
+  and it also mirrors the engine's `row->cellCount > 0` test.
+
+  This was **always reachable** -- any category the player happened to
+  have nothing in -- not something M107 introduced. M107 only made it the
+  normal case.
+
+- **New `m107_clean_start_smoke`** (13 checks, three parts): a New Game
+  (and a second one, the Load Game path) leaves the inventory empty while
+  still starting the game, and `LoadItemScripts` still loads the three
+  real fixture scripts; `inventory.s` opens for an empty character, its
+  table has no rows, activating it throws nothing and opens no action
+  popup; and `DebugOverlay` constructs with no page and no mini bar, with
+  `SetMiniBar(true)` still working.
+
+- **The suite**: 99 executables, 98 pass. Soft-fail stays at **5**.
+
+- **Live** (the real New Game flow, main menu through character creation
+  into Azra's Crossing): the main menu and the 3D view both render with
+  **no debug bar**; `inv` reports `-- inventory (0 items) -- (empty)`,
+  and no `PlayerExecutable:` item lines appear at all. The character
+  manager renders with Gold 0 and both hands empty, and the inventory
+  screen shows "Weapons / (empty)". Pressing Enter on that empty list
+  logged the `GetAssociatedObject` runtime error before the fix and
+  **zero** runtime errors after, on the identical keystroke sequence.
+  The test was controlled the same way M106's was: restoring the
+  no-argument invoke turned check 2 red, and restoring the guard turned
+  it green again.
+
 ## Next milestones (not yet started)
 
 Roughly in priority order for reaching "actually playable," not commitments:

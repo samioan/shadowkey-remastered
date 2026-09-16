@@ -474,9 +474,10 @@ int main(int argc, char** argv) {
         sk_bindings::MenuStack stack(scriptRoot, interpreter, &strings);
         sk_bindings::PlayerExecutable& player = stack.player();
 
-        player.LoadStartingInventory(stack);
+        // M107: an explicit fixture -- a New Game grants no inventory.
+        player.LoadItemScripts(stack, {"weapons/club.s", "armor/chain_coif.s", "items/bread.s"});
         const size_t itemCount = player.inventory().size();
-        std::printf("   starting inventory: %zu items\n", itemCount);
+        std::printf("   fixture inventory: %zu items\n", itemCount);
 
         // Drive some real state in through the same script-facing calls
         // the game uses.

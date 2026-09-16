@@ -49,6 +49,13 @@ public:
 
     // The single-line always-on readout (fps, position, tile) shown even
     // when no page is selected, if enabled.
+    //
+    // M107: **off by default** (Shift+F1 turns it on, `mini` toggles it
+    // from the console). It used to default on, which meant every launch
+    // -- including a plain "play the game" one -- drew a debug readout
+    // over the 3D view before the player had asked for anything. `m_Page`
+    // has always defaulted to "" (no panel), so with this the suite now
+    // renders nothing at all until it is asked to.
     void SetMiniBar(bool on) { m_MiniBar = on; }
     bool miniBar() const { return m_MiniBar; }
 
@@ -68,7 +75,7 @@ private:
     std::string m_Page;
     std::string m_EventFilter;
     std::vector<std::string> m_Watches;
-    bool m_MiniBar = true;
+    bool m_MiniBar = false;
 };
 
 }  // namespace sk_debug

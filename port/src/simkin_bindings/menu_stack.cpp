@@ -421,10 +421,14 @@ std::string MenuStack::GetSavedTimeStr(int slot) const {
 }
 
 void MenuStack::RequestGameStart(std::string zoneName) {
-    if (!m_StartingInventoryLoaded) {
-        m_Player->LoadStartingInventory(*this);
-        m_StartingInventoryLoaded = true;
-    }
+    // M107: a New Game grants **no** inventory. This used to call
+    // PlayerExecutable::LoadStartingInventory here, which handed every new
+    // character a club, a chain coif and a loaf of bread -- a real-data
+    // fixture from M10 that was never the game's own starting kit and had
+    // been visible to the player ever since. See player_executable.h for
+    // the four independent places that show the original grants nothing,
+    // and where the dagger and Blaze actually come from (world pickups
+    // placed in azra.ent).
     m_GameStartRequested = true;
     m_RequestedZone = std::move(zoneName);
 }

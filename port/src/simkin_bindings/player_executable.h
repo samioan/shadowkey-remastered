@@ -123,19 +123,47 @@ public:
     }
     const std::string& charNameBuffer() const { return m_CharNameBuffer; }
 
-    // M10: real-data verification step for this milestone, mirroring M8's
-    // real .ent -> models.idx resolution -- runs a small curated set of
-    // real armor/weapon/item .s files through `stack`'s interpreter,
-    // appending each successfully-loaded one to the inventory. Logs (to
-    // stdout) and skips any that fail to parse/run rather than aborting;
-    // not fatal if the whole set is unavailable. Called once by MenuStack
-    // when a New Game starts.
+    // M10: real-data verification step, mirroring M8's real .ent ->
+    // models.idx resolution -- runs each of `relPaths` (real armor/weapon/
+    // item .s files, relative to the script root) through `stack`'s
+    // interpreter, appending each successfully-loaded one to the
+    // inventory. Logs (to stdout) and skips any that fail to parse/run
+    // rather than aborting; not fatal if the whole set is unavailable.
     //
     // M21: takes `MenuStack&` (was `scriptRoot`/`interpreter` separately)
     // -- ItemExecutable's own constructor needs a MenuStack now too (see
     // its header comment), and `stack` already has everything this method
     // itself needs (scriptRoot(), interpreter()).
-    void LoadStartingInventory(MenuStack& stack);
+    //
+    // M107: this used to be `LoadStartingInventory()`, with the three
+    // paths baked in, and MenuStack::RequestGameStart called it on every
+    // New Game -- so a new character began holding a club, a chain coif
+    // and a loaf of bread. **The original grants nothing.** Four
+    // independent places say so:
+    //
+    //   * `menus/newgamemenu.s` -- its `StartGame` is `NewGameHook()` then
+    //     `NewGame()`, and neither it nor any menu it comes from touches
+    //     the inventory.
+    //   * `ChooseCharacter(classId)` -- case 0x2e of the Player dispatcher
+    //     (`FUN_1003f130`) -- writes the class (`+0xf38`), a portrait id
+    //     (`+0xf40 = classId*2 + 0x1f`) and `+0x3e0 = 1`. No item factory
+    //     call, no inventory write.
+    //   * the item factory itself, `FUN_100715a8`, is reached with a
+    //     literal template id from exactly two places in the whole image:
+    //     `0x34` (gold, the GiveGold path) and `300` (the corpse/loot bag
+    //     `FUN_1002c3a8` drops). Neither is a starting kit.
+    //   * no shipped script grants one either -- all 29 `GiveItem()` calls
+    //     in the corpus are `cheatmenu.s` (27) and `lothna/treasure_menu.s`.
+    //
+    // The dagger and the Blaze spell a new character does end up with are
+    // **world pickups placed in Azra's Crossing**: `azra.ent` carries a
+    // `Loot_Dagger.s` placement and an entity named "blaze" running
+    // `blaze.s` (entities.txt rows 55 and 50, the two item scripts that
+    // sit at the script root rather than under `weapons/` or `spells/`).
+    // `azra.s`'s EnterZone opens the `daggerhelp` tutorial from a trigger
+    // region for the same reason. So this method is now a **test fixture
+    // only** -- nothing on the New Game path calls it.
+    void LoadItemScripts(MenuStack& stack, const std::vector<std::string>& relPaths);
 
     const std::vector<std::unique_ptr<ItemExecutable>>& inventory() const { return m_Inventory; }
     // M101: is `item` one of the objects in the inventory list right now

@@ -274,10 +274,39 @@ void TableExecutable::ActivateSelected() {
     // `selectedItem` and then drives the whole buy/sell popup off it.
     // Passing nothing (which this did before M60) left `cell` unset and
     // the store screen with no way to name what the player picked.
-    if (m_SelectedRow < 0 || m_SelectedRow >= m_VisibleRows) {
-        m_Owner.TryInvoke(m_Callback);
-        return;
-    }
+    //
+    // M107: and when there is no such cell, the engine invokes **nothing**.
+    // `FUN_1008d978` is the whole path:
+    //
+    //     if (table->+0xd0 == 0) return;              // no SetCallback
+    //     cell = 0;
+    //     if (table->+0xdc < table->+0xc8) {          // selected < rowCount
+    //         row = walk(table->+0xc0, table->+0xdc);
+    //         if (row->cellCount > 0) cell = row->cells[0];
+    //     }
+    //     if (cell != 0) { ...invoke the callback... }
+    //
+    // An empty table has rowCount 0, fails the first test, leaves `cell`
+    // zero and falls straight out. This port called the callback with no
+    // argument instead, and that is a crash waiting for the first script
+    // that dereferences the selection -- which is most of them.
+    // `inventory.s`'s is the one the player meets first:
+    //
+    //     SelectedInventoryItem[ ()
+    //     {
+    //         activeInventoryItem = inventoryTable.GetSelectedRow();
+    //         inv = activeInventoryItem.GetAssociatedObject();
+    //
+    // -- no row, so `GetSelectedRow()` yields no object and the next line
+    // throws `Method GetAssociatedObject not found`. The script's own
+    // `if (inv != null)` two lines further down is the tell: the author
+    // expected to be called only with a real row in hand. Live-reproduced
+    // by pressing Enter on the empty Weapons list of a new character,
+    // which M107 made the normal case by no longer granting a starting
+    // kit -- but it was always reachable, on any category the player had
+    // nothing in.
+    if (m_SelectedRow < 0 || m_SelectedRow >= m_VisibleRows) return;
+    if (PeekCell(static_cast<size_t>(m_SelectedRow), 0) == nullptr) return;
     auto* handle = new TableRowHandle(*this, static_cast<size_t>(m_SelectedRow));
     skRValue arg(static_cast<skiExecutable*>(handle), true);
     m_Owner.TryInvokeWithArg(m_Callback, arg);

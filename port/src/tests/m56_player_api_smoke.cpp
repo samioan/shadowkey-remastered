@@ -136,10 +136,11 @@ int main(int argc, char** argv) {
         callInt(&player, "ChooseCharacter", 2);
     }
 
-    // ---- 3. FindInventory / HasItem, on the real starting kit ----
+    // ---- 3. FindInventory / HasItem, on a real three-item fixture ----
     {
-        player.LoadStartingInventory(stack);
-        // items/bread.s is the one starting item with a SetID.
+        // M107: an explicit fixture -- a New Game grants no inventory.
+        player.LoadItemScripts(stack, {"weapons/club.s", "armor/chain_coif.s", "items/bread.s"});
+        // items/bread.s is the one fixture item with a SetID.
         skRValue bread = callStr(&player, "FindInventory", "bread");
         Check(bread.type() == skRValue::T_Object && bread.obj() != nullptr,
               "FindInventory(\"bread\") returns the real item object");

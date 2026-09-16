@@ -42,20 +42,13 @@ bool PlayerExecutable::getValue(const skString& fieldName, const skString&, skRV
     return true;
 }
 
-void PlayerExecutable::LoadStartingInventory(MenuStack& stack) {
-    // A small, curated starting kit -- one of each real category
-    // (weapon/armor/consumable) this milestone's item native binding
-    // covers, not an attempt at "the real game's actual starting
-    // inventory" (that would need a quest/scripted-event trigger this
-    // port doesn't reproduce). Proves ItemExecutable against real game
-    // data the same way M8 proved model_archive.h against real
-    // models.idx/.huge entries.
-    static const char* kStartingItems[] = {
-        "weapons/club.s",
-        "armor/chain_coif.s",
-        "items/bread.s",
-    };
-    for (const char* relPath : kStartingItems) {
+void PlayerExecutable::LoadItemScripts(MenuStack& stack,
+                                       const std::vector<std::string>& relPaths) {
+    // Proves ItemExecutable against real game data the same way M8 proved
+    // model_archive.h against real models.idx/.huge entries. See the
+    // header for why the New Game path no longer calls this.
+    for (const std::string& path : relPaths) {
+        const char* relPath = path.c_str();
         // M79: through the real creation path first. An item built straight
         // from a script path never learns its entities.txt category, and the
         // category is what picks its C++ class -- so it gets none of that
@@ -67,7 +60,7 @@ void PlayerExecutable::LoadStartingInventory(MenuStack& stack) {
         if (typeId >= 0) {
             std::unique_ptr<ItemExecutable> item = stack.level().CreateItem(typeId, true);
             if (item) {
-                std::printf("PlayerExecutable: starting item '%s' -> \"%s\" (type=%d)\n", relPath,
+                std::printf("PlayerExecutable: fixture item '%s' -> \"%s\" (type=%d)\n", relPath,
                             item->name().c_str(), item->itemType());
                 m_Inventory.push_back(std::move(item));
                 continue;
@@ -80,7 +73,7 @@ void PlayerExecutable::LoadStartingInventory(MenuStack& stack) {
                 std::make_unique<ItemExecutable>(skString(fullPath.c_str()), loadCtxt, stack);
             skExecutableContext callCtxt(&stack.interpreter());
             RunEntityInit(*item, stack.scriptRoot(), callCtxt);
-            std::printf("PlayerExecutable: starting item '%s' -> \"%s\" (type=%d)\n", relPath,
+            std::printf("PlayerExecutable: fixture item '%s' -> \"%s\" (type=%d)\n", relPath,
                         item->name().c_str(), item->itemType());
             m_Inventory.push_back(std::move(item));
         } catch (skParseException& e) {

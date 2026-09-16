@@ -390,11 +390,9 @@ public:
     // verified against) is wired up for now; LoadGame() requests the
     // same zone since there's no real save-file format to read a
     // different one from yet.
-    // M10: the first call also runs PlayerExecutable::LoadStartingInventory
-    // (guarded by m_StartingInventoryLoaded so a later Load Game -- which
-    // also calls this, see menu_executable.cpp's LoadGame() handler --
-    // doesn't grant duplicate items on top of whatever the in-memory-only
-    // save system already has).
+    // M107: this grants no inventory. It used to (M10's curated club/coif/
+    // bread fixture); the original grants nothing on New Game -- see
+    // player_executable.h.
     void RequestGameStart(std::string zoneName);
     bool gameStartRequested() const { return m_GameStartRequested; }
     const std::string& requestedZone() const { return m_RequestedZone; }
@@ -587,7 +585,6 @@ private:
     std::vector<std::string> m_CreditsLines;
     bool m_GameStartRequested = false;
     std::string m_RequestedZone;
-    bool m_StartingInventoryLoaded = false;
 };
 
 }  // namespace sk_bindings

@@ -194,8 +194,12 @@ int main(int argc, char** argv) {
 
     // ---- 5. CountInventory ----
     {
-        stack.player().LoadStartingInventory(stack);
-        // items/bread.s is the one starting item that calls SetID
+        // M107: an explicit test fixture. This used to be the New Game
+        // path's own starting inventory; the original grants none, so the
+        // three scripts are named here instead.
+        stack.player().LoadItemScripts(
+            stack, {"weapons/club.s", "armor/chain_coif.s", "items/bread.s"});
+        // items/bread.s is the one fixture item that calls SetID
         // ("bread"); weapons/club.s and armor/chain_coif.s set no id at
         // all, which is itself worth pinning -- an unnamed item must not
         // match an empty-string query either.

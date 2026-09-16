@@ -1,7 +1,8 @@
 // M10 smoke test: proves the real inventory/character-manager chain end
-// to end against real game data -- loads a curated starting inventory by
-// actually running real armor/weapon/item .s files through the vendored
-// interpreter (PlayerExecutable::LoadStartingInventory), opens the real
+// to end against real game data -- checks that a New Game grants no
+// inventory (M107), loads a curated three-item fixture by actually running
+// real armor/weapon/item .s files through the vendored interpreter
+// (PlayerExecutable::LoadItemScripts), opens the real
 // charactermanager.s -> inventory.s screens (the same MenuStack::OpenMenu
 // path M4/M5 already proved for the main menu chain), switches inventory
 // categories via the real ArmorMenu()/WeaponsMenu() script callbacks, and
@@ -54,17 +55,35 @@ int main(int argc, char** argv) {
 
     try {
         // Mirrors main.cpp's New Game path (MenuExecutable::NewGame() ->
-        // MenuStack::RequestGameStart()) -- the first call also runs the
-        // real starting-inventory item scripts.
+        // MenuStack::RequestGameStart()).
         stack.RequestGameStart("azra");
 
         const auto& inv = stack.player().inventory();
-        std::printf("starting inventory: %zu item(s)\n", inv.size());
+        // M107: a New Game grants **nothing**. This used to be where the
+        // port handed out a club, a chain coif and a loaf of bread -- M10's
+        // real-data fixture, mistaken for the game's own starting kit and
+        // shipped to the player for 97 milestones. See
+        // player_executable.h for the evidence that the original grants no
+        // inventory at all.
+        if (!inv.empty()) {
+            std::printf("m10_inventory_smoke: FAILED a New Game must grant no items, got %zu\n",
+                        inv.size());
+            for (const auto& item : inv) std::printf("  unexpected: \"%s\"\n", item->name().c_str());
+            return 1;
+        }
+        std::printf("New Game grants 0 items  OK\n");
+
+        // The rest of this test needs items to work on, so load the same
+        // three real scripts explicitly -- one weapon, one armour, one
+        // consumable, which is all the fixture was ever for.
+        stack.player().LoadItemScripts(
+            stack, {"weapons/club.s", "armor/chain_coif.s", "items/bread.s"});
+        std::printf("fixture inventory: %zu item(s)\n", inv.size());
         for (const auto& item : inv) {
             std::printf("  \"%s\" type=%d\n", item->name().c_str(), item->itemType());
         }
         if (inv.size() != 3) {
-            std::printf("m10_inventory_smoke: FAILED expected 3 starting items, got %zu\n",
+            std::printf("m10_inventory_smoke: FAILED expected 3 fixture items, got %zu\n",
                         inv.size());
             return 1;
         }

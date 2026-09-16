@@ -212,10 +212,17 @@ ItemExecutable::StatusEffect ItemExecutable::statusEffect() const {
         endsWith("spells/u_ignite_foe_8_lvl8.s")) {
         return kEffectIgniteFoe;
     }
-    // M37: the four damage-only branches. Blaze is the one spell the game
-    // hands out at the very start (menus/newgamemenu.s gives it to every
-    // new character), and until now it was the *only* spell falling
-    // through to the from-scratch RollSpellDamage() path.
+    // M37: the four damage-only branches. Blaze is the spell a new
+    // character picks up first, and until now it was the *only* spell
+    // falling through to the from-scratch RollSpellDamage() path.
+    //
+    // M107 correction: this comment used to say "the game hands out at
+    // the very start (menus/newgamemenu.s gives it to every new
+    // character)". `newgamemenu.s` grants nothing -- its whole StartGame
+    // is `NewGameHook()` then `NewGame()`. Blaze is a **placement**:
+    // `azra.ent` carries an entity named "blaze" running `blaze.s`
+    // (entities.txt row 50), picked up in Azra's Crossing like the
+    // `Loot_Dagger.s` placed beside it.
     if (endsWith("blaze.s") || endsWith("spells/u_blaze_lvl5.s") ||
         endsWith("spells/u_blaze_lvl10.s")) {
         return kEffectBlaze;
