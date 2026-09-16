@@ -75,4 +75,17 @@ bool TryHandleRandom(const skString& methodName, skRValueArray& args, skRValue& 
     return true;
 }
 
+bool TryHandleMultiplayerQuery(const skString& methodName, skRValueArray& args,
+                                skRValue& returnValue) {
+    if (args.entries() != 0) return false;
+    if (methodName != skString("IsMultiplayer") &&
+        methodName != skString("IsMultiplayerClient")) {
+        return false;
+    }
+    // See the declaration: `engine+0x5c0` is zero in this port and there is
+    // nothing that could set it, so both answer false.
+    returnValue = skRValue(false);
+    return true;
+}
+
 }  // namespace sk_bindings

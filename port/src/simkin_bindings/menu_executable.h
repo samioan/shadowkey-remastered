@@ -34,6 +34,7 @@
 // AddButton("Cymric",...) or AddFloatingText(healthText,...)), so which
 // one applies is decided per call via the argument's own skRValue::type().
 
+#include <ctime>
 #include <map>
 #include <memory>
 #include <string>
@@ -444,6 +445,28 @@ public:
     // body against it.
     void DisplayMessagePopup(const std::string& text);
 
+    // M104: `DelayOnEnter()` -- menu binding 0 on the `0x14dd4` class, two
+    // instructions: `menu+0xc8 = time() + kEnterDelaySeconds`. The reader is
+    // `FUN_10032868`, the row-activate handler that every menu vtable
+    // carries, whose first guard is `time() >= menu+0xc8`. So the screen
+    // ignores the select key for three seconds after it opens, and nothing
+    // else about it changes -- navigation and the back key are unaffected.
+    //
+    // One shipped caller: `herbhurrah.s`, the screen `ratherb.s`'s OnKilled
+    // opens when the player kills Azra's herb rat. It is a one-button
+    // "you found it" page that appears the instant a fight ends, i.e. while
+    // the player is still holding the key they were attacking with, and the
+    // delay is what stops it being dismissed before it is read. The whole
+    // chain is this milestone's: that OnKilled also asks
+    // `Level.IsMultiplayer()` three times on its way here.
+    //
+    // A `std::time_t` deadline, like the engine's -- wall-clock seconds,
+    // not ticks, so it survives a pause. `now` is a parameter so a test can
+    // ask about a moment other than this one.
+    static constexpr int kEnterDelaySeconds = 3;
+    bool enterDelayed(std::time_t now) const;
+    std::time_t enterAllowedAt() const { return m_EnterAllowedAt; }
+
     // Used by RowOwnerRef-derived widgets (MenuItemHandle,
     // TextAreaExecutable) to implement .SetSelectable(bool) and (for
     // TextAreaExecutable) .SetLocalizedText(id).
@@ -593,6 +616,9 @@ private:
     // M103: see messagePopup(). Owning, and deliberately outside
     // m_KnownPopups so ClearMenu() cannot drop it.
     std::unique_ptr<PopupMenuExecutable> m_MessagePopup;
+    // M104: menu+0xc8. 0 means "never delayed", which is every screen but
+    // herbhurrah.s.
+    std::time_t m_EnterAllowedAt = 0;
 
     // M10: SetInventoryList()'s remembered target -- DisplayWeaponsPage()/
     // DisplayArmorMenu()/etc. populate whichever Table this last pointed

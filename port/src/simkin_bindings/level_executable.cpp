@@ -209,6 +209,10 @@ bool LevelExecutable::method(const skString& methodName, skRValueArray& args,
     if (m_ZoneScript && m_ZoneScript->ScriptMethod(methodName, args, returnValue, context)) {
         return true;
     }
+    // M104: Level's own `0x14d38` cases 0 and 1. Last, after the zone
+    // script, because a zone root that defined a method by either name
+    // would shadow them -- none does, but the order is the engine's.
+    if (TryHandleMultiplayerQuery(methodName, args, returnValue)) return true;
     return SoftFailNativeCall("Level", methodName, args, returnValue);
 }
 

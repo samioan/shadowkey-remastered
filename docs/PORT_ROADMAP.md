@@ -9732,6 +9732,107 @@ soft-fails 39 -> 39, all 14 tracked `.ppm` renders byte-identical,
       (30346, 11904)`, took every rat in the level from 23 health to 9, and
       cost the thrower 4 health on its own separate roll.
 
+- [x] **M104 -- the last of the audit list, and the screen a death was
+      never allowed to show.** Audit items 6 and 7, which are small; the
+      milestone's weight is in what verifying them uncovered.
+    - **`IsMultiplayer` / `IsMultiplayerClient`** (audit item 7). Root
+      bindings 0x3a/0x3b, re-registered on Level (`0x14d38` cases 0 and 1)
+      and the sprite-attach mixin (`0x14d14` case 1), which is why a script
+      can write either `Level.IsMultiplayer()` or a bare
+      `IsMultiplayerClient()`. Both read `engine+0x5c0`, "a Bluetooth
+      session is up": false here, always, and that is not a stand-in --
+      false is what the shipped game answers in single player and what all
+      **76 call sites across 24 scripts** are written around. They were
+      already *answering* false by soft-failing to 0, so this changes no
+      behaviour; it changes the log, and it stops a milestone from having
+      to wonder. Shared as `TryHandleMultiplayerQuery` next to M21's
+      `TryHandleRandom` -- the same "bare-reachable global" shape.
+    - **`SetFocus(n)`** (audit item 6). Popup case 4 is case 5
+      (`SetSelectedItem`) with one extra line: an out-of-range index is
+      reported and then **stored anyway**, not clamped. Two callers, both
+      `buysell.s`, so the store's "your trade cannot use this" prompt now
+      opens pointing at *Buy Anyway* instead of at nothing.
+    - **`DelayOnEnter()`** (audit item 6). Two instructions --
+      `menu+0xc8 = time() + 3` -- read by `FUN_10032868`, the row-activate
+      handler every menu vtable carries, whose first guard is
+      `time() >= menu+0xc8`. So the screen ignores the select key for three
+      seconds and nothing else about it changes. Wall-clock seconds, like
+      the engine's, so the boundary has the engine's own one-second
+      granularity. One caller: `herbhurrah.s`, the screen the Azra herb rat
+      opens when killed -- a one-button "you found it" page that appears
+      the instant a fight ends, while the player is still holding the key
+      they were attacking with.
+    - **And that screen had never been shown.** Verifying DelayOnEnter
+      meant opening herbhurrah.s for real, which is where this stopped
+      being a small milestone: **`handleDeath` never handed the frame to a
+      menu the death opened.** The Use path and the OnDetect arm both
+      compare `currentMenu()` before and after and pause into the result
+      (M80's lesson); the death path did not, so the menu was built and
+      then drawn over by the 3D view on the same tick. **21 shipped
+      handlers open a screen this way** -- `ratherb.s`'s OnKilled, on the
+      game's *first quest*, plus the Crypt of Hearts shade waves, the four
+      Skyrim raiders, the three raider loot rooms, and through OnDecay the
+      five Dark Star pit bosses and both of Pergan Asuul's killed screens.
+      Fixed on both hooks, with the same `ClearPendingEdges()` the OnDetect
+      arm carries for the same M90 reason: the key that landed the killing
+      blow is still a pending edge.
+    - **`IsRightQueue` is real, and this port's own comment said it was
+      not.** It is not in the 702-entry trie -- but M93 already established
+      that some classes reach their methods through a plain `wcscmp` chain
+      instead, and the action-queue screen is another: `FUN_10033dd0`
+      compares against **`MoveItem`, `GetLastItem`, `IsRightQueue` and
+      `UpdateTextItems`** before chaining on. Two milestones' comments
+      asserted these were absent from the binary and that the shipped
+      screen was therefore non-functional, and cited the trie census as
+      proof. *"Not in the JSON" is not evidence of absence* -- the test
+      that settles it is whether the name is a wide literal in the image.
+      `IsRightQueue()` is one line of that chain (`menu+0xcc`, the hand
+      byte `ShowActionQueue` copies on) and its only caller picks a title
+      with it, so it is safe to answer alone -- implemented here. Which
+      immediately exposed one more: **`ShowActionQueue` opened the screen
+      and copied the hand flag afterwards**, so `OnDisplay`'s
+      `IsRightQueue()` read the previous hand and the screen was always
+      headed "Left Hand". The engine resolves, copies, *then* opens.
+    - **Test**: `port/src/tests/m104_last_natives_smoke.cpp`, 31 checks:
+      the multiplayer pair answering false on Level/item/creature/menu and
+      `ratherb.s`'s OnKilled taking its single-player arm; SetFocus sharing
+      SetSelectedItem's field and not clamping; herbhurrah.s's deadline,
+      the refused activation inside it and the allowed one after, with
+      navigation ungated; and a scan of `6r51.app` for each name still in
+      the soft-fail log.
+    - **The suite**: 96 executables, 95 pass. Soft-fail lines **10 -> 7**,
+      and those seven are now fully accounted for: `HitTarget`,
+      `SetMagicResistable` and `MenuQuit` are **not literals in the image
+      at all**, so they miss on the real device too; `Item: Init(0)` is
+      this suite calling `Init` on a loot-bag script that defines no
+      handler; and the two `UpdateTextItems` lines are the action-queue
+      chain above. Gaps tool: **17 -> 15 names**, 451 of 648 -- and all 15
+      are the multiplayer/Bluetooth set plus `AutoSave`, i.e. **every
+      trie-registered native a shipped script calls that is not
+      multiplayer is now implemented.**
+    - **Live** (azra, `port/debug/m104_delay_queue.cfg`): killing the herb
+      rat now shows "You find a bundle of strange herbs. Perhaps you should
+      take them to the temple." -- the first quest's reward screen, which
+      this port had never displayed. Enter 1.6s later was refused and the
+      screen stayed up; the next press, past the whole-second deadline,
+      closed it. And `SetRightActionQueue` + `ShowActionQueue` now heads the
+      action queue "Right Hand" instead of "Left Hand" (its five rows still
+      read "item" -- that is `UpdateTextItems`, below).
+
+- [ ] **Next: the action-queue screen's own four natives.** `MoveItem`,
+      `GetLastItem`, `UpdateTextItems` and `IsRightQueue` (done) on the
+      `wcscmp` chain `FUN_10033dd0`, driving `actionqueue.s` and
+      `removequeue.s` -- the quick-use hotbar. `UpdateTextItems` hides
+      every widget on the screen, walks the player's five queue slots for
+      the selected hand (`FUN_100455b0(player, hand)`), and fills one
+      widget per held item: text from the entity's name string,
+      `widget+0x90` pointed at the object, visible, and the last one
+      remembered at `menu+0xd0` for `GetLastItem()` to return.
+      `MoveItem(item, up)` finds the queue slot holding that entity
+      (`FUN_10045568`) and moves it (`FUN_1006c628`). Until then the screen
+      shows five rows reading "item" and its Drop/Up/Down popup has nothing
+      to act on.
+
 ## Next milestones (not yet started)
 
 Roughly in priority order for reaching "actually playable," not commitments:
@@ -10145,16 +10246,22 @@ What it found, most serious first:
       with no market value -- and two paths that destroyed items the engine
       keeps: `OnUsedBy`'s unconditional mark and `RemoveRow` aliased to the
       Drop action.
-- [ ] **6. Menu natives and the third event**: `SetFocus` x2
-      (`buysell.s`) and `DelayOnEnter` (`herbhurrah.s`). *M103 took
-      `GetMessagePopup` and `OnMsgPopupClosed` (both `inventory.s`), which
-      are the same `menu+0xa8` object `DisplayPopup` creates.*
-- [ ] **7. `IsMultiplayer`/`IsMultiplayerClient` off the menu class.**
-      About 40 calls from Level, zone scripts, creatures and items
-      soft-fail and read 0 -- which picks the single-player branch, so the
-      behaviour is right by accident and the log is noisy. The names are
-      registered on Level (`0x14d38`) and the sprite-attach mixin
-      (`0x14d14`) as well as the root.
+- [x] **6. Menu natives and the third event**: Done -- M103 took
+      `GetMessagePopup` and `OnMsgPopupClosed` (both `inventory.s`, the
+      same `menu+0xa8` object `DisplayPopup` creates), M104 the remaining
+      `SetFocus` x2 (`buysell.s`) and `DelayOnEnter` (`herbhurrah.s`).
+      M104 also found that the screen DelayOnEnter guards had never been
+      displayed at all: a creature death never handed the frame to a menu
+      its OnKilled/OnDecay opened.
+- [x] **7. `IsMultiplayer`/`IsMultiplayerClient` off the menu class.**
+      Done in M104. 76 calls (not the ~40 estimated here) from Level, zone
+      scripts, creatures and items soft-failed and read 0 -- which picks
+      the single-player branch, so the behaviour was right by accident and
+      the log was noisy. The names are registered on Level (`0x14d38`) and
+      the sprite-attach mixin (`0x14d14`) as well as the root.
+
+**The audit list is complete.** What replaced it: the action-queue
+screen's four `wcscmp`-chain natives, at the end of the M104 entry above.
 - **Explicitly not planned: multiplayer and Bluetooth** (~25 of the 55).
   `JoinGame`, `MPPreHost`, `GetBluetoothName`, `RejectClient` and the rest
   need an N-Gage Bluetooth session this port has no counterpart for, and

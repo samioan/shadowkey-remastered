@@ -54,6 +54,31 @@ void SetSoftFailObserver(SoftFailObserver observer);
 // same "try, then soft-fail" shape as every other binding class.
 bool TryHandleRandom(const skString& methodName, skRValueArray& args, skRValue& returnValue);
 
+// M104: `IsMultiplayer()` / `IsMultiplayerClient()`, the other pair of
+// bare-reachable globals -- root-class bindings 0x3a and 0x3b
+// (`FUN_10078de4`), re-registered on Level (`0x14d38` cases 0 and 1) and on
+// the sprite-attach mixin (`0x14d14` case 1), which is why a script can
+// write `Level.IsMultiplayer()` and a bare `IsMultiplayerClient()` and mean
+// the same thing. Both read one byte:
+//
+//     IsMultiplayer()       = engine+0x5c0
+//     IsMultiplayerClient() = engine+0x5c0 && !FUN_1000db04(engine+0x5cc)
+//
+// -- `engine+0x5c0` being "a Bluetooth session is up". This port has no
+// session and no counterpart for one (see the roadmap's "explicitly not
+// planned"), so both are false, always, and that is not a stand-in: false
+// is what the shipped game answers in single player, and it is the answer
+// every one of the 76 call sites is written around.
+//
+// They were *already* answering false, by soft-failing to 0 -- so this
+// changes no behaviour at all. What it changes is the log: 76 sites across
+// 24 scripts, including `ratherb.s`'s OnKilled (the Azra herb rat, on the
+// game's first quest), `twilite/pergan_asuul.s`, all three crypt zone
+// roots and both Dragonfield loot bags. A soft-fail line is a claim that
+// the port does not know what the engine does here, and it does.
+bool TryHandleMultiplayerQuery(const skString& methodName, skRValueArray& args,
+                                skRValue& returnValue);
+
 // M38: keep a native object assigned to a *pre-declared* script field.
 //
 // The vendored Simkin's skTreeNodeObject::setValue() stores a non-TreeNode

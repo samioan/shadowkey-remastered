@@ -715,3 +715,7 @@ target_link_libraries(walkto_inventory_smoke PRIVATE sk_bindings sk_world)
 # M103 milestone smoke test -- see src/tests/m103_item_natives_smoke.cpp.
 add_executable(item_natives_smoke src/tests/m103_item_natives_smoke.cpp)
 target_link_libraries(item_natives_smoke PRIVATE sk_bindings sk_world)
+
+# M104 milestone smoke test -- see src/tests/m104_last_natives_smoke.cpp.
+add_executable(last_natives_smoke src/tests/m104_last_natives_smoke.cpp)
+target_link_libraries(last_natives_smoke PRIVATE sk_bindings sk_world)

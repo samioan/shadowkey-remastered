@@ -5406,7 +5406,19 @@ int main(int argc, char** argv) {
                     // first -- FUN_1001817c drops it from the entity list
                     // this tick walks, so a corpse destroyed before its five
                     // seconds never decays and never runs OnDecay.
-                    if (!m.script->destroyed()) m.script->TickDecay();
+                    if (!m.script->destroyed()) {
+                        // M104: OnDecay is the other death hook that opens
+                        // screens -- the five Dark Star pit bosses and both
+                        // Pergan Asuuls -- so it needs the same hand-off the
+                        // OnKilled path below got. See handleDeath().
+                        sk_bindings::MenuExecutable* beforeDecayMenu = stack.currentMenu();
+                        m.script->TickDecay();
+                        if (stack.currentMenu() != beforeDecayMenu) {
+                            inGame = false;
+                            gamePausedForMenu = true;
+                            input.ClearPendingEdges();
+                        }
+                    }
                     // M23: destroyed() (a real zone-root script's
                     // DestroyObjectMirror()) removes an entity from play
                     // as fully as death does, everywhere alive() is
@@ -6175,7 +6187,33 @@ int main(int argc, char** argv) {
                     // own position -- before OnKilled runs and before the
                     // loot. See MonsterExecutable::PayKillExperience.
                     dead.script->PayKillExperience();
+                    // M104: and a death that opens a screen has to be handed
+                    // the frame, the same way the Use path and the OnDetect
+                    // arm already do it. Without this the menu is built and
+                    // then drawn over by the 3D view on the same tick --
+                    // M80's shape exactly, in a path M80 did not cover.
+                    //
+                    // 21 shipped handlers do it: `ratherb.s`'s OnKilled, the
+                    // Azra herb rat on the game's first quest, plus the
+                    // Crypt of Hearts shade waves, the four Skyrim raiders,
+                    // the three raider loot rooms, the five Dark Star pit
+                    // bosses and both of Pergan Asuul's killed screens (the
+                    // last seven through OnDecay, which reaches this same
+                    // hand-off via TickDecay).
+                    sk_bindings::MenuExecutable* beforeDeathMenu = stack.currentMenu();
                     dead.script->InvokeOnKilled();
+                    if (stack.currentMenu() != beforeDeathMenu) {
+                        // Same reasoning as the OnDetect arm's: pause at
+                        // frame granularity rather than letting the rest of
+                        // the tick run inside a frame the world has stopped.
+                        // And its ClearPendingEdges(), for the same M90
+                        // reason -- the key that landed the killing blow is
+                        // still a pending edge, and the screen that just
+                        // opened would eat it on its first frame.
+                        inGame = false;
+                        gamePausedForMenu = true;
+                        input.ClearPendingEdges();
+                    }
                     spawnLoot(dead);
                     // M24: a real zone-root script's own kill-count trigger
                     // (ghstpass.s's zombieTrigger etc.) -- no-ops if this

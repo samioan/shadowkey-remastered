@@ -209,6 +209,12 @@ bool EntityBaseRef::HandleEntityBaseNative(const skString& methodName, skRValueA
     // so `GetPlayer().Random(40, 100)` -- `ghchestgold.s`'s gold roll --
     // stops answering 0.
     if (TryHandleRandom(methodName, args, returnValue)) return true;
+    // M104: and the same for the multiplayer pair -- root bindings 0x3a/0x3b
+    // plus `0x14d14` case 1, so every entity answers them. See
+    // native_binding_common.h. This reaches `ratherb.s`'s OnKilled, the
+    // Dragonfield and Lothna loot bags, the five Dark Star East creatures
+    // and Pergan Asuul.
+    if (TryHandleMultiplayerQuery(methodName, args, returnValue)) return true;
     return false;
 }
 

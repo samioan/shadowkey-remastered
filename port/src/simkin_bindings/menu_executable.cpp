@@ -745,7 +745,12 @@ void MenuExecutable::ApplySliderValue(const SliderExecutable& slider) {
     }
 }
 
+bool MenuExecutable::enterDelayed(std::time_t now) const { return now < m_EnterAllowedAt; }
+
 void MenuExecutable::ActivateSelected() {
+    // M104: `FUN_10032868`'s own first guard -- the row's callback does not
+    // run while `time() < menu+0xc8`. See the DelayOnEnter handler.
+    if (enterDelayed(std::time(nullptr))) return;
     if (m_SelectedItem < 1 || static_cast<size_t>(m_SelectedItem) > m_Rows.size()) return;
     MenuRow& row = m_Rows[static_cast<size_t>(m_SelectedItem - 1)];
     switch (row.kind) {
@@ -1294,6 +1299,11 @@ bool MenuExecutable::method(const skString& methodName, skRValueArray& args,
     // around exactly that: `msgPopup=GetMessagePopup(); if (msgPopup !=
     // null)`, so returning a freshly built popup here instead of null would
     // make every Use of an item look like it had something to say.
+    // M104: menu binding 0 -- see enterDelayed()'s declaration.
+    if (methodName == skString("DelayOnEnter") && args.entries() == 0) {
+        m_EnterAllowedAt = std::time(nullptr) + kEnterDelaySeconds;
+        return true;
+    }
     if (methodName == skString("DisplayPopup") && args.entries() == 1) {
         DisplayMessagePopup(ToStdString(args[0].str()));
         return true;
@@ -1516,13 +1526,15 @@ bool MenuExecutable::method(const skString& methodName, skRValueArray& args,
         returnValue = skRValue(true);
         return true;
     }
-    if (methodName == skString("CheatsActivated") || methodName == skString("IsMultiplayer") ||
-        methodName == skString("IsMultiplayerClient") || methodName == skString("ArenaActive")) {
-        // No multiplayer or cheat state exists yet -- a fixed "off"
-        // answer is the correct behavior, not a soft-fail placeholder.
+    if (methodName == skString("CheatsActivated") || methodName == skString("ArenaActive")) {
+        // No cheat or arena state exists yet -- a fixed "off" answer is the
+        // correct behavior, not a soft-fail placeholder.
         returnValue = skRValue(false);
         return true;
     }
+    // M104: the multiplayer pair moved to the shared helper, which every
+    // other class now chains too -- same answer, one place.
+    if (TryHandleMultiplayerQuery(methodName, args, returnValue)) return true;
     if (methodName == skString("UnFadeMusic") || methodName == skString("FadeMusic") ||
         methodName == skString("ClearNewGameHook")) {
         return true;
@@ -1861,34 +1873,60 @@ bool MenuExecutable::method(const skString& methodName, skRValueArray& args,
         m_QueueHandIsRight = true;
         return true;
     }
-    if (methodName == skString("IsLeftQueue") && args.entries() == 0) {
-        // Decompiled ground truth (FUN_10034d8c case 2): the real native
-        // returns the raw hand-selection byte UN-negated -- true exactly
-        // when the RIGHT hand was most recently selected, the opposite of
-        // what its name says. A genuine naming bug in the shipped binary,
-        // reproduced faithfully here; harmless since no real script ever
-        // calls IsLeftQueue() (actionqueue.s calls the never-registered
-        // "IsRightQueue()" instead, which always soft-fails to false/null
-        // -- see actionqueue.s's OnDisplay(), confirmed by this session's
-        // decompile that no such native binding exists in the real
-        // 702-entry table).
+    // M104 correction: `IsRightQueue` **is** a real native, and the claim
+    // that used to stand here -- that it is absent from the 702-entry table
+    // and soft-fails in the shipped game too -- was wrong. It is not in the
+    // trie, but M93 already established that three classes reach their
+    // methods through a plain `wcscmp` chain instead, and the action-queue
+    // screen is a fourth: `FUN_10033dd0` compares against `MoveItem`,
+    // `GetLastItem`, `IsRightQueue` and `UpdateTextItems` before chaining
+    // on. Neither coverage tool can see a name that reaches its handler
+    // that way, and neither can the binding census, so "not in the JSON"
+    // is not evidence of anything.
+    //
+    // `IsRightQueue()` is one line of that chain -- `SIMKIN_ord40(ret,
+    // menu+0xcc)`, the same hand byte `ShowActionQueue` copies onto the
+    // screen it opens, which is exactly this port's m_QueueHandIsRight. Its
+    // one caller is `actionqueue.s`'s OnDisplay, choosing between title
+    // 3779 and 3778, so until now the screen was always headed "Left
+    // Queue". Nothing else on that screen depends on it, which is why this
+    // one is safe to answer on its own -- see the roadmap for the other
+    // three, which are the screen's actual contents.
+    if (args.entries() == 0 &&
+        (methodName == skString("IsLeftQueue") || methodName == skString("IsRightQueue"))) {
+        // And `IsLeftQueue` returns the same byte UN-negated
+        // (`FUN_10034d8c` case 2) -- true when the RIGHT hand was selected,
+        // the opposite of what its name says. A naming bug in the shipped
+        // binary, reproduced; no shipped script calls it.
         returnValue = skRValue(m_QueueHandIsRight);
         return true;
     }
     if (methodName == skString("ShowActionQueue") && args.entries() == 0) {
         // Real engine (FUN_10034d8c case 3): resolves the actionqueue.s
         // menu slot, copies the CALLER's hand flag onto it, then actually
-        // pushes/opens it. actionqueue.s's own row-population
-        // (UpdateTextItems()/GetLastItem()) isn't a registered native at
-        // all in the real binary, so the screen it opens genuinely never
-        // shows real item names or wires up DropItem/ItemUp/ItemDown to a
-        // real object in the shipped game either -- this port reproduces
-        // that same (non-functional) screen rather than inventing a
-        // working one, faithful to the real, confirmed-broken behavior.
-        m_Stack.OpenMenu("ActionQueue");
-        if (auto* target = dynamic_cast<MenuExecutable*>(m_Stack.currentMenu())) {
+        // pushes/opens it.
+        //
+        // M104 correction: this used to say the screen's own row population
+        // (`UpdateTextItems`/`GetLastItem`) "isn't a registered native at
+        // all", so the port left the screen blank on purpose. Both are real
+        // -- they live on the `wcscmp` chain `FUN_10033dd0`, alongside
+        // `MoveItem` and the `IsRightQueue` above. `UpdateTextItems` hides
+        // every widget, walks the player's five queue slots for this hand,
+        // and fills one widget per held item (text from the entity's name,
+        // `widget+0x90` pointing at the object, the last one remembered at
+        // `menu+0xd0` for `GetLastItem`). So the shipped screen does work,
+        // and this port's is the one that is blank. Recorded as the next
+        // milestone rather than bolted on here.
+        // M104: **resolve, copy, then open** -- the engine's own order, and
+        // the one this port had inverted. `OpenMenu` runs the screen's
+        // `OnDisplay`, which is where `actionqueue.s` asks `IsRightQueue()`
+        // to pick its title, so copying the flag afterwards left the screen
+        // headed with the previous hand's title. Invisible until the
+        // `IsRightQueue` above started answering.
+        if (auto* target = m_Stack.GetOrCreateMenu("ActionQueue")) {
             target->SetQueueHandIsRight(m_QueueHandIsRight);
         }
+        m_Stack.OpenMenu("ActionQueue");
         return true;
     }
     if (methodName == skString("ShowRemovedQueue") && args.entries() == 0) {

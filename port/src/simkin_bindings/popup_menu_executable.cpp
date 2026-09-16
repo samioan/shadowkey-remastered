@@ -1,5 +1,6 @@
 #include "simkin_bindings/popup_menu_executable.h"
 
+#include <cstdio>
 #include <utility>
 
 #include "simkin_bindings/menu_executable.h"
@@ -65,6 +66,29 @@ bool PopupMenuExecutable::method(const skString& methodName, skRValueArray& args
             }
             if (args.entries() >= 3) item.callback = ToStdString(args[2].str());
         }
+        return true;
+    }
+    // M104: popup binding 4 (`FUN_10087a60` case 4). It is case 5 --
+    // `SetSelectedItem` -- with one extra line: if the index is past the
+    // item count it logs a warning first, and then writes `popup+0xa0`
+    // anyway. Same field, same 0-based index (M91), so this shares the
+    // handler below rather than restating it.
+    //
+    // Two shipped callers, both `buysell.s`: `msgPopup.SetFocus(1)` on the
+    // "your trade cannot use this" prompt, whose row 1 is "Buy Anyway" and
+    // whose row 0 is made unselectable on the next line; and
+    // `inventoryInfoPopup.SetFocus(3)`. Until now both soft-failed, so the
+    // store's warning opened pointing at nothing and the first D-pad press
+    // was spent finding a row.
+    if (methodName == skString("SetFocus") && args.entries() == 1) {
+        const int index = args[0].intValue();
+        if (index >= static_cast<int>(m_Items.size())) {
+            // `FUN_1000e02c(...)` -- the engine's own out-of-range notice.
+            // It does not clamp, and neither does this.
+            std::printf("  [popup] SetFocus(%d) past the %d items this popup has\n", index,
+                        static_cast<int>(m_Items.size()));
+        }
+        m_SelectedItem = index + 1;  // internal 1-based, see selectedItem()
         return true;
     }
     if (methodName == skString("SetBack") && args.entries() == 1) {
