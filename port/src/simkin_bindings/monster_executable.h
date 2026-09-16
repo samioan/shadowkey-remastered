@@ -612,6 +612,42 @@ public:
     // / "30%". The one-argument form `AddSpell(Item)` stores 100, i.e.
     // always.
     static constexpr int kSpellSlots = 4;
+    // M102: what this creature has been handed -- its spells, and anything
+    // `AddInventoryItem` gave it. The engine keeps one chain for both.
+    const std::vector<std::unique_ptr<ItemExecutable>>& inventory() const { return m_Inventory; }
+
+    // ---- M102: WalkTo, Actor case 0x1e ---------------------------------
+    //
+    //   WalkTo(x, y [, a3 = 0] [, a4 = 2])  ->  vtable[0x1fc](x, y, a3, a4, 1)
+    //
+    // and that slot (`FUN_10005be4`, a creature's `FUN_10086d60` wrapping it
+    // to break off any animation first) is nine stores: the goal at
+    // `+0x1bc`/`+0x1c0`, `a3`/`a4` at `+0x1d0`/`+0x1d4` (which nothing in
+    // the image ever reads back), the heading turned to face the goal, and
+    // the order flag `+0x1b9 = 1`. The entity's own per-frame move
+    // (`FUN_10006840`, vtable `+0x24`) then steers toward the goal every
+    // tick while that flag is set.
+    //
+    // **Nothing stops it on arrival.** The arrival slot (`+0x204`,
+    // FUN_10005ad4) and `SetWalkToDist`'s `+0x1d8` are both dead code in the
+    // shipped build -- no caller, no reader -- and `ReachedDestination`,
+    // which `bbrawler_talkrun.s` defines for exactly this, is not a literal
+    // anywhere in the image. So the walk ends only when the AI tick
+    // overwrites the goal (chasing) or clears the flag (losing a target).
+    // That script is also unreferenced: no `.ent` placement, no
+    // entities.txt row, nothing spawns it. This is a faithful native with
+    // no live caller, and the "walks up to you and then turns hostile"
+    // sequence it reads like never ran in the shipped game either.
+    void SetWalkOrder(int x, int y) {
+        m_WalkOrderActive = true;
+        m_WalkOrderX = x;
+        m_WalkOrderY = y;
+    }
+    // `+0x1b9 = 0`: the AI tick drops the order when it takes over.
+    void ClearWalkOrder() { m_WalkOrderActive = false; }
+    bool walkOrderActive() const { return m_WalkOrderActive; }
+    int walkOrderX() const { return m_WalkOrderX; }
+    int walkOrderY() const { return m_WalkOrderY; }
     // `0xfaa`. AddSpell caches the slot of a Blind spell specially, in
     // `monster+0x32c`, so the AI can avoid re-casting it -- see
     // ChooseSpell().
@@ -968,7 +1004,14 @@ private:
     // (`FUN_1006d510(spell, monster)`) -- so the unique_ptrs live here,
     // taken from LevelExecutable's pending-CreateEntity slot the same way
     // ItemExecutable::AddObject already claims a loot bag's contents.
-    std::vector<std::unique_ptr<ItemExecutable>> m_OwnedSpells;
+    // M102: `actor+0x1f8`, the creature's own inventory chain. Both
+    // AddSpell and AddInventoryItem append to it (the engine's two cases run
+    // the identical three calls), which is why one list holds both.
+    std::vector<std::unique_ptr<ItemExecutable>> m_Inventory;
+    // M102: the script's own move order -- see SetWalkOrder().
+    bool m_WalkOrderActive = false;
+    int m_WalkOrderX = 0;
+    int m_WalkOrderY = 0;
     SpellSlot m_SpellSlots[kSpellSlots];
     int m_BlindSpellSlot = -1;  // monster+0x32c, 0xff when there is none
     int m_MeleeRoll = 0;        // monster+0x304

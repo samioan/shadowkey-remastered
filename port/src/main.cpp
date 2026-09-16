@@ -5719,6 +5719,44 @@ int main(int argc, char** argv) {
                         continue;
                     }
 
+                    // ---- M102: the script's own walk order ----
+                    //
+                    // `WalkTo(x, y)` sets the same move goal the AI writes,
+                    // and the entity's per-frame move steers toward it while
+                    // the flag is up (monster_executable.h). It is stepped
+                    // here, in the arm where nothing else is driving the
+                    // creature: the chase arm above overwrites the goal with
+                    // its target every tick, exactly as the engine does, and
+                    // the aggressive acquire below drops the order outright.
+                    // Nothing stops the walk on arrival -- the engine has no
+                    // arrival test -- so a creature that gets there stands
+                    // pushing into the spot, which is what the original does.
+                    if (m.script->walkOrderActive() && gameZone && !m.script->paralyzed() &&
+                        !m.script->immobile()) {
+                        const float wx = static_cast<float>(m.script->walkOrderX()) - m.x;
+                        const float wy = static_cast<float>(m.script->walkOrderY()) - m.y;
+                        const float wdist = std::sqrt(wx * wx + wy * wy);
+                        if (wdist > 1.0f) {
+                            const float step = (std::min)(kMonsterMoveSpeed, wdist);
+                            const float dirX = wx / wdist, dirY = wy / wdist;
+                            for (float steer : kSteerAngles) {
+                                const float cs = std::cos(steer), sn = std::sin(steer);
+                                const float sx = dirX * cs - dirY * sn;
+                                const float sy = dirX * sn + dirY * cs;
+                                const float nx = m.x + sx * step;
+                                const float ny = m.y + sy * step;
+                                if (!gameZone->CircleHitsWall(nx, ny, kMonsterRadius)) {
+                                    m.x = nx;
+                                    m.y = ny;
+                                    m.facingYaw = std::atan2(sy, sx);
+                                    break;
+                                }
+                            }
+                            m.z = gameZone->FloorHeightAt(m.x, m.y);
+                            setAnimClip(m, m.script->walkAnimation(), false);
+                        }
+                    }
+
                     // ---- the look arm: package 2, or 3 with no target ----
                     //
                     // One perception test, then a split on one byte. The
@@ -5815,6 +5853,10 @@ int main(int argc, char** argv) {
                     m.hasTarget = true;
                     m.script->SetAiPackage(sk_bindings::MonsterExecutable::kAiPursue);
                     m.script->ClearAttackCadence();
+                    // M102: and the chase owns the move goal from here --
+                    // the engine writes its target's position into the same
+                    // fields every tick, so a script's WalkTo is over.
+                    m.script->ClearWalkOrder();
                     m.aiState = MonsterInstance::AiState::Chasing;
                     setAnimClip(m, m.script->walkAnimation(), false);
 #if SK_DEBUG_SUITE

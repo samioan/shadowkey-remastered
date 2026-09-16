@@ -913,7 +913,7 @@ bool MonsterExecutable::method(const skString& methodName, skRValueArray& args,
         // happen. Every real call site is a fresh CreateEntity handed
         // straight over, so this only rejects hypotheticals.
         bool alreadyOwned = false;
-        for (const auto& held : m_OwnedSpells) {
+        for (const auto& held : m_Inventory) {
             if (held.get() == spell) alreadyOwned = true;
         }
         if (owned.get() != spell && !alreadyOwned) {
@@ -942,10 +942,49 @@ bool MonsterExecutable::method(const skString& methodName, skRValueArray& args,
         // `FUN_1006d510(spell, monster)` -- the owner write the whole
         // caster half of FUN_100458e4 reads back.
         spell->SetSpellOwner(this);
-        if (owned) m_OwnedSpells.push_back(std::move(owned));
+        if (owned) m_Inventory.push_back(std::move(owned));
         // `if (spell->typeId == 0xfaa) monster+0x32c = slot` -- the cached
         // Blind slot, see ChooseSpell().
         if (spell->templateId() == kBlindSpellTypeId) m_BlindSpellSlot = index;
+        return true;
+    }
+    if (methodName == skString("AddInventoryItem") && args.entries() == 1) {
+        // M102: Actor case 0x1a, and it is AddSpell's own three lines
+        // without the spell slot:
+        //
+        //     if (item->vtable[0xb4]()) {           // it is an item at all
+        //         FUN_1006cf38(self + 0x1f8, item); // append to the chain
+        //         FUN_1006d510(item, self);         // item->owner = self
+        //         FUN_1001bf6c(engine, item, 0);    // and out of the world
+        //     }
+        //
+        // One shipped caller, `lakvan/highwaymage_cskye.s`, which hands over
+        // an Ignite Foe it then also passes to AddSpell -- so the same
+        // object arrives here first and at the spell table second, and the
+        // ownership check there has to know this list.
+        auto* item = dynamic_cast<ItemExecutable*>(args[0].obj());
+        if (!item) return true;
+        std::unique_ptr<ItemExecutable> owned = m_Stack.level().TakePendingCreatedEntity();
+        bool alreadyHeld = false;
+        for (const auto& held : m_Inventory) {
+            if (held.get() == item) alreadyHeld = true;
+        }
+        if (owned.get() != item && !alreadyHeld) {
+            std::printf("MonsterExecutable: AddInventoryItem -- ignoring an item this creature "
+                        "does not own\n");
+            return true;
+        }
+        item->SetOwner(this);
+        item->RemoveFromWorld();
+        if (owned) m_Inventory.push_back(std::move(owned));
+        return true;
+    }
+    if (methodName == skString("WalkTo") && args.entries() >= 2) {
+        // M102: Actor case 0x1e -- see SetWalkOrder() for the slot it calls
+        // and why nothing ever stops the walk. The third and fourth
+        // arguments default to 0 and 2 and are stored in fields no code
+        // reads, so they are accepted and dropped.
+        SetWalkOrder(args[0].intValue(), args[1].intValue());
         return true;
     }
     if (methodName == skString("SetMeleeRoll") && args.entries() == 1) {

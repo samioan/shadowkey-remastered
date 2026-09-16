@@ -9581,6 +9581,51 @@ soft-fails 39 -> 39, all 14 tracked `.ppm` renders byte-identical,
       ..."), and its back key returned to the front-end main menu. No
       soft-fail line.
 
+- [x] **M102 -- WalkTo and AddInventoryItem.** Audit item 4: the two creature
+      natives, both Actor cases, one shipped caller each.
+    - **`AddInventoryItem`** (case 0x1a) is `AddSpell`'s own three lines
+      without the spell slot: `FUN_1006cf38(self + 0x1f8, item)` appends to
+      the creature's inventory chain, `FUN_1006d510(item, self)` makes it the
+      owner, and `FUN_1001bf6c(engine, item, 0)` takes the item out of the
+      world -- the same removal `DestroyObject` does (M101), minus the dead
+      flag and the motion stop. One caller: `lakvan/highwaymage_cskye.s`,
+      which hands its Ignite Foe over *here* and then to `AddSpell` as well.
+      That is why the two share one list now (`MonsterExecutable::
+      m_Inventory`, `actor+0x1f8`): AddSpell's ownership check has to
+      recognise an item this creature was already given, or the spell would
+      be refused as a stranger. **4 of the suite's soft-fail lines.**
+    - **`WalkTo(x, y [, a3 = 0] [, a4 = 2])`** (case 0x1e) calls
+      `vtable[0x1fc]` -- `FUN_10005be4`, wrapped by a creature's
+      `FUN_10086d60` to break off any animation first -- which writes the
+      move goal at `+0x1bc`/`+0x1c0`, turns the heading to face it, raises
+      the order flag `+0x1b9`, and stores `a3`/`a4` in two fields **nothing
+      in the image ever reads**. The entity's per-frame move
+      (`FUN_10006840`, vtable `+0x24`) then steers toward the goal on every
+      tick the flag is up. The port steps it in the AI tick's look arm,
+      where nothing else is driving the creature; acquiring a target clears
+      it, exactly as the engine's chase arm overwrites the goal each tick.
+    - **Nothing stops the walk on arrival.** The arrival slot `+0x204`
+      (`FUN_10005ad4`) has no caller anywhere in the image, `SetWalkToDist`'s
+      `+0x1d8` has no reader, and **`ReachedDestination` is not a literal in
+      the image at all** -- so the handler `bbrawler_talkrun.s` defines for
+      it never runs, and its "walk up to the player, then turn hostile"
+      sequence never happened in the shipped game either. That script is
+      unreferenced anyway: no `.ent` placement, no `entities.txt` row,
+      nothing spawns it. So this is a faithful native whose only live effect
+      is the one a script can ask for at runtime.
+    - **Test**: `port/src/tests/m102_walkto_inventory_smoke.cpp`, 17 checks:
+      the highway mage's two spells owned once and slotted, the handed-over
+      one out of the world with its `SetLevel(8)` intact; the move order and
+      its four-argument form; the brawler's OnDetect issuing the walk and
+      its ReachedDestination staying unrun; and entities.txt not naming the
+      script.
+    - **The suite**: 94 executables, 93 pass. Soft-fail lines **15 -> 11**.
+      Gaps tool: **24 -> 22 names**, 443 of 648.
+    - **Live** (azra, `port/debug/m102_walkto.cfg`): spawned Devron (non-
+      aggressive, so nothing else moves him), `call ent:68 WalkTo 29000
+      11440`, and `ents` walked him from x=30726 to x=30250 and on. Spawning
+      entities.txt row 179, the highway mage, printed no soft-fail line.
+
 ## Next milestones (not yet started)
 
 Roughly in priority order for reaching "actually playable," not commitments:
@@ -9982,9 +10027,10 @@ What it found, most serious first:
       caretaker), `Random` (`ghchestgold.s`), `MoveToLeftQueue`
       (`removequeue.s`). The three `0x14d08` names belong on
       `EntityBaseRef`.
-- [ ] **4. Creature natives**: `WalkTo` (`bbrawler_talkrun.s`),
-      `AddInventoryItem` (`highwaymage_cskye.s`, 4 soft-fail lines in the
-      suite).
+- [x] **4. Creature natives**: Done in M102 -- `WalkTo`
+      (`bbrawler_talkrun.s`, which turns out to be unplaced, and whose
+      `ReachedDestination` the engine never fires) and `AddInventoryItem`
+      (`highwaymage_cskye.s`, 4 soft-fail lines in the suite).
 - [ ] **5. Item natives**: `CastAzraWrath` (both vermin bombs),
       `MoveToEmptyQueue` (`olpac_pack.s`, `pilgrim_body.s`),
       `GetMarketValue` (`buysell.s`'s sell price), `DisplayPopup`
