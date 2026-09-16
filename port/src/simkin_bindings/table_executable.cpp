@@ -217,13 +217,27 @@ bool TableExecutable::method(const skString& methodName, skRValueArray& args,
         return true;
     }
     if (methodName == skString("RemoveRow") && args.entries() == 1) {
-        // inventory.s's UseItem() calls this directly (not through
-        // TableRowHandle::DropItem()) right before consuming the item --
-        // same real intent (the item leaves the player's inventory too,
-        // not just this table's display), so this shares DropRow()'s
-        // implementation.
+        // M103: this is the *display* row, and nothing else. The real
+        // binding is the table class's case 4 (`FUN_1008d0e4`): walk the
+        // row list at `table+0xc0`, find the row object the argument names,
+        // unlink it and release it. It never looks at the row's item.
+        //
+        // It used to share DropRow()'s body, on the reading that
+        // `inventory.s`'s `UseItem()` -- which calls
+        // `inventoryTable.RemoveRow(activeInventoryItem)` on the line
+        // before `inv.OnUsedBy(GetPlayer())` -- meant the item to leave the
+        // bag as well. It does not: the row goes because the screen is
+        // about to be redrawn, and whether the *item* goes is the script's
+        // own `DestroyObject(self)` to decide. Dropping it here put the
+        // item in a loot bag on the floor, which is the Drop action's job
+        // (the inventory row class's own `DropItem` arm, still DropRow()
+        // below and still reached from TableRowHandle).
+        //
+        // Together with the OnUsedBy fix in item_executable.cpp, this is
+        // what lets Trothgar's magicka potion survive refusing to be drunk
+        // -- and every other item whose OnUse does not destroy it.
         if (auto* handle = dynamic_cast<TableRowHandle*>(args[0].obj())) {
-            DropRow(handle->rowIndex());
+            RemoveRowAt(handle->rowIndex());
         }
         return true;
     }

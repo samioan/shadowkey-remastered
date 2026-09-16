@@ -141,15 +141,76 @@ void PopupMenuExecutable::MoveSelection(int delta) {
     m_SelectedItem = static_cast<int>(selectableIndices[static_cast<size_t>(nextPos)]) + 1;
 }
 
+// M103 -- see the declaration. The engine builds this popup inline in two
+// places (`FUN_10035368` for an item's DisplayPopup, the menu class's own
+// case 0xa for a menu's) with byte-identical bodies: a 174x70 box at
+// (0, 0x68), two rows, visible.
+void PopupMenuExecutable::MakeMessagePopup() {
+    m_X = 0;
+    m_Y = 0x68;
+    m_W = 0xae;
+    m_H = 0x46;
+    m_ClosesOnActivate = true;
+    m_Items.clear();
+    Item message;
+    message.textId = -1;
+    m_Items.push_back(message);
+    Item back;
+    back.textId = -1;
+    back.literalText = "Back";  // the engine's own literal, not a string id
+    // Not a script callback name in the engine -- `FUN_1002fd94` calls the
+    // method directly -- but naming it here is what makes this row the
+    // selectable one, and ActivateSelected() below routes it through
+    // TryInvoke rather than InvokeCallback so a screen with no
+    // OnMsgPopupClosed (every screen but inventory.s) stays quiet.
+    back.callback = "OnMsgPopupClosed";
+    m_Items.push_back(back);
+    // The engine leaves `popup+0xa0` at -1 when it shows the popup, so the
+    // first D-pad press lands on the first selectable row -- which is row
+    // 1. Pointing there up front saves the player that press and cannot
+    // land anywhere else: row 0 has no callback.
+    m_SelectedItem = 2;  // 1-based, see selectedItem()
+}
+
+void PopupMenuExecutable::SetMessage(const std::string& text) {
+    if (!m_ClosesOnActivate) MakeMessagePopup();
+    m_Items[0].literalText = text;
+    m_Items[0].textId = -1;
+    m_Items[0].blanked = text.empty();
+    m_SelectedItem = 2;
+    m_Visible = true;
+}
+
 void PopupMenuExecutable::ActivateSelected() {
     if (m_SelectedItem < 1 || static_cast<size_t>(m_SelectedItem) > m_Items.size()) return;
     const Item& item = m_Items[static_cast<size_t>(m_SelectedItem - 1)];
+    if (m_ClosesOnActivate) {
+        // `FUN_1002fd94`: hide first, then the method call -- and the call
+        // is a plain one on the menu script, so it is not a soft-fail for a
+        // screen that defines no handler.
+        m_Visible = false;
+        m_Owner.TryInvoke(item.callback);
+        return;
+    }
     // M91: a popup row is a row -- InvokeCallback, not TryInvoke. See
     // MenuExecutable::InvokeCallback(). Every one-button popup in the
     // corpus ("Okay" over a message) is `AddItem(id, "Quit")`.
     m_Owner.InvokeCallback(item.callback);
 }
 
-void PopupMenuExecutable::GoBack() { m_Owner.InvokeCallback(m_BackCallback); }
+void PopupMenuExecutable::GoBack() {
+    // M103: the message popup carries no SetBack target -- the engine never
+    // gives it one -- and a visible popup owns the back key outright
+    // (main.cpp), so routing it to InvokeCallback("") would latch the popup
+    // up with no way out. Its second row is labelled "Back"; the right
+    // softkey does what that row does. A port decision, not a decompiled
+    // one: what the shipped build does with this key was not established.
+    if (m_ClosesOnActivate) {
+        m_Visible = false;
+        m_Owner.TryInvoke("OnMsgPopupClosed");
+        return;
+    }
+    m_Owner.InvokeCallback(m_BackCallback);
+}
 
 }  // namespace sk_bindings

@@ -10,10 +10,12 @@
 #include "simkin_bindings/effects.h"
 #include "simkin_bindings/game_constants.h"
 #include "simkin_bindings/level_executable.h"
+#include "simkin_bindings/menu_executable.h"
 #include "simkin_bindings/menu_stack.h"
 #include "simkin_bindings/monster_executable.h"
 #include "simkin_bindings/native_binding_common.h"
 #include "simkin_bindings/player_executable.h"
+#include "simkin_bindings/spell_cast.h"
 #include "simkin_bindings/use_prompt.h"
 #include "skExecutableContext.h"
 #include "skParseException.h"
@@ -65,6 +67,10 @@ void ItemExecutable::SetEntityCategory(int category) {
     if (m_ItemType == kItemTypeSpell) {
         m_WeaponSprite = kSpellViewmodelSprite;
         m_AnimationFrames = kSpellAnimationFrames;
+        // M103: and the one constructor default a spell does *not* inherit
+        // from the base block -- `FUN_10047740` overwrites `+0x1b0` with
+        // 0x3d after chaining `FUN_1002eeb8`'s 0x1d.
+        m_Icon = kSpellDefaultIcon;
     }
 }
 
@@ -77,6 +83,11 @@ void ItemExecutable::InferItemType(int type) {
         case kItemTypeConsumable: m_EquipSlot = kEquipSlotLeft; break;
         default: m_EquipSlot = kEquipSlotNone; break;
     }
+    // M103: the spell constructor's icon, for the path-built case this
+    // whole function exists to serve. Only while the icon is still the base
+    // constructor's -- unlike the category route above, this runs from
+    // inside a setter and so can land *after* the script's own SetIcon.
+    if (type == kItemTypeSpell && m_Icon == kItemDefaultIcon) m_Icon = kSpellDefaultIcon;
 }
 
 int ItemExecutable::spellTypeId() const {
@@ -881,6 +892,89 @@ bool ItemExecutable::method(const skString& methodName, skRValueArray& args,
         returnValue = skRValue(m_Cost);
         return true;
     }
+    // M103: Item binding 0xe (`FUN_1002c848` case 0xe), the plain read of
+    // `item+0x1b8` that `SetMarketValue` writes -- a *separate* number from
+    // `GetCost`'s `+0x1b4`, which is what the merchant charges. This is
+    // what he pays. `buysell.s`'s `SellItem()` reads it into a local it
+    // never uses again (`cost=inventory.GetMarketValue();`), so the visible
+    // half of this native is what `PlayerExecutable::SellItemToMerchant`
+    // has always used it for.
+    if (methodName == skString("GetMarketValue") && args.entries() == 0) {
+        returnValue = skRValue(m_MarketValue);
+        return true;
+    }
+    // M103: Item bindings 0x14/0x15/0x16 -- three one-line cases that all
+    // write `item+0x1c0`, the hand this item files itself into when it is
+    // picked up (0 left, 1 right, 2 neither; M74 decoded the read side in
+    // `FUN_1003d8e0`, and `FUN_100422a4` re-files a saved queue by the same
+    // three values). They are *not* the player's `MoveToLeftQueue(item)`
+    // from M101, which actually fills a quick-use slot -- these take no
+    // argument and only mark the item.
+    //
+    // Only `MoveToEmptyQueue` is ever called, by `ghstpass/olpac_pack.s`
+    // and `lothna/pilgrim_body.s`, and **neither call changes anything**:
+    // both scripts are entities.txt category 3, and the misc-item
+    // constructor `FUN_1002eeb8` already writes 2 there. Implemented
+    // because a soft-fail is a lie about what the engine does, not because
+    // the shipped game can tell.
+    // M103: Item binding 0, the vermin bomb.
+    //
+    //     dmg = Random(2, 12);
+    //     FUN_1004720c(item->owner, 0, dmg, 1);
+    //
+    // and `FUN_1004720c` walks the level's creature list (`engine+0x64c`),
+    // skipping the origin itself, and damages everything within 12000 units
+    // -- the same sweep the AzraWrath *spell* runs, which this port has had
+    // since M45. No sightline test, no facing test, one roll for everyone.
+    //
+    // Note where the damage to the *user* comes from: not from here. Both
+    // bombs open their OnUse with
+    // `GetOwner().AddEffect(Permanent, Health, Increment, Random(-2,-12))`,
+    // an independent roll through the effects system, and then call this.
+    // So a bomb hurts its thrower and the room by different amounts.
+    if (methodName == skString("CastAzraWrath") && args.entries() == 0) {
+        skRValueArray range;
+        range.append(skRValue(kAzraWrathDamageMin));
+        range.append(skRValue(kAzraWrathDamageMax));
+        skRValue roll;
+        TryHandleRandom(skString("Random"), range, roll);
+        // `item+0x170` is always set in the engine -- the pickup path writes
+        // it -- but this port only fills m_Owner on some routes (see
+        // DestroyObject below), so a bomb the player is carrying can reach
+        // here with none. Fall back to the carrier, which is the same
+        // object the engine would have found.
+        PlayerExecutable& player = m_Stack.player();
+        const skiExecutable* origin = m_Owner;
+        if (!origin && player.CarriesItem(this)) origin = &player;
+        m_Stack.RequestAreaBlast(origin, roll.intValue());
+        return true;
+    }
+    // M103: Item binding 6. `FUN_1002c848` case 6 resolves the *currently
+    // open screen* off the menu manager (`engine+0x28`, vtable 0x20), and
+    // if there is one runs `FUN_10035368` against it -- the same body the
+    // menu class's own DisplayPopup runs. So an item's popup is not the
+    // item's: it belongs to whatever screen the player used the item from,
+    // and used from the 3D view (no screen) it silently does nothing.
+    //
+    // One shipped caller: `items/trothgars_magicka_potion.s`, whose OnUse
+    // refuses below 50 fatigue and says so. Until now that refusal was
+    // silent -- the row vanished from the inventory table (inventory.s
+    // removes it *before* calling OnUsedBy) and nothing explained why the
+    // potion was still there.
+    if (methodName == skString("DisplayPopup") && args.entries() == 1) {
+        if (MenuExecutable* screen = m_Stack.currentMenu()) {
+            screen->DisplayMessagePopup(ToStdString(args[0].str()));
+        }
+        return true;
+    }
+    if (args.entries() == 0 &&
+        (methodName == skString("MoveToLeftQueue") || methodName == skString("MoveToRightQueue") ||
+         methodName == skString("MoveToEmptyQueue"))) {
+        m_EquipSlot = methodName == skString("MoveToLeftQueue")    ? kEquipSlotLeft
+                      : methodName == skString("MoveToRightQueue") ? kEquipSlotRight
+                                                                   : kEquipSlotNone;
+        return true;
+    }
     if (methodName == skString("GetItemType") && args.entries() == 0) {
         returnValue = skRValue(m_ItemType);
         return true;
@@ -930,18 +1024,31 @@ bool ItemExecutable::method(const skString& methodName, skRValueArray& args,
         // Native entry point inventory.s's UseItem() calls
         // ("inv.OnUsedBy(GetPlayer())") -- binds the passed-in player as
         // this item's GetOwner() and then runs the script's own OnUse
-        // handler (items/bread.s etc.), if it defines one. Marks the item
-        // for removal so the host (PlayerExecutable::PurgeRemovedItems)
-        // erases it from the inventory once this tick's script calls have
-        // fully returned -- matches items/bread.s's own
-        // DestroyObject(self) call, which this port doesn't model as a
-        // generic native (no general object-destruction registry exists),
-        // just this one well-understood consumable-item case.
+        // handler (items/bread.s etc.), if it defines one.
+        //
+        // M103: and that is **all** it does. The real binding is the entity
+        // base's case 0xa (`FUN_10061a60`), which dispatches vtable 0x90 ->
+        // `FUN_1002c75c` -> `FUN_100646a8`, whose whole body is "if
+        // `entity+0xd8` is set, call the script's OnUse". Nothing there
+        // destroys the item.
+        //
+        // This used to end with an unconditional `m_MarkedForRemoval =
+        // true`, which was a fair stand-in back when this port's
+        // DestroyObject was a no-op and every consumable's OnUse ended in
+        // `DestroyObject(self)`. M101 made DestroyObject real, and the
+        // stand-in became a second, silent delete -- **49 of the 110 item
+        // scripts with an OnUse never call DestroyObject at all**: all
+        // eleven Shadowkey fragments, the three raider amulets, the Dawn
+        // and Dusk scrolls, the quest keys and letters, and every castable
+        // spell in the game. Using any of them from the inventory screen
+        // destroyed it. The two potions with a *branch* around their
+        // DestroyObject (Trothgar's magicka potion, Mercredi's healing
+        // potion) were eaten even when they refused to be drunk, which is
+        // what this milestone's DisplayPopup work walked into.
         m_Owner = args[0].obj();
         skRValueArray noArgs;
         skRValue ret;
         skScriptedExecutable::method(skString("OnUse"), noArgs, ret, context);
-        m_MarkedForRemoval = true;
         return true;
     }
     if (methodName == skString("DestroyObject")) {

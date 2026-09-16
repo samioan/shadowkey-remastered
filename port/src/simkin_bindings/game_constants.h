@@ -146,6 +146,30 @@ constexpr int kEquipSlotRight = 1;
 constexpr int kEquipSlotNone = 2;
 int EquipSlotForCategory(int entityCategory);
 
+// M103: the rest of what those same constructors write before a script's
+// `Init()` ever runs. Every one of the eight item arms opens with the
+// identical block (`FUN_1002eeb8`, and the weapon/armour/consumable arms
+// repeat it verbatim rather than calling it):
+//
+//     +0x1b0 icon         = 0x1d   (0x3d for a spell, FUN_10047740)
+//     +0x1b4 cost         = 0x1e
+//     +0x1b8 marketValue  = 0x14
+//     +0x1bc weight       = 1
+//     +0x1c4 quantity     = 1
+//     +0x1c9 canDrop      = 1
+//
+// which matters because a script only has to name what it wants to
+// *change*. 185 of the 317 item scripts in the corpus never call
+// `SetIcon` -- every piece of armour in the game -- and 46 never call
+// `SetMarketValue`, `dagger.s` and `healwound.s` among them. This port
+// started those at -1 and 0, so an unarmoured default drew no inventory
+// or hand icon at all and ten droppable items sold to a merchant for
+// nothing. The numbers are the engine's, not a house default.
+constexpr int kItemDefaultIcon = 0x1d;
+constexpr int kSpellDefaultIcon = 0x3d;
+constexpr int kItemDefaultCost = 0x1e;
+constexpr int kItemDefaultMarketValue = 0x14;
+
 // Does this `entities.txt` category name one of the eight item classes
 // above? Categories outside the table are creatures, doors, triggers and
 // the rest of the world, which never enter an inventory.

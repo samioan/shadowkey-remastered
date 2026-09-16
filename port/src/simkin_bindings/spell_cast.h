@@ -69,6 +69,13 @@ constexpr int kSpellCostDiscount = 6;
 // world units, i.e. about 47 tiles -- the whole level, in practice.
 constexpr int kAreaSpellRange = 12000;
 
+// M103: and the roll the *item* binding makes before handing that sweep the
+// same job -- `FUN_1002c848` case 0's `Random(2, 12)`, the vermin bomb's
+// blast. The spell's magnitude comes from the caster's level instead; this
+// one is a flat roll that does not care who set it off.
+constexpr int kAzraWrathDamageMin = 2;
+constexpr int kAzraWrathDamageMax = 12;
+
 // `spells\DaedricWeapon.s` conjures entity 4037 (`weapons\DaedricSword.s`)
 // into the caster's weapon slot, but only if they do not already have one.
 constexpr int kConjuredWeaponTypeId = 4037;

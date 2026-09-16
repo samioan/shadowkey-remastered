@@ -255,6 +255,26 @@ public:
     void SetPendingScreenMode(int mode) { m_PendingScreenMode = mode; }
     int pendingScreenMode() const { return m_PendingScreenMode; }
 
+    // M103: a script has fired `CastAzraWrath()` (Item binding 0, the two
+    // vermin bombs). `FUN_1002c848` case 0 rolls Random(2, 12) and hands it
+    // to `FUN_1004720c` centred on the item's **owner**, so the roll and
+    // the epicentre are settled inside the native and only the sweep is
+    // left for the world. Parked here rather than done on the spot for the
+    // same reason PickupItem's is: the item is running inside a script call
+    // and the level's creature list belongs to main.cpp.
+    struct AreaBlast {
+        const skiExecutable* origin = nullptr;  // the item's owner; excluded from the sweep
+        int damage = 0;
+    };
+    void RequestAreaBlast(const skiExecutable* origin, int damage) {
+        m_PendingBlasts.push_back(AreaBlast{origin, damage});
+    }
+    std::vector<AreaBlast> TakePendingAreaBlasts() {
+        std::vector<AreaBlast> taken;
+        taken.swap(m_PendingBlasts);
+        return taken;
+    }
+
     // M50: the save system writes real files.
     //
     // This was a simulated four-slot table (a `used` bool and a
@@ -552,6 +572,7 @@ private:
     // Defaults to Inventory so every screen that is not the store gets
     // the mode its own constructor would have given it.
     int m_PendingScreenMode = 0;
+    std::vector<AreaBlast> m_PendingBlasts;  // M103: see RequestAreaBlast()
     bool m_QuitRequested = false;
     bool m_QuitToMenuRequested = false;  // M54: see quitToMenuRequested() above
     bool m_GameActive = false;          // M91: see gameActive() above

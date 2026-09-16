@@ -9626,6 +9626,112 @@ soft-fails 39 -> 39, all 14 tracked `.ppm` renders byte-identical,
       11440`, and `ents` walked him from x=30726 to x=30250 and on. Spawning
       entities.txt row 179, the highway mage, printed no soft-fail line.
 
+- [x] **M103 -- the item natives, and what an item is before its script
+      speaks.** Audit item 5's four Item-class cases. Two are one-liners,
+      one is a marker nothing in the shipped data can observe, and the
+      fourth -- `DisplayPopup` -- turned out to sit on top of two real bugs
+      that between them destroyed items the game never meant to destroy.
+    - **`GetMarketValue`** (case 0xe) reads `item+0x1b8`, a *different*
+      field from `GetCost`'s `+0x1b4`: cost is what a merchant charges,
+      market value what he pays. `buysell.s`'s `SellItem()` reads it into a
+      local it then ignores, so the visible half is
+      `PlayerExecutable::SellItemToMerchant`, which already used the number.
+    - **The item constructors' defaults**, which this finding turned up.
+      Every one of the eight factory arms opens with the same block
+      (`FUN_1002eeb8`; the weapon/armour/consumable arms repeat it
+      verbatim): icon `0x1d`, cost `0x1e`, market value `0x14`, weight 1,
+      quantity 1, canDrop 1 -- and the spell arm (`FUN_10047740`) then
+      overwrites the icon with `0x3d`. A script only names what it wants to
+      *change*, and **185 of the 317 item scripts never call `SetIcon`** --
+      every piece of armour in the game -- while 46 never call
+      `SetMarketValue`. This port started those at -1 and 0, so an
+      unarmoured default drew no icon at all in the hand slot or the
+      inventory row, and ten droppable items (the starting `dagger.s` and
+      `healwound.s` among them) sold to a merchant for nothing. The spell
+      arm's `0x3d` is real but **unobservable in the shipped data**: all 38
+      placed spell rows end up running a script that calls `SetIcon`, 31
+      directly and the other seven (`ignitescroll.s` and the six `u_*.s`
+      upgrades) through a `RunScript` into one that does.
+    - **`MoveToLeftQueue`/`MoveToRightQueue`/`MoveToEmptyQueue`** (cases
+      0x14/0x15/0x16) are three one-line writes of `item+0x1c0`, the hand an
+      item files itself into when picked up (M74 decoded the read side).
+      They are not the player's `MoveToLeftQueue(item)` from M101, which
+      fills a real quick-use slot -- these take no argument and only mark
+      the item. Only `MoveToEmptyQueue` is ever called, by
+      `ghstpass/olpac_pack.s` and `lothna/pilgrim_body.s`, and **neither
+      call changes anything**: both are entities.txt category 3, and the
+      misc constructor already wrote 2 there.
+    - **`DisplayPopup(text)`** (case 6) resolves the *currently open screen*
+      off the menu manager (`engine+0x28`, vtable 0x20) and runs
+      `FUN_10035368` against it -- the same inlined body as the menu class's
+      own case 0xa. So an item's popup belongs to whatever screen the player
+      used the item from, and used from the 3D view it silently does
+      nothing. The popup is `menu+0xa8`, a 174x70 box at (0, 0x68) with two
+      rows: the message, and the engine's own literal "Back". Its class has
+      its own vtable, whose activate slot (`FUN_1002fd94`) is four lines --
+      if the selected row is row 1, hide the popup and call
+      `OnMsgPopupClosed` on the owning menu script. `GetMessagePopup` (menu
+      case 0xb) hands that same object back, **only if it already exists**,
+      which is exactly what `inventory.s`'s `CheckForMsg()` is written
+      around. Both are implemented here, so audit item 6 keeps only
+      `SetFocus` and `DelayOnEnter`.
+      One shipped caller: `items/trothgars_magicka_potion.s`, which refuses
+      below 50 fatigue and says so.
+    - **Two bugs behind it.** `inventory.s`'s `UseItem()` is
+      `inventoryTable.RemoveRow(...)` and then `inv.OnUsedBy(GetPlayer())`,
+      and this port had both wrong in the same direction:
+        - `OnUsedBy` ended with an unconditional `MarkForRemoval()`. The
+          real binding (entity base case 0xa -> vtable 0x90 ->
+          `FUN_1002c75c` -> `FUN_100646a8`) is "if `entity+0xd8` is set,
+          call the script's OnUse", and nothing else. The mark was a fair
+          stand-in while `DestroyObject` was a no-op; M101 made
+          DestroyObject real and left it a second, silent delete. **49 of
+          the 110 item scripts with an `OnUse` never call `DestroyObject`**
+          -- all eleven Shadowkey fragments, the three raider amulets, the
+          Dawn and Dusk scrolls, the quest keys and letters, and every
+          castable spell in the game. Using any of them from the inventory
+          screen destroyed it.
+        - `RemoveRow` was aliased to `DropRow`, so using anything first put
+          it in a loot bag on the floor. The real binding (`FUN_1008d0e4`
+          case 4) unlinks the row object from `table+0xc0` and never looks
+          at its item. Dropping is the *Drop* action's job (the inventory
+          row class's own `DropItem` arm, M93), which still goes through
+          `DropRow`.
+      Together these are why the two potions with a *branch* around their
+      `DestroyObject` (Trothgar's, and Mercredi's healing potion) were eaten
+      even when they refused to be drunk.
+    - **`CastAzraWrath()`** (case 0) rolls `Random(2, 12)` and hands it to
+      `FUN_1004720c` centred on the item's **owner** -- the same area sweep
+      the AzraWrath spell runs (M45): every creature in the level within
+      `kAreaSpellRange` (12000), the origin excluded, no sightline and no
+      facing test. Note where the damage to the *user* comes from: not from
+      here. Both vermin bombs open their OnUse with
+      `GetOwner().AddEffect(Permanent, Health, Increment, Random(-2,-12))`,
+      an independent roll, and then call this -- so a bomb hurts its thrower
+      and the room by different amounts.
+    - **Test**: `port/src/tests/m103_item_natives_smoke.cpp`, 55 checks in
+      six parts: the constructor defaults against real scripts (including
+      the spell icon's unobservability), `GetMarketValue` and a real
+      merchant paying 20 for a dagger that names no price, the three queue
+      markers and the two callers that cannot tell, the potion's refusal
+      putting a real popup up and its dismissal firing `OnMsgPopupClosed`,
+      `RemoveRow` leaving the item in the bag, and the bomb's two
+      independent rolls plus 400 draws covering exactly 2..12.
+    - **The suite**: 95 executables, 94 pass. Soft-fail lines **11 -> 10**.
+      Gaps tool: **22 -> 17 names**, 449 of 648 -- and of the 17, fourteen
+      are the multiplayer/Bluetooth set that is explicitly out of scope, so
+      what is left of the reachable gap is `SetFocus` (2 sites) and
+      `DelayOnEnter` (1).
+    - **Live** (azra, `port/debug/m103_item_popup.cfg`): the dagger now
+      draws the constructor's icon in the character manager's hand slot;
+      using Trothgar's potion at 10 fatigue put "Must have at least 50
+      fatigue!" on screen over the inventory list, and dismissing it ran
+      `OnMsgPopupClosed` -> `RedrawPage`, which brought the potion's row
+      back -- the console confirming all seven items still carried, with no
+      `[drop]` line. The vermin bomb printed `[azrawrath] 4 damage around
+      (30346, 11904)`, took every rat in the level from 23 health to 9, and
+      cost the thrower 4 health on its own separate roll.
+
 ## Next milestones (not yet started)
 
 Roughly in priority order for reaching "actually playable," not commitments:
@@ -9791,7 +9897,7 @@ surface is **55 names**, and they bucket by owning class like this:
 | sites | class | names |
 |---|---|---|
 | 94 | Object/Entity base (`0x14d08`) | `ShowEntity` (40), `MirrorMethod` (33), `GetID` (9), `RunScript` (7), `SetModel`, `SetRotationTurn` |
-| 46 | Item (`0x14d74`) | **`SetCanDrop` (39)**, `MoveToEmptyQueue`, `CastAzraWrath`, `MoveToLeftQueue`, `GetMarketValue`, `DisplayPopup` -- *M93 took `SetCanDrop`, leaving 7* |
+| 46 | Item (`0x14d74`) | **`SetCanDrop` (39)**, `MoveToEmptyQueue`, `CastAzraWrath`, `MoveToLeftQueue`, `GetMarketValue`, `DisplayPopup` -- *M93 took `SetCanDrop`, M101 `MoveToLeftQueue` (on the player), M103 the rest: this class is done* |
 | 40 | GameEngine root (`0x14cf0`) | ~25 multiplayer/Bluetooth, plus `SetLanguage` (6), `ConfigKeysMenu` (3), `ConfigKeysDefault`, `SaveConfig` |
 | 35 | GameState (`0x14dbc`) | `DropGold` (9), `CanDisarmTrap` (9), `VisitStore` (5), `IsMenuActive` (3), `SetGhost`/`IsGhost`, `SetPositionMirrorAll`, `SetPlayerClassFlag`, `EnableCoords`, `CanAvoidTrap` |
 | 19 | trap/magic-damage mixin (`0x14e10`) | `SetMagicDamage` (6), `SetDormant` (6), `SetSpellLevel` (4), `DoMagicDamage` (3) |
@@ -10031,13 +10137,18 @@ What it found, most serious first:
       (`bbrawler_talkrun.s`, which turns out to be unplaced, and whose
       `ReachedDestination` the engine never fires) and `AddInventoryItem`
       (`highwaymage_cskye.s`, 4 soft-fail lines in the suite).
-- [ ] **5. Item natives**: `CastAzraWrath` (both vermin bombs),
-      `MoveToEmptyQueue` (`olpac_pack.s`, `pilgrim_body.s`),
-      `GetMarketValue` (`buysell.s`'s sell price), `DisplayPopup`
-      (Trothgar's magicka potion).
+- [x] **5. Item natives**: Done in M103 -- `CastAzraWrath` (both vermin
+      bombs), `MoveToEmptyQueue` (`olpac_pack.s`, `pilgrim_body.s`, and it
+      restates the value both already have), `GetMarketValue` (`buysell.s`'s
+      sell price) and `DisplayPopup` (Trothgar's magicka potion). Which also
+      found the item constructors' defaults -- 185 scripts with no icon, 46
+      with no market value -- and two paths that destroyed items the engine
+      keeps: `OnUsedBy`'s unconditional mark and `RemoveRow` aliased to the
+      Drop action.
 - [ ] **6. Menu natives and the third event**: `SetFocus` x2
-      (`buysell.s`), `GetMessagePopup` (`inventory.s`), `DelayOnEnter`
-      (`herbhurrah.s`), and `OnMsgPopupClosed` (`inventory.s`).
+      (`buysell.s`) and `DelayOnEnter` (`herbhurrah.s`). *M103 took
+      `GetMessagePopup` and `OnMsgPopupClosed` (both `inventory.s`), which
+      are the same `menu+0xa8` object `DisplayPopup` creates.*
 - [ ] **7. `IsMultiplayer`/`IsMultiplayerClient` off the menu class.**
       About 40 calls from Level, zone scripts, creatures and items
       soft-fail and read 0 -- which picks the single-player branch, so the

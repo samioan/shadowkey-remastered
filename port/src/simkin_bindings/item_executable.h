@@ -25,6 +25,7 @@
 #include <vector>
 
 #include "simkin_bindings/entity_base_ref.h"
+#include "simkin_bindings/game_constants.h"
 #include "simkin_bindings/native_stub_executable.h"
 #include "simkin_bindings/script_delay.h"
 #include "simkin_bindings/spell_actor.h"
@@ -541,9 +542,13 @@ private:
     int m_ShortNameId = -1;
     int m_DescriptionId = -1;
     int m_UseTextId = -1;
-    int m_Cost = 0;
-    int m_MarketValue = 0;
-    int m_Icon = -1;
+    // M103: the item constructors' own values, not zero -- see
+    // game_constants.h's kItemDefault* block. A script that never calls
+    // SetCost/SetMarketValue/SetIcon keeps these, which is the majority of
+    // the corpus for the icon.
+    int m_Cost = kItemDefaultCost;
+    int m_MarketValue = kItemDefaultMarketValue;
+    int m_Icon = kItemDefaultIcon;
     bool m_Usable = false;
     int m_ArmorValue = 0;
     int m_ArmorType = 0;

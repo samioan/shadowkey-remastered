@@ -3415,6 +3415,54 @@ int main(int argc, char** argv) {
                 gamePickups.push_back(std::move(inst));
             }
         }
+        // M103: `CastAzraWrath()` -- the vermin bomb. The native already
+        // rolled the damage and named the epicentre (the item's owner);
+        // what is left is `FUN_1004720c`'s sweep, which is the same one the
+        // AzraWrath *spell* runs above in applyCastResult: every creature
+        // in the level within kAreaSpellRange of the origin, the origin
+        // itself excluded, no sightline and no facing test.
+        //
+        // The player's own share of the bomb is not here. Both scripts take
+        // it through AddEffect in their OnUse, on a separate roll, so the
+        // blast never has to damage its own origin.
+        for (const sk_bindings::MenuStack::AreaBlast& blast : stack.TakePendingAreaBlasts()) {
+            if (blast.damage <= 0) continue;
+            float blastX = gameCamera.x, blastY = gameCamera.y;
+            const bool fromPlayer =
+                blast.origin == nullptr ||
+                blast.origin == static_cast<const skiExecutable*>(&stack.player());
+            if (!fromPlayer) {
+                bool found = false;
+                for (const MonsterInstance& m : gameMonsters) {
+                    if (m.script.get() != blast.origin) continue;
+                    blastX = m.x;
+                    blastY = m.y;
+                    found = true;
+                    break;
+                }
+                if (!found) continue;  // an owner that is not in this level
+            }
+            std::printf("  [azrawrath] %d damage around (%.0f, %.0f)\n", blast.damage, blastX,
+                        blastY);
+            for (MonsterInstance& victim : gameMonsters) {
+                if (static_cast<const skiExecutable*>(victim.script.get()) == blast.origin) {
+                    continue;
+                }
+                if (!victim.script->alive() || victim.script->outOfWorld()) continue;
+                const float adx = victim.x - blastX, ady = victim.y - blastY;
+                if (std::sqrt(adx * adx + ady * ady) >
+                    static_cast<float>(sk_bindings::kAreaSpellRange)) {
+                    continue;
+                }
+                victim.flash.Arm(sk::kFlashPeriodUnits, sk::kFlashRedMin, sk::kFlashRedMax);
+                // The attacker the kill credit goes to is the origin when it
+                // is a creature; a bomb the player set off pays the player,
+                // through the same SpellActor slot the area spell uses.
+                victim.script->ApplyDamage(blast.damage,
+                                            fromPlayer ? &stack.player() : nullptr,
+                                            /*ranged=*/true);
+            }
+        }
         // M27: reaps one-shot SFX voices that finished playing -- see
         // AudioEngine::Update()'s own comment.
         audioEngine.Update();

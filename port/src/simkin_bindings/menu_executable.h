@@ -41,6 +41,10 @@
 
 #include "simkin_bindings/menu_stack.h"
 #include "simkin_bindings/native_stub_executable.h"
+// M103: m_MessagePopup is an owning unique_ptr, so the popup class has to
+// be complete here for the implicit destructor. The include is safe --
+// popup_menu_executable.h only forward-declares MenuExecutable.
+#include "simkin_bindings/popup_menu_executable.h"
 #include "skRValue.h"
 #include "skScriptedExecutable.h"
 
@@ -428,6 +432,18 @@ public:
     // to without knowing those names.
     PopupMenuExecutable* activePopup() const;
 
+    // M103: `menu+0xa8`, the engine's own message popup -- created on the
+    // first DisplayPopup() and then kept for the life of the screen (a
+    // ClearMenu does not touch it, and neither does a redraw). Owned here,
+    // unlike the script-created popups in m_KnownPopups, because the engine
+    // owns it too: `GetMessagePopup()` hands the script a borrowed
+    // reference and inventory.s stores it in a local.
+    PopupMenuExecutable* messagePopup() const { return m_MessagePopup.get(); }
+    // DisplayPopup(text), shared by the menu binding and the *item* binding
+    // (`FUN_10035368`), which resolves the current screen and runs the same
+    // body against it.
+    void DisplayMessagePopup(const std::string& text);
+
     // Used by RowOwnerRef-derived widgets (MenuItemHandle,
     // TextAreaExecutable) to implement .SetSelectable(bool) and (for
     // TextAreaExecutable) .SetLocalizedText(id).
@@ -574,6 +590,9 @@ private:
     // the .cpp. Lets activePopup() find a visible one without scanning
     // m_NativeFields by (unknown) name or type.
     std::vector<PopupMenuExecutable*> m_KnownPopups;
+    // M103: see messagePopup(). Owning, and deliberately outside
+    // m_KnownPopups so ClearMenu() cannot drop it.
+    std::unique_ptr<PopupMenuExecutable> m_MessagePopup;
 
     // M10: SetInventoryList()'s remembered target -- DisplayWeaponsPage()/
     // DisplayArmorMenu()/etc. populate whichever Table this last pointed

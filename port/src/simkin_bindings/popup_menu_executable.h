@@ -80,6 +80,27 @@ public:
     // this popup is open).
     void GoBack();
 
+    // M103: the engine-owned message popup at `menu+0xa8` -- the one
+    // `DisplayPopup(text)` creates and `GetMessagePopup()` hands back. It
+    // is not a `CreatePopupMenu` popup: it has its own C++ class and its
+    // own vtable (0x100fdc60), whose activate slot `FUN_1002fd94` is four
+    // lines long --
+    //
+    //     if (selectedRow == 1) { SetVisible(popup, 0);
+    //                             menu->script.OnMsgPopupClosed(); }
+    //
+    // -- so activating its second row hides it and calls a method on the
+    // owning menu script, rather than dispatching a script-named callback
+    // like every other popup row. `MakeMessagePopup` sets that up; the flag
+    // is what makes ActivateSelected() hide the popup first.
+    void MakeMessagePopup();
+    bool isMessagePopup() const { return m_ClosesOnActivate; }
+    // DisplayPopup's own body: row 0 is the message, row 1 the "Back"
+    // label, and the popup is shown. Re-displaying an existing one only
+    // rewrites row 0 (`FUN_10088ea4(popup, 0, text)`), which is why a
+    // second message never grows the popup.
+    void SetMessage(const std::string& text);
+
 private:
     MenuExecutable& m_Owner;
     int m_X, m_Y, m_W, m_H;
@@ -87,6 +108,7 @@ private:
     int m_SelectedItem = 0;
     std::string m_BackCallback;
     std::vector<Item> m_Items;
+    bool m_ClosesOnActivate = false;  // M103, see MakeMessagePopup()
 };
 
 }  // namespace sk_bindings

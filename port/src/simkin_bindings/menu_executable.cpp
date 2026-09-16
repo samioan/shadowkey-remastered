@@ -783,10 +783,23 @@ bool MenuExecutable::TryActivateTable() {
 }
 
 PopupMenuExecutable* MenuExecutable::activePopup() const {
+    // M103: the engine's own message popup is a popup like any other for
+    // input and rendering -- `SetVisible` parks it in the same `menu+0x40`
+    // active slot the script-created ones use -- and it is checked first
+    // because DisplayPopup() is what just put it up.
+    if (m_MessagePopup && m_MessagePopup->visible()) return m_MessagePopup.get();
     for (PopupMenuExecutable* popup : m_KnownPopups) {
         if (popup->visible()) return popup;
     }
     return nullptr;
+}
+
+void MenuExecutable::DisplayMessagePopup(const std::string& text) {
+    if (!m_MessagePopup) {
+        m_MessagePopup = std::make_unique<PopupMenuExecutable>(*this, 0, 0, 0, 0);
+        m_MessagePopup->MakeMessagePopup();
+    }
+    m_MessagePopup->SetMessage(text);
 }
 
 bool MenuExecutable::TryInvoke(const std::string& handlerName) {
@@ -1272,6 +1285,23 @@ bool MenuExecutable::method(const skString& methodName, skRValueArray& args,
         // No native owner besides the script variable -- created=true so
         // it's freed once Simkin's ref count on it reaches zero.
         returnValue = skRValue(static_cast<skiExecutable*>(popup), true);
+        return true;
+    }
+    // M103: menu bindings 0xa and 0xb (`FUN_1003136c`). DisplayPopup's case
+    // is the same inlined body the *item* binding runs (`FUN_10035368`),
+    // and GetMessagePopup's is four lines that hand back `menu+0xa8` --
+    // **only if it already exists**. inventory.s's CheckForMsg() is written
+    // around exactly that: `msgPopup=GetMessagePopup(); if (msgPopup !=
+    // null)`, so returning a freshly built popup here instead of null would
+    // make every Use of an item look like it had something to say.
+    if (methodName == skString("DisplayPopup") && args.entries() == 1) {
+        DisplayMessagePopup(ToStdString(args[0].str()));
+        return true;
+    }
+    if (methodName == skString("GetMessagePopup") && args.entries() == 0) {
+        if (m_MessagePopup) {
+            returnValue = skRValue(static_cast<skiExecutable*>(m_MessagePopup.get()), false);
+        }
         return true;
     }
     if (methodName == skString("AddFloatingTextJustify") && args.entries() == 5) {
