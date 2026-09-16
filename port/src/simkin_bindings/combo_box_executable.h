@@ -35,6 +35,13 @@ public:
     // table -- so dropgoldmenu.s's `AddOption(25)` reads "25", not string 25
     // ("Medium Bow"), which is what this port drew until the menu worked.
     bool numericalMode() const { return m_Numerical; }
+    int width() const { return m_Width; }
+    // M108: the combo's widget kind is 10 (`FUN_1008f82c` sets `+0x58 = 10`),
+    // so it draws itself at its own `+0x78`/`+0x7c` -- the x and y the
+    // script passed to AddComboBox -- and does not move the menu's row
+    // cursor. See RenderMenu's ComboBox case.
+    int x() const { return m_X; }
+    int y() const { return m_Y; }
     const std::string& onChangeCallback() const { return m_OnChangeCallback; }
     const std::string& onEnterCallback() const { return m_OnEnterCallback; }
 

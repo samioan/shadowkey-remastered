@@ -10225,6 +10225,76 @@ The contact sheet makes these obvious, and none is fixed yet:
   has), == 1 builds a `"Swiss"` typeface at size 0xd5 with bold/italic
   flags.
 
+## M109 -- the widgets that position themselves, and a wrong guess the sheet caught
+
+M108's `SK_DUMP_MENUS` sweep paid for itself immediately: three of the
+screens in it had text drawn on top of other text, and all three were the
+same mistake.
+
+- **A text area draws at its own x/y.** `FUN_1008f458` is the whole
+  widget:
+
+      split(text, lines, widget+0x98 /* SetTextWidth */);
+      x = widget+0x78; y = widget+0x7c;
+      for (line : lines) {
+          FUN_1007f49c(x, y, line, ..., 0 /* left-aligned */, ...);
+          y += 0xc;
+      }
+
+  This port drew every text area at a hardcoded **x=12** and at the menu's
+  shared row cursor, then advanced that cursor past it. The x was the
+  visible half: `choosecharactermenu.s` asks for `AddTextArea(5, 45)` with
+  `SetTextWidth(27)`, and 27 characters starting at 12 instead of 5 runs
+  off the right of a 176px screen -- which is why the class descriptions
+  read "considerabl" and "quie".
+
+- **So does a combo box, and this is where I got it wrong first.** I read
+  the combo as `case 4` of `FUN_10076b64` -- a cursor-positioned row,
+  centred and bold, with a 3px rule under it, advancing 0x18 -- and wrote
+  that. The contact sheet showed the result immediately: the combo landed
+  on top of the text area on `choosecharactermenu.s`.
+
+  `AddComboBox` (case 0x1e of `FUN_10078de4`) builds its widget with
+  `FUN_1008f82c`, which sets **`+0x58 = 10`** -- the same kind the text
+  area's `FUN_1008f7d0` sets. Kind 10 takes the menu draw's `default:`
+  arm: the widget's own vtable slot, with `uVar9 = uVar8` leaving the row
+  cursor alone. Case 4 belongs to some other widget class entirely.
+  Positions come from `+0x78`/`+0x7c`, filled by the shared dispatcher
+  tail at `LAB_10079d28` from the script's own arguments.
+
+  `statsscreen.s` is the proof from the data side: its
+  `AddComboBox(15, 7)` sits at y=7, *above* the default start row of 50,
+  which a cursor-positioned widget could never reach.
+
+- **The lesson, which is M105's and M106's again.** The switch arm was
+  inferred from what the widget looked like rather than traced from the
+  constructor that sets its kind. One extra step -- read `+0x58` at the
+  site that allocates the widget -- would have settled it before any code
+  was written. What made this cheap instead of expensive was having a
+  picture of all 95 screens a rebuild away.
+
+- **`m108_menu_layout_smoke` grows a part 4** (25 checks now, was 19):
+  `choosecharactermenu.s`'s `AddComboBox(15, 30)` and `AddTextArea(5, 45)`
+  keep their own coordinates and do not collide, and `statsscreen.s`'s
+  combo sits at y=7.
+
+- **The suite**: 100 executables, 99 pass. Soft-fail stays at **5**.
+
+### Still open
+
+- **The title colour**, unchanged from M108: `*(ushort *)(engine->+0x28 +
+  8)`, a word in a global UI palette object that is in none of the
+  shipped data files (`6r51.cfg` is the game-manager XML stub). Text
+  areas read the *same* word, so both are wrong together, and
+  `kTitleColor` is still the old eyeballed blue. The likeliest remaining
+  home for it is the Symbian resource file `6r51.rsc`.
+- **`SetFontNum` is still ignored** (95 call sites). `FUN_10022b20` gates
+  on it: != 1 uses the ROM legend font (LatinBold12, which this port has),
+  == 1 builds a `"Swiss"` typeface at size 0xd5 with bold/italic flags.
+- **The combo box's second marker** -- three vertical lines 11px tall in
+  colour 0x7f0 -- belongs to whatever class case 4 really is, not to the
+  combo. Unidentified.
+
 ## Next milestones (not yet started)
 
 Roughly in priority order for reaching "actually playable," not commitments:

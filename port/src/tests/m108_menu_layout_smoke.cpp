@@ -14,8 +14,10 @@
 #include <string>
 
 #include "assets/string_table.h"
+#include "simkin_bindings/combo_box_executable.h"
 #include "simkin_bindings/menu_executable.h"
 #include "simkin_bindings/menu_stack.h"
+#include "simkin_bindings/text_area_executable.h"
 #include "skInterpreter.h"
 #include "skRValue.h"
 #include "skRValueArray.h"
@@ -125,6 +127,69 @@ int main(int argc, char** argv) {
                   "  its AddTitle(3785,10) / AddTitle(3786,25) keep their own y");
         } else if (log) {
             Check(false, "  questlog.s should add two positioned titles");
+        }
+    }
+
+    // ---- 4. the widgets that position themselves (M109) ----
+    //
+    // A text area (`FUN_1008f7d0`) and a combo box (`FUN_1008f82c`) both
+    // set `+0x58 = 10`, and kind 10 takes the menu draw's `default:` arm:
+    // the widget's own vtable slot, with `uVar9 = uVar8` leaving the row
+    // cursor untouched. Both read their position from `+0x78`/`+0x7c`,
+    // which case 0x1d / 0x1e of `FUN_10078de4` fill from the script's own
+    // arguments at the shared tail LAB_10079d28.
+    //
+    // This is pinned because getting it wrong is silent and ugly: drawing
+    // either one at the shared cursor instead lands it on top of whatever
+    // the script positioned nearby, which is exactly what
+    // choosecharactermenu.s and statsscreen.s did.
+    std::printf("\n-- 4. self-positioning widgets (kind 10) --\n");
+    {
+        sk::StringTable strings;
+        if (!strings.Load(std::string(scriptRoot) + "/stringtable.eng")) return 1;
+        skInterpreter interpreter;
+        skb::MenuStack stack(scriptRoot, interpreter, &strings);
+
+        // choosecharactermenu.s: AddComboBox(15, 30) / AddTextArea(5, 45).
+        stack.OpenMenu("menus/choosecharactermenu");
+        skb::MenuExecutable* menu = stack.currentMenu();
+        Check(menu != nullptr, "menus/choosecharactermenu.s opens");
+        if (menu) {
+            const skb::ComboBoxExecutable* combo = nullptr;
+            const skb::TextAreaExecutable* area = nullptr;
+            for (const auto& r : menu->rows()) {
+                if (r.kind == skb::MenuExecutable::RowKind::ComboBox) {
+                    combo = static_cast<const skb::ComboBoxExecutable*>(r.widget.get());
+                } else if (r.kind == skb::MenuExecutable::RowKind::TextArea) {
+                    area = static_cast<const skb::TextAreaExecutable*>(r.widget.get());
+                }
+            }
+            Check(combo != nullptr && combo->x() == 15 && combo->y() == 30,
+                  "  its AddComboBox(15, 30) keeps x=15, y=30");
+            Check(area != nullptr && area->x() == 5 && area->y() == 45,
+                  "  its AddTextArea(5, 45) keeps x=5, y=45");
+            // The two must not collide: the combo sits a full row above
+            // the text area, which is only true if each is at its own y.
+            if (combo && area) {
+                Check(area->y() > combo->y(),
+                      "  and the text area starts below the combo, not on it");
+            }
+        }
+
+        // statsscreen.s puts its combo at y=7, well above the default
+        // start row of 50 -- unreachable if it were cursor-positioned.
+        stack.OpenMenu("statsscreen");
+        skb::MenuExecutable* stats = stack.currentMenu();
+        Check(stats != nullptr, "statsscreen.s opens");
+        if (stats) {
+            const skb::ComboBoxExecutable* combo = nullptr;
+            for (const auto& r : stats->rows()) {
+                if (r.kind == skb::MenuExecutable::RowKind::ComboBox) {
+                    combo = static_cast<const skb::ComboBoxExecutable*>(r.widget.get());
+                }
+            }
+            Check(combo != nullptr && combo->y() == 7,
+                  "  its AddComboBox(15, 7) sits at y=7, above the default start row");
         }
     }
 

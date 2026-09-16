@@ -2585,15 +2585,51 @@ void RenderMenu(sk::Backbuffer& backbuffer, sk_bindings::MenuExecutable& menu,
                 const std::string text =
                     combo->numericalMode() ? std::to_string(value) : strings.Get(value);
                 std::string label = value >= 0 ? ("< " + text + " >") : "< -- >";
-                sk::BitmapFont::DrawString(backbuffer, 12, y, label, color);
-                y += lineHeight;
+                // M108: at its own x/y, and the row cursor is untouched --
+                // the same shape as the text area above.
+                //
+                // I first read this as `case 4` of `FUN_10076b64` (a
+                // cursor-positioned row, centred and bold, with a rule
+                // under it, advancing 0x18) and wrote that. It was wrong,
+                // and the contact sheet caught it immediately: the combo
+                // landed on top of the text area on
+                // choosecharactermenu.s. `AddComboBox` (case 0x1e of
+                // `FUN_10078de4`) builds its widget with `FUN_1008f82c`,
+                // which sets `+0x58 = 10` -- the same kind the text area's
+                // `FUN_1008f7d0` sets, and kind 10 takes the menu draw's
+                // `default:` arm: the widget's own vtable slot, with
+                // `uVar9 = uVar8` leaving the cursor alone. Case 4 belongs
+                // to some other widget class. Positions come from
+                // `+0x78`/`+0x7c`, which the shared tail at LAB_10079d28
+                // fills in from the script's own arguments.
+                sk::BitmapFont::DrawString(backbuffer, combo->x(), combo->y(), label, color);
                 break;
             }
             case RowKind::TextArea: {
                 auto* textArea = static_cast<sk_bindings::TextAreaExecutable*>(row.widget.get());
-                int lines = DrawWrappedText(backbuffer, 12, y, strings.Get(row.textId),
-                                             textArea->textWidth(), color);
-                y += lines * lineHeight;
+                // M108: at its own x/y, and the row cursor is untouched.
+                // `FUN_1008f458` is the whole widget:
+                //
+                //     split(text, lines, widget+0x98 /* SetTextWidth */);
+                //     x = widget+0x78; y = widget+0x7c;
+                //     for (line : lines) {
+                //         FUN_1007f49c(x, y, line, ..., 0 /* left */, ...);
+                //         y += 0xc;
+                //     }
+                //
+                // and its widget kind takes the menu draw's `default:` arm,
+                // which leaves the cursor alone. This port drew every text
+                // area at a hardcoded x=12 and at the shared cursor, then
+                // advanced the cursor past it. The x was the visible half:
+                // choosecharactermenu.s asks for `AddTextArea(5, 45)` with
+                // `SetTextWidth(27)`, and 27 characters starting at 12
+                // instead of 5 runs off the right edge of a 176px screen --
+                // which is why the class descriptions read "considerabl"
+                // and "quie".
+                const int taX = textArea->x();
+                int taY = textArea->y();
+                DrawWrappedText(backbuffer, taX, taY, strings.Get(row.textId),
+                                 textArea->textWidth(), color);
                 break;
             }
             case RowKind::FloatingSprite: {

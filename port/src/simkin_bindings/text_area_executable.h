@@ -19,6 +19,12 @@ public:
                 skExecutableContext& context) override;
 
     int textWidth() const { return m_TextWidth; }
+    // M108: the engine's text-area draw (`FUN_1008f458`) starts its line
+    // cursor at the widget's **own** `+0x78`/`+0x7c` -- the x and y the
+    // script passed to AddTextArea -- not at the menu's shared row
+    // cursor, and it does not advance that cursor afterwards.
+    int x() const { return m_X; }
+    int y() const { return m_Y; }
 
 private:
     int m_X, m_Y;
