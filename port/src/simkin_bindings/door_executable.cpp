@@ -75,6 +75,12 @@ void DoorExecutable::ApplyTileStamp() {
                                  m_HalfExtentY, 0x04, !entityPassable());
 }
 
+void DoorExecutable::OnRemovedFromWorld() {
+    if (!m_TileStamp || !isTileStamped()) return;
+    m_TileStamp->StampEntityBox(positionX(), positionY(), headingRaw(), m_HalfExtentX,
+                                 m_HalfExtentY, 0x04, false);
+}
+
 void DoorExecutable::InvokeOnUse() {
     if (!m_Interpreter) return;
     // M17: real placeholder arg for OnUse's "(s)" parameter -- same fix

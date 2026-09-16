@@ -175,6 +175,13 @@ MenuExecutable* MenuStack::CreateRootMenu(const std::string& key, const std::str
     return raw;
 }
 
+void MenuStack::ForgetOpener(const skiExecutable* object) {
+    if (!object) return;
+    for (auto& entry : m_Menus) {
+        if (entry.second && entry.second->opener() == object) entry.second->SetOpener(nullptr);
+    }
+}
+
 void MenuStack::OpenMenu(const std::string& simkinPath, skiExecutable* opener) {
     // M60: stamp the pending screen mode before Init()/OnDisplay() runs,
     // since `buysell.s`'s OnDisplay() reads it back on its very first line

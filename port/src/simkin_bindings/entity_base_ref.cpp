@@ -174,6 +174,41 @@ bool EntityBaseRef::HandleEntityBaseNative(const skString& methodName, skRValueA
         ++m_MirroredMethods;
         return true;
     }
+
+    // ---- removal: 0x20 / 0x21 / 0x33 (M101) ---------------------------
+    //
+    // See the header. The target is resolved identically by all three:
+    // no argument is this entity, an object argument is the entity it
+    // names, and any other argument is nothing at all --
+    // `crypt1/caretaker_leave_convo.s`'s `DestroyObjectMirror("ctaker")`
+    // passes a string and so destroys nobody (the script is never opened
+    // anyway). 0x21's extra work is a multiplayer notify, and 0x33 is only
+    // that notify.
+    if (methodName == skString("DestroyObject") || methodName == skString("DestroyObjectMirror") ||
+        methodName == skString("MirrorDestroyObject")) {
+        EntityBaseRef* target = this;
+        if (args.entries() >= 1) {
+            target = args[0].type() == skRValue::T_Object
+                         ? dynamic_cast<EntityBaseRef*>(args[0].obj())
+                         : nullptr;
+        }
+        if (!target) return true;
+        if (methodName == skString("MirrorDestroyObject")) {
+            ++target->m_MirroredDestroys;
+        } else {
+            target->RemoveFromWorld();
+        }
+        return true;
+    }
+
+    // ---- Random: 0x2c (M101) ------------------------------------------
+    //
+    // `FUN_100730c8(registry, lo, hi)` = `lo + rand() % (hi - lo + 1)`, the
+    // same draw M21's shared helper already makes (which also tolerates the
+    // bounds reversed; no shipped call passes them that way). On the base
+    // so `GetPlayer().Random(40, 100)` -- `ghchestgold.s`'s gold roll --
+    // stops answering 0.
+    if (TryHandleRandom(methodName, args, returnValue)) return true;
     return false;
 }
 

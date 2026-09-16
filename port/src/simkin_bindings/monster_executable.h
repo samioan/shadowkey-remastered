@@ -443,7 +443,11 @@ public:
     // folded into `alive()` since the two have genuinely different real
     // triggers and consequences (this one never runs `InvokeOnKilled()`
     // or spawns loot).
-    bool destroyed() const { return m_Destroyed; }
+    //
+    // M101: the flag is `EntityBaseRef::entityRemoved()` now, shared by every
+    // entity class, because `DestroyObjectMirror` is a base binding and a
+    // door leaves the world by the same call. The name stays.
+    bool destroyed() const { return entityRemoved(); }
 
     // M92: `ShowEntity(false)` is the reversible twin of the above -- the
     // engine reaches the same state from both (`vtable[0x58]`, see
@@ -452,7 +456,7 @@ public:
     // question those tests are actually asking; `destroyed()` stays the
     // narrow flag, for the save record and the debug row that want to tell
     // the two apart.
-    bool outOfWorld() const { return m_Destroyed || entityHidden(); }
+    bool outOfWorld() const { return entityOutOfWorld(); }
 
     // M16: NPC-mode fields (see class comment) -- usable()/useTextId()
     // mirror door_executable.h's own accessors of the same name (same
@@ -578,7 +582,7 @@ public:
     }
     bool actorInvulnerable() const override { return m_Invulnerable; }
     void AddActorExperience(int amount) override;
-    bool actorAlive() const override { return m_Alive && !m_Destroyed; }
+    bool actorAlive() const override { return m_Alive && !entityRemoved(); }
     bool actorUndead() const override { return undead(); }
     void SetActorAiPackageTimed(int package, int durationUnits) override {
         SetAiPackageTimed(package, durationUnits);
@@ -862,6 +866,9 @@ protected:
     // M92: PlaySound is a base binding now; the lookup is the same
     // null-checked pair PlayNoise() has always used.
     sk::SoundArchive* entitySounds() const override;
+    // M101: FUN_1001817c's actor arm, `vtable[0x178](target, 1, 0)` -- the
+    // dead flag, with no decay armed. Not a kill: no OnKilled, no loot.
+    void OnRemovedFromWorld() override { SetDead(true, 0); }
     sk::AudioEngine* entityAudio() const override;
 
 private:
@@ -987,7 +994,6 @@ private:
     bool m_Invulnerable = false;
     std::string m_LootTag;  // M21: see lootTag()'s comment.
     int m_LootTypeId = 0;   // M81: `monster+0x2f0`, same comment.
-    bool m_Destroyed = false;  // M23: see destroyed()'s comment.
     // M28: see PlayAttackNoise()'s comment -- -1 (SetXNoise() never
     // called, e.g. an NPC) is a real, harmless no-play case, same
     // sentinel convention entityNameId()/m_UseTextId already use.

@@ -188,6 +188,13 @@ public:
     // contents actually change across visits).
     void ReopenMenu(const std::string& simkinPath, skiExecutable* opener = nullptr);
 
+    // M101: clear `object` as the opener of every cached screen. A menu keeps
+    // its opener across visits (OpenMenu() only overwrites it with a non-null
+    // one), so the host calls this before it destroys a world object a
+    // screen may have been opened by -- a loot chest whose own menu ran
+    // `GetOpener().DestroyObject()`.
+    void ForgetOpener(const skiExecutable* object);
+
     // Constructs, registers under `key` (so a later OpenMenu(key) -- e.g.
     // every "back to main menu" handler's OpenMenu("MainMenu") -- reuses
     // this same instance instead of silently constructing a duplicate),

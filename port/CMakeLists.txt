@@ -703,3 +703,7 @@ target_link_libraries(options_smoke PRIVATE sk_bindings sk_world)
 # M100 milestone smoke test -- see src/tests/m100_hit_decay_smoke.cpp.
 add_executable(hit_decay_smoke src/tests/m100_hit_decay_smoke.cpp)
 target_link_libraries(hit_decay_smoke PRIVATE sk_bindings sk_world)
+
+# M101 milestone smoke test -- see src/tests/m101_destroy_death_smoke.cpp.
+add_executable(destroy_death_smoke src/tests/m101_destroy_death_smoke.cpp)
+target_link_libraries(destroy_death_smoke PRIVATE sk_bindings sk_world)

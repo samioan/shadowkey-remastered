@@ -190,6 +190,12 @@ private:
     void OnPassableChanged() override { ApplyTileStamp(); }
     void ApplyTileStamp();
 
+    // M101: FUN_1001817c's grid arm -- `if (vtable[0xac]() && tileGrid)
+    // vtable[0x9c](this, 4, 0)`: a door leaving the world lifts flag 4 off
+    // its footprint whatever its passability was. Every shadow-key door,
+    // cage and gate that `DestroyObjectMirror` opens is solid until then.
+    void OnRemovedFromWorld() override;
+
     int m_UseTextId = -1;
     bool m_Usable = false;  // M75: entity+0xd8, see usable() above
     bool m_MpUsable = false;  // SetMPUsable() -- stored but inert, no multiplayer in this port

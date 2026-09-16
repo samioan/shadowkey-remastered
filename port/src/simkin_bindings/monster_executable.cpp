@@ -190,8 +190,8 @@ bool MonsterExecutable::TickDecay() {
     if (now < m_DecayDeadline) return false;
     m_DecayArmed = false;
     // FUN_1001b484 -- the same world removal an arrow's despawn and
-    // DestroyObjectMirror use, which this port spells m_Destroyed.
-    m_Destroyed = true;
+    // DestroyObjectMirror use (M101: EntityBaseRef::RemoveFromWorld).
+    RemoveFromWorld();
     InvokeScriptEvent("OnDecay", skRValueArray());
     return true;
 }
@@ -1279,15 +1279,6 @@ bool MonsterExecutable::method(const skString& methodName, skRValueArray& args,
     // `fearfrst\sergeant_convo2.s` reads the sergeant's.
     if (methodName == skString("GetHealth") && args.entries() == 0) {
         returnValue = skRValue(m_CurrentHealth);
-        return true;
-    }
-    if (methodName == skString("DestroyObjectMirror")) {
-        // M23: see destroyed()'s comment -- azra.s's own
-        // `M1.DestroyObjectMirror(M1)` (self-passed, network/replication
-        // bookkeeping in the original, same `DoorOpened()`-style pattern
-        // -- this port has no multiplayer) after a real save flag says
-        // an entity is no longer relevant.
-        m_Destroyed = true;
         return true;
     }
     if (methodName == skString("SetAttackNoise") && args.entries() == 1) {

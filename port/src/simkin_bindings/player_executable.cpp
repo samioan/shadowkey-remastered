@@ -97,6 +97,14 @@ void PlayerExecutable::RemoveItem(ItemExecutable* item) {
     if (item) item->MarkForRemoval();
 }
 
+bool PlayerExecutable::CarriesItem(const ItemExecutable* item) const {
+    if (!item) return false;
+    for (const std::unique_ptr<ItemExecutable>& held : m_Inventory) {
+        if (held.get() == item) return true;
+    }
+    return false;
+}
+
 void PlayerExecutable::AddItem(std::unique_ptr<ItemExecutable> item) {
     // M56: `FUN_1003d8e0` -- the real add-to-inventory path tests the
     // incoming item's template id against four specific ids and sets the
@@ -593,11 +601,21 @@ void PlayerExecutable::ApplyDamage(int amount, SpellActor* attacker, bool ranged
     const StatsDamage resolved = ResolveStatsDamage(*this, amount, attacker, ranged);
     if (resolved.refused) return;
     // `if (health <= dmg) { health = 0; die; } else health -= dmg`.
+    // M101: and "die" is real now -- see Die().
     if (m_Health <= resolved.damage) {
         m_Health = 0;
+        Die();
     } else {
         m_Health -= resolved.damage;
     }
+}
+
+// M101: FUN_10042cb0, single-player arm. The multiplayer arm opens
+// "MPDeathMenu" and tells the session; IsMultiplayer() is false here.
+void PlayerExecutable::Die() {
+    if (m_DeathHandled || m_Invulnerable) return;
+    m_DeathHandled = true;
+    m_DeathPending = true;
 }
 
 void PlayerExecutable::SetHealth(int value) {
@@ -1052,7 +1070,60 @@ bool PlayerExecutable::method(const skString& methodName, skRValueArray& args,
         return true;
     }
     if (methodName == skString("SetMagicka") && args.entries() == 1) {
-        m_Magicka = args[0].intValue();
+        // M101: Character-stats case 0x2f assigns and then clamps, ceiling
+        // first and floor second, like SetHealth's 0x30 -- it used to assign
+        // straight through. `cheatmenu.s`'s GiveBlaze is why the order of
+        // its two lines matters: `SetMaxMagicka(5000)` first, so the
+        // `SetMagicka(5000)` after it is not clamped back down.
+        m_Magicka = static_cast<int16_t>(args[0].intValue());
+        if (m_MaxMagicka < m_Magicka) m_Magicka = m_MaxMagicka;
+        if (m_Magicka < 0) m_Magicka = 0;
+        return true;
+    }
+
+    // ---- M101: the stats-block maxima and the health bonus ----
+    //
+    // Character-stats cases 0x34, 0x36 and 2. All three were implemented on
+    // other receivers only, so the player's soft-failed.
+    if (methodName == skString("SetMaxHealth") && args.entries() == 1) {
+        // 0x34: `maxHealth = v; if (v < health) health = v;` -- lowering the
+        // ceiling pulls health down with it, raising it gives nothing.
+        // `lothna/loot_chest08.s` and `lothna/stone_menu.s` both do
+        // `SetMaxHealth(GetMaxHealth() - 5)` and then raise Strength, whose
+        // recompute rewrites the maximum from the attributes -- so what the
+        // player keeps of the -5 is only the health it cost. That is the
+        // shipped game, not a port shortcut.
+        m_MaxHealth = static_cast<int16_t>(args[0].intValue());
+        if (m_MaxHealth < m_Health) m_Health = m_MaxHealth;
+        return true;
+    }
+    if (methodName == skString("SetMaxMagicka") && args.entries() == 1) {
+        // 0x36: the field alone, no clamp of the current value.
+        m_MaxMagicka = static_cast<int16_t>(args[0].intValue());
+        return true;
+    }
+    if (methodName == skString("ModHealthBonus") && args.entries() == 1) {
+        // 2: `stats+0x12 += v`, nothing else. The bonus is a term of the
+        // derived-stat recompute (`maxHealth = bonus + (str + end) >> 1`),
+        // so it shows up the next time an attribute setter runs --
+        // `lothna/treasure_menu.s`'s Grace3 ("hack to pump max health by
+        // 20") calls SetLuck on the very next line, which is one.
+        m_HealthBonus = static_cast<int16_t>(m_HealthBonus + args[0].intValue());
+        return true;
+    }
+
+    // ---- M101: SetInvulnerable / GetInvulnerable, Actor cases 0x17/0x19 ----
+    //
+    // `entity+0x1e2`, the same byte a creature's has always used. For the
+    // player it gates the death screen (see Die()) and DoAttackRoll's target
+    // test; `cheatmenu.s`'s God Mode and `options.s` set it, and both read it
+    // back to label the toggle. The setter's multiplayer notify is inert.
+    if (methodName == skString("SetInvulnerable") && args.entries() == 1) {
+        m_Invulnerable = args[0].boolValue();
+        return true;
+    }
+    if (methodName == skString("GetInvulnerable") && args.entries() == 0) {
+        returnValue = skRValue(m_Invulnerable);
         return true;
     }
     if (methodName == skString("GetFatigue") && args.entries() == 0) {
@@ -1793,6 +1864,29 @@ bool PlayerExecutable::method(const skString& methodName, skRValueArray& args,
         // answer, which is also what the real function does with a null row.
         const ItemExecutable* item = dynamic_cast<const ItemExecutable*>(args[0].obj());
         returnValue = skRValue(item ? IsItemEnabledFor(*item) : true);
+        return true;
+    }
+    if (methodName == skString("MoveToLeftQueue") && args.entries() == 1) {
+        // M101: Player case 0x44. Resolve the object to an item; refuse a
+        // non-item, an item whose type word is 0 or 4, or one this class may
+        // not use (FUN_1001f82c, IsItemEnabledFor); otherwise
+        // `FUN_10044d94(player, item, item->equipSlot == 1)` puts it in the
+        // first free of five slots of that hand's queue and answers whether
+        // there was one. The refusals return without writing a value, which
+        // reads as false.
+        //
+        // This port does not model the hand queues (see UpdateEquipStatus),
+        // so an accepted item answers true -- the "queue full" 0 needs five
+        // queued items the queue screens never let a player build. And the
+        // only caller, `removequeue.s`'s AddToLeft, is unreachable: its one
+        // opener is `charactermanager.s`'s DisplayRemoved row, commented out
+        // in the shipped script.
+        const ItemExecutable* item = args[0].type() == skRValue::T_Object
+                                         ? dynamic_cast<const ItemExecutable*>(args[0].obj())
+                                         : nullptr;
+        const bool accepted = item && item->itemType() != kItemTypeMisc &&
+                              item->itemType() != kItemTypeConsumable && IsItemEnabledFor(*item);
+        returnValue = skRValue(accepted);
         return true;
     }
     if (methodName == skString("ResetQueue") && args.entries() == 1) {

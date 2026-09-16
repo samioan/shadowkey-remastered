@@ -69,6 +69,7 @@
 // DoorExecutable/MonsterExecutable's own strValue() overrides, M21, for
 // a real bug this exact reasoning missed the first time).
 
+#include <iterator>
 #include <map>
 #include <memory>
 #include <string>
@@ -140,6 +141,15 @@ public:
         if (!name.empty()) m_Entities[name] = object;
     }
     void ClearEntities() { m_Entities.clear(); }
+    // M101: drop every name bound to `object`. The host calls it before it
+    // destroys a live object the registry may still name -- a world pickup a
+    // script took out of the world -- so a later GetEntity() cannot hand a
+    // script a freed pointer.
+    void UnregisterEntity(const skiExecutable* object) {
+        for (auto it = m_Entities.begin(); it != m_Entities.end();) {
+            it = it->second == object ? m_Entities.erase(it) : std::next(it);
+        }
+    }
 
     // M21: must be called once entities.txt is loaded (main.cpp) before
     // CreateEntity() can resolve anything -- see this class's comment.

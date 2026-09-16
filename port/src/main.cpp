@@ -1000,7 +1000,12 @@ void LiveDebugHost::Entities(std::vector<sk_debug::EntityRow>& out) const {
             // M67: passability is the field that actually matters for the
             // "an open door is still a wall" class of bug, so it is what a
             // door reports as its state.
-            if (d.script) row.state = d.script->passable() ? "passable" : "solid";
+            if (d.script) {
+                row.state = d.script->entityRemoved() ? "removed"   // M101
+                            : d.script->entityHidden() ? "hidden"
+                            : d.script->passable()     ? "passable"
+                                                       : "solid";
+            }
             out.push_back(std::move(row));
         }
     }
@@ -3467,6 +3472,10 @@ int main(int argc, char** argv) {
             // dies, or the next `Level.<field>` on the main menu reads
             // freed memory.
             stack.level().AttachZoneScript(nullptr);
+            // M101: the engine's quit teardown deletes the player object
+            // (FUN_1000e3c4 with keepPlayer 0), so the next session's player
+            // is born alive and mortal. This port keeps the object.
+            stack.player().ResetForNewSession();
             gameZoneScript.reset();
             gameMonsters.clear();
             gameDoors.clear();
@@ -4429,7 +4438,8 @@ int main(int argc, char** argv) {
                     // its box is axis-aligned exactly like this one. The
                     // grid was what kept opened doors shut.
                     for (const DoorInstance& d : gameDoors) {
-                        if (d.script->entityHidden()) continue;  // M92
+                        // M92 hidden, M101 removed.
+                        if (d.script->entityOutOfWorld()) continue;
                         if (d.script->passable() || !solidAt(d.modelArchiveIndex)) continue;
                         if (sk::BoxesOverlap(mover, boxOf(d.x, d.y, d.modelArchiveIndex))) {
                             return true;
@@ -5125,12 +5135,44 @@ int main(int argc, char** argv) {
                 // deferred-removal rule PlayerExecutable::PurgeRemovedItems
                 // already follows for inventory items, and for the same
                 // use-after-free reason.
+                //
+                // M101: and a world object a script's DestroyObject took out
+                // of the world -- a loot chest's own menu running
+                // `GetOpener().DestroyObject()`, a zone script destroying a
+                // placed item. Both names that can still reach the object
+                // are dropped first: the GetEntity registry and any cached
+                // screen it opened.
                 for (size_t i = 0; i < gamePickups.size();) {
-                    if (gamePickups[i].script && gamePickups[i].script->markedForRemoval()) {
+                    const sk_bindings::ItemExecutable* doomed = gamePickups[i].script.get();
+                    if (doomed && (doomed->markedForRemoval() || doomed->entityRemoved())) {
+                        stack.level().UnregisterEntity(doomed);
+                        stack.ForgetOpener(doomed);
                         gamePickups.erase(gamePickups.begin() + static_cast<long>(i));
                     } else {
                         ++i;
                     }
+                }
+
+                // M101: **the player can die.** Whatever took health to 0
+                // last tick -- a swing, an arrow, a spell, a poison or burn
+                // tick, a script's DoDamage -- went through
+                // PlayerExecutable::ApplyDamage, whose kill slot
+                // (`FUN_10042cb0`) plays slot 0x50 and opens "DeathMenu",
+                // unless SetInvulnerable(true) is set. Opened here, at the
+                // top of the next tick, so no script frame is live under it.
+                //
+                // `FUN_100779b8(menuManager, "DeathMenu", 0, 0)`: the third
+                // argument is the "open over a live session" flag MainMenu
+                // passes as 1, and it is 0 here -- the death screen is not a
+                // pause. So gamePausedForMenu stays false and the screen runs
+                // as a front-end menu: its back key is `DeathMenuBack`, which
+                // is `QuitToMenu()`, and the only way out.
+                if (stack.player().TakePendingDeath()) {
+                    playPlayerSound(sk::kSoundAttackHit);
+                    stack.OpenMenu("DeathMenu");
+                    inGame = false;
+                    gamePausedForMenu = false;
+                    input.ClearPendingEdges();  // M90, see its comment
                 }
 
                 // M34: creatures that died to a damage-over-time this tick
@@ -5312,7 +5354,11 @@ int main(int argc, char** argv) {
                     // M100: FUN_1006410c's second half, after its first (the
                     // script Delay, which TickAi ran). A corpse whose five
                     // seconds are up leaves the world and runs OnDecay.
-                    m.script->TickDecay();
+                    // M101: not once a script has taken it out of the world
+                    // first -- FUN_1001817c drops it from the entity list
+                    // this tick walks, so a corpse destroyed before its five
+                    // seconds never decays and never runs OnDecay.
+                    if (!m.script->destroyed()) m.script->TickDecay();
                     // M23: destroyed() (a real zone-root script's
                     // DestroyObjectMirror()) removes an entity from play
                     // as fully as death does, everywhere alive() is
@@ -6693,7 +6739,7 @@ int main(int argc, char** argv) {
                         // consequence is the one thing the census called
                         // out: scripted set-pieces had props standing where
                         // the script hid them, and they answered Use.
-                        if (d.script->entityHidden()) continue;
+                        if (d.script->entityOutOfWorld()) continue;  // M101: or removed
                         if (!d.script->usable()) continue;
                         if (!sk_bindings::InInteractRange(gameCamera.x, gameCamera.y,
                                                            gameCamera.yaw, d.x, d.y,
@@ -6749,7 +6795,7 @@ int main(int argc, char** argv) {
                     PickupInstance* nearest = nullptr;
                     float bestDist = kInteractRange + 1.0f;
                     for (PickupInstance& p : gamePickups) {
-                        if (p.script->entityHidden()) continue;  // M92, see above
+                        if (p.script->entityOutOfWorld()) continue;  // M92/M101, see above
                         if (!p.script->usable()) continue;
                         if (!sk_bindings::InInteractRange(gameCamera.x, gameCamera.y,
                                                            gameCamera.yaw, p.x, p.y,
@@ -6843,13 +6889,27 @@ int main(int argc, char** argv) {
                                 gamePickups.erase(gamePickups.begin() +
                                                    (pickup - gamePickups.data()));
                             }
-                        } else if (pickup->script->markedForRemoval()) {
-                            skiExecutable* pending = stack.player().TakePendingPickupItem();
-                            if (pending == static_cast<skiExecutable*>(pickup->script.get())) {
-                                stack.player().AddItem(std::move(pickup->script));
-                            }
+                        } else if (stack.player().TakePendingPickupItem() ==
+                                       static_cast<skiExecutable*>(pickup->script.get())) {
+                            // M101: the pickup itself is what takes a world
+                            // item out of the world -- keyed on
+                            // PickupItem(self) naming this instance, not on
+                            // a removal flag. The MirrorDestroyObject(self)
+                            // the herbs follow it with is a multiplayer
+                            // notify (entity_base_ref.h), and treating it as
+                            // the removal is what left the flag on them in
+                            // the inventory. `items/shadowkey1.s`'s
+                            // DestroyObjectMirror(self) after its pickup
+                            // does leave `entityRemoved()` set on the
+                            // carried key, which nothing in the inventory
+                            // reads.
+                            stack.player().AddItem(std::move(pickup->script));
                             gamePickups.erase(gamePickups.begin() +
                                                (pickup - gamePickups.data()));
+                        } else if (pickup->script->markedForRemoval() ||
+                                   pickup->script->entityRemoved()) {
+                            // Gone without being taken: the top-of-tick
+                            // sweep erases it, and unnames it first.
                         } else if (stack.currentMenu() != beforeMenu) {
                             inGame = false;
                             gamePausedForMenu = true;
@@ -7060,7 +7120,8 @@ int main(int argc, char** argv) {
                 }
                 for (const DoorInstance& d : gameDoors) {
                     // M92: ShowEntity(false) -- see entity_base_ref.h.
-                    if (d.script->entityHidden()) continue;
+                    // M101: and DestroyObject, which nothing undoes.
+                    if (d.script->entityOutOfWorld()) continue;
                     // Real wall-facing heading from the .ent placement, plus
                     // whatever the script's own AddRotationTurn() has
                     // accumulated (the 90-degree swing door.s applies on
@@ -7089,7 +7150,7 @@ int main(int argc, char** argv) {
                     // M92: ShowEntity(false) -- `stouttp.s` hides the "old
                     // trinket" until the shopkeeper mentions it, and
                     // `lothna/loot_pilgrim.s` hides itself on Init().
-                    if (p.script->entityHidden()) continue;
+                    if (p.script->entityOutOfWorld()) continue;  // M101: or removed
                     sk::PlacedEntity pickup{p.x, p.y, p.z, p.modelArchiveIndex, p.placementYaw};
                     pickup.rotA = p.rotA;  // M71
                     pickup.rotB = p.rotB;

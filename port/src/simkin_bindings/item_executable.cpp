@@ -944,10 +944,35 @@ bool ItemExecutable::method(const skString& methodName, skRValueArray& args,
         m_MarkedForRemoval = true;
         return true;
     }
-    if (methodName == skString("DestroyObject") && args.entries() == 1) {
-        // Called as "DestroyObject(self)" from within the item's own
-        // OnUse handler -- already covered by OnUsedBy() marking
-        // m_Consumed above, this just needs to not throw.
+    if (methodName == skString("DestroyObject")) {
+        // M101: the Item class's own binding 3 (`FUN_1002c848` case 3), which
+        // the lookup finds before the entity base's 0x20 and which ignores
+        // its arguments -- `DestroyObject(self)`, `DestroyObject()` and
+        // `GetOpener().DestroyObject(GetOpener())` are all the same call:
+        //
+        //     if (item->owner /* +0x170 */ == 0) FUN_1001b484(engine, item);
+        //     else if (item->owner->vtable[200]())          // an actor
+        //         item->owner->vtable[0x174](owner, item);  // RemoveItem
+        //
+        // Unowned is a world object: freed, which here is out of the world
+        // until main.cpp's sweep erases it -- `fearfrst`'s mushroom patches,
+        // the twilite and lakvan loot chests, `ghstpass.s`'s cameo. Owned is
+        // an inventory item, handed to the owner's `RemoveItem` -- the
+        // player's case 0x4a calls that same slot -- so `sisithikconvo.s`'s
+        // `Will.DestroyObject(Will)` really does take Sisithik's will off
+        // the player, and the 49 consumables' `DestroyObject(self)` inside
+        // OnUsedBy (which already marks) are unchanged.
+        //
+        // This port only sets `m_Owner` on some paths, so an item the player
+        // is carrying counts as owned whether or not it was set.
+        PlayerExecutable& player = m_Stack.player();
+        const bool ownedByPlayer =
+            m_Owner == static_cast<skiExecutable*>(&player) || player.CarriesItem(this);
+        if (ownedByPlayer) {
+            player.RemoveItem(this);
+        } else if (!m_Owner) {
+            RemoveFromWorld();
+        }
         return true;
     }
     if (methodName == skString("GetPlayer") && args.entries() == 0) {
@@ -1073,18 +1098,17 @@ bool ItemExecutable::method(const skString& methodName, skRValueArray& args,
         m_Stack.ReopenMenu(ToStdString(args[0].str()), static_cast<skiExecutable*>(this));
         return true;
     }
-    if (methodName == skString("MirrorDestroyObject") && args.entries() == 1) {
-        // M19: called as "MirrorDestroyObject(self)" from a real world
-        // pickup's own OnUse() (snowline/foxglove.s etc.), right after
-        // GetPlayer().PickupItem(self) -- network/replication bookkeeping
-        // in the original (this port has no multiplayer, same DoorOpened()
-        // precedent), but the removal-from-world intent is real: reuses
-        // the same markedForRemoval flag OnUsedBy() sets for a consumed
-        // inventory item -- main.cpp's Action::Use handling reads it to
-        // erase this instance from gamePickups after InvokeOnUse() returns.
-        m_MarkedForRemoval = true;
-        return true;
-    }
+    // M101: `MirrorDestroyObject` used to be handled here as the removal
+    // itself, setting markedForRemoval. It is the entity base's 0x33, and the
+    // whole case is a multiplayer notify: in single player nothing happens.
+    // The five snowline herbs (`foxglove.s` and its four siblings) pair it
+    // with `GetPlayer().PickupItem(self)`, and the pickup alone is what takes
+    // them out of the world -- main.cpp's Use branch erases the world
+    // instance when TakePendingPickupItem() names it. Marking them as well
+    // carried the flag into the inventory, where the next
+    // PurgeRemovedItems() deleted them: Rilora's herb quest could never be
+    // handed in.
+    //
     // The whole `0x14d08` Object/Entity base (entity_base_ref.h) -- for an
     // item that is `SetName`/`SetID` (M10/M39, which used to be written out
     // above), the position group, and from M92 `PlaySound`, `ShowEntity`,

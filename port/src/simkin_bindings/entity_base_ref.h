@@ -26,11 +26,15 @@
 //   0x17  SetPassable(passable)
 //   0x18  SetRotationTurn(raw)
 //   0x1b  AddRotationTurn(raw)
+//   0x20  DestroyObject([entity])         -- M101, see below
+//   0x21  DestroyObjectMirror([entity])   -- M101, the same plus a notify
 //   0x23  SetModel(modelsTxtIndex)
 //   0x25  PlaySound(id[, volume[, directional[, repeats]]])
+//   0x2c  Random(lo, hi)                  -- M101
 //   0x30  SetPosition(x, y[, z])
 //   0x31  SetPositionMirror(x, y[, z])    -- the replicated twin
 //   0x32  MirrorMethod(name)              -- multiplayer only, see below
+//   0x33  MirrorDestroyObject([entity])   -- M101, multiplayer only
 //   0x34  GetPositionX()
 //   0x35  GetPositionY()
 //   0x36  GetPositionZ()
@@ -110,10 +114,53 @@
 // In single player it does nothing at all -- and this port answers
 // `IsMultiplayer()` false everywhere (M91), which is what routes every
 // script down its single-player branch. So all 33 shipped call sites are
-// correctly no-ops here, the same conclusion `DoorOpened`,
-// `DestroyObjectMirror` and `SetPositionMirror` already reached. It is
-// counted rather than ignored (`mirroredMethodCount()`) so a test can tell
-// "deliberately does nothing" from "never ran".
+// correctly no-ops here, the same conclusion `DoorOpened` and
+// `SetPositionMirror` already reached. It is counted rather than ignored
+// (`mirroredMethodCount()`) so a test can tell "deliberately does nothing"
+// from "never ran".
+//
+// (This paragraph used to list `DestroyObjectMirror` with them. It does not
+// belong: only its notify is multiplayer. See the next section.)
+//
+// ---- `DestroyObject` takes an entity out of the world (0x20/0x21) ----
+//
+// Both cases resolve a target the same way -- no argument means this
+// entity; an *object* argument means the entity it names; anything else (a
+// string, a number) resolves to nothing and the case does nothing -- and
+// hand it to `FUN_1001817c(engine, target)`:
+//
+//     if (!target->vtable[0xf8]()) FUN_1001a4d8(engine, target->id, 0);
+//     if (target->vtable[0xac]() && engine->tileGrid)   // stamped in the grid
+//         target->vtable[0x9c](target, 4, 0);           // lift flag 4
+//     remove from engine+0x634 (every entity) and +0x640 (actors);
+//     if (!target->vtable[0xc0]()) remove from engine+0x64c;
+//     if (target->vtable[200]())                        // an actor
+//         target->vtable[0x178](target, 1, 0);          // dead, no decay
+//     target->+0x94 = target->+0x9c = 0; target->+0xa4 = 0;
+//     target->+0x48 = 1;                                // removed
+//     FUN_10073648(registry, target);                   // and unnamed
+//
+// -- which is the whole of "remove from play": no longer in any list the
+// renderer, the AI, the use prompt or `GetEntity` walks, and no longer in
+// the collision grid. Nothing is freed and no inventory is touched.
+// `DestroyObjectMirror` (0x21) is the same call plus, in multiplayer, a
+// notify carrying the entity id. `MirrorDestroyObject` (0x33) is *only* that
+// notify, so in single player it does nothing.
+//
+// That corrects two things this port had. `DestroyObjectMirror` was
+// implemented on a creature and nowhere else, so every *door* that leaves
+// the world soft-failed and stayed shut: the shadow-key doors in twilite,
+// lakvan, lothcav, raiders, delfhide and both Dragonstars, the broken1
+// cages, the delfhide gates, the ffarena ice. And `MirrorDestroyObject` was
+// taken to mean the removal, which made the five snowline herbs purge
+// themselves out of the inventory the tick after they were picked up. An
+// entity's `RemoveFromWorld()` below is the one place the state now lives;
+// what it means for each class is that class's `OnRemovedFromWorld()`.
+//
+// An *item* is the exception to the routing: the Item class has a
+// `DestroyObject` of its own (`FUN_1002c848` case 3), found before this one,
+// that frees an unowned item and removes an owned one from its owner's
+// inventory. `ItemExecutable` handles that name first; see its comment.
 //
 // ---- `SetName` takes an ID, not a string (case 0x14) ------------------
 //
@@ -260,6 +307,25 @@ public:
     // false -- a placement is visible until a script says otherwise.
     bool entityHidden() const { return m_Hidden; }
 
+    // ---- removal from the world (M101) ---------------------------------
+
+    // `entity+0x48`: `DestroyObject`/`DestroyObjectMirror` took this entity
+    // out of play (see the header comment). Unlike hidden, nothing brings it
+    // back.
+    bool entityRemoved() const { return m_Removed; }
+    // Hidden or removed -- the question every "is this thing there" test in
+    // the host is actually asking.
+    bool entityOutOfWorld() const { return m_Hidden || m_Removed; }
+    // `FUN_1001817c`. Idempotent: the class hook runs once.
+    void RemoveFromWorld() {
+        if (m_Removed) return;
+        m_Removed = true;
+        OnRemovedFromWorld();
+    }
+    // How many `MirrorDestroyObject` calls reached this entity -- a no-op in
+    // single player, counted for the same reason `mirroredMethodCount()` is.
+    int mirroredDestroyCount() const { return m_MirroredDestroys; }
+
     // ---- passability (M92) ---------------------------------------------
 
     // `entity+0xd5`. False (solid) until a script says otherwise, which is
@@ -331,6 +397,11 @@ protected:
     // `entityPassable()` per frame and needs no hook.
     virtual void OnPassableChanged() {}
 
+    // M101: what leaving the world means for this class, beyond the flag.
+    // A creature is marked dead (`vtable[0x178](1, 0)`); a door lifts its
+    // footprint out of the tile grid. Everything else is the flag alone.
+    virtual void OnRemovedFromWorld() {}
+
     // `PlaySound` needs the zone's sound manifest and the mixer. Every
     // entity class can reach both; the base cannot, so it asks.
     virtual sk::SoundArchive* entitySounds() const { return nullptr; }
@@ -346,6 +417,8 @@ private:
     std::string m_Id;
     int m_NameId = -1;
     bool m_Hidden = false;
+    bool m_Removed = false;    // M101
+    int m_MirroredDestroys = 0;  // M101
     bool m_Passable = false;
     int m_RotationRaw = 0;
     bool m_RotationDirty = false;

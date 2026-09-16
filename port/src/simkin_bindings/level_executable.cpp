@@ -216,7 +216,13 @@ bool LevelExecutable::NativeMethod(const skString& methodName, skRValueArray& ar
                                     skRValue& returnValue, skExecutableContext& context) {
     if (methodName == skString("GetEntity") && args.entries() == 1) {
         auto it = m_Entities.find(ToStdString(args[0].str()));
-        if (it != m_Entities.end()) {
+        // M101: an entity DestroyObject took out of the world is no longer
+        // found. FUN_1001817c's last call hands it to the registry's
+        // removal list (`FUN_10073648`), and `azra.s`, `lothcav.s` and the
+        // crypt zones null-check exactly this before destroying again.
+        const EntityBaseRef* entity =
+            it != m_Entities.end() ? dynamic_cast<const EntityBaseRef*>(it->second) : nullptr;
+        if (it != m_Entities.end() && !(entity && entity->entityRemoved())) {
             returnValue = skRValue(it->second, false);
         } else {
             // Matches the "null" global game_constants.cpp registers --

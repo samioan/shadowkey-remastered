@@ -9492,6 +9492,95 @@ soft-fails 39 -> 39, all 14 tracked `.ppm` renders byte-identical,
       true after. No soft-fail line. (With `set freezeai 1` nothing decays:
       the flag stops the whole creature tick.)
 
+- [x] **M101 -- The player natives, the doors that open, and a death screen.**
+      Item 3 of the post-M99 audit. Its eight names were each one or two
+      lines; working out what two of them *mean* found two bigger holes.
+    - **`DestroyObject`/`DestroyObjectMirror` on every entity.** Base cases
+      0x20/0x21 resolve a target (no argument: this entity; an object
+      argument: that entity; anything else: nobody) and call
+      `FUN_1001817c`: unregister the id, lift flag 4 off the grid footprint,
+      drop the entity from the entity/actor lists, mark an actor dead with
+      no decay, stop it, set `+0x48`, and hand it to the registry's removal
+      list. Nothing is freed and no inventory is touched. 0x21 adds a
+      multiplayer notify. `MirrorDestroyObject` (0x33) is *only* the notify.
+      The port had `DestroyObjectMirror` on the creature alone, so a census
+      of every call site, classed by receiver, found every **door** one soft-failing: the
+      shadow-key doors of twilite, lakvan, lothcav, raiders, delfhide and
+      both Dragonstars, broken1's twelve cages, the delfhide gates, the
+      ffarena ice. They stayed shut. Now `EntityBaseRef::RemoveFromWorld()`
+      holds the state (`entityRemoved()`, `entityOutOfWorld()`), and each
+      class's `OnRemovedFromWorld()` says what it means: a creature
+      `SetDead(true, 0)`, a door unstamps its footprint. `GetEntity` stops
+      finding a removed entity; main.cpp skips removed doors and pickups
+      wherever it skipped hidden ones, and a removed corpse no longer decays.
+    - **The Item class's own `DestroyObject`** (`FUN_1002c848` case 3, found
+      first, arguments ignored): an unowned item is freed (out of the world,
+      then main.cpp's sweep erases it -- the fearfrst mushrooms, the twilite
+      and lakvan loot chests); an owned one goes to its owner's `RemoveItem`
+      (`vtable[0x174]`, the slot the player's case 0x4a calls), so
+      `sisithikconvo.s` really takes the will. The sweep now unregisters the
+      object and clears it as any cached screen's opener
+      (`MenuStack::ForgetOpener`) before erasing it.
+    - **The snowline herbs vanished from the inventory.** M19 read
+      `MirrorDestroyObject(self)` as the removal and set markedForRemoval;
+      the flag moved into the inventory with the herb, and the next
+      `PurgeRemovedItems()` deleted it, so Rilora's quest could never be
+      handed in. The pickup is the removal: the Use branch now erases the
+      world instance when `TakePendingPickupItem()` names it.
+    - **The player can die.** The kill slot (stats `vtable[0x28]`, a thunk
+      to `FUN_10042cb0`) is `if (!+0x1099 && !+0x1e2) { +0x1099 = 1;
+      PlaySound(0x50); OpenMenu("DeathMenu", 0, 0); }`. The port had none of
+      it: health stopped at 0 and play went on. `ApplyDamage` calls
+      `Die()`, main.cpp opens the screen at the top of the next tick, and
+      the third argument 0 means it is not a pause: its back key is
+      `DeathMenuBack`, `QuitToMenu()`. `+0x1099` is set nowhere but the
+      player constructor, so the quit teardown calls
+      `ResetForNewSession()` and a loaded save starts clear.
+    - **`SetInvulnerable`/`GetInvulnerable`** (Actor 0x17/0x19) are that
+      `+0x1e2`: health still reaches 0 but the death screen does not open,
+      and DoAttackRoll refuses the player as a target. Saved as
+      `holder.invulnerable`.
+    - **The stats natives.** `SetMaxHealth` (0x34) pulls health down with
+      it; `SetMaxMagicka` (0x36) is the field alone; `ModHealthBonus` (2) is
+      `stats+0x12 += v`, a term of the derived recompute, now saved. And
+      `SetMagicka` (0x2f) clamps, which it did not.
+    - **`Random`** (0x2c) is `lo + rand() % (hi - lo + 1)`, now on the base,
+      so `ghchestgold.s`'s roll pays 40..100 instead of 0.
+    - **`MoveToLeftQueue`** (Player 0x44): refuses a non-item, types 0 and
+      4, and a class the item is not enabled for; otherwise true (the hand
+      queues are not modelled). Its only caller, `removequeue.s`, is
+      unreachable.
+    - **`GoBack`** counted a `QuitToMenu()` as not having done anything, so
+      the death screen's back key also ran `OnRightSoftkey`'s `MenuQuit()`.
+    - **Not done:** `DestroyObjectMirror`'s clearing of the menu manager's
+      opener (no script reads `GetOpener()` after it); a removed creature's
+      script `Delay` still ticks.
+    - **Test**: `port/src/tests/m101_destroy_death_smoke.cpp`, 53 checks:
+        1. **The shadow door**, through `twilite/shadow_open.s`'s real
+           TurnKey: removed, flag 4 cleared, `GetEntity` null, the script's
+           `saved_SSdoor` set, a second destroy inert.
+        2. **A creature**: a string argument destroys nobody; out of the
+           world and dead, but no kill owed and no decay.
+        3. **Items**: `fearfrst/loot7_menu.s`'s Take removes its chest;
+           a carried `sisithik_will.s` is purged; `MirrorDestroyObject` only
+           counts; `GetPlayer().DestroyObject(Herb)` is the base.
+        4. **Stats**: GiveBlaze's 5000/5000, both clamps, `SetMaxHealth`
+           both ways, Grace3's +20 through the recompute.
+        5. **Random**, and `ghchestgold` paying 40..100.
+        6. **Death**: invulnerable at 0 with no screen; a death owed once;
+           a second fatal hit inert; again after the reset; the flag and the
+           bonus through a save record.
+        7. **MoveToLeftQueue**'s refusals.
+      `m19_pickup_smoke` now checks the herb survives the purge.
+    - **The suite**: 93 executables, 92 pass. Soft-fail lines **16 -> 15**.
+      Gaps tool: **28 -> 24 names**, 441 of 648.
+    - **Live** (twilite, `port/debug/m101_destroy_death.cfg`): `ents sdwdoor`
+      read `solid`, then `removed` after `call ent:64 DestroyObjectMirror`.
+      With God Mode, `DoDamage 9999` emptied the health bar and play went
+      on; without it the death screen came up ("A cold, maniacal laughter
+      ..."), and its back key returned to the front-end main menu. No
+      soft-fail line.
+
 ## Next milestones (not yet started)
 
 Roughly in priority order for reaching "actually playable," not commitments:
@@ -9882,7 +9971,10 @@ What it found, most serious first:
       on a creature. Its `OnHit` tests `GetHealth() < 375`, which a
       soft-fail answers with 0, so the moment `OnHit` is wired the final
       boss would fake its death on the first hit.
-- [ ] **3. Player natives implemented only on other classes**:
+- [x] **3. Player natives implemented only on other classes**: Done in
+      M101, which also found every door's `DestroyObjectMirror`
+      soft-failing, the snowline herbs purging themselves, and no player
+      death at all.
       `SetInvulnerable`/`GetInvulnerable` (cheat menu God Mode),
       `SetMaxHealth` (two Lothna chests), `ModHealthBonus` (Lothna
       treasure), `SetMaxMagicka` (cheat menu), `DestroyObject`

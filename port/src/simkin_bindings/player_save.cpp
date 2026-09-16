@@ -84,6 +84,7 @@ sk::SavedEntity PlayerExecutable::BuildSaveRecord(const std::string& levelName) 
     st.magicResistance = static_cast<int16_t>(m_MagicResistance);
     st.strength = static_cast<int16_t>(m_Strength);
     st.strengthBonus = static_cast<int16_t>(m_StrengthBonus);
+    st.healthBonus = static_cast<int16_t>(m_HealthBonus);  // M101: ModHealthBonus
     st.intelligence = static_cast<int16_t>(m_Intelligence);
     st.agility = static_cast<int16_t>(m_Agility);
     st.willpower = static_cast<int16_t>(m_Will);
@@ -100,6 +101,9 @@ sk::SavedEntity PlayerExecutable::BuildSaveRecord(const std::string& levelName) 
     st.experience = m_Experience;
     st.level = static_cast<int16_t>(m_Level);
     st.gold = m_Gold;
+    // M101: `+0x1e2`, which FUN_10005164 writes for every inventory holder --
+    // a God Mode player saves as one.
+    rec.holder.invulnerable = m_Invulnerable ? 1 : 0;
 
     // --- the Character layer: which level this save is in ---
     rec.character.levelName = levelName;
@@ -229,6 +233,7 @@ void PlayerExecutable::ApplySaveRecord(const sk::SavedEntity& record, MenuStack&
     m_MagicResistance = st.magicResistance;
     m_Strength = st.strength;
     m_StrengthBonus = st.strengthBonus;
+    m_HealthBonus = st.healthBonus;  // M101
     m_Intelligence = st.intelligence;
     m_Agility = st.agility;
     m_Will = st.willpower;
@@ -245,6 +250,11 @@ void PlayerExecutable::ApplySaveRecord(const sk::SavedEntity& record, MenuStack&
     m_Experience = st.experience;
     m_Level = st.level;
     m_Gold = st.gold;
+    // M101: a loaded save is a new player object in the engine, so its death
+    // flag starts clear; its invulnerability is whatever was saved.
+    m_Invulnerable = record.holder.invulnerable != 0;
+    m_DeathHandled = false;
+    m_DeathPending = false;
 
     m_HasCreatedCharacter = record.player.hasCreatedCharacter != 0;
     m_Race = record.player.race;

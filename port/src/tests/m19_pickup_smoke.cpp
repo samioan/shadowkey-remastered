@@ -114,9 +114,16 @@ int main(int argc, char** argv) {
     size_t inventoryBefore = stack.player().inventory().size();
     item->InvokeOnUse();
 
-    bool markedOk = item->markedForRemoval();
-    std::printf("markedForRemoval() after OnUse() (MirrorDestroyObject(self)): %s %s\n",
-                markedOk ? "true" : "false", markedOk ? "OK" : "FAILED");
+    // M101: MirrorDestroyObject is the entity base's 0x33, a multiplayer
+    // notify and nothing else -- it neither marks the item for removal nor
+    // takes it out of the world. The pickup is what moves it (below).
+    bool markedOk = !item->markedForRemoval() && !item->entityRemoved() &&
+                    item->mirroredDestroyCount() == 1;
+    std::printf("after OnUse(): markedForRemoval=%s entityRemoved=%s mirroredDestroyCount=%d "
+                "(expected false/false/1) %s\n",
+                item->markedForRemoval() ? "true" : "false",
+                item->entityRemoved() ? "true" : "false", item->mirroredDestroyCount(),
+                markedOk ? "OK" : "FAILED");
     if (!markedOk) ok = false;
 
     // Same check main.cpp's Action::Use handling performs before moving
@@ -147,6 +154,16 @@ int main(int argc, char** argv) {
     std::printf("the real picked-up ItemExecutable is the one now in inventory: %s %s\n",
                 sameObjectOk ? "true" : "false", sameObjectOk ? "OK" : "FAILED");
     if (!sameObjectOk) ok = false;
+
+    // M101: and it is still there after the purge that runs every tick.
+    // MirrorDestroyObject used to set markedForRemoval, which came into the
+    // inventory with the item and deleted it here.
+    stack.player().PurgeRemovedItems();
+    bool survivesPurgeOk = stack.player().inventory().size() == inventoryAfter &&
+                           stack.player().FindInventoryById("herb5") == itemRaw;
+    std::printf("the herb survives PurgeRemovedItems() and FindInventory(\"herb5\") finds it: %s\n",
+                survivesPurgeOk ? "OK" : "FAILED");
+    if (!survivesPurgeOk) ok = false;
 
     std::printf("\nm19_pickup_smoke: %s\n", ok ? "OK" : "FAILED");
     return ok ? 0 : 1;

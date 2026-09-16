@@ -873,8 +873,13 @@ bool MenuExecutable::GoBack() {
     // GameActive() )` -- and for those the pre-M90 chain below is still
     // what gets the player off the screen.
     bool handled = !m_ScriptName.empty() && TryInvoke(m_ScriptName + "Back");
+    // M101: a QuitToMenu() counts too. `deathmenu.s`'s DeathMenuBack is
+    // exactly that, and without it the chain carried on into the screen's
+    // OnRightSoftkey -- a `MenuQuit()` no native answers -- on top of the
+    // teardown it had already asked for.
     if (handled && (m_Stack.currentMenu() != before || m_Stack.closeMenuRequested() ||
-                    m_Stack.quitRequested() || m_Stack.gameStartRequested())) {
+                    m_Stack.quitRequested() || m_Stack.gameStartRequested() ||
+                    m_Stack.quitToMenuRequested())) {
         return true;
     }
     handled = TryInvoke("OnRightSoftkey") || TryInvoke("OnRightSoftKey") || handled;

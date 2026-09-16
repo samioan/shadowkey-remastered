@@ -135,6 +135,10 @@ public:
     void LoadStartingInventory(MenuStack& stack);
 
     const std::vector<std::unique_ptr<ItemExecutable>>& inventory() const { return m_Inventory; }
+    // M101: is `item` one of the objects in the inventory list right now
+    // (marked for removal or not)? The Item class's own DestroyObject asks
+    // it, to tell a carried item from a world one.
+    bool CarriesItem(const ItemExecutable* item) const;
     // Marks `item` for removal -- see item_executable.h's
     // markedForRemoval() comment for why this doesn't erase immediately.
     void RemoveItem(ItemExecutable* item);
@@ -336,6 +340,47 @@ public:
     // snowray gate. See stats_damage.h.
     void ApplyDamage(int amount, SpellActor* attacker = nullptr, bool ranged = false);
 
+    // ---- M101: death, and the flag that refuses it ----------------------
+    //
+    // The player's kill slot -- the stats vtable's `+0x28`, which for the
+    // player is a `this -= 0x3ac` thunk to `FUN_10042cb0` -- is what
+    // FUN_10049e78 calls when a hit takes health to 0, and what the burn
+    // channel calls directly. Its whole body in single player:
+    //
+    //     if (player->+0x1099 == 0 && player->+0x1e2 == 0) {  // not dead yet,
+    //         player->+0x1099 = 1;                            // not invulnerable
+    //         PlaySound(0x50, player position, 100);
+    //         FUN_100779b8(menuManager, "DeathMenu", 0, 0);   // OpenMenu
+    //     }
+    //
+    // -- so health does reach 0 either way; what `SetInvulnerable(true)`
+    // prevents is the death screen, and it prevents it only at the moment of
+    // the killing blow. `+0x1099` is written nowhere else but the player
+    // constructor (`FUN_1003d670`), so a player dies once per player object.
+    //
+    // This port had no player death at all: health bottomed out at 0 and
+    // play went on. `cheatmenu.s`'s God Mode and `options.s`'s toggle are
+    // the two scripts that set the flag.
+    bool invulnerable() const { return m_Invulnerable; }
+    bool deathHandled() const { return m_DeathHandled; }
+    // The death is opened by the host, at a safe point in its frame, the
+    // same deferral every other script-side request here uses. Clears on
+    // read.
+    bool TakePendingDeath() {
+        const bool pending = m_DeathPending;
+        m_DeathPending = false;
+        return pending;
+    }
+    // The fresh player object the engine builds for a new session: what
+    // `FUN_1003d670` and the actor constructor `FUN_1001c534` zero that this
+    // port keeps on a player that outlives its session. main.cpp's
+    // quit-to-menu teardown calls it.
+    void ResetForNewSession() {
+        m_DeathHandled = false;
+        m_DeathPending = false;
+        m_Invulnerable = false;
+    }
+
     // M86: the real `+0x17c` hit timer -- see ApplyDamage's own comment
     // and main.cpp's RenderHud. Counted down by the HUD draw, exactly
     // where `FUN_1002ae88` counts it down.
@@ -502,6 +547,12 @@ public:
     // player more health than their maximum.
     void SetHealth(int value);
 
+private:
+    // M101: FUN_10042cb0 -- see the "death" block above.
+    void Die();
+
+public:
+
     // ---- M43: SpellActor (spell_actor.h) ----
     //
     // The player is the `vtable+0xcc` side of FUN_1002fd30, with its stats
@@ -515,6 +566,8 @@ public:
     // the real engine has. attack()/defense()/armorRating() below fold in
     // any live modifier the way MonsterExecutable's already did.
     bool isPlayerActor() const override { return true; }
+    // M101: DoAttackRoll's invulnerable gate reads the player's flag too.
+    bool actorInvulnerable() const override { return m_Invulnerable; }
     bool isMonsterActor() const override { return false; }
     ActorStats& actorStats() override { return m_Stats; }
     // M58: FUN_1004ad40's field map -- see spell_actor.h. The player has
@@ -792,6 +845,9 @@ private:
     std::unique_ptr<Store> m_GodVendor;
     bool m_CoordsEnabled = false;  // M95: +0xfc0, EnableCoords
     bool m_Ghost = false;          // M95: +0x10a1, SetGhost
+    bool m_Invulnerable = false;   // M101: +0x1e2, SetInvulnerable
+    bool m_DeathHandled = false;   // M101: +0x1099, see ApplyDamage/Die
+    bool m_DeathPending = false;   // M101: see TakePendingDeath()
     // M56: see AttachStack(). Null in every standalone construction.
     MenuStack* m_Stack = nullptr;
     ItemExecutable* m_LeftItem = nullptr;
