@@ -9819,19 +9819,96 @@ soft-fails 39 -> 39, all 14 tracked `.ppm` renders byte-identical,
       action queue "Right Hand" instead of "Left Hand" (its five rows still
       read "item" -- that is `UpdateTextItems`, below).
 
-- [ ] **Next: the action-queue screen's own four natives.** `MoveItem`,
-      `GetLastItem`, `UpdateTextItems` and `IsRightQueue` (done) on the
-      `wcscmp` chain `FUN_10033dd0`, driving `actionqueue.s` and
-      `removequeue.s` -- the quick-use hotbar. `UpdateTextItems` hides
-      every widget on the screen, walks the player's five queue slots for
-      the selected hand (`FUN_100455b0(player, hand)`), and fills one
-      widget per held item: text from the entity's name string,
-      `widget+0x90` pointed at the object, visible, and the last one
-      remembered at `menu+0xd0` for `GetLastItem()` to return.
-      `MoveItem(item, up)` finds the queue slot holding that entity
-      (`FUN_10045568`) and moves it (`FUN_1006c628`). Until then the screen
-      shows five rows reading "item" and its Drop/Up/Down popup has nothing
-      to act on.
+- [x] **M105 -- the action queue.** The screen M104 found, and the state
+      behind it: this port had **no hand queues at all**, so the whole
+      feature was missing rather than broken.
+    - **The container**, fully decompiled and transcribed to
+      `simkin_bindings/hand_queue.h`. A queue is 0x1c bytes at
+      `player + hand*0x1c + 0xf4c` (`FUN_100455b0`) -- two words and then
+      **five entity pointers at +8**. Six operations touch it: `At`,
+      `IndexOf`, `Add` (first empty slot, else fail), `Remove` (**shift
+      the tail down and clear slot 4 -- compacting, so a queue never has
+      holes**), `Clear`, and `Move`, which is a **swap** with the
+      neighbour and whose target index is an *unsigned* compare against 5,
+      so moving the first item up underflows and moving the last down is
+      out of range. Both failures are load-bearing: `actionqueue.s`'s
+      `ShowPopup` blanks its "Up" row on the first item and its "Down" row
+      on the last, which is what `GetLastItem()` exists to tell it.
+    - **The three remaining chain natives** (`FUN_10033dd0`).
+      `UpdateTextItems()` is the screen's entire contents: hide every
+      widget, walk the five slots of the hand this screen is showing, and
+      for each held item give the next widget the item's name, point
+      `widget+0x90` at the object (that is `GetAssociatedObject`), show it,
+      and remember it at `menu+0xd0`. The widget cursor only advances on a
+      filled slot, which is safe *because* Remove compacts.
+      `GetLastItem()` returns `menu+0xd0`, and writes **no value at all**
+      when it is null rather than a null object -- so on an empty screen
+      `ShowPopup`'s `selectedItem = lastItem` is false and its "Down" row
+      stays offered. `MoveItem(item, up)` finds the queue holding the item
+      and swaps.
+    - **The five player natives** behind the screen's other rows, all
+      previously stubs or no-ops: `MoveToLeftQueue` (case 0x44) --  which
+      **files by the item's own preferred hand, not by its name**, so a
+      right-handed weapon passed to it lands in the *right* queue, while
+      `MoveToRightQueue` (0x45) forces hand 1; both refuse a Misc or
+      Consumable item and one the class may not use, returning without
+      writing a value. `MoveToOtherQueue` (0x46) removes from whichever
+      queue holds it and adds to the other -- note the engine's own
+      not-found path computes `1 - (-1)` and writes to
+      `player + 2*0x1c + 0xf4c`, past both queues, which this refuses
+      instead. `RemoveItemFromQueue` (0x48) takes it out of both and
+      leaves it in the bag. `ResetQueue` (0x43) empties a queue and
+      re-files everything by `item+0x1c0`.
+    - **What fills a queue**, which is where the missing model showed.
+      `FUN_1003d8e0`'s tail -- the line this port's own M74 comment has
+      quoted as `appendToHandQueue(...)` ever since and stopped one call
+      short of -- appends a picked-up item to its hand's queue, **but only
+      when it actually equipped it**: the engine returns before the Add if
+      the hand is full, so a second weapon is carried without being
+      queued. The other filler is the Equip row itself (`FUN_10033660`
+      case 1), which **toggles** membership -- an item already in that
+      hand's queue comes out, one that is not goes in -- and whose "2"
+      return means *the queue is full*. The port's header had called that
+      code "unreachable here" since M74; it was unreachable only because
+      there was no queue to fill.
+    - **And it is saved.** The format has carried `quickSlots[2][5]` plus
+      the two selection indices since M50 (`FUN_10043308` writes both
+      lists); this port filled slot 0 of each with the wielded item and
+      left the other eight empty. Both lists are written and restored in
+      full now. The format's own limit stays: a slot names an item by
+      typeId, so it cannot distinguish two copies of the same thing --
+      which no shipped screen can put in a queue anyway.
+    - **The two rotates are dead.** `FUN_1006c560`/`FUN_1006c5c8` rotate a
+      queue and `FUN_10044c9c`/`FUN_10044cdc` wrap them and equip the new
+      head -- exactly the default control scheme's "Cycle Left Queue"
+      (KD_ASTERISK) and "Cycle Right Queue" (KD_0). **Neither wrapper has
+      a caller, a pointer, or any other mention in the image**, so those
+      two keys did nothing on the device either. Implemented in the
+      container because it costs two loops; nothing calls them here
+      either, which is the faithful answer.
+    - **Test**: `port/src/tests/m105_action_queue_smoke.cpp`, 45 checks in
+      five parts: the container against all six operations including both
+      refusing ends of `Move` and the compaction after `Remove`; pickup
+      and the Equip toggle including the "2"; the five player natives
+      including 0x44's hand-from-the-item; the screen driven through
+      `actionqueue.s`'s own `OnDisplay`, with the rows carrying real names
+      and associations and `MoveItem` refusing at the front; and the save
+      record carrying every queued item.
+    - **The suite**: 97 executables, 96 pass. Soft-fail lines **7 -> 5**,
+      and **all five are now accounted for as not-real**: three names that
+      are not literals in the image at all (`HitTarget`,
+      `SetMagicResistable`, `MenuQuit`) and two from this suite calling
+      `Init` on a loot-bag script that defines no handler. There is no
+      unimplemented native left that a shipped script reaches, outside
+      multiplayer.
+    - **Live** (azra, `port/debug/m105_action_queue.cfg`): the action
+      queue now lists **Iron Dagger / Steel Dagger / Iron Shortsword**
+      instead of five rows reading "item"; its row popup opens with
+      "Remove from List / Move Item Up / Move Item Down / Back"; *Remove
+      from List* took the Steel Dagger out of the queue and left it in the
+      inventory; and *Move Item Up* swapped it above the Iron Dagger, with
+      the screen's own `HidePopup -> OnDisplay -> UpdateTextItems` redraw
+      showing the new order.
 
 ## Next milestones (not yet started)
 

@@ -210,6 +210,13 @@ void PlayerExecutable::AddItem(std::unique_ptr<ItemExecutable> item) {
         default: return;
     }
     added->SetEquipped(true);
+    // M105: and the line this function's own M74 comment has quoted as
+    // `appendToHandQueue(...)` ever since -- the real tail of
+    // `FUN_1003d8e0`, which this port stopped one call short of because it
+    // had no queue to append to. A weapon or spell you pick up joins the
+    // right hand's queue, a consumable the left's, and the action-queue
+    // screen is what that list is for.
+    queue(added->equipSlot()).Add(added);
 }
 
 ItemExecutable* PlayerExecutable::FindInventoryById(const std::string& id) const {
@@ -221,6 +228,25 @@ ItemExecutable* PlayerExecutable::FindInventoryById(const std::string& id) const
 
 std::vector<std::unique_ptr<ItemExecutable>> PlayerExecutable::TakePendingDrops() {
     return std::move(m_PendingDrops);
+}
+
+// M105: `FUN_100422a4`. Take a copy of the queue, empty it, then walk the
+// copy and re-file each item by its own `+0x1c0` -- left (0) and right (1)
+// go to that queue, anything else (kEquipSlotNone) is simply dropped from
+// the queues. Note it re-files into *either* queue, not back into the one
+// it was called for, which is why the argument is the queue to empty
+// rather than the queue to fill.
+void PlayerExecutable::ResetQueue(int hand) {
+    HandQueue& source = queue(hand);
+    std::array<ItemExecutable*, HandQueue::kSlots> taken{};
+    for (int i = 0; i < HandQueue::kSlots; ++i) taken[static_cast<size_t>(i)] = source.At(i);
+    source.Clear();
+    for (ItemExecutable* item : taken) {
+        if (!item) continue;
+        if (item->equipSlot() == kEquipSlotLeft || item->equipSlot() == kEquipSlotRight) {
+            queue(item->equipSlot()).Add(item);
+        }
+    }
 }
 
 void PlayerExecutable::QueueDrop(std::unique_ptr<ItemExecutable> item) {
@@ -360,6 +386,10 @@ void PlayerExecutable::PurgeRemovedItems() {
         if (!item->markedForRemoval()) continue;
         if (m_LeftItem == item.get()) m_LeftItem = nullptr;
         if (m_RightItem == item.get()) m_RightItem = nullptr;
+        // M105: and out of both action queues, which hold raw pointers into
+        // this same vector. The engine's item teardown calls the queue's own
+        // Remove for the same reason.
+        for (HandQueue& q : m_Queues) q.Forget(item.get());
         // M93: a *dropped* item is leaving the inventory but not existence
         // -- it is about to be the contents of a loot bag on the floor, so
         // it moves to the pending list instead of being destroyed with the
@@ -838,33 +868,47 @@ int PlayerExecutable::UpdateEquipStatus(ItemExecutable* item, bool equipping) {
 
     // Already in a hand: taking it out is unconditional, and the real code
     // returns before it ever looks at the preferred slot.
+    // M105: and it comes out of that hand's queue at the same time --
+    // `FUN_1006c4d4(player + 0xf4c, item)` on the left arm,
+    // `player + 0xf68` on the right.
     if (m_LeftItem == item) {
         m_LeftItem = nullptr;
         item->SetEquipped(false);
+        queue(kEquipSlotLeft).Remove(item);
         return 1;
     }
     if (m_RightItem == item) {
         m_RightItem = nullptr;
         item->SetEquipped(false);
+        queue(kEquipSlotRight).Remove(item);
         return 1;
     }
 
     // Otherwise it goes in its own hand -- and only if that hand is empty.
-    // The real function then appends to that hand's queue whether or not
-    // the slot was free, which is the invisible waitlist this port does
-    // not model (see the header's UpdateEquipStatus comment); a full hand
-    // is therefore a no-op success here, exactly as before.
     ItemExecutable** slot = nullptr;
     switch (item->equipSlot()) {
         case kEquipSlotLeft: slot = &m_LeftItem; break;
         case kEquipSlotRight: slot = &m_RightItem; break;
         default: break;  // kEquipSlotNone: armour and misc, handled above
     }
-    if (slot && equipping && *slot == nullptr) {
+    if (!slot) return 1;
+    if (equipping && *slot == nullptr) {
         *slot = item;
         item->SetEquipped(true);
     }
-    return 1;
+    // M105: and then the queue, which this port had no model for until now
+    // -- the header's "2 = the hand queue is full (unreachable here)" was
+    // true only because there was no queue to fill. The real arm
+    // **toggles** membership: an item already in that hand's queue is
+    // taken out, one that is not is put in, and an Add that finds no free
+    // slot is the 2. So the Equip row on a five-deep hand really does
+    // refuse, and pressing it again on a queued item removes it.
+    HandQueue& q = queue(item->equipSlot());
+    if (q.Contains(item)) {
+        q.Remove(item);
+        return 1;
+    }
+    return q.Add(item) ? 1 : 2;
 }
 
 bool PlayerExecutable::method(const skString& methodName, skRValueArray& args,
@@ -1866,49 +1910,74 @@ bool PlayerExecutable::method(const skString& methodName, skRValueArray& args,
         returnValue = skRValue(item ? IsItemEnabledFor(*item) : true);
         return true;
     }
-    if (methodName == skString("MoveToLeftQueue") && args.entries() == 1) {
-        // M101: Player case 0x44. Resolve the object to an item; refuse a
-        // non-item, an item whose type word is 0 or 4, or one this class may
-        // not use (FUN_1001f82c, IsItemEnabledFor); otherwise
-        // `FUN_10044d94(player, item, item->equipSlot == 1)` puts it in the
-        // first free of five slots of that hand's queue and answers whether
-        // there was one. The refusals return without writing a value, which
-        // reads as false.
+    // M105: the four queue natives, real now. The container they all drive
+    // is hand_queue.h; `queue(hand)` is `FUN_100455b0`.
+    if (args.entries() == 1 && (methodName == skString("MoveToLeftQueue") ||
+                                 methodName == skString("MoveToRightQueue"))) {
+        // Player cases 0x44 and 0x45. Identical but for the last argument:
+        // 0x45 forces hand 1, while **0x44 files by the item's own
+        // preferred hand** (`FUN_1002ed74(item)`, `item+0x1c0`) rather than
+        // by its own name -- so `MoveToLeftQueue` is a misnomer, and a
+        // right-handed weapon passed to it lands in the right queue.
         //
-        // This port does not model the hand queues (see UpdateEquipStatus),
-        // so an accepted item answers true -- the "queue full" 0 needs five
-        // queued items the queue screens never let a player build. And the
-        // only caller, `removequeue.s`'s AddToLeft, is unreachable: its one
-        // opener is `charactermanager.s`'s DisplayRemoved row, commented out
-        // in the shipped script.
-        const ItemExecutable* item = args[0].type() == skRValue::T_Object
-                                         ? dynamic_cast<const ItemExecutable*>(args[0].obj())
-                                         : nullptr;
-        const bool accepted = item && item->itemType() != kItemTypeMisc &&
-                              item->itemType() != kItemTypeConsumable && IsItemEnabledFor(*item);
-        returnValue = skRValue(accepted);
+        // Both refuse a non-object, an item whose type word is 0 (Misc) or
+        // 4 (Consumable), and one this character's class may not use
+        // (`FUN_1001f82c`), returning **without writing a value** -- which
+        // reads as false. Otherwise the answer is whether the queue had a
+        // free slot.
+        ItemExecutable* item = args[0].type() == skRValue::T_Object
+                                   ? dynamic_cast<ItemExecutable*>(args[0].obj())
+                                   : nullptr;
+        if (!item) return true;
+        if (item->itemType() == kItemTypeMisc || item->itemType() == kItemTypeConsumable) {
+            return true;
+        }
+        if (!IsItemEnabledFor(*item)) return true;
+        const int hand = methodName == skString("MoveToRightQueue") ? kEquipSlotRight
+                                                                    : item->equipSlot();
+        returnValue = skRValue(queue(hand).Add(item));
         return true;
     }
     if (methodName == skString("ResetQueue") && args.entries() == 1) {
-        // Dead in the real shipped game -- charactermanager.s's only call
-        // site (its ResetQueue() handler) is on a popup item
-        // (actionQueuePopup.AddItem(3776,"ResetQueue")) that's commented
-        // out in the real script, and that popup is never even made
-        // visible on the live click path anyway. Accepted so nothing logs
-        // soft-fail noise if a build ever does reach it; no state to reset.
+        // Player case 0x43 -> `FUN_100422a4`. Dead in the shipped game --
+        // `charactermanager.s`'s only call site is on a popup item that is
+        // commented out -- but it is three lines on top of the container
+        // and it is what gives `item+0x1c0` a second reader, so it is here.
+        ResetQueue(args[0].intValue());
         return true;
     }
-    if (methodName == skString("MoveToOtherQueue") || methodName == skString("RemoveItemFromQueue")) {
-        // Reachable (DropItem/RelocateItem in actionqueue.s), but always
-        // called with a null argument in the real game: both handlers read
-        // `selectedItem.GetAssociatedObject()` where selectedItem came from
-        // a row actionqueue.s's own UpdateTextItems()/GetLastItem() calls
-        // were supposed to populate -- and those two names are absent from
-        // the fully-enumerated real native binding table (confirmed this
-        // session, decompiled cross-check against
-        // shadowkey/simkin_native_bindings.json), so they never resolve
-        // and the rows are never actually bound to a real item. Accepted
-        // no-op, matching that real (non-functional) behavior faithfully.
+    if (methodName == skString("MoveToOtherQueue") && args.entries() == 1) {
+        // Player case 0x46, `actionqueue.s`'s RelocateItem. Remove it from
+        // whichever queue holds it, then Add it to the other one.
+        //
+        // Note what the engine does when the item is in *neither*: the
+        // not-found index stays -1, so `1 - (-1)` is 2 and it adds to
+        // `player + 2*0x1c + 0xf4c` -- past the end of both queues, into
+        // whatever follows. Unreachable from the screen, which only offers
+        // rows that came out of a queue, and not reproduced: this refuses.
+        ItemExecutable* item = args[0].type() == skRValue::T_Object
+                                   ? dynamic_cast<ItemExecutable*>(args[0].obj())
+                                   : nullptr;
+        const int hand = QueueHoldingItem(item);
+        if (!item || hand < 0) return true;
+        queue(hand).Remove(item);
+        queue(hand == 0 ? kEquipSlotRight : kEquipSlotLeft).Add(item);
+        return true;
+    }
+    if (methodName == skString("RemoveItemFromQueue") && args.entries() == 1) {
+        // Player case 0x48, `actionqueue.s`'s DropItem -- which despite the
+        // name only takes the item *out of the queue*; it stays in the
+        // inventory. Walks both hands and stops at the first that had it.
+        ItemExecutable* item = args[0].type() == skRValue::T_Object
+                                   ? dynamic_cast<ItemExecutable*>(args[0].obj())
+                                   : nullptr;
+        if (!item) return true;
+        for (int hand = 0; hand < kHands; ++hand) {
+            if (queue(hand).Remove(item)) {
+                returnValue = skRValue(true);
+                return true;
+            }
+        }
         return true;
     }
     return SoftFailNativeCall("Player", methodName, args, returnValue);

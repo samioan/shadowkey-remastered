@@ -1901,22 +1901,104 @@ bool MenuExecutable::method(const skString& methodName, skRValueArray& args,
         returnValue = skRValue(m_QueueHandIsRight);
         return true;
     }
+    // M105: the rest of the action-queue screen's own `wcscmp` chain
+    // (`FUN_10033dd0`), alongside the `IsRightQueue` above. See
+    // hand_queue.h for the container all three drive.
+    //
+    // `UpdateTextItems()` is the screen's whole contents:
+    //
+    //     for (w : menu->widgets) { w->visible = 0; w->selectable = 0; }
+    //     q = GetQueue(player, menu+0xcc);      // the hand this screen shows
+    //     copy q's five slots;
+    //     w = menu->widgets.head; filled = 0;
+    //     for (i = 0; i < 5; i++)
+    //         if (w && q[i]) { w->text = stringTable[q[i]->nameId];
+    //                          w->+0x90 = q[i];        // GetAssociatedObject
+    //                          w->visible = w->selectable = 1;
+    //                          menu+0xd0 = w;          // GetLastItem
+    //                          w = w->next; filled++; }
+    //     if (filled == 0) SelectWidget(menu, menu+0x98);
+    //
+    // Two things worth keeping. The widget cursor only advances on a slot
+    // that had something in it, which is safe only because the queue never
+    // has holes (Remove compacts -- hand_queue.h). And `menu+0xd0` is left
+    // pointing at the last widget it filled, which is exactly what
+    // `ShowPopup` compares against to decide whether to offer "Down".
+    if (methodName == skString("UpdateTextItems") && args.entries() == 0) {
+        PlayerExecutable& player = m_Stack.player();
+        const HandQueue& q = player.queue(m_QueueHandIsRight ? kEquipSlotRight : kEquipSlotLeft);
+        m_LastFilledRow = -1;
+        // Only the screen's own item widgets take part: the quit button is
+        // a widget too, and the engine's list holds the rows the script
+        // built, in build order.
+        std::vector<size_t> slots;
+        for (size_t i = 0; i < m_Rows.size(); ++i) {
+            if (m_Rows[i].kind != RowKind::MenuItem || m_Rows[i].isQuitButton) continue;
+            m_Rows[i].visible = false;
+            m_Rows[i].selectable = false;
+            m_Rows[i].associatedObject = nullptr;
+            slots.push_back(i);
+        }
+        size_t next = 0;
+        for (int i = 0; i < HandQueue::kSlots && next < slots.size(); ++i) {
+            ItemExecutable* held = q.At(i);
+            if (!held) continue;
+            MenuRow& row = m_Rows[slots[next]];
+            row.textId = -1;
+            row.literalText = held->name();
+            row.associatedObject = static_cast<skiExecutable*>(held);
+            row.visible = true;
+            row.selectable = true;
+            m_LastFilledRow = static_cast<int>(slots[next]);
+            ++next;
+        }
+        // `FUN_1007ff30(menu, menu+0x98)` -- with nothing to show, put the
+        // focus where there is something: the screen's quit button.
+        if (m_LastFilledRow < 0) {
+            for (size_t i = 0; i < m_Rows.size(); ++i) {
+                if (m_Rows[i].isQuitButton) m_SelectedItem = static_cast<int>(i) + 1;
+            }
+        }
+        return true;
+    }
+    if (methodName == skString("GetLastItem") && args.entries() == 0) {
+        // `menu+0xd0`, and the engine answers *nothing* when it is null --
+        // not a null object, no return value written at all. `ShowPopup`
+        // compares `selectedItem = lastItem`, which is then false, so its
+        // "Down" row stays offered on an empty screen. Reproduced.
+        if (m_LastFilledRow >= 0 && static_cast<size_t>(m_LastFilledRow) < m_Rows.size()) {
+            MenuRow& row = m_Rows[static_cast<size_t>(m_LastFilledRow)];
+            if (row.widget) {
+                returnValue = skRValue(static_cast<skiExecutable*>(row.widget.get()), false);
+            }
+        }
+        return true;
+    }
+    if (methodName == skString("MoveItem") && args.entries() == 2) {
+        // `FUN_10045568` to find the queue holding it, then the container's
+        // own swap (`FUN_1006c628`). The second argument is "up", toward
+        // slot 0 -- `actionqueue.s`'s ItemUp passes true -- and the answer
+        // is whether the swap happened, which is what gates the screen's
+        // redraw.
+        ItemExecutable* item = args[0].type() == skRValue::T_Object
+                                   ? dynamic_cast<ItemExecutable*>(args[0].obj())
+                                   : nullptr;
+        PlayerExecutable& player = m_Stack.player();
+        const int hand = player.QueueHoldingItem(item);
+        returnValue = skRValue(hand >= 0 && player.queue(hand).Move(item, args[1].boolValue()));
+        return true;
+    }
     if (methodName == skString("ShowActionQueue") && args.entries() == 0) {
         // Real engine (FUN_10034d8c case 3): resolves the actionqueue.s
         // menu slot, copies the CALLER's hand flag onto it, then actually
         // pushes/opens it.
         //
-        // M104 correction: this used to say the screen's own row population
-        // (`UpdateTextItems`/`GetLastItem`) "isn't a registered native at
-        // all", so the port left the screen blank on purpose. Both are real
-        // -- they live on the `wcscmp` chain `FUN_10033dd0`, alongside
-        // `MoveItem` and the `IsRightQueue` above. `UpdateTextItems` hides
-        // every widget, walks the player's five queue slots for this hand,
-        // and fills one widget per held item (text from the entity's name,
-        // `widget+0x90` pointing at the object, the last one remembered at
-        // `menu+0xd0` for `GetLastItem`). So the shipped screen does work,
-        // and this port's is the one that is blank. Recorded as the next
-        // milestone rather than bolted on here.
+        // M104 correction, finished in M105: this used to say the screen's
+        // own row population (`UpdateTextItems`/`GetLastItem`) "isn't a
+        // registered native at all", so the port left the screen blank on
+        // purpose. Both are real -- they live on the `wcscmp` chain
+        // `FUN_10033dd0`, alongside `MoveItem` and the `IsRightQueue`
+        // above, and all four are implemented now.
         // M104: **resolve, copy, then open** -- the engine's own order, and
         // the one this port had inverted. `OpenMenu` runs the screen's
         // `OnDisplay`, which is where `actionqueue.s` asks `IsRightQueue()`

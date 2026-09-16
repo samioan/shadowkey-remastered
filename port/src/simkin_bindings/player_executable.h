@@ -23,6 +23,7 @@
 // SetDamageMin/Max() on top of the flat base, so equipping something
 // through the real inventory screen visibly changes these numbers.
 
+#include <array>
 #include <map>
 #include <memory>
 #include <set>
@@ -33,6 +34,8 @@
 #include "simkin_bindings/actor_stats.h"
 #include "simkin_bindings/amulet_flags.h"
 #include "simkin_bindings/entity_base_ref.h"
+#include "simkin_bindings/game_constants.h"
+#include "simkin_bindings/hand_queue.h"
 #include "simkin_bindings/store.h"
 #include "simkin_bindings/native_stub_executable.h"
 #include "simkin_bindings/spell_actor.h"
@@ -316,6 +319,33 @@ public:
 
     ItemExecutable* leftItem() const { return m_LeftItem; }
     ItemExecutable* rightItem() const { return m_RightItem; }
+
+    // M105: the two action queues at `player + hand*0x1c + 0xf4c`
+    // (`FUN_100455b0`). Hand 0 is the left, 1 the right -- the same two
+    // values `item+0x1c0` uses (kEquipSlotLeft/kEquipSlotRight), which is
+    // not a coincidence: `MoveToLeftQueue` picks the hand off the *item*,
+    // not off its own name. Real state now, and saved: the save format has
+    // carried `quickSlots[2][5]` since M50 and this port wrote zeros into
+    // it for fifty milestones.
+    static constexpr int kHands = 2;
+    HandQueue& queue(int hand) {
+        return m_Queues[static_cast<size_t>(hand == kEquipSlotRight ? 1 : 0)];
+    }
+    const HandQueue& queue(int hand) const {
+        return m_Queues[static_cast<size_t>(hand == kEquipSlotRight ? 1 : 0)];
+    }
+    // Which queue holds this item, or -1. `FUN_10045568`, whose own return
+    // is the queue pointer; the hand index is what every caller wants.
+    int QueueHoldingItem(const ItemExecutable* item) const {
+        for (int hand = 0; hand < kHands; ++hand) {
+            if (m_Queues[static_cast<size_t>(hand)].Contains(item)) return hand;
+        }
+        return -1;
+    }
+    // `FUN_100422a4`, the body of `ResetQueue(hand)`: empty that queue and
+    // re-file everything that was in it by each item's own preferred hand,
+    // dropping anything whose `+0x1c0` names neither (kEquipSlotNone).
+    void ResetQueue(int hand);
 
     int health() const { return m_Health; }
     int maxHealth() const { return m_MaxHealth; }
@@ -852,6 +882,10 @@ private:
     MenuStack* m_Stack = nullptr;
     ItemExecutable* m_LeftItem = nullptr;
     ItemExecutable* m_RightItem = nullptr;
+    // M105: see queue(). Raw pointers into m_Inventory, so
+    // PurgeRemovedItems has to drop them -- it already does the same for
+    // m_LeftItem/m_RightItem.
+    std::array<HandQueue, kHands> m_Queues{};
     // M19: see TakePendingPickupItem()'s comment.
     skiExecutable* m_PendingPickupItem = nullptr;
     // M93: see TakePendingDrops().

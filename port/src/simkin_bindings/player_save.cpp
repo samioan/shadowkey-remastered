@@ -128,19 +128,26 @@ sk::SavedEntity PlayerExecutable::BuildSaveRecord(const std::string& levelName) 
     // The real lists hold five item ids each and the stats block's +0x48 /
     // +0x4c point at the one visibly wielded in that hand -- saved as an
     // *index into the list*, which is why the selection is an i16 in
-    // [0,5) and not an id. This port models one item per hand rather than
-    // the full five-deep queue (see UpdateEquipStatus's own comment), so
-    // it fills slot 0 of each list and selects it.
+    // [0,5) and not an id.
+    //
+    // M105: and this port has the full five-deep queues now, so both lists
+    // are written for real instead of one item each. The selection stays
+    // the index of the item actually in that hand, which is what the two
+    // stats-block pointers mean.
     for (auto& list : rec.player.quickSlots) list.fill(-1);
     rec.player.selectedQuick0 = -1;
     rec.player.selectedQuick1 = -1;
-    if (m_LeftItem) {
-        rec.player.quickSlots[0][0] = static_cast<int16_t>(m_LeftItem->templateId());
-        rec.player.selectedQuick0 = 0;
-    }
-    if (m_RightItem) {
-        rec.player.quickSlots[1][0] = static_cast<int16_t>(m_RightItem->templateId());
-        rec.player.selectedQuick1 = 0;
+    for (int hand = 0; hand < kHands; ++hand) {
+        const HandQueue& q = queue(hand == 0 ? kEquipSlotLeft : kEquipSlotRight);
+        const ItemExecutable* wielded = hand == 0 ? m_LeftItem : m_RightItem;
+        int16_t& selected = hand == 0 ? rec.player.selectedQuick0 : rec.player.selectedQuick1;
+        for (int slot = 0; slot < HandQueue::kSlots; ++slot) {
+            const ItemExecutable* held = q.At(slot);
+            if (!held) continue;
+            rec.player.quickSlots[static_cast<size_t>(hand)][static_cast<size_t>(slot)] =
+                static_cast<int16_t>(held->templateId());
+            if (held == wielded) selected = static_cast<int16_t>(slot);
+        }
     }
 
     // --- the eight equipment slots (+0xf8c), saved by typeId ---
@@ -318,6 +325,22 @@ void PlayerExecutable::ApplySaveRecord(const sk::SavedEntity& record, MenuStack&
     };
     for (uint16_t typeId : record.player.equipTypeIds) {
         if (ItemExecutable* item = findByTemplate(typeId)) item->SetEquipped(true);
+    }
+    // M105: rebuild both queues, then take the wielded item from each
+    // list's own selection index. `findByTemplate` is how the format names
+    // an item at all -- by typeId -- so a queue holding two copies of the
+    // same thing comes back pointing at one of them twice. The shipped
+    // screens cannot build one (an item occupies at most one slot) and the
+    // format has no way to say otherwise, so this is the format's limit,
+    // not a shortcut.
+    for (int hand = 0; hand < kHands; ++hand) {
+        HandQueue& q = queue(hand == 0 ? kEquipSlotLeft : kEquipSlotRight);
+        q.Clear();
+        for (int slot = 0; slot < HandQueue::kSlots; ++slot) {
+            const int16_t id =
+                record.player.quickSlots[static_cast<size_t>(hand)][static_cast<size_t>(slot)];
+            if (ItemExecutable* item = findByTemplate(id)) q.Add(item);
+        }
     }
     if (record.player.selectedQuick0 >= 0 &&
         record.player.selectedQuick0 < sk::SavedPlayer::kQuickSlots) {

@@ -607,6 +607,9 @@ private:
     std::vector<MenuRow> m_Rows;
     int m_SelectedItem = 0;
     bool m_QueueHandIsRight = false;
+    // M105: `menu+0xd0` -- the last row UpdateTextItems() filled, which is
+    // what GetLastItem() hands back. -1 when the queue was empty.
+    int m_LastFilledRow = -1;
     int m_PrevSelectedItem = 0;
     std::map<std::string, skRValue> m_NativeFields;
     // Non-owning -- see CreatePopupMenu's handler and ClearMenu's reset in
