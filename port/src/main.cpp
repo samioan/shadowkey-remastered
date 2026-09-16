@@ -2292,22 +2292,23 @@ void RenderMenu(sk::Backbuffer& backbuffer, sk_bindings::MenuExecutable& menu,
     // `TRect(0, y, x, ...)` right-aligned, so the text's *right edge*
     // lands on x. The colour guard is real: a zero colour draws nothing.
     //
-    // Still not honoured: `widget+0x3c`, the font. All 95 shipped sites
-    // call `SetFontNum(1)` on these, and `FUN_10022b20` resolves that to a
-    // `TFontSpec("Swiss", 0xd5)` rather than the ROM legend font. There is
-    // no "Swiss" in Ceurope.gdr (it carries LatinBold12/13/17/19,
-    // LatinPlain12, Acb14, Acb30, Acp5), so the device resolved it through
-    // Symbian's nearest-font matching and this port would have to pick a
-    // face. Drawing them in the wrong face is still much closer than not
-    // drawing them at all, which is what happened before.
+    // M111: and in the *second* face. All 95 shipped sites call
+    // `SetFontNum(1)` on these, which `FUN_10022b20` resolves to a
+    // `TFontSpec("Swiss", 0xd5)` instead of the ROM legend font; no
+    // N-Gage font store has a "Swiss", so the device fell through to
+    // Symbian's nearest-font matching on style alone, and LatinPlain12 is
+    // the only non-bold Latin text face there is. See bitmap_font.h.
+    constexpr sk::BitmapFont::Face kCaptionFace = sk::BitmapFont::Face::Small;
     for (const auto& ft : menu.floatingTexts()) {
         if (ft.textId < 0 || ft.color444 == 0) continue;
         const std::string text = strings.Get(ft.textId);
         if (text.empty()) continue;
-        const int x = ft.rightJustify ? ft.x - sk::BitmapFont::TextWidth(text) : ft.x;
+        const int x =
+            ft.rightJustify ? ft.x - sk::BitmapFont::TextWidth(text, kCaptionFace) : ft.x;
         constexpr uint16_t kFloatShadow = MenuColor444(sk_bindings::kTextShadowColor444);
-        sk::BitmapFont::DrawString(backbuffer, x + 1, ft.y + 1, text, kFloatShadow);
-        sk::BitmapFont::DrawString(backbuffer, x, ft.y, text, MenuColor444(ft.color444));
+        sk::BitmapFont::DrawString(backbuffer, x + 1, ft.y + 1, text, kFloatShadow, kCaptionFace);
+        sk::BitmapFont::DrawString(backbuffer, x, ft.y, text, MenuColor444(ft.color444),
+                                    kCaptionFace);
     }
 
     for (size_t rowIndex = 0; rowIndex < menu.rows().size(); ++rowIndex) {
@@ -3153,6 +3154,12 @@ int main(int argc, char** argv) {
     // the loader list the ones that are).
     const char* typeface = std::getenv("SK_FONT_TYPEFACE");
     sk::BitmapFont::LoadRealFont(fontPath, typeface ? typeface : "LatinBold12");
+    // M111: the second face, for `SetFontNum(1)` -- see bitmap_font.h's
+    // Face comment for why LatinPlain12 is the one the device's
+    // nearest-font matching would have landed on. Same store as the
+    // legend font, so it costs one extra parse and nothing else; if it
+    // fails to load, drawing silently falls back to the Ui face.
+    sk::BitmapFont::LoadRealFont(fontPath, "LatinPlain12", sk::BitmapFont::Face::Small);
 
     skInterpreter interpreter;
     sk_bindings::MenuStack stack(scriptRoot, interpreter, &strings, &soundArchive, &audioEngine);

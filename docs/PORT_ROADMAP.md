@@ -10384,6 +10384,72 @@ calls are attached to was never drawn at all.**
 - **Which face `SetFontNum(1)` should map to**, as above.
 - **Whatever class `case 4` of `FUN_10076b64` really is** (M109).
 
+## M111 -- which face `SetFontNum(1)` means
+
+M110 left this open because the answer was not in the game: `FUN_10022b20`
+resolves font 1 to a `TFontSpec("Swiss", 0xd5)`, and `Ceurope.gdr` has no
+"Swiss". With the device's own ROM font directory to hand
+(`z\RH-29\System\Fonts`) it is answerable, and the answer turns out not to
+need the twips conversion at all.
+
+- **"Swiss" is in none of the three ROM font stores.** Enumerated with
+  `SK_FONT_TYPEFACE` (M110's diagnostic), the device's complete set is:
+    - `Ceurope.gdr` -- LatinBold12, LatinBold13, LatinBold17, LatinBold19,
+      LatinPlain12, Acb14, Acb30, Acp5
+    - `Browsereur.gdr` -- Alpi12, Albi12, Alp13, Alpi13, Albi13, alp17,
+      Alb17b, albi17b, alpi17
+    - `CalcEur.gdr` -- Aco13, Aco21, Acalc21
+
+  So the name contributed nothing to Symbian's nearest-font match and the
+  request fell through to style and metrics.
+
+- **Three of Ceurope's eight "typefaces" are not text faces.** Loading
+  each and reading its glyph count settles it: `Acb14` has **13** glyphs
+  (cell height 10), `Acb30` **13** (height 12) and `Acp5` **10** (height
+  5) -- digit-only clock/battery faces. Every real Latin text face has
+  465-475 glyphs. That leaves LatinBold12, LatinBold13, LatinBold17,
+  LatinBold19 and LatinPlain12.
+
+- **The style then picks one uniquely.** `FUN_1007f49c` passes 0 for both
+  of `FUN_1008f8a4`'s style arguments, which reach `FUN_10022b20` as its
+  `SetStrokeWeight(param_8 != 0)` and `SetPosture` flags -- so font 1 is
+  requested **non-bold and non-italic**. Of the five real text faces,
+  exactly one is not bold: **LatinPlain12**. No twips-to-pixel conversion
+  is needed to get there, which is just as well: the N-Gage's screen size
+  in twips is not in `Wsini.ini` or any other readable ROM data, and the
+  `.gdr` store header's `pxRatio` is 1000 (square pixels), not a twips
+  scale.
+
+  The height agrees independently. The captions sit at y=195 on a 208px
+  screen, so the face has to be 13px or shorter: LatinPlain12's 12px cell
+  fits with a pixel to spare, and LatinBold19 would overrun by six.
+
+- **`BitmapFont` carries two faces now** (`Face::Ui`, `Face::Small`).
+  `LoadRealFont`, `DrawString` and `TextWidth` all take an optional face
+  that defaults to `Ui`, and drawing with a face that was never loaded
+  silently falls back to `Ui` -- so every existing call site is unchanged
+  and a build without the second face behaves exactly as before. The
+  softkey captions are the only thing that asks for `Small`.
+
+- **No new test, deliberately.** `Ceurope.gdr` is device firmware and is
+  never committed (see .gitignore), so a check that asserts "the Small
+  face is LatinPlain12" would fail on any machine but this one. The
+  captions' geometry -- position, justification, colour, lifetime -- is
+  already pinned by `m108_menu_layout_smoke` part 5, and none of that
+  depends on which face draws them.
+
+- **The suite**: 100 executables, 99 pass. Soft-fail stays at **5**.
+
+### Still open
+
+- **The title colour** (M108, M110): `*(ushort *)(engine->+0x28 + 8)`,
+  which text areas read too. `GameEngine_ctor` nulls the pointer and no
+  function in the image assigns it; the dump is complete and it is not an
+  array-form write either. Needs runtime tracing.
+- **Whatever class `case 4` of `FUN_10076b64` really is** (M109) -- it
+  owns the centred-and-bold row with a rule under it that was wrongly
+  attributed to the combo box.
+
 ## Next milestones (not yet started)
 
 Roughly in priority order for reaching "actually playable," not commitments:

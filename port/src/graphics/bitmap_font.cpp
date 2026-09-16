@@ -11,9 +11,22 @@ namespace sk {
 
 namespace {
 
-GdrFont& RealFont() {
-    static GdrFont font;
-    return font;
+// M111: two faces, not one -- see bitmap_font.h's Face comment.
+// FontSlot() is the storage (what LoadRealFont writes into); RealFont()
+// is what drawing should use, which falls back to the Ui face when the
+// Small one was never loaded. So a caller that never mentions a face,
+// and a build with no Small font available, both behave exactly as
+// before.
+GdrFont& FontSlot(BitmapFont::Face face) {
+    static GdrFont ui;
+    static GdrFont small;
+    return face == BitmapFont::Face::Small ? small : ui;
+}
+
+GdrFont& RealFont(BitmapFont::Face face = BitmapFont::Face::Ui) {
+    GdrFont& slot = FontSlot(face);
+    if (slot.IsLoaded()) return slot;
+    return FontSlot(BitmapFont::Face::Ui);
 }
 
 // A TrueType path for DrawString, NOT currently used by default --
@@ -296,7 +309,7 @@ const char* const* GlyphRows(char c) {
 
 }  // namespace
 
-bool BitmapFont::LoadRealFont(const std::string& path, const std::string& typefaceName) {
+bool BitmapFont::LoadRealFont(const std::string& path, const std::string& typefaceName, Face face) {
     // Dispatch by extension: a real Symbian .gdr (assets/gdr_font.h) or
     // a .ttf (TtfFont above). Both are genuinely implemented and
     // exercised -- .gdr is what main.cpp actually loads.
@@ -316,24 +329,28 @@ bool BitmapFont::LoadRealFont(const std::string& path, const std::string& typefa
     // on an ~11px bitmap font reads as "rounded" to the eye; it isn't.
     if (path.size() >= 4 &&
         _stricmp(path.c_str() + path.size() - 4, ".ttf") == 0) {
+        // The TTF path is the Ui face only -- it predates M111's second
+        // face and nothing asks a .ttf for the small one.
         constexpr int kTtfPixelHeight = 8;
         return RealTtfFont().Load(path, typefaceName, kTtfPixelHeight);
     }
-    return RealFont().Load(path, typefaceName);
+    return FontSlot(face).Load(path, typefaceName);
 }
 
-void BitmapFont::DrawString(Backbuffer& bb, int x, int y, std::string_view text, uint16_t color) {
-    if (RealTtfFont().IsLoaded()) {
+void BitmapFont::DrawString(Backbuffer& bb, int x, int y, std::string_view text, uint16_t color,
+                            Face face) {
+    if (face == Face::Ui && RealTtfFont().IsLoaded()) {
         RealTtfFont().DrawString(bb, x, y, text, color);
         return;
     }
 
+    GdrFont& font = RealFont(face);
     int cursorX = x;
-    const int baselineY = y + RealFont().Ascent();
+    const int baselineY = y + font.Ascent();
 
     for (char c : text) {
         const GdrGlyph* glyph =
-            RealFont().GetGlyph(static_cast<char32_t>(static_cast<unsigned char>(c)));
+            font.GetGlyph(static_cast<char32_t>(static_cast<unsigned char>(c)));
         if (glyph) {
             int glyphX = cursorX + glyph->leftBearing;
             int glyphY = baselineY - glyph->ascentAboveBaseline;
@@ -359,18 +376,24 @@ void BitmapFont::DrawString(Backbuffer& bb, int x, int y, std::string_view text,
     }
 }
 
-int BitmapFont::TextWidth(std::string_view text) {
-    if (RealTtfFont().IsLoaded()) return RealTtfFont().MeasureWidth(text);
-    if (RealFont().IsLoaded()) {
+int BitmapFont::TextWidth(std::string_view text, Face face) {
+    if (face == Face::Ui && RealTtfFont().IsLoaded()) return RealTtfFont().MeasureWidth(text);
+    GdrFont& font = RealFont(face);
+    if (font.IsLoaded()) {
         int w = 0;
         for (char c : text) {
             const GdrGlyph* glyph =
-                RealFont().GetGlyph(static_cast<char32_t>(static_cast<unsigned char>(c)));
+                font.GetGlyph(static_cast<char32_t>(static_cast<unsigned char>(c)));
             w += glyph ? glyph->advance : kAdvance;
         }
         return w;
     }
     return static_cast<int>(text.size()) * kAdvance;
+}
+
+int BitmapFont::LineHeight(Face face) {
+    GdrFont& font = RealFont(face);
+    return font.IsLoaded() ? font.CellHeight() : kGlyphHeight;
 }
 
 }  // namespace sk

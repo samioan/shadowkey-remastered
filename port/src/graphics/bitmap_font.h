@@ -47,7 +47,28 @@ public:
     // file, unrecognised format, no such typeface) DrawString keeps
     // using the placeholder glyphs, exactly as if this were never
     // called.
-    static bool LoadRealFont(const std::string& path, const std::string& typefaceName);
+    // M111: the two faces the game actually asks for. `FUN_10022b20`
+    // gates on the widget's `SetFontNum`: anything but 1 takes
+    // `EIKCORE::LegendFont()` (Ui below), and 1 builds a
+    // `TFontSpec("Swiss", 0xd5)` with the caller's stroke weight and
+    // posture, which for every shipped site is non-bold and non-italic.
+    //
+    // No N-Gage ROM font store contains a typeface called "Swiss" --
+    // Ceurope.gdr, Browsereur.gdr and CalcEur.gdr between them hold
+    // LatinBold12/13/17/19, LatinPlain12, Acb14, Acb30, Acp5, Alpi12,
+    // Albi12, Alp13, Alpi13, Albi13, alp17, Alb17b, albi17b, alpi17,
+    // Aco13, Aco21 and Acalc21 -- so the device resolved it through
+    // Symbian's nearest-font matching and the name contributed nothing.
+    // The **style** then settles it on its own: Acb14 (13 glyphs),
+    // Acb30 (13) and Acp5 (10) are digit-only clock/battery fonts rather
+    // than text faces, which leaves five real Latin text faces, and
+    // exactly one of them -- LatinPlain12 -- is not bold. Its 12px cell
+    // is also the only candidate that fits the captions' own y=195 on a
+    // 208px screen (LatinBold19 would overrun by six).
+    enum class Face { Ui, Small };
+
+    static bool LoadRealFont(const std::string& path, const std::string& typefaceName,
+                             Face face = Face::Ui);
 
     // Draws text with (x,y) as the top-left corner of the first glyph's
     // cell. Lowercase is folded to upper only for the placeholder path
@@ -58,14 +79,17 @@ public:
     // DrawTextW/A depending on UNICODE, and since not every translation
     // unit that sees this header also includes windows.h first, the two
     // would disagree on the mangled name and fail to link.
-    static void DrawString(Backbuffer& bb, int x, int y, std::string_view text, uint16_t color);
+    static void DrawString(Backbuffer& bb, int x, int y, std::string_view text, uint16_t color,
+                           Face face = Face::Ui);
 
     // Real measured pixel width of `text` in whichever font DrawString
     // would actually use for it (the real TTF's per-glyph advances when
     // loaded, else the placeholder's fixed pitch) -- for centering menu
     // item labels, which the real game does (a fixed per-character
     // advance guess would drift from what DrawString actually draws).
-    static int TextWidth(std::string_view text);
+    static int TextWidth(std::string_view text, Face face = Face::Ui);
+    // Cell height of a loaded face, or kGlyphHeight when it isn't loaded.
+    static int LineHeight(Face face = Face::Ui);
 };
 
 }  // namespace sk
