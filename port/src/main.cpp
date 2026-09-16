@@ -2279,6 +2279,37 @@ void RenderMenu(sk::Backbuffer& backbuffer, sk_bindings::MenuExecutable& menu,
         sk::BitmapFont::DrawString(backbuffer, titleX, title.y, text, kTitleColor);
     }
 
+    // M110: the softkey captions along the bottom -- `case 0xb` of
+    // `FUN_10076b64`, absolutely positioned and outside the row flow:
+    //
+    //     if (widget+0x48 && widget+0x36)
+    //         FUN_1007f49c(widget+0x78, widget+0x7c, text, 0, engine,
+    //                      widget+0x36, 0, widget+0x94, widget+0x3c);
+    //
+    // param_7 = 0 is the left arm, which draws the 0x0b96 shadow at
+    // (x+1, y+1) and then the text at (x, y); param_8 is the justify flag,
+    // and it picks `FUN_1008f8a4` mode 2 -- `FUN_10022f88`, whose rect is
+    // `TRect(0, y, x, ...)` right-aligned, so the text's *right edge*
+    // lands on x. The colour guard is real: a zero colour draws nothing.
+    //
+    // Still not honoured: `widget+0x3c`, the font. All 95 shipped sites
+    // call `SetFontNum(1)` on these, and `FUN_10022b20` resolves that to a
+    // `TFontSpec("Swiss", 0xd5)` rather than the ROM legend font. There is
+    // no "Swiss" in Ceurope.gdr (it carries LatinBold12/13/17/19,
+    // LatinPlain12, Acb14, Acb30, Acp5), so the device resolved it through
+    // Symbian's nearest-font matching and this port would have to pick a
+    // face. Drawing them in the wrong face is still much closer than not
+    // drawing them at all, which is what happened before.
+    for (const auto& ft : menu.floatingTexts()) {
+        if (ft.textId < 0 || ft.color444 == 0) continue;
+        const std::string text = strings.Get(ft.textId);
+        if (text.empty()) continue;
+        const int x = ft.rightJustify ? ft.x - sk::BitmapFont::TextWidth(text) : ft.x;
+        constexpr uint16_t kFloatShadow = MenuColor444(sk_bindings::kTextShadowColor444);
+        sk::BitmapFont::DrawString(backbuffer, x + 1, ft.y + 1, text, kFloatShadow);
+        sk::BitmapFont::DrawString(backbuffer, x, ft.y, text, MenuColor444(ft.color444));
+    }
+
     for (size_t rowIndex = 0; rowIndex < menu.rows().size(); ++rowIndex) {
         const auto& row = menu.rows()[rowIndex];
         // M60: the shared widget class's SetVisible byte (widget+0x5d).
@@ -3115,7 +3146,13 @@ int main(int argc, char** argv) {
     // placeholder glyphs, same as every other optional real asset here.
     const std::string defaultFontPath = repoRoot + "/port/assets/fonts/Ceurope.gdr";
     const char* fontPath = argc > 2 ? argv[2] : defaultFontPath.c_str();
-    sk::BitmapFont::LoadRealFont(fontPath, "LatinBold12");
+    // M110: `SK_FONT_TYPEFACE` overrides which typeface is taken from the
+    // store -- the game itself asks for two by name, so being able to ask
+    // for a different one without a rebuild is how you find out what a
+    // given Ceurope.gdr actually carries (a name that is not there makes
+    // the loader list the ones that are).
+    const char* typeface = std::getenv("SK_FONT_TYPEFACE");
+    sk::BitmapFont::LoadRealFont(fontPath, typeface ? typeface : "LatinBold12");
 
     skInterpreter interpreter;
     sk_bindings::MenuStack stack(scriptRoot, interpreter, &strings, &soundArchive, &audioEngine);

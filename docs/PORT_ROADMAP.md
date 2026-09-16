@@ -10295,6 +10295,95 @@ same mistake.
   colour 0x7f0 -- belongs to whatever class case 4 really is, not to the
   combo. Unidentified.
 
+## M110 -- the softkey captions, and what chasing a font found instead
+
+The next item on M109's open list was `SetFontNum`, ignored at 95 call
+sites. Following it turned up something much larger: **the text those 95
+calls are attached to was never drawn at all.**
+
+- **All 95 sites are the same two lines.** Every `SetFontNum(1)` in the
+  corpus is on the pair of softkey captions along the bottom of a menu
+  screen:
+
+      funtext = AddFloatingTextJustify(4077,   0, 195, false, 32767);
+      funtext.SetFontNum(1);
+      funtext = AddFloatingTextJustify(4078, 176, 195, true,  32767);
+      funtext.SetFontNum(1);
+
+  This port's `AddFloatingTextJustify` handler built a
+  `FloatingTextExecutable`, returned it to the script and **kept no
+  reference**, so the widget was destroyed with the returned value and
+  nothing was ever rendered. "Accept" and "Back" were missing from the
+  bottom of nearly every screen in the game -- a far bigger visual
+  difference than the typeface that led here.
+
+- **The engine's version, fully derived.** Case 0x65 of `FUN_10078de4`
+  builds the widget with `FUN_1007f8bc`, sets `+0x78`/`+0x7c` from
+  arguments 2 and 3, `+0x5c = 0` (not selectable), **`+0x58 = 0xb`**,
+  `+0x94` from argument 4 (justify) and `+0x36` from argument 5 (colour),
+  then adds it to the menu's widget list. Kind 0xb is its own arm of
+  `FUN_10076b64`:
+
+      case 0xb:
+        if (widget+0x48 && widget+0x36)
+            FUN_1007f49c(widget+0x78, widget+0x7c, text, 0, engine,
+                         widget+0x36, 0, widget+0x94, widget+0x3c);
+
+  -- absolutely positioned, outside the row flow (the arm does not touch
+  the cursor), with three details worth having:
+    - `param_7 = 0` is the left arm, so these get the ordinary `0x0b96`
+      shadow at (x+1, y+1) under the text at (x, y).
+    - `param_8` is the justify flag, and it selects `FUN_1008f8a4` mode 2
+      -- `FUN_10022f88`, whose rect is `TRect(0, y, x, ...)` right-aligned
+      -- over mode 0's left-aligned `TRect(x, y, 0xb0, ...)`. So `false`
+      puts the text's left edge on x and `true` puts its **right** edge on
+      x, which is exactly how the shipped pair at x=0 and x=176 hugs both
+      bottom corners.
+    - the colour guard is real: `widget+0x36 == 0` draws nothing. The
+      shipped `32767` is `0x7fff`, and the unpack reads only the low 12
+      bits, so it is `0xfff` -- near-white.
+
+- **`SetFontNum` itself is still not honoured, and now it is clear why
+  that is a bounded problem.** `FUN_10022b20` gates on it: anything but 1
+  takes `EIKCORE::LegendFont()`, while 1 builds a `TFontSpec("Swiss",
+  0xd5)` with the caller's bold/italic flags. **`Ceurope.gdr` has no
+  "Swiss"** -- `SK_FONT_TYPEFACE` now lets the store be enumerated without
+  a rebuild, and it carries `LatinBold12`, `LatinBold13`, `LatinBold17`,
+  `LatinBold19`, `LatinPlain12`, `Acb14`, `Acb30` and `Acp5`. So the
+  device resolved "Swiss" through Symbian's nearest-font matching against
+  whatever its own font store held, and this port would have to *choose* a
+  face rather than read one. Drawing the captions in the wrong face is
+  still much closer than not drawing them, so they go in now and the face
+  stays an open question.
+
+- **Two diagnostics added.** `GdrFont::Load` now lists the typefaces a
+  store actually contains when the requested one is absent, and
+  `SK_FONT_TYPEFACE=<name>` overrides which one is loaded.
+
+- **A stale comment corrected.** `floating_text_executable.h` claimed "the
+  game's real font/glyph format was never RE'd ... so rendering is out of
+  scope here regardless". The font was solved long ago; the claim outlived
+  the code it described, which is M105's, M106's and M107's pattern again.
+
+- **`m108_menu_layout_smoke` grows a part 5** (32 checks now, was 25):
+  `chooseracemenu.s`'s two captions keep their positions and justification,
+  32767 masks to 0xfff, the screen's title is undisturbed, and reopening
+  the screen yields two captions rather than four (they are cleared by
+  `ClearMenu` alongside the titles, and `OnDisplay` runs on every redraw).
+
+- **The suite**: 100 executables, 99 pass. Soft-fail stays at **5**.
+
+### Still open
+
+- **The title colour**, unchanged: `*(ushort *)(engine->+0x28 + 8)`. The
+  engine constructor nulls that pointer and **no function in the image
+  assigns it** -- the dump is complete (2006 functions, every called
+  address defined), so the write is not a plain assignment and is not in
+  array form at index 10 either. Text areas read the same word. Needs a
+  different tool than grep, probably tracing the object at runtime.
+- **Which face `SetFontNum(1)` should map to**, as above.
+- **Whatever class `case 4` of `FUN_10076b64` really is** (M109).
+
 ## Next milestones (not yet started)
 
 Roughly in priority order for reaching "actually playable," not commitments:

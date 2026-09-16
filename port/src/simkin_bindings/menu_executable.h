@@ -449,6 +449,36 @@ public:
         int y = kTitleDefaultY;
     };
     const std::vector<MenuTitle>& titles() const { return m_Titles; }
+
+    // M110: `AddFloatingTextJustify(textId, x, y, justify, colour)` --
+    // widget kind `0xb` (case 0x65 of `FUN_10078de4` sets `+0x58 = 0xb`),
+    // absolutely positioned and outside the row flow like a title.
+    //
+    // Every one of the 95 shipped call sites is the same thing: the pair
+    // of softkey captions along the bottom of a menu screen --
+    //
+    //     funtext = AddFloatingTextJustify(4077,   0, 195, false, 32767);
+    //     funtext = AddFloatingTextJustify(4078, 176, 195, true,  32767);
+    //
+    // The port built the widget, handed it back and **threw it away**, so
+    // those captions were missing from nearly every screen in the game.
+    struct FloatingText {
+        int textId = -1;
+        int x = 0;
+        int y = 0;
+        // `+0x94`, the 4th argument. The draw passes it as
+        // `FUN_1007f49c`'s param_8, which picks `FUN_1008f8a4` mode 2
+        // (`FUN_10022f88`, `TRect(0, y, x, ...)` right-aligned) over mode
+        // 0 (`FUN_10022b20`, left-aligned at x). So false = left edge at
+        // x, true = right edge at x.
+        bool rightJustify = false;
+        // `+0x36`, the 5th argument, in the same RGB444 the rest of the
+        // menu uses -- the high bits are simply not read, so the shipped
+        // 32767 (0x7fff) masks down to 0xfff, near-white. The draw is
+        // skipped entirely when this is 0.
+        int color444 = 0;
+    };
+    const std::vector<FloatingText>& floatingTexts() const { return m_FloatingTexts; }
     int selectedItem() const { return m_SelectedItem; }  // 1-based, 0 = none
     bool useHoriz() const { return m_UseHoriz; }
     bool textEntryActive() const { return m_TextEntryActive; }
@@ -622,6 +652,7 @@ private:
     int m_StartCoord = 50;
     int m_TitleTextId = -1;
     std::vector<MenuTitle> m_Titles;
+    std::vector<FloatingText> m_FloatingTexts;  // M110, see floatingTexts()
     TitleHandle m_TitleHandle{*this};
     bool m_UseHoriz = false;
     bool m_TextEntryActive = false;

@@ -193,6 +193,54 @@ int main(int argc, char** argv) {
         }
     }
 
+    // ---- 5. the softkey captions (M110) ----
+    //
+    // `AddFloatingTextJustify(textId, x, y, justify, colour)` is case 0x65
+    // of `FUN_10078de4`: widget kind 0xb, position in `+0x78`/`+0x7c`,
+    // justify in `+0x94`, colour in `+0x36`. The port built the widget,
+    // handed it to the script and dropped it, so the captions along the
+    // bottom of nearly every menu were missing entirely.
+    std::printf("\n-- 5. softkey captions (FUN_10078de4 case 0x65) --\n");
+    {
+        sk::StringTable strings;
+        if (!strings.Load(std::string(scriptRoot) + "/stringtable.eng")) return 1;
+        skInterpreter interpreter;
+        skb::MenuStack stack(scriptRoot, interpreter, &strings);
+
+        // chooseracemenu.s adds the canonical pair:
+        //   AddFloatingTextJustify(4077,   0, 195, false, 32767);
+        //   AddFloatingTextJustify(4078, 176, 195, true,  32767);
+        stack.OpenMenu("menus/chooseracemenu");
+        skb::MenuExecutable* menu = stack.currentMenu();
+        Check(menu != nullptr, "menus/chooseracemenu.s opens");
+        if (menu) {
+            const auto& fts = menu->floatingTexts();
+            Check(fts.size() == 2, "  and records both floating texts");
+            if (fts.size() == 2) {
+                Check(fts[0].textId == 4077 && fts[0].x == 0 && fts[0].y == 195 &&
+                          !fts[0].rightJustify,
+                      "  4077 sits at x=0, y=195, left-justified");
+                Check(fts[1].textId == 4078 && fts[1].x == 176 && fts[1].y == 195 &&
+                          fts[1].rightJustify,
+                      "  4078 sits at x=176, y=195, right-justified");
+                // 32767 is 0x7fff; the draw reads only the low 12 bits, so
+                // it is 0xfff -- near-white, not "some huge number".
+                Check((fts[0].color444 & 0xfff) == 0xfff,
+                      "  and 32767 masks to 0xfff (near-white)");
+            }
+            // The captions must not have disturbed the row flow: kind 0xb
+            // takes the draw's `default:` arm like a title does.
+            Check(menu->titles().size() == 1, "  the screen still has its one title");
+        }
+
+        // ClearMenu drops them, the same as the titles -- OnDisplay runs
+        // again on every redraw, so a leak here would stack captions up.
+        stack.OpenMenu("menus/chooseracemenu");
+        skb::MenuExecutable* again = stack.currentMenu();
+        Check(again != nullptr && again->floatingTexts().size() == 2,
+              "  reopening the screen still yields exactly 2, not 4");
+    }
+
     std::printf("\nm108_menu_layout_smoke: %d/%d checks passed -- %s\n", g_Checks - g_Failed,
                 g_Checks, g_Failed == 0 ? "OK" : "FAILED");
     return g_Failed == 0 ? 0 : 1;

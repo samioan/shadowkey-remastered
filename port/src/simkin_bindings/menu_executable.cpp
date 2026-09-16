@@ -1243,6 +1243,7 @@ bool MenuExecutable::method(const skString& methodName, skRValueArray& args,
         m_SelectedItem = 0;
         m_TitleTextId = -1;
         m_Titles.clear();
+        m_FloatingTexts.clear();  // M110: same lifetime as the titles
         m_UseHoriz = false;
         m_TextEntryActive = false;
         // Old popups get replaced (their script variable reassigned) or
@@ -1315,6 +1316,23 @@ bool MenuExecutable::method(const skString& methodName, skRValueArray& args,
         return true;
     }
     if (methodName == skString("AddFloatingTextJustify") && args.entries() == 5) {
+        // M110: recorded and rendered now. Case 0x65 of `FUN_10078de4`
+        // builds a kind-0xb widget at `+0x78`/`+0x7c` with the justify
+        // flag in `+0x94` and the colour in `+0x36`, and adds it to the
+        // menu's widget list; this port built the object, returned it and
+        // dropped it on the floor, which is why the softkey captions along
+        // the bottom of nearly every screen were missing. See
+        // MenuExecutable::FloatingText and RenderMenu.
+        FloatingText ft;
+        ft.textId = args[0].intValue();
+        ft.x = args[1].intValue();
+        ft.y = args[2].intValue();
+        ft.rightJustify = args[3].boolValue();
+        ft.color444 = args[4].intValue();
+        m_FloatingTexts.push_back(ft);
+        // The object still goes back to the script, which always calls
+        // SetFontNum(1) on it. That selection is still not honoured -- see
+        // RenderMenu -- so the executable stays the stub it was.
         auto* text = new FloatingTextExecutable(args[0].intValue(), args[1].intValue(),
                                                  args[2].intValue(), args[3].boolValue(),
                                                  args[4].intValue());

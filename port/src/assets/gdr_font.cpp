@@ -531,7 +531,19 @@ bool GdrFont::Load(const std::string& path, const std::string& typefaceName) {
         }
     }
     if (!found || found->bitmaps.empty()) {
-        std::printf("GdrFont: %s has no typeface named '%s'\n", path.c_str(), typefaceName.c_str());
+        // M110: say what the file *does* have. A Symbian font store holds
+        // several typefaces and the game asks for two of them by name
+        // (see main.cpp's SetFontNum note), so "not found" is only useful
+        // alongside the list of what was there.
+        std::printf("GdrFont: %s has no typeface named '%s'. Available:\n", path.c_str(),
+                    typefaceName.c_str());
+        for (const auto& th : typefaceHeaders) {
+            std::string ascii;
+            for (char32_t ch : th.name) {
+                ascii.push_back(ch < 0x80 ? static_cast<char>(ch) : '?');
+            }
+            std::printf("  '%s' (%zu bitmap(s))\n", ascii.c_str(), th.bitmaps.size());
+        }
         return false;
     }
 
