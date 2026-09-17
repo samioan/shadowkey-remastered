@@ -100,6 +100,36 @@ constexpr unsigned short kSelectedItemColor444 = 0xddd;
 // pushes the list down.
 constexpr int kTitleDefaultY = 10;
 
+// M112: the slider row's geometry, from `case 4` of `FUN_10076b64` -- the
+// only widget kind that draws real geometry instead of only text, and the
+// arm M109 mistook for the combo box.
+//
+// The track is `widget+0x64` pixels wide, which is AddMenuSlider's *max
+// value* argument: the engine scales nothing, so one pixel is one unit and
+// the marker's offset along the track is just the value. Both shipped
+// calls pass 100, giving a 100px track on a 176px screen.
+constexpr int kSliderCenterX = 0x58;       // the engine's literal, = kWidth/2
+constexpr int kSliderTrackDY = 0x11;       // track top, from the row cursor
+constexpr int kSliderMarkerDY = 0x0d;      // marker top, 4px above the track
+constexpr int kSliderMarkerHeight = 0x0b;  // so it straddles the 3px track
+constexpr int kSliderBarThickness = 3;     // both runs are drawn three times
+constexpr int kSliderRowHeight = 0x18;     // double a normal row's 0xc
+constexpr unsigned short kSliderMarkerColor444 = 0x7f0;
+
+// `iVar13 = 0x58 - (widget+0x64 >> 1)`. An arithmetic shift, so this
+// matches the engine for odd maxima too (101 gives 38, not 37).
+constexpr int SliderTrackLeft(int maxValue) { return kSliderCenterX - (maxValue >> 1); }
+
+// `iVar6 = iVar13 + widget+0x78 + widget+0x68 - 1`, with `widget+0x78`
+// always 0 for a slider: `FUN_1007e458` zeroes it and case 99 of
+// `FUN_10078de4`, the only thing that builds one, never assigns it. The
+// -1 is the engine's own, so a slider at 0 puts its marker one pixel to
+// the left of the track's first column, and one at max puts the marker's
+// last two columns past the track's end.
+constexpr int SliderMarkerX(int maxValue, int value) {
+    return SliderTrackLeft(maxValue) + value - 1;
+}
+
 // Post-M80 -- **every menu opened by name starts on `global.spr` slot 20,
 // the parchment.** `FUN_100779b8`, the routine behind every script-level
 // `OpenMenu(name)`, clears the widget list and then writes

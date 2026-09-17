@@ -14,9 +14,11 @@
 #include <string>
 
 #include "assets/string_table.h"
+#include "graphics/backbuffer.h"
 #include "simkin_bindings/combo_box_executable.h"
 #include "simkin_bindings/menu_executable.h"
 #include "simkin_bindings/menu_stack.h"
+#include "simkin_bindings/slider_executable.h"
 #include "simkin_bindings/text_area_executable.h"
 #include "skInterpreter.h"
 #include "skRValue.h"
@@ -239,6 +241,74 @@ int main(int argc, char** argv) {
         skb::MenuExecutable* again = stack.currentMenu();
         Check(again != nullptr && again->floatingTexts().size() == 2,
               "  reopening the screen still yields exactly 2, not 4");
+    }
+
+    // ---- 6. the slider row (M112) ----
+    //
+    // `case 4` of `FUN_10076b64`, which M109 wrongly attributed to the
+    // combo box. It belongs to `AddMenuSlider` -- case 99 of
+    // `FUN_10078de4` is the only thing in the image that sets a widget's
+    // `+0x58` to 4 -- and it is the one row that draws geometry rather
+    // than only text: a centred bold label, a 3px-thick track and a
+    // 3x11px marker straddling it.
+    std::printf("\n-- 6. the slider row (FUN_10076b64 case 4) --\n");
+    {
+        sk::StringTable strings;
+        if (!strings.Load(std::string(scriptRoot) + "/stringtable.eng")) return 1;
+        skInterpreter interpreter;
+        skb::MenuStack stack(scriptRoot, interpreter, &strings);
+
+        // options.s holds the corpus's only two:
+        //   AddMenuSlider(4062, "SoundFXSlider", 100, 10);
+        //   AddMenuSlider(4063, "MusicSlider",   100, 10);
+        stack.OpenMenu("options");
+        skb::MenuExecutable* menu = stack.currentMenu();
+        Check(menu != nullptr, "options.s opens");
+        if (menu) {
+            int sliders = 0;
+            const skb::SliderExecutable* first = nullptr;
+            for (const auto& r : menu->rows()) {
+                if (r.kind == skb::MenuExecutable::RowKind::Slider) {
+                    ++sliders;
+                    if (!first) first = static_cast<const skb::SliderExecutable*>(r.widget.get());
+                }
+            }
+            Check(sliders == 2, "  and carries both volume sliders");
+            Check(first != nullptr && first->maxValue() == 100,
+                  "  whose max is 100 -- which is also the track's pixel width");
+        }
+
+        // The engine scales nothing: `+0x64` is both the max value and the
+        // track width, so the marker's offset along the track *is* the
+        // value. A 100-wide track on a 176px screen starts at 38.
+        Check(skb::SliderTrackLeft(100) == 38, "  a 100-unit track starts at x=38 (0x58 - 50)");
+        Check(skb::SliderTrackLeft(100) + 100 == 138 &&
+                  sk::Backbuffer::kWidth - 138 == skb::SliderTrackLeft(100),
+              "  and is centred: the same 38px margin on both sides");
+        // `>>` is an arithmetic shift in the engine too, so an odd max
+        // rounds the same way rather than splitting the difference.
+        Check(skb::SliderTrackLeft(101) == 38, "  an odd max (101) still starts at x=38, not 37");
+
+        // The -1 is the engine's own, not a rounding fudge.
+        Check(skb::SliderMarkerX(100, 0) == 37, "  a slider at 0 puts its marker at x=37");
+        Check(skb::SliderMarkerX(100, 100) == 137,
+              "  and at max at x=137 -- its last 2 columns past the track's end");
+        Check(skb::SliderMarkerX(100, 50) == 87, "  the midpoint lands at x=87");
+
+        // The marker straddles the track: marker y spans [+0xd, +0x18),
+        // the track [+0x11, +0x14).
+        Check(skb::kSliderMarkerDY < skb::kSliderTrackDY &&
+                  skb::kSliderMarkerDY + skb::kSliderMarkerHeight >
+                      skb::kSliderTrackDY + skb::kSliderBarThickness,
+              "  the 11px marker fully straddles the 3px track");
+        Check(skb::kSliderMarkerDY + skb::kSliderMarkerHeight == skb::kSliderRowHeight,
+              "  and ends exactly on the row's own 0x18 height");
+        // A slider row is worth two ordinary rows, so anything below it
+        // sits 24px down, not 12.
+        Check(skb::kSliderRowHeight == 0x18, "  which is double an ordinary row's 0xc pitch");
+        // Unpacked the engine's way (nibble << 4), not *17.
+        Check(skb::kSliderMarkerColor444 == 0x7f0,
+              "  and the marker is 0x7f0 -- (0x70, 0xf0, 0x00), a bright green");
     }
 
     std::printf("\nm108_menu_layout_smoke: %d/%d checks passed -- %s\n", g_Checks - g_Failed,

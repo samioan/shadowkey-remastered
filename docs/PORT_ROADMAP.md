@@ -10450,6 +10450,93 @@ need the twips conversion at all.
   owns the centred-and-bold row with a rule under it that was wrongly
   attributed to the combo box.
 
+## M112 -- `case 4`, and the widget that draws something other than text
+
+M109 left "whatever class `case 4` of `FUN_10076b64` really is" on the
+open list, having wrongly attributed that arm to the combo box. It is the
+**slider** -- `AddMenuSlider` -- and finding it took one grep rather than
+the inference that went wrong last time: case 99 of `FUN_10078de4` is the
+**only** site in the whole image that sets a widget's `+0x58` to 4.
+
+- **Why it looked exotic.** Every other widget kind draws text and
+  nothing else. This one draws a centred bold label, then a track, then a
+  marker, pixel by pixel:
+
+      if (widget+0x48)                          // the label
+          FUN_1008f97c(gc, text, cursorY, colour, 1, 1, 0, 0);
+      left = 0x58 - (widget+0x64 >> 1);
+      for (i = 0; i < 3; i++)                   // the track
+          FUN_1006bee8(.., left, cursorY+0x11+i, widget+0x64,
+                       *(ushort *)(menu+0x90));
+      x = left + widget+0x78 + widget+0x68 - 1;
+      for (i = 0; i < 3; i++)                   // the marker
+          FUN_1006be58(.., x+i, cursorY+0xd, 0xb, 0x7f0);
+      cursorY += 0x18;
+
+  `FUN_1006bee8` and `FUN_1006be58` are bare horizontal and vertical
+  pixel runs (stride 0xb0 = 176), taking a length rather than an end
+  coordinate. The "three vertical lines 11px tall" M109 noticed is a
+  3px-wide marker straddling a 3px-thick track, not three of anything.
+
+- **The engine scales nothing.** `FUN_1007e7f0` fills `+0x64` from
+  AddMenuSlider's third argument and `+0x6c` from its fourth; `+0x68` is
+  the live value, seeded there from the mixer (`soundMgr+0xabc` for
+  `SoundFXSlider`, `+0xab8` for `MusicSlider`) and clamped to [0, 0x100].
+  `+0x64` is then used as **both** the maximum and the track's pixel
+  width, so one pixel is one unit and the marker's offset along the track
+  is simply the value. Both shipped calls pass 100, giving a 100px track
+  that starts at x=38 and is centred by construction.
+
+- **`widget+0x78` is always 0 here.** `FUN_1007e458` zeroes it and case 99
+  never assigns it -- unlike every other positioned widget, which fills
+  `+0x78`/`+0x7c` at the shared tail `LAB_10079d28`. So the marker sits at
+  `trackLeft + value - 1`, and that `-1` is the engine's own: a slider at
+  0 puts its marker one pixel left of the track's first column, and one at
+  max puts its last two columns past the track's end, overwriting the
+  track's last pixel because the marker is drawn second.
+
+- **The track keeps the *unselected* colour** (`*(ushort *)(menu+0x90)`,
+  0x733) whether or not the row has focus. Only the label changes colour.
+  The marker is 0x7f0, a bright green, and is the one hard-coded colour in
+  the arm.
+
+- **What the port had.** A character meter -- `"< Label ####------ >"` --
+  written in M28 with a comment explaining that no slider art could be
+  found in `global.spr`. That search was looking for the wrong kind of
+  thing: there is no sprite, the engine plots the bar itself. The Options
+  screen's two volume rows now draw as the real ones do, and a slider row
+  is worth 0x18 of row cursor rather than an ordinary 0xc, so everything
+  below it moves down 24px instead of 12.
+
+- **Verified against the rendered output, not by eye.** `SK_DUMP_MENUS`
+  writes `options.ppm`; scanning it for the two colours finds the tracks
+  at y=79-81 and y=103-105 spanning x=38..136 and the markers 3x11 at
+  x=137..139 starting at y=75 and y=99 -- i.e. rows 24px apart, marker
+  4px above its track, and the track one pixel short of its full 100
+  precisely where the marker overwrote it. That is the engine's geometry
+  reproduced exactly, including the overdraw.
+
+- **`m108_menu_layout_smoke` grows a part 6** (45 checks now, was 32). The
+  geometry constants moved to `menu_executable.h` beside the menu's other
+  engine-derived values so the test can reach them, with
+  `SliderTrackLeft(max)` and `SliderMarkerX(max, value)` as constexpr
+  helpers -- including that an odd max still shifts rather than rounds.
+
+- **The suite**: 100 executables, 99 pass. Soft-fail stays at **5**.
+
+### Still open
+
+- **The title colour**, unchanged: `*(ushort *)(engine->+0x28 + 8)`. Needs
+  runtime tracing; static search is exhausted.
+- **`widget+0x6c`, the slider's step, has no reader in the image** that
+  this pass could find -- `FUN_1007e7f0` writes it and nothing in the
+  menu-widget address range reads it back, so the left/right nudge amount
+  presumably arrives through a vtable slot that Ghidra rendered as an
+  indirect call. It does not affect rendering, and M28's behavioural
+  implementation (one step per keypress, clamped to [0, max]) already
+  matches what the shipped `AddMenuSlider(.., 100, 10)` produces.
+
+
 ## Next milestones (not yet started)
 
 Roughly in priority order for reaching "actually playable," not commitments:

@@ -129,6 +129,12 @@ constexpr uint16_t kStaticTextColor = MenuColor444(sk_bindings::kStaticItemColor
 // arm's shadow (`FUN_1007f49c`, colour 0xb96) is offset in x as well.
 constexpr uint16_t kCenteredShadowColor = sk::PackRGB565(0xb1, 0x9c, 0x65);
 constexpr uint16_t kTitleColor = sk::PackRGB565(140, 180, 255);
+// M112: the slider marker. The geometry itself lives in
+// menu_executable.h next to the menu's other engine-derived constants,
+// so the smoke test can check it; only the colour needs packing here.
+// The track borrows `menu+0x90`, the *unselected* item colour, and keeps
+// it whether or not the row has focus -- only the label changes colour.
+constexpr uint16_t kSliderMarkerColor = MenuColor444(sk_bindings::kSliderMarkerColor444);
 constexpr uint16_t kPopupBgColor = sk::PackRGB565(40, 40, 60);
 constexpr uint16_t kPopupBorderColor = sk::PackRGB565(90, 90, 130);
 
@@ -2160,6 +2166,20 @@ void DrawRectOutline(sk::Backbuffer& backbuffer, int x0, int y0, int w, int h, u
     }
 }
 
+// `FUN_1006bee8` / `FUN_1006be58` -- the engine's horizontal and
+// vertical pixel runs. Both take a length, not an end coordinate, and
+// both write straight into the frame buffer with no clipping (the
+// engine's callers stay in bounds by construction); SetPixel clips for
+// us, which only matters for a slider marker parked at its maximum,
+// where the engine itself would run three pixels past the track.
+void DrawHRun(sk::Backbuffer& backbuffer, int x, int y, int len, uint16_t color) {
+    for (int i = 0; i < len; ++i) backbuffer.SetPixel(x + i, y, color);
+}
+
+void DrawVRun(sk::Backbuffer& backbuffer, int x, int y, int len, uint16_t color) {
+    for (int i = 0; i < len; ++i) backbuffer.SetPixel(x, y + i, color);
+}
+
 void RenderPopup(sk::Backbuffer& backbuffer, sk_bindings::PopupMenuExecutable& popup,
                   const sk::StringTable& strings) {
     int x0 = 10, y0 = 60, x1 = sk::Backbuffer::kWidth - 10, y1 = 150;
@@ -2581,33 +2601,56 @@ void RenderMenu(sk::Backbuffer& backbuffer, sk_bindings::MenuExecutable& menu,
                 break;
             }
             case RowKind::Slider: {
-                // M28: the real Options screen's volume rows. Drawn as
-                // "< Label ####------ >" -- the angle brackets match the
-                // combo-box row's own convention for "Left/Right adjusts
-                // this", and the bar is a plain character meter (no real
-                // slider art was found in global.spr; the two slots
-                // options.s references are text ids, not sprite ids).
+                // M112: `case 4` of `FUN_10076b64` -- the arm M109 wrongly
+                // guessed was the combo box. It is the slider, and it is
+                // the only widget kind that draws real geometry rather
+                // than just text, which is why it looked like something
+                // more exotic than it is.
+                //
+                // Until now this row was a character meter,
+                // "< Label ####------ >", written when no slider art
+                // could be found in global.spr. That search was looking
+                // for the wrong thing: the engine draws no sprite, it
+                // plots the track and the marker pixel by pixel.
+                //
+                //     if (widget+0x48)                       // the label
+                //         FUN_1008f97c(gc, text, cursorY, colour, 1,1,0,0);
+                //     left = 0x58 - (widget+0x64 >> 1);
+                //     for (i = 0; i < 3; i++)                // the track
+                //         FUN_1006bee8(.., left, cursorY+0x11+i,
+                //                      widget+0x64, *(ushort*)(menu+0x90));
+                //     x = left + widget+0x78 + widget+0x68 - 1;
+                //     for (i = 0; i < 3; i++)                // the marker
+                //         FUN_1006be58(.., x+i, cursorY+0xd, 0xb, 0x7f0);
+                //     cursorY += 0x18;
+                //
+                // `+0x64` is AddMenuSlider's third argument and `+0x6c`
+                // its fourth, both set by `FUN_1007e7f0`; `+0x68` is the
+                // live value, seeded there from the mixer and clamped to
+                // [0, 0x100]. Both shipped calls pass a max of 100, so the
+                // track is 100px wide and one pixel is one unit -- the max
+                // doubles as the track's pixel width, which is why the
+                // engine needs no scaling anywhere.
                 auto* slider = static_cast<sk_bindings::SliderExecutable*>(row.widget.get());
                 std::string name = RowText(row.textId, row.literalText, strings);
-                // Shrink the meter until the whole row fits the real
-                // 176px screen -- the font is proportional and the real
-                // labels ("Sound Volume", "Music Volume") are long, so a
-                // fixed cell count runs off the right edge.
-                constexpr int kLeftMargin = 6;
-                int maxWidth = sk::Backbuffer::kWidth - kLeftMargin * 2;
-                std::string label;
-                for (int cells = 10; cells >= 3; --cells) {
-                    int filled = slider->maxValue() > 0
-                                      ? slider->value() * cells / slider->maxValue()
-                                      : 0;
-                    filled = std::clamp(filled, 0, cells);
-                    std::string bar(static_cast<size_t>(filled), '#');
-                    bar += std::string(static_cast<size_t>(cells - filled), '-');
-                    label = "<" + name + " " + bar + ">";
-                    if (sk::BitmapFont::TextWidth(label) <= maxWidth) break;
+                int labelX = (sk::Backbuffer::kWidth - sk::BitmapFont::TextWidth(name)) / 2;
+                sk::BitmapFont::DrawString(backbuffer, labelX, y + 1, name, kCenteredShadowColor);
+                sk::BitmapFont::DrawString(backbuffer, labelX, y, name, color);
+
+                const int trackWidth = slider->maxValue();
+                const int trackLeft = sk_bindings::SliderTrackLeft(trackWidth);
+                for (int i = 0; i < sk_bindings::kSliderBarThickness; ++i) {
+                    DrawHRun(backbuffer, trackLeft, y + sk_bindings::kSliderTrackDY + i, trackWidth,
+                             kTextColor);
                 }
-                sk::BitmapFont::DrawString(backbuffer, kLeftMargin, y, label, color);
-                y += lineHeight;
+                // Drawn after the track, as the engine does, so at full
+                // value the marker overwrites the track's last column.
+                const int markerX = sk_bindings::SliderMarkerX(trackWidth, slider->value());
+                for (int i = 0; i < sk_bindings::kSliderBarThickness; ++i) {
+                    DrawVRun(backbuffer, markerX + i, y + sk_bindings::kSliderMarkerDY,
+                             sk_bindings::kSliderMarkerHeight, kSliderMarkerColor);
+                }
+                y += sk_bindings::kSliderRowHeight;
                 break;
             }
             case RowKind::ComboBox: {
