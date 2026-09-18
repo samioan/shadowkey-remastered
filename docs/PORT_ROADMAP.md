@@ -10753,6 +10753,109 @@ image's contents are assumed rather than known.
 - **`widget+0x6c`, the slider's step**, unchanged since M112.
 
 
+## M115 -- the launcher updates itself
+
+M114 made a release something you cause by pushing a tag. This makes the
+people who already downloaded it get the next one, which is the other half
+of the same problem: a port that improves every milestone is only useful if
+the copy on someone's disk moves with it.
+
+- **`/releases/latest` is the wrong endpoint, and the plan said to use it.**
+  It excludes pre-releases, and this project's releases *are* pre-releases
+  while the major version is 0 (M114's own rule). Asked for the current
+  build it returns **404**. An updater written to the plan would have
+  reported "up to date" forever and nobody would have noticed until the
+  first 1.0 -- a bug with a years-long fuse. The list endpoint with
+  `per_page=1` returns the newest published release whatever its flags,
+  which is what was actually meant. Checked against the live API before a
+  line of the fetch was written.
+
+- **Version comparison is its own function, with its own tests.** A string
+  compare puts 0.99.0 *after* 0.115.0, and a naive numeric one puts
+  `1.0.0-beta1` after `1.0.0`, which would mean a real release never
+  superseding the beta that led to it. Both orderings are pinned.
+
+- **No JSON library and no image library and now no HTTP library.** Four
+  fields are scraped out of the release payload by hand (about 60 lines,
+  including the escape handling GitHub does not currently need but a parser
+  that cannot survive an escape is one waiting to break), and WinHTTP does
+  the transfer. The one dependency added is `winhttp.dll`, which is part of
+  Windows.
+
+- **`puff` is back, and this time for what it is for.** M113 used zlib's
+  vendored inflater for the banner and M114 took it away again when the
+  artwork stopped being compressible; the zip reader now uses it for what it
+  was vendored to do. The reader is deliberately small -- stored and deflate
+  are the only two methods `Compress-Archive` emits -- and deliberately
+  suspicious: it refuses entries whose paths escape the destination
+  (`..\..\evil.exe` is how an archive overwrites something it was never
+  given), absolute paths, drive letters, and encrypted entries.
+
+- **Replacing a running executable.** Windows will not let `Shadowkey.exe`
+  overwrite itself, but it *will* let a running image be **renamed**. So the
+  swap renames each file being replaced to `<name>.old`, moves the new one
+  into place, relaunches, and deletes the leftovers on the next start, by
+  which time nothing holds them open. Everything is staged under `update/`
+  and only moved once the download has been unpacked **and checked** -- an
+  archive that does not contain both `Shadowkey.exe` and
+  `bin/shadowkey_port.exe` at the top level never gets as far as being moved
+  over an install.
+
+- **The player's own files are never in scope.** Only paths present in the
+  downloaded archive are moved, and the archive contains no `data/`,
+  `user/` or `launcher.cfg` -- so the update cannot touch a save, a
+  settings file, or the 22 MB of game data the user supplied. Verified by
+  planting a save and watching it survive.
+
+- **A `-dev` build does not self-update.** Its install is a build tree;
+  dropping a release on top of it would overwrite whatever someone is
+  working on. The version string decides, so nothing has to be configured.
+
+- **The worker threads never touch the launcher's state.** Each posts a
+  heap-allocated result the window procedure takes ownership of. That is
+  what makes them safe to detach: if the window has gone, `PostMessage`
+  fails and the worker frees its own message, with nothing left pointing at
+  a dead stack frame. A slow or unreachable network cannot delay the window
+  appearing, and a failed check says nothing at all -- the launcher's job is
+  to start a game, not to complain about GitHub.
+
+- **`m113_launcher_smoke` is 90 checks now** (was 47). The new parts cover
+  version ordering, the release payload (including a non-zip asset listed
+  *before* the zip, which is exactly what trips a naive scrape), the zip
+  reader, and the dev-build guard. The zip tests build their own archive
+  rather than shipping a binary fixture: writing a zip is far simpler than
+  reading one, so the reader is exercised against bytes whose every field is
+  known, including a real method-8 entry through `puff`.
+
+- **The suite**: 101 executables, 100 tests, all passing. Soft-fail stays
+  at **5**.
+
+### Verified against the real release, not a mock
+
+Built the launcher as **0.113.0**, installed it to a folder, and let it find
+the live **v0.114.0** on GitHub. It offered the update, downloaded 1.4 MB,
+unpacked it, renamed four files aside, moved the new ones in, relaunched
+itself, and came back showing 0.114.0 -- `Shadowkey.exe` going from
+1,141,248 bytes to the released 1,054,208. Then a separate run with planted
+`.old` files, a stale `update/` directory and a save file confirmed startup
+cleanup removes the first two and leaves the third alone.
+
+One cosmetic bug the live run caught that no unit test would have: the
+update note and the version line were eight pixels apart and drew straight
+through each other the first time an update was actually offered.
+
+### Still open
+
+- **The title colour**, unchanged since M108: `*(ushort *)(engine->+0x28 + 8)`.
+  Needs runtime tracing; static search is exhausted.
+- **`widget+0x6c`, the slider's step**, unchanged since M112.
+- **Nothing verifies the download's integrity.** GitHub is reached over
+  HTTPS and the archive is checked for shape before use, but there is no
+  signature and no checksum. Publishing a `checksums.txt` beside the zip and
+  verifying it would close that gap; the asset picker already ignores
+  non-zip assets, so the release could carry one tomorrow.
+
+
 ## Next milestones (not yet started)
 
 Roughly in priority order for reaching "actually playable," not commitments:

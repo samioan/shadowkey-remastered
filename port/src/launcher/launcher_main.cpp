@@ -29,13 +29,17 @@
 
 #include <algorithm>
 #include <filesystem>
+#include <memory>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include "launcher/banner.h"
 #include "launcher/install.h"
 #include "launcher/launcher_config.h"
 #include "launcher/resource.h"
+#include "launcher/update_check.h"
+#include "launcher/updater.h"
 #include "launcher/version.h"
 #include "platform/win32/exe_dir.h"
 
@@ -71,7 +75,7 @@ constexpr COLORREF kBad = RGB(232, 124, 124);
 // proportioned piece re-lays the window instead of slicing the title off.
 constexpr int kClientWidth = 820;
 constexpr int kMinClientWidth = 560;
-constexpr int kPanelHeight = 268;
+constexpr int kPanelHeight = 296;
 constexpr int kFallbackHeaderHeight = 300;  // only if the artwork fails to decode
 constexpr int kBannerVisiblePermille = 850;
 
@@ -94,17 +98,56 @@ constexpr int kScaleWidth = 44;
 constexpr int kScaleHeight = 28;
 constexpr int kPlayY = 140;
 constexpr int kPlayHeight = 44;
-constexpr int kStatusY = 202;
-constexpr int kVersionY = 242;
+constexpr int kStatusY = 196;
+// The version sits on its own line above the update row; they used to be
+// eight pixels apart and drew straight through each other the first time an
+// update was actually offered.
+constexpr int kVersionY = 234;
+constexpr int kUpdateY = 256;
 
 enum ControlId : int {
     IDC_CHOOSE_DATA = 1001,
     IDC_CHOOSE_FONT = 1002,
     IDC_PLAY = 1003,
+    IDC_UPDATE = 1004,
     IDC_SCALE_FIRST = 1010,  // +0 => 2x, +1 => 3x, +2 => 4x
 };
 
 constexpr int kScaleChoices[] = {2, 3, 4};
+
+// M115: what the update worker thread sends back. The thread never touches
+// the launcher's state directly -- it posts a heap-allocated result the
+// window procedure takes ownership of. That is what makes the worker safe
+// to detach: if the window has gone, PostMessage fails and the worker frees
+// its own result, and nothing is left pointing at a dead stack frame.
+constexpr UINT WM_APP_UPDATE_CHECKED = WM_APP + 1;
+constexpr UINT WM_APP_UPDATE_PROGRESS = WM_APP + 2;
+constexpr UINT WM_APP_UPDATE_DONE = WM_APP + 3;
+
+struct UpdateCheckResult {
+    bool ok = false;
+    sk::launcher::ReleaseInfo release;
+    std::string error;
+};
+
+struct UpdateProgressMessage {
+    sk::launcher::UpdateProgress progress;
+};
+
+struct UpdateDoneMessage {
+    bool ok = false;
+    std::string error;
+    std::string tag;
+};
+
+enum class UpdateState {
+    Disabled,   // a -dev build: never offers to replace a build tree
+    Checking,
+    UpToDate,
+    Available,
+    Installing,
+    Failed,
+};
 
 std::wstring Widen(const std::string& text) {
     if (text.empty()) return std::wstring();
@@ -207,7 +250,17 @@ struct Impl {
     Button chooseData;
     Button chooseFont;
     Button play;
+    Button update;
     Button scale[3];
+
+    // M115
+    UpdateState updateState = UpdateState::Checking;
+    sk::launcher::ReleaseInfo availableRelease;
+    std::wstring updateNote;
+    // Set while an install is in flight. The window refuses to close and
+    // the game refuses to start during it -- replacing shadowkey_port.exe
+    // out from under a running game would be a genuinely bad time.
+    bool installing = false;
 
     HFONT uiFont = nullptr;
     HFONT captionFont = nullptr;
@@ -320,17 +373,74 @@ void Refresh(Impl& impl) {
     impl.dataOk = sk::launcher::IsGameDataRoot(impl.dataPath);
     impl.fontOk = sk::launcher::IsUsableFont(impl.fontPath);
 
-    EnableWindow(impl.play.hwnd, impl.dataOk && !impl.busy);
-    EnableWindow(impl.chooseData.hwnd, !impl.busy);
-    EnableWindow(impl.chooseFont.hwnd, !impl.busy);
+    const bool busy = impl.busy || impl.installing;
+    EnableWindow(impl.play.hwnd, impl.dataOk && !busy);
+    EnableWindow(impl.chooseData.hwnd, !busy);
+    EnableWindow(impl.chooseFont.hwnd, !busy);
     for (int i = 0; i < 3; ++i) {
         impl.scale[i].style.selected = kScaleChoices[i] == impl.config.scale;
-        EnableWindow(impl.scale[i].hwnd, !impl.busy);
+        EnableWindow(impl.scale[i].hwnd, !busy);
     }
+
+    // The update button exists only when there is actually an update: a
+    // permanently visible "check for updates" that usually says "no" is
+    // noise, and this checks on its own at startup anyway.
+    const bool offerUpdate = impl.updateState == UpdateState::Available && !busy;
+    ShowWindow(impl.update.hwnd, offerUpdate ? SW_SHOW : SW_HIDE);
+    EnableWindow(impl.update.hwnd, offerUpdate);
+
     InvalidateRect(impl.hwnd, nullptr, FALSE);
 }
 
 void Save(Impl& impl) { sk::launcher::SaveLauncherConfig(impl.configPath, impl.config); }
+
+// ---------------------------------------------------------------------
+// Updates
+// ---------------------------------------------------------------------
+
+std::wstring FormatSize(unsigned long long bytes) {
+    if (bytes >= 1024ull * 1024) {
+        wchar_t text[32];
+        swprintf(text, 32, L"%.1f MB", static_cast<double>(bytes) / (1024.0 * 1024.0));
+        return text;
+    }
+    return std::to_wstring(bytes / 1024) + L" KB";
+}
+
+// Both workers below are detached and own everything they touch. Nothing
+// here reads or writes `Impl` -- see WM_APP_UPDATE_* for why.
+void StartUpdateCheck(HWND hwnd) {
+    std::thread([hwnd]() {
+        auto* result = new UpdateCheckResult();
+        result->ok = sk::launcher::FetchLatestRelease(SK_UPDATE_OWNER, SK_UPDATE_REPO,
+                                                      result->release, result->error);
+        if (!PostMessageW(hwnd, WM_APP_UPDATE_CHECKED, 0,
+                          reinterpret_cast<LPARAM>(result))) {
+            delete result;  // the window has gone; nobody will take it
+        }
+    }).detach();
+}
+
+void ForwardProgress(const sk::launcher::UpdateProgress& progress, void* context) {
+    HWND hwnd = static_cast<HWND>(context);
+    auto* message = new UpdateProgressMessage{progress};
+    if (!PostMessageW(hwnd, WM_APP_UPDATE_PROGRESS, 0, reinterpret_cast<LPARAM>(message))) {
+        delete message;
+    }
+}
+
+void StartInstall(HWND hwnd, const std::string& installRoot,
+                  const sk::launcher::ReleaseInfo& release) {
+    std::thread([hwnd, installRoot, release]() {
+        auto* done = new UpdateDoneMessage();
+        done->tag = release.tag;
+        done->ok = sk::launcher::InstallUpdate(installRoot, release, ForwardProgress, hwnd,
+                                               done->error);
+        if (!PostMessageW(hwnd, WM_APP_UPDATE_DONE, 0, reinterpret_cast<LPARAM>(done))) {
+            delete done;
+        }
+    }).detach();
+}
 
 // ---------------------------------------------------------------------
 // Pickers
@@ -709,7 +819,18 @@ void PaintWindow(Impl& impl, HDC target) {
     }
     DrawTextLine(dc, impl.captionFont, RGB(92, 80, 120), margin, impl.P(kVersionY),
                  width - 2 * margin, impl.S(18), L"Shadowkey Remastered " SK_LAUNCHER_VERSION_W,
-                 DT_RIGHT | DT_SINGLELINE | DT_VCENTER);
+                 DT_LEFT | DT_SINGLELINE | DT_VCENTER);
+
+    // The update note sits beside the version, left of the button. Only the
+    // Available and Installing states have anything to say here; a
+    // successful "you are up to date" is not news and stays quiet.
+    if (!impl.updateNote.empty()) {
+        const int noteWidth = impl.ButtonX() - margin - impl.S(20);
+        const COLORREF noteColor =
+            impl.updateState == UpdateState::Failed ? kMuted : kGold;
+        DrawTextLine(dc, impl.uiFont, noteColor, margin, impl.P(kUpdateY), noteWidth,
+                     impl.S(28), impl.updateNote, DT_LEFT | DT_SINGLELINE | DT_VCENTER);
+    }
     (void)height;
 
     BitBlt(target, 0, 0, width, height, dc, 0, 0, SRCCOPY);
@@ -798,6 +919,9 @@ void CreateControls(Impl& impl) {
                impl.P(kRow2Button), kButtonWidth, kButtonHeight, ButtonStyle{});
     MakeButton(impl, impl.play, L"Play", IDC_PLAY, buttonX, impl.P(kPlayY), kButtonWidth,
                kPlayHeight, ButtonStyle{true, false});
+    MakeButton(impl, impl.update, L"Update", IDC_UPDATE, buttonX, impl.P(kUpdateY),
+               kButtonWidth, kButtonHeight, ButtonStyle{});
+    ShowWindow(impl.update.hwnd, SW_HIDE);  // only shown when one exists
     for (int i = 0; i < 3; ++i) {
         const std::wstring caption = std::to_wstring(kScaleChoices[i]) + L"×";
         MakeButton(impl, impl.scale[i], caption.c_str(), IDC_SCALE_FIRST + i,
@@ -832,6 +956,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam) 
                 case IDC_CHOOSE_DATA: button = &impl->chooseData; break;
                 case IDC_CHOOSE_FONT: button = &impl->chooseFont; break;
                 case IDC_PLAY: button = &impl->play; break;
+                case IDC_UPDATE: button = &impl->update; break;
                 default:
                     if (static_cast<int>(wParam) >= IDC_SCALE_FIRST &&
                         static_cast<int>(wParam) < IDC_SCALE_FIRST + 3) {
@@ -846,17 +971,106 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam) 
         case WM_COMMAND: {
             const int id = LOWORD(wParam);
             if (HIWORD(wParam) != BN_CLICKED) break;
+            if (impl->installing) return 0;  // nothing is safe to start mid-swap
             if (id == IDC_CHOOSE_DATA) ChooseGameData(*impl);
             else if (id == IDC_CHOOSE_FONT) ChooseFont(*impl);
             else if (id == IDC_PLAY) Play(*impl);
-            else if (id >= IDC_SCALE_FIRST && id < IDC_SCALE_FIRST + 3) {
+            else if (id == IDC_UPDATE) {
+                impl->installing = true;
+                impl->updateState = UpdateState::Installing;
+                impl->updateNote = L"Starting…";
+                Refresh(*impl);
+                SetStatus(*impl, L"Updating to " + Widen(impl->availableRelease.tag) +
+                                     L". Please don't close this window.",
+                          kCaption);
+                StartInstall(hwnd, impl->installRoot, impl->availableRelease);
+            } else if (id >= IDC_SCALE_FIRST && id < IDC_SCALE_FIRST + 3) {
                 impl->config.scale = kScaleChoices[id - IDC_SCALE_FIRST];
                 Save(*impl);
                 Refresh(*impl);
             }
             return 0;
         }
+
+        // --- M115: the update worker's three messages ------------------
+        //
+        // Each arrives with a heap-allocated payload this handler owns and
+        // frees. The worker is detached and never touches `Impl`, so a
+        // check still in flight when the window closes simply fails to post
+        // and cleans up after itself.
+        case WM_APP_UPDATE_CHECKED: {
+            std::unique_ptr<UpdateCheckResult> result(
+                reinterpret_cast<UpdateCheckResult*>(lParam));
+            if (!result->ok) {
+                // Not being able to reach GitHub is not an error worth
+                // shouting about -- the launcher's job is to start a game.
+                impl->updateState = UpdateState::Failed;
+                impl->updateNote.clear();
+                Refresh(*impl);
+                return 0;
+            }
+            const int comparison =
+                sk::launcher::CompareVersions(SK_LAUNCHER_VERSION, result->release.version);
+            if (comparison < 0) {
+                impl->updateState = UpdateState::Available;
+                impl->availableRelease = result->release;
+                impl->updateNote = L"Version " + Widen(result->release.version) + L" is available";
+            } else {
+                impl->updateState = UpdateState::UpToDate;
+                impl->updateNote.clear();
+            }
+            Refresh(*impl);
+            return 0;
+        }
+        case WM_APP_UPDATE_PROGRESS: {
+            std::unique_ptr<UpdateProgressMessage> message(
+                reinterpret_cast<UpdateProgressMessage*>(lParam));
+            const sk::launcher::UpdateProgress& progress = message->progress;
+            if (progress.stage == sk::launcher::UpdateStage::Downloading &&
+                progress.bytesTotal > 0) {
+                impl->updateNote = L"Downloading " + FormatSize(progress.bytesSoFar) + L" of " +
+                                   FormatSize(progress.bytesTotal);
+            } else if (!progress.message.empty()) {
+                impl->updateNote = Widen(progress.message);
+            }
+            InvalidateRect(hwnd, nullptr, FALSE);
+            return 0;
+        }
+        case WM_APP_UPDATE_DONE: {
+            std::unique_ptr<UpdateDoneMessage> done(
+                reinterpret_cast<UpdateDoneMessage*>(lParam));
+            impl->installing = false;
+            if (!done->ok) {
+                impl->updateState = UpdateState::Failed;
+                impl->updateNote.clear();
+                Refresh(*impl);
+                SetStatus(*impl, L"The update failed: " + Widen(done->error), kBad);
+                return 0;
+            }
+            // This executable has just been renamed aside and replaced, so
+            // the new one has to take over from here.
+            if (sk::launcher::RelaunchLauncher(impl->installRoot)) {
+                DestroyWindow(hwnd);
+            } else {
+                impl->updateState = UpdateState::UpToDate;
+                impl->updateNote.clear();
+                Refresh(*impl);
+                SetStatus(*impl,
+                          L"Updated to " + Widen(done->tag) +
+                              L". Close and reopen Shadowkey to use it.",
+                          kGold);
+            }
+            return 0;
+        }
+
         case WM_CLOSE:
+            if (impl->installing) {
+                // Half-replaced installs are how people end up with a
+                // folder that no longer starts.
+                SetStatus(*impl, L"Please wait — files are being replaced right now.",
+                          kBad);
+                return 0;
+            }
             DestroyWindow(hwnd);
             return 0;
         case WM_DESTROY:
@@ -926,6 +1140,17 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int showCommand) {
             Refresh(impl);
         }
     }
+    // M115: clear out whatever the last update left behind, then ask GitHub
+    // whether there is a newer build -- on a worker thread, because a slow
+    // or unreachable network must never delay the window appearing.
+    if (sk::launcher::UpdatesEnabledForThisBuild(SK_LAUNCHER_VERSION)) {
+        sk::launcher::CleanUpPreviousUpdate(impl.installRoot);
+        impl.updateState = UpdateState::Checking;
+        StartUpdateCheck(impl.hwnd);
+    } else {
+        impl.updateState = UpdateState::Disabled;
+    }
+
     if (impl.dataOk) {
         SetStatus(impl, L"Ready to play.", kMuted);
     } else {

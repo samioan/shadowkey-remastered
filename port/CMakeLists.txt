@@ -13,7 +13,13 @@ endif()
 #
 # `SK_VERSION` is what the launcher prints in its corner. A local build
 # leaves it at the "-dev" default; the release workflow passes the git tag.
-set(SK_VERSION "0.113.0-dev" CACHE STRING "Version string shown by the launcher")
+set(SK_VERSION "0.115.0-dev" CACHE STRING "Version string shown by the launcher")
+
+# M115: where the launcher checks for newer builds. Cache variables so a
+# fork updates from its own repository without editing source. A version
+# carrying "-dev" does not check at all -- see src/launcher/updater.h.
+set(SK_UPDATE_OWNER "samioan" CACHE STRING "GitHub owner to check for updates")
+set(SK_UPDATE_REPO "shadowkey-remastered" CACHE STRING "GitHub repo to check for updates")
 
 # `SK_DIST` is the shipping build: no debug suite, and none of the ~99 smoke
 # tests, so a release compiles the two executables that actually get zipped
@@ -282,6 +288,9 @@ if(WIN32)
     src/launcher/banner.cpp
     src/launcher/install.cpp
     src/launcher/launcher_config.cpp
+    src/launcher/update_check.cpp
+    src/launcher/updater.cpp
+    src/launcher/zip_reader.cpp
     src/launcher/launcher.rc
     src/assets/gdr_font.cpp
     src/platform/win32/exe_dir.cpp
@@ -289,9 +298,11 @@ if(WIN32)
   set_target_properties(shadowkey_launcher PROPERTIES OUTPUT_NAME "Shadowkey")
   target_include_directories(shadowkey_launcher
     PRIVATE src "${CMAKE_BINARY_DIR}/generated")
-  # windowscodecs is WIC, the system image decoder -- see src/launcher/banner.h.
+  # windowscodecs is WIC, the system image decoder (src/launcher/banner.h);
+  # winhttp fetches the release list and the download (M115); puff is back,
+  # now inflating zip members rather than the artwork (src/launcher/zip_reader.h).
   target_link_libraries(shadowkey_launcher
-    PRIVATE user32 gdi32 comctl32 ole32 shell32 windowscodecs)
+    PRIVATE puff user32 gdi32 comctl32 ole32 shell32 windowscodecs winhttp)
   target_compile_definitions(shadowkey_launcher
     PRIVATE UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN)
   # The manifest is a resource in launcher.rc (see the comment there for
@@ -814,9 +825,12 @@ add_executable(launcher_smoke
   src/launcher/banner.cpp
   src/launcher/install.cpp
   src/launcher/launcher_config.cpp
+  src/launcher/update_check.cpp
+  src/launcher/updater.cpp
+  src/launcher/zip_reader.cpp
   src/assets/gdr_font.cpp
 )
 target_include_directories(launcher_smoke PRIVATE src)
-target_link_libraries(launcher_smoke PRIVATE ole32 windowscodecs)
+target_link_libraries(launcher_smoke PRIVATE puff ole32 windowscodecs winhttp)
 
 endif()  # NOT SK_DIST

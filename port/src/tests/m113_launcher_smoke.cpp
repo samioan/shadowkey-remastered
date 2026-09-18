@@ -23,6 +23,9 @@
 #include "launcher/banner.h"
 #include "launcher/install.h"
 #include "launcher/launcher_config.h"
+#include "launcher/update_check.h"
+#include "launcher/updater.h"
+#include "launcher/zip_reader.h"
 
 namespace {
 
@@ -43,6 +46,125 @@ std::vector<unsigned char> ReadFile(const std::string& path) {
     if (!file) return {};
     return std::vector<unsigned char>((std::istreambuf_iterator<char>(file)),
                                       std::istreambuf_iterator<char>());
+}
+
+std::string ReadWholeText(const std::string& path) {
+    std::ifstream file(path, std::ios::binary);
+    if (!file) return std::string();
+    return std::string((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
+}
+
+// --- a minimal zip writer, for part 9 --------------------------------
+//
+// Writing a zip is much simpler than reading one, so the reader is tested
+// against bytes whose every field is known here rather than against a
+// checked-in binary fixture nobody can inspect.
+
+void PutU16(std::string& out, unsigned value) {
+    out.push_back(static_cast<char>(value & 0xff));
+    out.push_back(static_cast<char>((value >> 8) & 0xff));
+}
+
+void PutU32(std::string& out, unsigned long value) {
+    for (int i = 0; i < 4; ++i) out.push_back(static_cast<char>((value >> (8 * i)) & 0xff));
+}
+
+// CRC-32 as the zip format defines it. The reader does not verify it, but
+// writing a wrong one would leave an archive other tools reject, and this
+// test's output should be a real zip.
+unsigned long Crc32(const std::string& data) {
+    unsigned long crc = 0xFFFFFFFFul;
+    for (unsigned char byte : data) {
+        crc ^= byte;
+        for (int bit = 0; bit < 8; ++bit) {
+            crc = (crc >> 1) ^ (0xEDB88320ul & (~(crc & 1) + 1));
+        }
+    }
+    return crc ^ 0xFFFFFFFFul;
+}
+
+// A DEFLATE stream of one uncompressed block: BFINAL=1, BTYPE=00, then
+// LEN/~LEN and the bytes. Still the method-8 path through puff, which is
+// what needs covering -- without needing a compressor in the test.
+std::string DeflateStored(const std::string& data) {
+    std::string out;
+    out.push_back(static_cast<char>(0x01));
+    PutU16(out, static_cast<unsigned>(data.size()));
+    PutU16(out, static_cast<unsigned>(~data.size() & 0xffff));
+    out += data;
+    return out;
+}
+
+bool WriteTestZip(const std::string& path, const std::string& storedName,
+                  const std::string& storedBody, const std::string& deflateName,
+                  const std::string& deflateBody) {
+    struct Member {
+        std::string name, payload;
+        unsigned method;
+        unsigned long crc, uncompressed;
+        unsigned long localOffset = 0;
+    };
+    std::vector<Member> members = {
+        {storedName, storedBody, 0, Crc32(storedBody),
+         static_cast<unsigned long>(storedBody.size())},
+        {deflateName, DeflateStored(deflateBody), 8, Crc32(deflateBody),
+         static_cast<unsigned long>(deflateBody.size())},
+    };
+
+    std::string out;
+    for (Member& member : members) {
+        member.localOffset = static_cast<unsigned long>(out.size());
+        PutU32(out, 0x04034b50);                                  // local file header
+        PutU16(out, 20);                                          // version needed
+        PutU16(out, 0);                                           // flags
+        PutU16(out, member.method);
+        PutU16(out, 0);                                           // mod time
+        PutU16(out, 0);                                           // mod date
+        PutU32(out, member.crc);
+        PutU32(out, static_cast<unsigned long>(member.payload.size()));
+        PutU32(out, member.uncompressed);
+        PutU16(out, static_cast<unsigned>(member.name.size()));
+        PutU16(out, 0);                                           // extra length
+        out += member.name;
+        out += member.payload;
+    }
+
+    const unsigned long directoryOffset = static_cast<unsigned long>(out.size());
+    for (const Member& member : members) {
+        PutU32(out, 0x02014b50);                                  // central file header
+        PutU16(out, 20);                                          // version made by
+        PutU16(out, 20);                                          // version needed
+        PutU16(out, 0);                                           // flags
+        PutU16(out, member.method);
+        PutU16(out, 0);
+        PutU16(out, 0);
+        PutU32(out, member.crc);
+        PutU32(out, static_cast<unsigned long>(member.payload.size()));
+        PutU32(out, member.uncompressed);
+        PutU16(out, static_cast<unsigned>(member.name.size()));
+        PutU16(out, 0);                                           // extra
+        PutU16(out, 0);                                           // comment
+        PutU16(out, 0);                                           // disk number
+        PutU16(out, 0);                                           // internal attrs
+        PutU32(out, 0);                                           // external attrs
+        PutU32(out, member.localOffset);
+        out += member.name;
+    }
+    const unsigned long directorySize = static_cast<unsigned long>(out.size()) - directoryOffset;
+
+    PutU32(out, 0x06054b50);                                      // end of central directory
+    PutU16(out, 0);                                               // this disk
+    PutU16(out, 0);                                               // disk with directory
+    PutU16(out, static_cast<unsigned>(members.size()));
+    PutU16(out, static_cast<unsigned>(members.size()));
+    PutU32(out, directorySize);
+    PutU32(out, directoryOffset);
+    PutU16(out, 0);                                               // comment length
+
+    std::ofstream file(path, std::ios::binary | std::ios::trunc);
+    if (!file) return false;
+    file.write(out.data(), static_cast<std::streamsize>(out.size()));
+    return static_cast<bool>(file);
 }
 
 // A scratch directory of our own under TEMP, same convention as
@@ -277,6 +399,144 @@ int main(int argc, char** argv) {
         Check(!CopyOneFile((scratch / "does_not_exist").string(), fontDestination.string(),
                            fileError) && !fileError.empty(),
               "a missing source reports an error rather than failing silently");
+    }
+
+    // -- 7. version comparison (M115) --
+    //
+    // The updater decides whether to offer a download by comparing these,
+    // so every ordering rule gets pinned. A plain string compare gets the
+    // second of these backwards, which is the whole reason it exists.
+    std::printf("\n-- 7. version comparison (M115) --\n");
+    {
+        Check(CompareVersions("0.114.0", "0.115.0") < 0, "0.114.0 is older than 0.115.0");
+        Check(CompareVersions("0.99.0", "0.115.0") < 0,
+              "0.99.0 is older than 0.115.0 (numeric, not lexical)");
+        Check(CompareVersions("0.115.0", "0.114.0") > 0, "the comparison is symmetric");
+        Check(CompareVersions("0.114.0", "0.114.0") == 0, "equal versions compare equal");
+        Check(CompareVersions("v0.114.0", "0.114.0") == 0, "a leading v is ignored");
+        Check(CompareVersions("1.0.0", "0.999.999") > 0, "major wins over minor and patch");
+        Check(CompareVersions("0.114.1", "0.114.0") > 0, "patch is compared");
+
+        // A pre-release leads up to its release, so it must sort before it.
+        // Getting this backwards would make a released 1.0.0 look older
+        // than the beta it succeeded, and the updater would never offer it.
+        Check(CompareVersions("1.0.0-beta1", "1.0.0") < 0, "a pre-release precedes its release");
+        Check(CompareVersions("1.0.0", "1.0.0-beta1") > 0, "...and the reverse");
+        Check(CompareVersions("1.0.0-beta1", "1.0.0-beta2") < 0, "pre-releases order among themselves");
+        Check(CompareVersions("0.115.0-dev", "0.115.0") < 0,
+              "a -dev build is older than the release of the same number");
+    }
+
+    // -- 8. reading the release list (M115) --
+    std::printf("\n-- 8. the GitHub release payload (M115) --\n");
+    {
+        // Shaped exactly like the real response: a one-element array, the
+        // asset list carrying its own "name", and -- the detail that
+        // matters -- a non-zip asset listed before the zip.
+        const std::string json = R"([{"tag_name":"v0.115.0","name":"Shadowkey Remastered v0.115.0",)"
+                                 R"("draft":false,"prerelease":true,"assets":[)"
+                                 R"({"name":"checksums.txt","browser_download_url":)"
+                                 R"("https://github.com/o/r/releases/download/v0.115.0/checksums.txt"},)"
+                                 R"({"name":"ShadowkeyRemastered-v0.115.0-win64.zip",)"
+                                 R"("browser_download_url":)"
+                                 R"("https://github.com/o/r/releases/download/v0.115.0/ShadowkeyRemastered-v0.115.0-win64.zip"}]}])";
+        ReleaseInfo info;
+        Check(ParseReleaseList(json, info), "a realistic payload parses");
+        Check(info.tag == "v0.115.0", "the tag is read");
+        Check(info.version == "0.115.0", "the version drops the leading v");
+        Check(info.prerelease, "the prerelease flag is read");
+        Check(info.assetName == "ShadowkeyRemastered-v0.115.0-win64.zip",
+              "the asset name comes from the URL");
+        Check(info.downloadUrl.find(".zip") != std::string::npos &&
+                  info.downloadUrl.find("checksums") == std::string::npos,
+              "the .zip asset is chosen, not the first asset listed");
+
+        ReleaseInfo rejected;
+        Check(!ParseReleaseList("[]", rejected), "an empty release list is rejected");
+        Check(!ParseReleaseList("", rejected), "an empty body is rejected");
+        Check(!ParseReleaseList(R"([{"tag_name":"v1.0.0","assets":[]}])", rejected),
+              "a release with no assets is rejected");
+        Check(!ParseReleaseList(R"([{"tag_name":"v1.0.0","assets":[{"browser_download_url":)"
+                                R"("https://x/y/source.tar.gz"}]}])",
+                                rejected),
+              "a release with no .zip asset is rejected");
+        // GitHub escapes nothing in these URLs today, but a parser that
+        // cannot survive an escape is a parser waiting to break.
+        ReleaseInfo escaped;
+        Check(ParseReleaseList(R"([{"tag_name":"v2.0.0","assets":[{"browser_download_url":)"
+                               R"("https:\/\/github.com\/o\/r\/a.zip"}]}])",
+                               escaped) &&
+                  escaped.downloadUrl == "https://github.com/o/r/a.zip",
+              "escaped forward slashes in a URL are unescaped");
+    }
+
+    // -- 9. the zip reader (M115) --
+    std::printf("\n-- 9. the zip reader (M115) --\n");
+    {
+        Check(IsSafeRelativePath("bin/shadowkey_port.exe"), "a normal path is safe");
+        Check(!IsSafeRelativePath("../evil.exe"), "a parent-directory escape is refused");
+        Check(!IsSafeRelativePath("bin/../../evil.exe"), "...including a buried one");
+        Check(!IsSafeRelativePath("/etc/passwd"), "an absolute path is refused");
+        Check(!IsSafeRelativePath("C:\\Windows\\System32\\evil.dll"),
+              "a drive-letter path is refused");
+        Check(!IsSafeRelativePath("..\\evil.exe"), "a backslash escape is refused too");
+        Check(!IsSafeRelativePath(""), "an empty path is refused");
+
+        // Built here rather than shipped as a fixture: writing a zip is far
+        // simpler than reading one, so this exercises the reader against
+        // bytes whose every field is known. One stored entry and one
+        // deflate entry (a single uncompressed DEFLATE block, which is
+        // still the method-8 path through puff).
+        const fs::path zipPath = scratch / "test.zip";
+        const std::string storedName = "Shadowkey.exe";
+        const std::string storedBody = "not really an executable";
+        const std::string deflateName = "bin/shadowkey_port.exe";
+        const std::string deflateBody = "nor is this one, but it inflates";
+        Check(WriteTestZip(zipPath.string(), storedName, storedBody, deflateName, deflateBody),
+              "a two-entry test archive is written");
+
+        std::vector<ZipEntry> index;
+        std::string zipError;
+        Check(ReadZipIndex(zipPath.string(), index, zipError),
+              "ReadZipIndex succeeds (" + zipError + ")");
+        Check(index.size() == 2, "both entries are listed");
+
+        std::vector<std::string> paths;
+        for (const ZipEntry& e : index) paths.push_back(e.path);
+        Check(LooksLikeShadowkeyPackage(paths), "the archive is recognised as a Shadowkey build");
+        Check(!LooksLikeShadowkeyPackage({"readme.txt"}),
+              "an unrelated archive is not");
+        Check(!LooksLikeShadowkeyPackage({"Shadowkey.exe"}),
+              "the launcher alone is not enough -- the game has to be there too");
+
+        const fs::path out = scratch / "unzipped";
+        Check(ExtractZip(zipPath.string(), out.string(), zipError),
+              "ExtractZip succeeds (" + zipError + ")");
+        Check(ReadWholeText((out / storedName).string()) == storedBody,
+              "the stored entry round-trips");
+        Check(ReadWholeText((out / "bin" / "shadowkey_port.exe").string()) == deflateBody,
+              "the deflated entry round-trips through puff");
+
+        std::string truncatedError;
+        std::vector<ZipEntry> nothing;
+        Check(!ReadZipIndex((scratch / "not_a_zip.bin").string(), nothing, truncatedError),
+              "a missing file is reported, not crashed on");
+        {
+            std::ofstream(scratch / "not_a_zip.bin", std::ios::binary) << "definitely not a zip";
+        }
+        Check(!ReadZipIndex((scratch / "not_a_zip.bin").string(), nothing, truncatedError) &&
+                  !truncatedError.empty(),
+              "a non-zip file is rejected with a reason");
+    }
+
+    // -- 10. the dev-build guard (M115) --
+    std::printf("\n-- 10. the dev-build guard (M115) --\n");
+    {
+        // A build tree must never be overwritten by a release: the install
+        // layout is not the same shape and someone is working in it.
+        Check(!UpdatesEnabledForThisBuild("0.115.0-dev"), "a -dev build does not self-update");
+        Check(!UpdatesEnabledForThisBuild(""), "an empty version does not self-update");
+        Check(UpdatesEnabledForThisBuild("0.115.0"), "a release build does");
     }
 
     std::error_code cleanup;

@@ -6,6 +6,15 @@
 // workflow sets from the git tag -- so what the launcher shows in its
 // corner is always the build it actually is, with no file to remember to
 // bump by hand.
+//
+// M115: the same value decides whether this build offers updates at all. A
+// "-dev" version does not (see updater.h): its install is a build tree, and
+// dropping a release on top of it would overwrite work in progress.
 
 #define SK_LAUNCHER_VERSION "@SK_VERSION@"
 #define SK_LAUNCHER_VERSION_W L"@SK_VERSION@"
+
+// Where the launcher looks for newer builds. Cache variables so a fork
+// updates from its own repository without editing source.
+#define SK_UPDATE_OWNER "@SK_UPDATE_OWNER@"
+#define SK_UPDATE_REPO "@SK_UPDATE_REPO@"
