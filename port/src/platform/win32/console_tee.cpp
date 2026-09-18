@@ -45,12 +45,19 @@ bool StartConsoleTeeLog(const std::string& logPath) {
     // thing if the caller already redirected stdout themselves, e.g.
     // `shadowkey_port.exe > somewhere.txt`) -- DuplicateHandle before
     // SetStdHandle repoints STD_OUTPUT_HANDLE out from under it, below.
+    //
+    // M113: failing to duplicate it is no longer fatal. When the launcher
+    // starts the game with CREATE_NO_WINDOW there is no console at all, so
+    // STD_OUTPUT_HANDLE is null and this call fails -- and the old code
+    // gave up on the log entirely at exactly the moment the log matters
+    // most, since a shipped player has no console to read instead. The tee
+    // thread already treats INVALID_HANDLE_VALUE as "write to the file
+    // only", so carrying on costs nothing.
     HANDLE process = GetCurrentProcess();
     HANDLE originalStdout = INVALID_HANDLE_VALUE;
     if (!DuplicateHandle(process, GetStdHandle(STD_OUTPUT_HANDLE), process, &originalStdout, 0,
                           FALSE, DUPLICATE_SAME_ACCESS)) {
-        std::printf("StartConsoleTeeLog: could not duplicate the console handle -- log disabled\n");
-        return false;
+        originalStdout = INVALID_HANDLE_VALUE;
     }
 
     HANDLE logFile = CreateFileA(logPath.c_str(), GENERIC_WRITE, FILE_SHARE_READ, nullptr,

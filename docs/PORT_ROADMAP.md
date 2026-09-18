@@ -10537,6 +10537,138 @@ the inference that went wrong last time: case 99 of `FUN_10078de4` is the
   matches what the shipped `AddMenuSlider(.., 100, 10)` produces.
 
 
+## M113 -- the launcher, and building something other people can download
+
+Everything through M112 was built to be run out of a checkout: the game
+walked `../..` from `port/build/` to the repo root and hoped the N-Gage dump
+was sitting there under its full 70-character folder name. This is the first
+half of turning that into a download -- a launcher that asks for the two
+things this project may not ship, copies them somewhere stable, and starts
+the game. M114 (CI and releases) and M115 (auto-update) follow.
+
+- **`Shadowkey.exe`**, a second executable beside the game. It draws its own
+  panel and owner-draws its own buttons rather than using a dialog template:
+  the artwork is a dark, saturated piece, and stock Win32 controls on top of
+  it read as a bug. Only the buttons are real windows, because they need
+  focus, keyboard activation and accessibility; every label is painted in
+  `WM_PAINT`, which is less code than the `WM_CTLCOLORSTATIC` dance the
+  alternative needs. It is not a port of `sk::Window` -- that class is welded
+  to the 176x208 RGB565 backbuffer and has no notion of child controls.
+
+- **The artwork, and a decision made twice.** The port has no image decoder
+  of any kind, so the first cut avoided needing one: the artwork of the day
+  was flat, vector-style colour, so `tools/make_banner.py` decoded it once
+  offline and wrote raw pixels under a plain DEFLATE stream, which the
+  `puff` inflater already vendored for the zone-file reader expanded in a
+  single call. 3.2 MB of BGRX in 155 KB, and **no new dependency at all**.
+
+  Then the artwork became the project's own key art -- a rendered piece, all
+  gradients and soft light -- and DEFLATE had nothing to work with: **2.44 MB**
+  at 1200x896, against **0.19 MB** for the same image as a quality-88 JPEG.
+  Thirteen times the size of every download and every auto-update is too
+  much to pay for the tidiness of having no decoder, so the decode moved to
+  **WIC**, which is part of Windows: nothing vendored, nothing
+  redistributed, and `banner.jpg` is now just a JPEG in the resource table.
+  Worth recording as a case where the elegant answer was right for one set
+  of inputs and wrong for the next, and the number that decided it was
+  measured rather than argued.
+
+  `tools/make_icon.py` assembles the seven-size `.ico` by hand -- the
+  container is a 6-byte header plus 16 bytes per entry, and since Vista
+  every entry may be a PNG, which removes the AND-mask and bottom-up-BMP
+  fiddliness entirely.
+
+- **Finding the game.** Nobody selects `system/apps/6r51`; they select the
+  folder they unzipped. `FindGameDataRoot` therefore accepts either and
+  breadth-first-searches three levels down, and validates on **four** marker
+  files together (`stringtable.eng`, `mainmenu.s`, `global.spr`,
+  `models.idx`) because any one alone is a coincidence waiting to happen.
+  The font is validated by actually parsing it -- the same `GdrFont::Load(..,
+  "LatinBold12")` call `main.cpp` makes -- so "the launcher accepted it" and
+  "the game can use it" cannot disagree, and a renamed `.gdr` fails at the
+  dialog instead of at the first frame of text.
+
+- **The install is self-contained and movable.** The chosen folder is copied
+  into `data/`, so the source dump can be deleted afterwards, and
+  `launcher.cfg` stores paths *relative* to the install root whenever they
+  are inside it. Verified by moving a working install to a path with spaces
+  in it and relaunching: both rows re-resolved and it played.
+
+- **Two additive engine changes**, both no-ops without the launcher:
+  `SK_USER_DIR` moves saves, `dragonstar.set` and the log into one folder a
+  player can find (they used to land beside the executable, which in a
+  shipped layout is `bin/`), and `SK_SCALE` replaces a hardcoded 3x window
+  with the launcher's 2x/3x/4x. The window title stopped being
+  "shadowkey-port (M6: 3D zone renderer)".
+
+- **Two latent bugs the shipping build flushed out.**
+  * `main.cpp` never included `<filesystem>`; it was reaching it through one
+    of the debug suite's headers, so **`SK_DEBUG_SUITE=OFF` had never once
+    been built** despite the comments claiming it compiled everything out.
+    A release build failed outright until this was fixed.
+  * `StartConsoleTeeLog` gave up on the log entirely if it could not
+    duplicate `STD_OUTPUT_HANDLE` -- i.e. exactly when there is no console,
+    which is the shipped case and the one where a player has no console to
+    read instead. The tee thread already handled a null console handle; only
+    the early return had to go.
+
+- **`port/run_tests.ps1` is now in the repo.** It had lived in whatever
+  scratch directory the session happened to have and been rewritten from
+  memory each time, once with `$?` read after an intervening subexpression
+  so every test reported failure while the code was fine. Writing it down
+  caught a second trap of the same family straight away: Windows PowerShell
+  wraps a native executable's **stderr** in an ErrorRecord, so under
+  `$ErrorActionPreference = 'Stop'` the first test that writes to stderr
+  aborts *the whole run*. WIC grumbles while `launcher_smoke` feeds it
+  deliberately corrupt data -- a passing check -- and the suite stopped dead
+  on it. Exit codes decide pass and fail here, so the loop runs with
+  stderr treated as text. It has to be
+  committed now regardless: CI calls it in M114, and since `port/build/`
+  contains a GUI executable, anything that naively runs every `.exe` there
+  hangs forever waiting for a window. It also takes `-NoGameData`, for the
+  five tests that read nothing outside the repository.
+
+  One thing it does **not** do is pass a data root by default: the tests do
+  not share an argv convention (`m15_font_smoke` takes a *font* there,
+  `m2_simkin_smoke` a script), so handing every test the same string makes
+  three of them fail for no reason. They already default to the in-repo path.
+
+- **`port/build_dist.bat`** builds Release with `SK_DIST=ON` (two
+  executables, not 101), `SK_DEBUG_SUITE=OFF`, and `/MT` via
+  `CMAKE_MSVC_RUNTIME_LIBRARY` -- the static CRT being the single thing that
+  most decides whether "unzip and play" works, since the dynamic runtime
+  turns every machine without a matching redistributable into a missing-DLL
+  dialog. `dumpbin /dependents` on both binaries shows only Windows system
+  DLLs: no `VCRUNTIME`, no `MSVCP`.
+
+- **`m113_launcher_smoke` is 47 checks** across six parts: the artwork
+  decodes to the right dimensions and the right pixel *in the right channel
+  order*, and every corruption path is rejected; `launcher.cfg` round-trips and
+  tolerates hand edits; install-relative paths resolve both ways; discovery
+  accepts the real dump from either depth and rejects a folder holding one
+  marker file; the font check parses rather than guesses; and copy-in
+  handles nesting, re-running setup, and a folder copied onto itself. Most
+  of it needs no game data, which is what will let CI run it.
+
+- **The suite**: 101 executables, 100 tests, all passing. Soft-fail stays at
+  **5**.
+
+- **Verified as a real install**, not in the build tree: assembled `dist/`
+  into a folder on the Desktop, drove the launcher's own picker with the
+  *dump root* (so the descend path was what got tested), watched it copy
+  18.4 MB into `data/`, added the font through its own dialog, pressed Play,
+  and got the main menu at 3x with the real font. Quitting brought the
+  launcher back; `dragonstar.set` and the log were in `user/` and `bin/`
+  held nothing but the exe.
+
+### Still open
+
+- **The title colour**, unchanged since M108: `*(ushort *)(engine->+0x28 + 8)`.
+  Needs runtime tracing; static search is exhausted.
+- **`widget+0x6c`, the slider's step**, unchanged since M112: written by
+  `FUN_1007e7f0`, no reader found in the menu-widget address range.
+
+
 ## Next milestones (not yet started)
 
 Roughly in priority order for reaching "actually playable," not commitments:

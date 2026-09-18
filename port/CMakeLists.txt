@@ -9,6 +9,27 @@ if(MSVC)
   add_compile_options(/W4 /utf-8)
 endif()
 
+# --- M113: building something other people can download ---------------
+#
+# `SK_VERSION` is what the launcher prints in its corner. A local build
+# leaves it at the "-dev" default; the release workflow passes the git tag.
+set(SK_VERSION "0.113.0-dev" CACHE STRING "Version string shown by the launcher")
+
+# `SK_DIST` is the shipping build: no debug suite, and none of the ~99 smoke
+# tests, so a release compiles the two executables that actually get zipped
+# instead of all 101. It does not change any game behaviour -- see
+# SK_DEBUG_SUITE below for what is compiled out with it.
+option(SK_DIST "Build only the shipped executables (launcher + game)" OFF)
+
+# Static CRT for release builds. This is the single thing that most decides
+# whether "unzip and play" works: with the dynamic runtime, every machine
+# without a matching Visual C++ redistributable gets a missing-DLL dialog
+# instead of a game. Debug builds stay dynamic so the usual debugging tools
+# behave normally.
+if(MSVC)
+  set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+endif()
+
 # --- Vendored Simkin C++ interpreter (LGPL, see third_party/simkin/PROVENANCE.md) ---
 # Only the "TreeNode" flavor (see upstream Src/Makefile's treenode_objects
 # list): the script parser/interpreter core, no XML backend (Expat/Xerces/
@@ -239,6 +260,50 @@ if(WIN32)
   # panels (src/platform/win32/window.cpp) -- see SK_DEBUG_SUITE above.
   target_link_libraries(shadowkey_port PRIVATE user32 gdi32 msimg32)
 endif()
+
+# --- M113: the launcher -----------------------------------------------
+#
+# The thing a downloader double-clicks. Ships as `Shadowkey.exe` beside the
+# game; see src/launcher/launcher_main.cpp for why it draws its own panel
+# rather than using a dialog template, and src/launcher/banner.h for why its
+# artwork is a JPEG decoded through WIC (windowscodecs) rather than raw
+# pixels through the vendored `puff`.
+configure_file(src/launcher/version.h.in
+               "${CMAKE_BINARY_DIR}/generated/launcher/version.h" @ONLY)
+
+# The artwork the .rc embeds (src/launcher/assets/banner.jpg and
+# shadowkey.ico) is committed, so a normal build never needs Python.
+# Regenerate only when the master artwork changes:
+#   python tools/make_banner.py port/src/launcher/assets/banner_source.jpg
+#   python tools/make_icon.py   port/src/launcher/assets/banner_source.jpg --box 845,0,710,710
+if(WIN32)
+  add_executable(shadowkey_launcher WIN32
+    src/launcher/launcher_main.cpp
+    src/launcher/banner.cpp
+    src/launcher/install.cpp
+    src/launcher/launcher_config.cpp
+    src/launcher/launcher.rc
+    src/assets/gdr_font.cpp
+    src/platform/win32/exe_dir.cpp
+  )
+  set_target_properties(shadowkey_launcher PROPERTIES OUTPUT_NAME "Shadowkey")
+  target_include_directories(shadowkey_launcher
+    PRIVATE src "${CMAKE_BINARY_DIR}/generated")
+  # windowscodecs is WIC, the system image decoder -- see src/launcher/banner.h.
+  target_link_libraries(shadowkey_launcher
+    PRIVATE user32 gdi32 comctl32 ole32 shell32 windowscodecs)
+  target_compile_definitions(shadowkey_launcher
+    PRIVATE UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN)
+  # The manifest is a resource in launcher.rc (see the comment there for
+  # why it cannot come in through /MANIFESTINPUT under CMake). This turns
+  # off the one the toolchain would otherwise generate and embed itself --
+  # two RT_MANIFEST resources in one image is a link error.
+  target_link_options(shadowkey_launcher PRIVATE /MANIFEST:NO)
+endif()
+
+# Everything below is test executables. A shipping build skips the lot --
+# see SK_DIST at the top of this file.
+if(NOT SK_DIST)
 
 # M2 milestone smoke test -- see src/tests/m2_simkin_smoke.cpp. Separate
 # console executable so it doesn't disturb the M0/M1 windowed app.
@@ -739,3 +804,19 @@ if(SK_DEBUG_SUITE)
   add_executable(clean_start_smoke src/tests/m107_clean_start_smoke.cpp)
   target_link_libraries(clean_start_smoke PRIVATE sk_bindings sk_world sk_debug)
 endif()
+
+# M113 milestone smoke test -- see src/tests/m113_launcher_smoke.cpp. Headless:
+# it exercises the launcher's decode/config/discovery layer directly, so it
+# never opens a window. Compiles the launcher's own sources rather than
+# linking Shadowkey.exe, which is a GUI binary with no exported entry points.
+add_executable(launcher_smoke
+  src/tests/m113_launcher_smoke.cpp
+  src/launcher/banner.cpp
+  src/launcher/install.cpp
+  src/launcher/launcher_config.cpp
+  src/assets/gdr_font.cpp
+)
+target_include_directories(launcher_smoke PRIVATE src)
+target_link_libraries(launcher_smoke PRIVATE ole32 windowscodecs)
+
+endif()  # NOT SK_DIST

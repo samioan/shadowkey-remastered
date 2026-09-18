@@ -1,0 +1,11 @@
+#pragma once
+
+// Generated into the build directory by port/CMakeLists.txt's
+// configure_file. The value comes from the `SK_VERSION` cache variable,
+// which a local build leaves at its "-dev" default and which the release
+// workflow sets from the git tag -- so what the launcher shows in its
+// corner is always the build it actually is, with no file to remember to
+// bump by hand.
+
+#define SK_LAUNCHER_VERSION "@SK_VERSION@"
+#define SK_LAUNCHER_VERSION_W L"@SK_VERSION@"

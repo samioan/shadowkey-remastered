@@ -14,6 +14,13 @@
 #include <chrono>
 #include <cmath>
 #include <cstdio>
+// M113: was reaching this file only through one of the debug suite's own
+// headers, so every std::filesystem use below (DebugZoneNames,
+// EnumerateMenuScripts, UserDirectory) compiled purely by luck -- and a
+// build with SK_DEBUG_SUITE=OFF, which is what a shipping build is, failed
+// outright. That configuration had evidently never been built before this
+// milestone needed it.
+#include <filesystem>
 #include <fstream>
 #include <map>
 #include <memory>
@@ -3084,6 +3091,36 @@ void RenderVignette(sk::Backbuffer& backbuffer, sk::SpriteArchive& sprites,
     sk::BitmapFont::DrawString(backbuffer, (std::max)(0, textX), 0x73, caption, kTitleColor);
 }
 
+// M113: where this run's *writable* files go -- saves, `dragonstar.set`
+// and the log. Everything that follows used to put them beside the
+// executable, which is right for a build directory and wrong for a shipped
+// install, where the exe lives in `bin/` and a player never looks there.
+// The launcher sets `SK_USER_DIR`; returns empty when it is not set, and
+// every caller below then keeps the exact path it used before this
+// milestone, so a bare run out of a build directory is unchanged. Joins
+// `SK_FONT_TYPEFACE`/`SK_DUMP_MENUS`/`SK_DEBUG_*`.
+std::string UserDirectory() {
+    const char* fromEnvironment = std::getenv("SK_USER_DIR");
+    if (!fromEnvironment || !*fromEnvironment) return std::string();
+    std::error_code error;
+    std::filesystem::create_directories(fromEnvironment, error);
+    if (!error) return fromEnvironment;
+    std::printf("shadowkey-port: SK_USER_DIR=%s is unusable (%s) -- falling back\n",
+                fromEnvironment, error.message().c_str());
+    return std::string();
+}
+
+// M113: the window scale, likewise. Was a hardcoded 3x below; the launcher
+// offers 2x/3x/4x and passes the choice through here. Out-of-range values
+// keep the old default rather than opening an unusable window.
+int WindowScale() {
+    if (const char* fromEnvironment = std::getenv("SK_SCALE")) {
+        const int scale = std::atoi(fromEnvironment);
+        if (scale >= 1 && scale <= 8) return scale;
+    }
+    return 3;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -3096,7 +3133,14 @@ int main(int argc, char** argv) {
     // tee (keeps the live console working too) rather than a plain
     // `freopen`. As early as possible -- anything printed before this
     // call only reaches the console, not the log.
-    sk::StartConsoleTeeLog("shadowkey_port.log");
+    // M113: `SK_USER_DIR` (empty unless the launcher set it) moves this
+    // run's writable files -- the log here, saves and `dragonstar.set`
+    // below -- into one folder a player can find. Without it every path is
+    // what it was before: the log beside the current directory, the saves
+    // beside the executable.
+    const std::string userDirectory = UserDirectory();
+    sk::StartConsoleTeeLog(userDirectory.empty() ? std::string("shadowkey_port.log")
+                                                 : userDirectory + "/shadowkey_port.log");
     // M36: right after the tee, so a crash report lands in the log too.
     sk::InstallCrashReporter();
 
@@ -3211,8 +3255,12 @@ int main(int argc, char** argv) {
     // keeps them under `c:\systemppsR51\`; here they go beside the
     // executable, resolved the same way as every other asset path above
     // so a save does not land in whatever directory the game was launched
-    // from.
-    stack.SetSaveDirectory(sk::ExecutableDirectory());
+    // from. M113: unless `SK_USER_DIR` says otherwise, which is how a
+    // shipped install keeps saves out of `bin/` and in a folder a player
+    // can actually find (and back up).
+    const std::string saveDirectory =
+        userDirectory.empty() ? sk::ExecutableDirectory() : userDirectory;
+    stack.SetSaveDirectory(saveDirectory);
     // M21: Level.CreateEntity() needs entities.txt to resolve a typeId --
     // see level_executable.h's class comment.
     stack.level().SetEntityTypes(&entityTypes);
@@ -3299,8 +3347,14 @@ int main(int argc, char** argv) {
         return 0;
     }
 
-    sk::Window window(sk::Backbuffer::kWidth * 3, sk::Backbuffer::kHeight * 3,
-                       L"shadowkey-port (M6: 3D zone renderer)");
+    // M113: the scale was hardcoded 3x; `SK_SCALE` is how the launcher
+    // offers 2x/3x/4x. The title is what a player sees in their taskbar,
+    // so it is the game's name rather than the milestone this window was
+    // first opened for.
+    const int windowScale = WindowScale();
+    sk::Window window(sk::Backbuffer::kWidth * windowScale,
+                      sk::Backbuffer::kHeight * windowScale,
+                      L"The Elder Scrolls Travels: Shadowkey");
 
     sk::InputState input;
     // M80: `ParseActionText` has to name whichever key an action is bound
@@ -3324,8 +3378,8 @@ int main(int argc, char** argv) {
     // two volumes and the mute-on-call flag all come back, and anything
     // the file does not mention keeps the default the constructors gave
     // it. A missing file is not an error -- a first run has none.
-    const std::string configPath =
-        sk::ExecutableDirectory() + "/" + sk::GameConfig::kFileName;
+    // M113: beside the saves, for the same reason.
+    const std::string configPath = saveDirectory + "/" + sk::GameConfig::kFileName;
     sk::GameConfig config;
     config.CaptureBindings(input);
     config.soundVolume = audioEngine.sfxVolumePercent();

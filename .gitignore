@@ -24,6 +24,8 @@
 !/tools/parse_zone_placement.py
 !/tools/parse_string_table.py
 !/tools/analyze_sta_fields.py
+!/tools/make_banner.py
+!/tools/make_icon.py
 
 # --- Ghidra project (regenerable from the .app via tools/e32image.py + analyzeHeadless) ---
 # Recursive (**) because pyghidra's open_program(), if nested_project_location
@@ -67,6 +69,10 @@ __pycache__/
 # open-source (LGPL) and safe to redistribute in-tree. See the port
 # scaffold plan for the license/provenance rationale.
 /port/build/
+# M113: the shipping build's object tree and the folder it assembles for
+# zipping (port/build_dist.bat). Both are regenerable from that script.
+/port/build-dist/
+/port/dist/
 # Runtime action/soft-fail log (platform/win32/console_tee.h) -- written
 # next to wherever shadowkey_port.exe is launched from.
 shadowkey_port.log
