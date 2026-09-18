@@ -10669,6 +10669,90 @@ the game. M114 (CI and releases) and M115 (auto-update) follow.
   `FUN_1007e7f0`, no reader found in the menu-widget address range.
 
 
+## M114 -- shipping it: CI, tagged releases, and the page people land on
+
+M113 produced a launcher and a folder that could be zipped by hand. This is
+the part that makes a release something you cause rather than something you
+perform: push a tag, get a download.
+
+- **`port/vcvars.bat`, so the build works on a machine that is not this
+  one.** Both build scripts hardcoded one developer's Visual Studio path,
+  which a CI runner does not have. They now call a shared locator that asks
+  **vswhere** -- which ships with every VS 2017 and later installer, always
+  at the same fixed path, precisely because VS itself moves around -- and
+  falls through silently if the caller is already in a developer prompt.
+  The point is not the path lookup; it is that CI runs *the same scripts a
+  person runs*, so a workflow cannot drift from what actually builds here.
+
+- **`.github/workflows/ci.yml`** on every push and pull request: build
+  Debug (all 101 targets), run the tests that read nothing outside the
+  repository, build the shipping configuration, check the package, and
+  upload it. Building *both* configurations is not ceremony -- M113 found
+  that `SK_DEBUG_SUITE=OFF` had never once been built and did not compile,
+  and that is exactly the class of thing a second configuration in CI
+  catches the day it appears rather than the day of a release.
+
+- **`.github/workflows/release.yml`** on a `v*` tag. The tag is the
+  version: it is compiled into the launcher and shown in its corner, so a
+  build can be identified from a screenshot alone and nothing needs bumping
+  by hand. The job re-runs the tests before it builds the release, because
+  a release that fails its own tests should not exist, zips
+  `ShadowkeyRemastered-<tag>-win64.zip`, and publishes with `gh` -- already
+  on the runner, so no third-party action is trusted with the token.
+  `workflow_dispatch` re-cuts an existing tag for when the upload failed
+  rather than the build, and re-running is idempotent (an existing release
+  gets its asset replaced, not a duplicate).
+
+- **`port/check_dist.ps1`, which is the interesting one.** A package can be
+  broken in ways a build cannot notice:
+  * **Linking the Visual C++ runtime.** The single failure that turns
+    "unzip and play" into a missing-DLL dialog on every machine without the
+    matching redistributable -- and it is invisible on a developer's
+    machine, which has it.
+  * **Shipping the game.** A stray `.gdr`, `.spr`, `.sav`, `.s` or `.eng`,
+    or a `data/` folder swept in from a local test install, would be a
+    licensing problem rather than a large download. The whole project
+    rests on not doing this, so it is worth a machine checking.
+  * **An artwork resource that silently did not embed.** The launcher still
+    links and still runs; it just draws a flat background. The size floor
+    catches it.
+  Verified by breaking it on purpose -- dropping a `Ceurope.gdr` and a
+  `data/` into the package -- and confirming it names both and exits 1.
+
+- **`port/run_tests.ps1` fails a run that verified nothing.** Zero matched
+  executables used to report `passed=0 failed=0` and exit 0, which is green
+  in CI. A build step that silently produced nothing would have sailed
+  through.
+
+- **The page people actually land on.** The top-level README opened with
+  E32Image header parsing; it now opens with how to play. `docs/ITCH_PAGE.md`
+  holds the store copy in the repo so it can be revised like anything else,
+  and `.github/release_notes_template.md` is the body of every release --
+  both stating plainly, in the first screenful, that the download does not
+  include the game.
+
+### Verified, and not verified
+
+Locally: both build scripts work through vswhere from a clean tree; the
+suite is **100 passed, 0 failed, soft-fail 5**; the `-NoGameData` subset CI
+runs is 4 passed; the zero-match guard exits 1; `check_dist.ps1` passes a
+good package and fails a deliberately poisoned one; the release zip builds
+to 1.4 MB with exactly the four expected entries; and the tag-parsing rule
+accepts `v0.114.0` and `v0.114.0-beta1` while rejecting `latest` and `v1.2`.
+
+**The workflows themselves have not run.** Both files parse and every step
+they invoke has been exercised by hand, but GitHub Actions has not executed
+either one -- that needs a push, and the first run is the real test. The
+likeliest thing to be wrong is the Ninja install step, since the runner
+image's contents are assumed rather than known.
+
+### Still open
+
+- **The title colour**, unchanged since M108: `*(ushort *)(engine->+0x28 + 8)`.
+  Needs runtime tracing; static search is exhausted.
+- **`widget+0x6c`, the slider's step**, unchanged since M112.
+
+
 ## Next milestones (not yet started)
 
 Roughly in priority order for reaching "actually playable," not commitments:

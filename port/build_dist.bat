@@ -13,7 +13,7 @@ rem Usage:  port\build_dist.bat [version]
 rem Output: port\dist\  (ready to zip)  and  port\build-dist\  (objects)
 
 setlocal
-call "C:\Program Files (x86)\Microsoft Visual Studio\18\BuildTools\VC\Auxiliary\Build\vcvarsall.bat" x64
+call "%~dp0vcvars.bat"
 if errorlevel 1 exit /b 1
 cd /d "%~dp0"
 

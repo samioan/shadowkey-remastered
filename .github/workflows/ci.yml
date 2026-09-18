@@ -1,0 +1,53 @@
+name: CI
+
+# M114. Two things this can actually prove on a machine that has neither
+# the N-Gage dump nor the Nokia font:
+#
+#   * both build configurations compile. That is not a formality -- the
+#     shipping configuration (SK_DEBUG_SUITE=OFF) had never once been built
+#     before M113 needed it, and it did not compile.
+#   * the handful of smoke tests that read nothing outside the repository
+#     still pass. The other ~95 need the game's own files and are a
+#     developer's job to run; `port/run_tests.ps1` with no switch does that.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # CMake is already on the runner image; Ninja is not guaranteed to be,
+      # and port/build.bat asks for it by name.
+      - name: Install Ninja
+        run: choco install ninja -y --no-progress
+
+      # These are the same scripts a developer runs. port/vcvars.bat finds
+      # whatever Visual Studio this machine has through vswhere, which is
+      # why the workflow does not need to know where that is.
+      - name: Build (Debug, all targets)
+        run: .\port\build.bat
+
+      - name: Smoke tests that need no game data
+        run: .\port\run_tests.ps1 -NoGameData
+
+      - name: Build (shipping configuration)
+        run: .\port\build_dist.bat ci-${{ github.run_number }}
+
+      - name: Check the package
+        run: .\port\check_dist.ps1
+
+      # Worth keeping around: this is a complete, runnable build, so a
+      # reviewer can download a pull request's launcher and try it without
+      # building anything. It still needs the user's own game files.
+      - name: Upload the build
+        uses: actions/upload-artifact@v4
+        with:
+          name: shadowkey-remastered-ci-${{ github.run_number }}
+          path: port/dist/
+          retention-days: 14

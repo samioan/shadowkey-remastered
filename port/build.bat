@@ -1,5 +1,7 @@
 @echo off
-call "C:\Program Files (x86)\Microsoft Visual Studio\18\BuildTools\VC\Auxiliary\Build\vcvarsall.bat" x64
+rem The everyday build: Debug, every target, into port\build\.
+rem Run port\run_tests.ps1 from the repository root afterwards.
+call "%~dp0vcvars.bat"
 if errorlevel 1 exit /b 1
 cd /d "%~dp0"
 cmake -G Ninja -S . -B build -DCMAKE_BUILD_TYPE=Debug

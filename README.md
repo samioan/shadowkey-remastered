@@ -1,7 +1,24 @@
 # shadowkey-decomp
 
 A decompilation project for **The Elder Scrolls Travels: Shadowkey**
-(Vir2L Studios, 2004), targeting the retail Nokia N-Gage release.
+(Vir2L Studios, 2004), targeting the retail Nokia N-Gage release — and a
+playable PC port built from what it found.
+
+## Playing it
+
+Grab the latest zip from [Releases](../../releases), unzip it anywhere, and
+run **Shadowkey.exe**. It will ask for your own copy of the N-Gage game
+files; point it at the folder you extracted them to and press Play.
+
+It does not include the game, and cannot — the game is Bethesda's and the
+font it draws with is Nokia's. Both are yours to supply. There is no
+installer and no Visual C++ redistributable to chase: everything stays in
+the folder you unzipped, and uninstalling is deleting it.
+
+Building it yourself: `port\build.bat` for the everyday build (then
+`port\run_tests.ps1` from the repository root), or `port\build_dist.bat` for
+the shipping one. See [`docs/PORT_ROADMAP.md`](docs/PORT_ROADMAP.md) — the
+port's authoritative record, milestone by milestone.
 
 ## The target
 

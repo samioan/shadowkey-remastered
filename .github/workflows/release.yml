@@ -1,0 +1,102 @@
+name: Release
+
+# M114. Push a tag, get a downloadable release:
+#
+#     git tag v0.114.0 && git push origin v0.114.0
+#
+# The tag is the version -- it is what gets compiled into the launcher and
+# shown in its corner, so a release can always be identified from a
+# screenshot. Nothing needs bumping by hand anywhere.
+#
+# M115 will have the launcher read the release this publishes and update
+# itself from it, which is why the asset name is a fixed shape.
+
+on:
+  push:
+    tags: ['v*']
+  # So a release can be re-cut without moving the tag, e.g. if the upload
+  # failed rather than the build.
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Existing tag to build and release (e.g. v0.114.0)'
+        required: true
+
+permissions:
+  contents: write   # to create the release and upload to it
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+
+      - name: Install Ninja
+        run: choco install ninja -y --no-progress
+
+      - name: Work out the version
+        id: version
+        shell: pwsh
+        run: |
+          $tag = if ($env:INPUT_TAG) { $env:INPUT_TAG } else { $env:GITHUB_REF_NAME }
+          # The tag carries a leading v by convention; the version the
+          # launcher displays does not.
+          $version = $tag -replace '^v', ''
+          if ($version -notmatch '^\d+\.\d+\.\d+') {
+            throw "tag '$tag' is not a version tag -- expected something like v0.114.0"
+          }
+          "tag=$tag" >> $env:GITHUB_OUTPUT
+          "version=$version" >> $env:GITHUB_OUTPUT
+          "zip=ShadowkeyRemastered-$tag-win64.zip" >> $env:GITHUB_OUTPUT
+          Write-Host "building $tag as version $version"
+        env:
+          INPUT_TAG: ${{ github.event.inputs.tag }}
+
+      # A release that fails its own tests should not exist. This is the
+      # same subset CI runs, for the same reason: no game data here.
+      - name: Build and test (Debug)
+        run: |
+          .\port\build.bat
+          .\port\run_tests.ps1 -NoGameData
+
+      - name: Build the release
+        run: .\port\build_dist.bat ${{ steps.version.outputs.version }}
+
+      - name: Check the package
+        run: .\port\check_dist.ps1
+
+      - name: Zip it
+        shell: pwsh
+        run: |
+          Compress-Archive -Path port/dist/* `
+                           -DestinationPath ${{ steps.version.outputs.zip }} `
+                           -CompressionLevel Optimal
+          Get-Item ${{ steps.version.outputs.zip }} |
+            ForEach-Object { "{0}: {1:N1} MB" -f $_.Name, ($_.Length / 1MB) }
+
+      # `gh` is on the runner already, so this needs no third-party action.
+      # --verify-tag so a typo cannot invent a tag that does not exist.
+      - name: Publish
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $tag = "${{ steps.version.outputs.tag }}"
+          $notesPath = "release_notes.md"
+          # Both encodings explicit: the template is UTF-8 without a BOM and
+          # has typographic punctuation in it, which Windows PowerShell would
+          # read as the ANSI codepage and mangle.
+          (Get-Content .github/release_notes_template.md -Raw -Encoding utf8).Replace('{{TAG}}', $tag) |
+            Set-Content $notesPath -Encoding utf8
+          $existing = gh release view $tag --json tagName 2>$null
+          if ($LASTEXITCODE -eq 0) {
+            Write-Host "release $tag already exists -- replacing its asset"
+            gh release upload $tag ${{ steps.version.outputs.zip }} --clobber
+          } else {
+            gh release create $tag ${{ steps.version.outputs.zip }} `
+              --title "Shadowkey Remastered $tag" `
+              --notes-file $notesPath `
+              --verify-tag
+          }

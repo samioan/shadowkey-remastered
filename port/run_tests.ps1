@@ -119,6 +119,13 @@ foreach ($exe in $executables) {
 
 $total = $passed + $failed
 Write-Host "passed=$passed failed=$failed total=$total soft-fail=$softFails"
+
+# A run that found nothing to run is a failure, not a pass. Without this a
+# CI job whose build step silently produced no executables reports green.
+if ($total -eq 0) {
+    Write-Host "no test executables matched -- nothing was verified" -ForegroundColor Red
+    exit 1
+}
 if ($failed -gt 0) {
     Write-Host "FAILED: $($failedNames -join ' ')" -ForegroundColor Red
     exit 1
