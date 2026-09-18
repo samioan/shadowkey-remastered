@@ -13,7 +13,32 @@ files; point it at the folder you extracted them to and press Play.
 It does not include the game, and cannot — the game is Bethesda's and the
 font it draws with is Nokia's. Both are yours to supply. There is no
 installer and no Visual C++ redistributable to chase: everything stays in
-the folder you unzipped, and uninstalling is deleting it.
+the folder you unzipped, and uninstalling is deleting it. The launcher
+updates itself from the releases above, and asks first.
+
+### Controls
+
+The N-Gage's own scheme mapped onto a keyboard — the original had a D-pad
+and a numeric keypad, so W/A/S/D is the D-pad and the rest stand in for the
+number keys. All of it is rebindable in **Options → Customize Controls**.
+
+| | |
+|---|---|
+| `W` / `S` | walk forward / backward |
+| `A` / `D` | turn left / right |
+| `←` / `→` | sidestep |
+| `↑` / `↓` | look up / down |
+| `Space` | jump |
+| `E` | use — doors, people, chests, pickups |
+| Left mouse | attack with your right hand |
+| `Q` | attack with your left hand |
+| `G` / `C` | cycle what is in your right / left hand |
+| `Tab` | character manager — inventory, spells, stats |
+| `M` | map |
+| `Enter` | confirm |
+| `Esc` | back / cancel; during play, opens the menu (Save Game is there) |
+
+Window size (2×, 3× or 4×) is set in the launcher.
 
 Building it yourself: `port\build.bat` for the everyday build (then
 `port\run_tests.ps1` from the repository root), or `port\build_dist.bat` for
