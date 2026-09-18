@@ -95,8 +95,18 @@ jobs:
             Write-Host "release $tag already exists -- replacing its asset"
             gh release upload $tag ${{ steps.version.outputs.zip }} --clobber
           } else {
-            gh release create $tag ${{ steps.version.outputs.zip }} `
-              --title "Shadowkey Remastered $tag" `
-              --notes-file $notesPath `
-              --verify-tag
+            # Pre-release while the major version is 0. The roadmap still
+            # lists unimplemented natives and the README says work in
+            # progress, so GitHub should not be calling this "Latest" and
+            # implying otherwise. Tagging v1.0.0 flips it automatically --
+            # no workflow edit needed on the day that happens. The flag can
+            # also be flipped by hand afterwards without rebuilding.
+            # Built as an array, not interpolated: an empty string variable
+            # on a native command line is still passed as an empty argument,
+            # which gh reads as a positional one.
+            $ghArgs = @('release', 'create', $tag, '${{ steps.version.outputs.zip }}',
+                        '--title', "Shadowkey Remastered $tag",
+                        '--notes-file', $notesPath, '--verify-tag')
+            if ($tag -match '^v?0\.' -or $tag -match '-') { $ghArgs += '--prerelease' }
+            gh @ghArgs
           }
