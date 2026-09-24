@@ -204,10 +204,14 @@ public:
     //     spells\Sanctuary.s:  SetRefireRate(768);  //3 secs
     //
     // whose own comment is an independent confirmation that engine
-    // durations are `seconds * 0x100`. Every other spell leaves it 0, which
-    // makes the gate inert -- so the "you can only cast so often" rule the
-    // engine appears to have is really a Sanctuary-only rule. The one
-    // runtime writer is the cast itself: AzraWrath sets 400 as it fires.
+    // durations are `seconds * 0x100`. The one runtime writer is the cast
+    // itself: AzraWrath sets 400 as it fires.
+    //
+    // CORRECTED (M117): M48 said every other spell leaves it 0, making the
+    // gate inert. The spell constructor (`FUN_10047740`) writes
+    // `+0x1d2 = 300` before any script runs, so every spell has a ~1.17s
+    // cooldown and Sanctuary's 768 is an override, not the only value.
+    // Starting at 0 is what let a held key cast every tick.
     int refireRate() const { return m_RefireRate; }
     void SetRefireRate(int units) { m_RefireRate = units; }
 

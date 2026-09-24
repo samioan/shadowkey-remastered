@@ -118,7 +118,9 @@ SpellCastRule SpellCastRuleFor(int typeId);
 // script sets a refire rate at all -- `spells\Sanctuary.s`'s
 // `SetRefireRate(768); //3 secs`, whose comment is an independent
 // confirmation of the 0x100-per-second time unit this port already uses
-// everywhere. Every other spell leaves it 0, which makes the gate inert.
+// everywhere. CORRECTED (M117): every other spell has the constructor's
+// 300 (`FUN_10047740`), not 0, so the gate holds every spell to ~1.17s.
+// The stamp is written as the gate passes, before the cast runs.
 struct SpellCastCooldown {
     int lastCastTime = 0;   // player+0xfc4; 0 means "never cast", as in the real test
     int sanctuaryTime = 0;  // player+0xfc8

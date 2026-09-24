@@ -167,6 +167,10 @@ int EquipSlotForCategory(int entityCategory);
 // nothing. The numbers are the engine's, not a house default.
 constexpr int kItemDefaultIcon = 0x1d;
 constexpr int kSpellDefaultIcon = 0x3d;
+// M117: and the spell constructor's `+0x1d2 = 300` -- the refire rate every
+// spell has unless its script says otherwise (only Sanctuary does). 300
+// 1/256s units, about 1.17 seconds between casts.
+constexpr int kSpellDefaultRefireRate = 300;
 constexpr int kItemDefaultCost = 0x1e;
 constexpr int kItemDefaultMarketValue = 0x14;
 

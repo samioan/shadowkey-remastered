@@ -275,8 +275,9 @@ int main(int argc, char** argv) {
         Check(sanctuary && sanctuary->refireRate() == 768,
               "Sanctuary.s's own SetRefireRate(768) -- '//3 secs', i.e. 3 * 0x100");
         auto blaze = loadItem("blaze.s");
-        Check(blaze && blaze->refireRate() == 0,
-              "...and every other spell leaves it 0, which makes the cooldown inert");
+        // CORRECTED (M117): the spell constructor writes +0x1d2 = 300.
+        Check(blaze && blaze->refireRate() == sk_bindings::kSpellDefaultRefireRate,
+              "...and every other spell has the constructor's 300 (M117), not 0");
     }
 
     // ---------------------------------------------------------------
@@ -359,8 +360,9 @@ int main(int argc, char** argv) {
               "Sanctuary's 768-unit refire rate blocks a re-cast 500 units later");
         Check(sk_bindings::SpellCastAllowed(*sanctuary, cooldown, 1768),
               "...and opens again exactly 3 seconds after the last cast");
-        Check(sk_bindings::SpellCastAllowed(*blaze, cooldown, 1001),
-              "a spell with no refire rate is never gated, even one tick after a cast");
+        Check(!sk_bindings::SpellCastAllowed(*blaze, cooldown, 1001) &&
+                  sk_bindings::SpellCastAllowed(*blaze, cooldown, 1300),
+              "blaze is gated by its default 300 units after a cast (M117)");
     }
 
     // ---------------------------------------------------------------

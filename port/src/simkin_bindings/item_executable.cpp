@@ -71,6 +71,8 @@ void ItemExecutable::SetEntityCategory(int category) {
         // from the base block -- `FUN_10047740` overwrites `+0x1b0` with
         // 0x3d after chaining `FUN_1002eeb8`'s 0x1d.
         m_Icon = kSpellDefaultIcon;
+        // M117: and `+0x1d2 = 300`, the default refire rate.
+        m_RefireRate = kSpellDefaultRefireRate;
     }
 }
 
@@ -88,6 +90,9 @@ void ItemExecutable::InferItemType(int type) {
     // constructor's -- unlike the category route above, this runs from
     // inside a setter and so can land *after* the script's own SetIcon.
     if (type == kItemTypeSpell && m_Icon == kItemDefaultIcon) m_Icon = kSpellDefaultIcon;
+    // M117: the refire default, on the same terms -- only while no script
+    // has set one of its own.
+    if (type == kItemTypeSpell && m_RefireRate == 0) m_RefireRate = kSpellDefaultRefireRate;
 }
 
 int ItemExecutable::spellTypeId() const {

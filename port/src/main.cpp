@@ -5721,14 +5721,27 @@ int main(int argc, char** argv) {
                                         float castZ, float castYaw, float castPitch) -> bool {
                     if (!spell || !caster) return false;
                     if (spell->spellTypeId() == 0) return false;  // not a spell at all
-                    if (caster->isPlayerActor() &&
-                        !sk_bindings::SpellCastAllowed(*spell, gameCastCooldown, gameClockUnits)) {
-                        return false;
+                    if (caster->isPlayerActor()) {
+                        if (!sk_bindings::SpellCastAllowed(*spell, gameCastCooldown,
+                                                           gameClockUnits)) {
+                            return false;
+                        }
+                        // M117: the gate's third clause, `player+0x428 == 4`
+                        // -- `stats+0x7c`, the Sanctuary channel, the same
+                        // field the weapon arm refuses on. No stamp.
+                        if (caster->actorStats().periodicKind() ==
+                            sk_bindings::ActorStats::kPeriodicSanctuaryTimer) {
+                            return false;
+                        }
+                        // M117: FUN_10046680 stamps `+0xfc4` as the gate
+                        // passes, *before* FUN_10046764 casts -- so a cast
+                        // refused for want of magicka still restarts the
+                        // cooldown. This used to stamp only on success.
+                        sk_bindings::NoteSpellCast(gameCastCooldown, gameClockUnits);
                     }
                     sk_bindings::SpellCastResult cast = sk_bindings::CastSpell(*spell, *caster);
                     if (!cast.cast) return false;
                     if (caster->isPlayerActor()) {
-                        sk_bindings::NoteSpellCast(gameCastCooldown, gameClockUnits);
                         // M73: a cast costs fatigue as well as magicka.
                         // `FUN_10042394` case 2 spends 3 -- but only here,
                         // after both the refire gate and the cast itself

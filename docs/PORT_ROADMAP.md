@@ -3599,6 +3599,10 @@ algorithms.
       inert. Its two clauses are asymmetric in a way that is real: only the
       general one is guarded on "something has actually been cast", so for
       the first three seconds of a level Sanctuary alone is refused.
+      **CORRECTED (M117):** the spell constructor `FUN_10047740` writes
+      `+0x1d2 = 300` before any script runs, so every spell has a ~1.17s
+      cooldown and Sanctuary's 768 is only an override. Starting at 0 is
+      what let a held key cast every tick.
 
     - **Three quirks reproduced rather than tidied.** The periodic
       duration store is a **16-bit** one, so Energize's `magnitude * 0xa00`
@@ -10920,6 +10924,45 @@ M105 claim.
   potion used from the hand (+30, consumed, hand emptied, queue compacted);
   and `ReleaseBound` holding through an auto-repeat.
 - **The suite**: 101 executables, 101 pass; soft-fail unchanged at 5.
+
+## M117 -- the spell cooldown every spell has
+
+Reported from play: holding the attack key with a spell in hand fires it
+every tick instead of once and then on a cadence.
+
+- **The cause is a missing constructor default.** The gate was already
+  right (`FUN_10046680`, M48): refuse while `now < player+0xfc4 +
+  spell+0x1d2`. But M48 read `+0x1d2` as a script-only field, set only by
+  Sanctuary's `SetRefireRate(768)`, and started every other spell at 0,
+  which made the gate never refuse anything. The spell constructor
+  `FUN_10047740` writes **`+0x1d2 = 300`** alongside the icon and
+  viewmodel defaults M79/M103 already took from it. That is 300/256 s,
+  **about 1.17 seconds** between casts. Both item routes get it: the
+  category constructor path and `InferItemType` for path-built spells like
+  the starting Blaze, the latter only while no script has set its own.
+- **Two more clauses of the same gate.** The stamp is written as the gate
+  passes, *before* `FUN_10046764` casts, so a cast refused for lack of
+  magicka still restarts the cooldown. This port stamped only on success.
+  And the gate's third clause, `player+0x428 == 4` (`stats+0x7c`, the
+  Sanctuary channel), refuses a cast outright, the same field the weapon
+  arm already refused on. Both are reproduced.
+- **The fireball does collide.** Checked rather than assumed, because the
+  report asked. `FUN_1005f928`'s flight (M48) sweeps a 200-unit box
+  around the projectile against every live creature each tick for twelve
+  ticks, stops at walls, and runs the spell's own `HitTarget`. The one
+  thing the existing test never covered was the aim from the in-game
+  camera: M48's test only fired at yaw 0. The camera's forward is
+  `(cos yaw, sin yaw)`; the spawn converts to the engine heading
+  `a = pi/2 - yaw` and flies along `(sin a, cos a)`, which is the same
+  vector at every yaw.
+- **Test**: `port/src/tests/m117_spell_refire_smoke.cpp`, 11 checks: the
+  300 on a template-built and a path-built Blaze, Sanctuary's 768 still
+  winning, a weapon at 0; 75 held ticks casting exactly 3 times, 300+
+  units apart; the velocity lying along the camera's forward at five yaws;
+  a real rat on a diagonal hit and damaged by `blaze.s`'s HitTarget, and a
+  shot the other way hitting nothing. Two M48 checks that asserted the
+  old 0 were corrected.
+- **The suite**: 102 executables, 102 pass; soft-fail unchanged at 5.
 
 
 ## Next milestones (not yet started)
