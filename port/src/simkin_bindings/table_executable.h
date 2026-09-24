@@ -178,6 +178,32 @@ public:
     };
     CellCompare CompareCell(int row, int col) const;
 
+    // M118: the other half of FUN_100a0cec -- the colour it gives a name
+    // cell (cell+0x42 set, cell+0x40 clear, and a products.dat record at
+    // cell+0x38). In the engine's order:
+    //
+    //   * with an item (Sell/Inventory): `FUN_100453e0` -- it is in either
+    //     hand or one of the eight worn-equipment slots -- or
+    //     `FUN_10045520` -- it is in either hand's quick queue -- draws it
+    //     in 0x00a, the "equipped" colour;
+    //   * with no item (Buy): `FUN_10045474` -- something of this typeId
+    //     is held or worn -- draws it in 0x00a too;
+    //   * otherwise it is 0xc33 when the class may not use it and the
+    //     palette's standard colour when it may.
+    //
+    // "May not use" is `(no item || !FUN_100450a0(player, item)) &&
+    // !product.classFlags[class]`. `FUN_100450a0` walks a per-class
+    // proficiency table this port does not have; the port already answers
+    // IsItemEnabledFor with "yes" for any owned item for the same reason,
+    // so here an owned item is never barred and only the Buy page can
+    // show 0xc33.
+    //
+    // A cell outside that arm (a plain grid cell, a stat line, a
+    // comparison column) is `Plain`: drawn in the standard colour by
+    // `FUN_1008e4b0`.
+    enum class NameTint { Plain, Standard, Equipped, ClassBarred };
+    NameTint CellTint(int row, int col) const;
+
     // FUN_1008df60: fetch cell (row, col), creating it (and any rows or
     // columns before it) if needed, and set its text. The single way
     // FUN_10032f78 writes the grid.

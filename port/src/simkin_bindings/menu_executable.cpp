@@ -419,6 +419,10 @@ int MenuExecutable::ArmorSlotOfTemplate(int templateId) const {
     return record ? record->armorSlot : -1;
 }
 
+const sk::ProductRecord* MenuExecutable::ProductForTemplate(int templateId) const {
+    return m_Stack.products().Find(templateId);
+}
+
 ItemExecutable* MenuExecutable::EquippedArmorInSlot(int slot) const {
     if (slot < 0) return nullptr;
     for (const std::unique_ptr<ItemExecutable>& held : m_Stack.player().inventory()) {
@@ -516,7 +520,11 @@ void MenuExecutable::PopulatePage(int category, bool clear) {
         TableCell& name = table->CellAt(row, 0);
         name.text = item->name();
         name.item = item;
-        name.classTinted = false;
+        // M118: CORRECTED -- this was cleared, and it is the flag that
+        // gives an equipped item its highlight. FUN_10032f78 never writes
+        // +0x42 on the name cell in either the Inventory or the Sell arm,
+        // so it keeps the constructor's 1 exactly as the Buy page's does.
+        name.classTinted = true;
 
         if (m_ScreenMode == ScreenMode::Inventory) {
             // The real inventory page's second column is the derived stat
@@ -726,8 +734,8 @@ void MenuExecutable::CycleSelectedCombo(int delta) {
     }
     if (row.kind != RowKind::ComboBox) return;
     auto* combo = static_cast<ComboBoxExecutable*>(row.widget.get());
-    combo->CycleSelection(delta);
-    TryInvoke(combo->onChangeCallback());
+    // M118: only when it actually moved (see CycleSelection).
+    if (combo->CycleSelection(delta)) TryInvoke(combo->onChangeCallback());
 }
 
 void MenuExecutable::ApplySliderValue(const SliderExecutable& slider) {
@@ -1578,11 +1586,15 @@ bool MenuExecutable::method(const skString& methodName, skRValueArray& args,
         // AddButton("", "WeaponsMenu", x, y, 47, 48) and friends, with an
         // empty label, so with the art dropped there was nothing at all to
         // draw and Left/Right moved a selection the player could not see.
-        if (args.entries() >= 6) {
-            row.spriteNormal = args[4].intValue();
-            row.spriteSelected = args[5].intValue();
-        }
-        row.widget.reset(new ButtonExecutable(*this, m_Rows.size() - 1));
+        //
+        // M118: `FUN_1007f650(widget, arg5, arg6)` stores them as the
+        // active-page art (+0x9c) and the dormant art (+0xa0), and sizes
+        // the widget 0x3c square until SetWidth/SetHeight say otherwise.
+        row.w = kButtonDefaultSize;
+        row.h = kButtonDefaultSize;
+        auto* button = new ButtonExecutable(*this, m_Rows.size() - 1);
+        if (args.entries() >= 6) button->SetSprites(args[4].intValue(), args[5].intValue());
+        row.widget.reset(button);
         returnValue = skRValue(static_cast<skiExecutable*>(row.widget.get()), false);
         return true;
     }
@@ -1711,6 +1723,9 @@ bool MenuExecutable::method(const skString& methodName, skRValueArray& args,
         for (auto& r : m_Rows) {
             if (auto* btn = dynamic_cast<ButtonExecutable*>(r.widget.get())) {
                 btn->SetActive(btn == active && r.visible);
+                // M118: and the engine's own flag, `FUN_1007f61c`, which
+                // is what actually picks the tab's art.
+                btn->SetPageSelected(btn == active && r.visible);
             }
         }
         return true;

@@ -812,6 +812,10 @@ target_link_libraries(queue_cycle_smoke PRIVATE sk_bindings sk_world)
 add_executable(spell_refire_smoke src/tests/m117_spell_refire_smoke.cpp)
 target_link_libraries(spell_refire_smoke PRIVATE sk_bindings sk_world)
 
+# M118 milestone smoke test -- see src/tests/m118_menu_widgets_smoke.cpp.
+add_executable(menu_widgets_smoke src/tests/m118_menu_widgets_smoke.cpp)
+target_link_libraries(menu_widgets_smoke PRIVATE sk_bindings sk_world)
+
 # M108 milestone smoke test -- see src/tests/m108_menu_layout_smoke.cpp.
 add_executable(menu_layout_smoke src/tests/m108_menu_layout_smoke.cpp)
 target_link_libraries(menu_layout_smoke PRIVATE sk_bindings sk_world)

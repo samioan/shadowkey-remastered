@@ -49,6 +49,10 @@
 #include "skRValue.h"
 #include "skScriptedExecutable.h"
 
+namespace sk {
+struct ProductRecord;
+}
+
 namespace sk_bindings {
 
 class ItemExecutable;
@@ -99,6 +103,78 @@ constexpr unsigned short kSelectedItemColor444 = 0xddd;
 // `default:` arm, which leaves the row cursor alone -- so a title never
 // pushes the list down.
 constexpr int kTitleDefaultY = 10;
+
+// M118: the UI palette every *widget* draws with, as opposed to the menu's
+// own three colours above. It is the object at `engine+0x28`, and M108-M112
+// could not find where that pointer was assigned: `GameEngine_ctor` nulls
+// it and no function writes `engine+0x28` directly. The write is in
+// `GameEngine_FirstTickBootstrap`, through the bootstrap's own pointer to
+// the engine -- `*(*(this+0x30) + 0x28) = new ScreenModeController` -- and
+// `ScreenModeController_ctor` seeds the three words:
+//
+//     +8    0x733   the standard widget text (titles, combos, text areas,
+//                   table cells, button labels)
+//     +10   0xddd   `FUN_1007f49c`'s override when its param_4 (the
+//                   widget's "I have focus" flag) is set, and the colour of
+//                   `DrawEntitySpriteWithOutline`'s selection ring
+//     +0xc  0x730   the rectangles `FUN_1007f050`/`FUN_10032aa4` draw
+//
+// The base constructor (`FUN_10068c40`) first writes 0xfff/0xff0/0xff0 and
+// the derived one overwrites all three. The only other writers are the
+// player natives `SetStandardColor` (+8) and `SetHighlightColor` (+10),
+// which no shipped script calls. So +8 and +10 are the same two values as
+// menu+0x90 and menu+0x94 -- the "title colour" M108 left open was the
+// ordinary menu-item colour all along.
+constexpr unsigned short kUiStandardColor444 = 0x733;
+constexpr unsigned short kUiHighlightColor444 = 0xddd;
+constexpr unsigned short kUiBoxColor444 = 0x730;
+
+// M118: a widget's rectangle is not drawn around its own x/y. Both
+// `FUN_1007f050` (a text button) and `FUN_10032aa4` (a hand-item button)
+// start it 5 left of and 10 above the widget's position, which is where
+// its label's top-left sits:
+//
+//     HRun(x-5, top,     w)      top = y + SetHAdjust - 10
+//     HRun(x-5, top + h, w)
+//     VRun(x-5,     top, h)
+//     VRun(x-5 + w, top, h)
+//
+// Four runs of a length, not a closed w x h box -- the right and bottom
+// edges sit one pixel outside it, and the bottom-right corner is never
+// drawn. `SetHAdjust` moves only the rectangle, never the label.
+constexpr int kWidgetBoxDX = -5;
+constexpr int kWidgetBoxDY = -10;
+// `FUN_1007f650`, AddButton's constructor: a button that never calls
+// SetWidth/SetHeight is 0x3c square.
+constexpr int kButtonDefaultSize = 0x3c;
+// `FUN_10032aa4`: the hand-item button draws its icon at (x+0x2d, y+0x19),
+// inside the lower right of its box, and its name at (x, y).
+constexpr int kItemButtonIconDX = 0x2d;
+constexpr int kItemButtonIconDY = 0x19;
+// `case 0x14` of `FUN_1003136c`: AddQuitButton is `FUN_1007fb78(menu,
+// text, callback, 0x47, 0xc1, selectable = 1, 0)` -- a plain floating
+// label at a fixed (71, 193), left-aligned, not centred.
+constexpr int kQuitButtonX = 0x47;
+constexpr int kQuitButtonY = 0xc1;
+
+// M118: the combo box (`FUN_1008e974`). Its two arrows are the loaded-image
+// cache's fixed slots `engine+0x479c` and `+0x47a0` -- i.e. global.spr 207
+// and 208, since the cache is `engine+0x4460 + slot*4`. The left one is
+// drawn at the combo's own (x, y) only when the selection is not the
+// first; the right one at (x + SetWidth - 5, y) only when it is not the
+// last. The option text between them is centred across the whole screen
+// (`FUN_1007f49c` with param_7 = 1 discards the x it is handed).
+constexpr int kComboLeftArrowSlot = (0x479c - 0x4460) / 4;   // 207
+constexpr int kComboRightArrowSlot = (0x47a0 - 0x4460) / 4;  // 208
+constexpr int kComboRightArrowInset = 5;
+
+// M118: the inventory list's name colour (`FUN_100a0cec`, the name cell's
+// tint arm). An item the player is holding, wearing, or has queued in
+// either hand is drawn in 0x00a -- the "equipped" highlight -- and an item
+// the player's class may not use in 0xc33. Everything else takes the
+// palette's standard +8. A focused row overrides all three with +10.
+constexpr unsigned short kInventoryEquippedColor444 = 0x00a;
+constexpr unsigned short kInventoryClassBarredColor444 = 0xc33;
 
 // M112: the slider row's geometry, from `case 4` of `FUN_10076b64` -- the
 // only widget kind that draws real geometry instead of only text, and the
@@ -322,6 +398,8 @@ public:
     // armour. Same answer, different bookkeeping; noted rather than
     // pretended otherwise.
     int ArmorSlotOfTemplate(int templateId) const;
+    // `FUN_1002c334`: the products.dat record for an entity typeId, or null.
+    const sk::ProductRecord* ProductForTemplate(int templateId) const;
     class ItemExecutable* EquippedArmorInSlot(int slot) const;
 
     // The back/cancel softkey for this screen -- the screen's own handler
@@ -424,11 +502,8 @@ public:
         // rectangle using w/h above, matching the real screenshot's boxed
         // 2x2 grid.
         bool showBorder = false;
-        // M36: AddButton's real 5th/6th arguments -- global.spr slot ids
-        // for the button's normal and highlighted art. -1 when the script
-        // used the 4-arg text-only form. See the AddButton handler.
-        int spriteNormal = -1;
-        int spriteSelected = -1;
+        // (M36's spriteNormal/spriteSelected moved onto ButtonExecutable in
+        // M118 as the engine's active/dormant art -- see button_executable.h.)
         // M36: AddQuitButton() rather than AddButton()/AddMenuItem() --
         // the real screens' bottom-centred softkey label ("Back"), which
         // has no x/y of its own and so used to land in the middle of the

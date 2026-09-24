@@ -356,6 +356,31 @@ TableExecutable::CellCompare TableExecutable::CompareCell(int row, int col) cons
     return opponent->rating() < rating ? CellCompare::Better : CellCompare::Worse;
 }
 
+TableExecutable::NameTint TableExecutable::CellTint(int row, int col) const {
+    const TableCell* cell = PeekCell(static_cast<size_t>(row), static_cast<size_t>(col));
+    if (!cell || !cell->classTinted || cell->comparison || cell->statLine) return NameTint::Plain;
+    // cell+0x38. The engine stores the record on an owned item's cell too
+    // (`FUN_1002c334`, a lookup by the item's typeId); this port keeps
+    // `product` null there so the cell's natives still answer from the
+    // item, and looks the record up here instead.
+    const sk::ProductRecord* product =
+        cell->product ? cell->product
+                      : (cell->item ? m_Owner.ProductForTemplate(cell->item->templateId()) : nullptr);
+    if (!product) return NameTint::Plain;
+
+    PlayerExecutable& player = m_Owner.stackPlayer();
+    if (cell->item) {
+        const ItemExecutable* item = cell->item;
+        const bool heldOrWorn =
+            item == player.leftItem() || item == player.rightItem() || item->equipped();
+        if (heldOrWorn || player.QueueHoldingItem(item) >= 0) return NameTint::Equipped;
+        return NameTint::Standard;  // FUN_100450a0: see the header
+    }
+    if (player.HasEquippedTemplate(product->templateId)) return NameTint::Equipped;
+    return product->enabledForClass(m_Owner.PlayerCharacterClass()) ? NameTint::Standard
+                                                                     : NameTint::ClassBarred;
+}
+
 ItemExecutable* TableExecutable::AssociatedItem(size_t rowIndex) const {
     const TableCell* cell = PeekCell(rowIndex, 0);
     return cell ? cell->item : nullptr;

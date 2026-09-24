@@ -8,8 +8,13 @@ namespace sk_bindings {
 
 bool ItemButtonTextArea::method(const skString& methodName, skRValueArray& args,
                                  skRValue& returnValue, skExecutableContext& context) {
-    if (methodName == skString("SetTextWidth") || methodName == skString("SetTrimText")) {
-        return true;  // purely cosmetic here, see item_button_executable.h
+    if (methodName == skString("SetTextWidth") && args.entries() == 1) {
+        m_TextWidth = args[0].intValue();
+        return true;
+    }
+    if (methodName == skString("SetTrimText") && args.entries() == 1) {
+        m_TrimText = args[0].boolValue();
+        return true;
     }
     return SoftFailNativeCall("ItemButtonTextArea", methodName, args, returnValue);
 }

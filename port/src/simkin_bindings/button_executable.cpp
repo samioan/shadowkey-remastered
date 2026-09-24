@@ -10,6 +10,8 @@ bool ButtonExecutable::method(const skString& methodName, skRValueArray& args,
                                skRValue& returnValue, skExecutableContext& context) {
     if (methodName == skString("SetActive") && args.entries() == 1) {
         m_Active = args[0].boolValue();
+        // M118: case 2 of `FUN_1007f210` -- `+0x98 = b ? +0x9c : +0xa0`.
+        m_SpriteCurrent = m_Active ? m_SpriteActive : m_SpriteDormant;
         return true;
     }
     if (methodName == skString("IsActive") && args.entries() == 0) {
@@ -39,11 +41,17 @@ bool ButtonExecutable::method(const skString& methodName, skRValueArray& args,
         SetRowShowBorder(args[0].boolValue());
         return true;
     }
-    if (methodName == skString("SetHAdjust") || methodName == skString("SetXAdjust") ||
-        methodName == skString("SetActiveSprite") || methodName == skString("SetDormantSprite")) {
-        // The remaining five of button class 0x14d2c's own eight bindings
-        // (SetActive/SetWidth/SetHeight/ShowBorder above are the others);
-        // cosmetic in this port, see button_executable.h.
+    if (methodName == skString("SetHAdjust") && args.entries() == 1) {
+        m_HAdjust = args[0].intValue();  // case 0, +0xae
+        return true;
+    }
+    if (methodName == skString("SetActiveSprite") && args.entries() == 1) {
+        m_SpriteActive = args[0].intValue();  // case 4, FUN_1007f614: +0x9c
+        return true;
+    }
+    if (methodName == skString("SetXAdjust") || methodName == skString("SetDormantSprite")) {
+        // Case 1 writes +0xb0, which no draw reads; case 5 is
+        // `FUN_1007f610`, an empty function. Both are no-ops on screen.
         return true;
     }
     return SoftFailNativeCall("Button", methodName, args, returnValue);

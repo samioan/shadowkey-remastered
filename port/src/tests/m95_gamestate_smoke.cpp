@@ -227,9 +227,10 @@ int main(int argc, char** argv) {
                 Call(*combo, "SetSelection", Args(skRValue(3)), interpreter);
                 Check(combo->currentOptionValue() == 500,
                       "  its fourth option at 600 gold is 500 -- 25/50/100/500 offered");
+                // M118: the engine clamps rather than wraps (FUN_1008f0b8).
                 combo->CycleSelection(1);
-                Check(combo->currentOptionValue() == 25,
-                      "  and there is no fifth: one step on wraps to 25 (1000 needs > 1000)");
+                Check(combo->currentOptionValue() == 500,
+                      "  and there is no fifth: one step on stays on 500 (1000 needs > 1000)");
                 Call(*combo, "SetSelection", Args(skRValue(3)), interpreter);
                 Call(*menu, "OnDropGold", Args(), interpreter);
                 drops = player.TakePendingDrops();

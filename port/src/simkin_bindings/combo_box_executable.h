@@ -46,14 +46,24 @@ public:
     const std::string& onEnterCallback() const { return m_OnEnterCallback; }
 
     // Host-driven navigation (main.cpp's Left/Right on a selected combo
-    // row) -- wraps at either end. Does NOT fire onChangeCallback itself;
-    // the caller (MenuExecutable::CycleSelectedCombo) does that, since
-    // only it can dispatch a method call back into the owning script.
-    void CycleSelection(int delta) {
-        if (m_Options.empty()) return;
-        int count = static_cast<int>(m_Options.size());
-        m_Selection = (m_Selection + delta % count + count) % count;
+    // row). Does NOT fire onChangeCallback itself; the caller
+    // (MenuExecutable::CycleSelectedCombo) does that, since only it can
+    // dispatch a method call back into the owning script.
+    //
+    // CORRECTED (M118): this wrapped at both ends, and the engine does
+    // not. The combo's vtable +0x20/+0x24 (`FUN_1008eeb4`/`FUN_1008f0b8`)
+    // step `+0x98` down only while it is non-zero and up only while it is
+    // below `count - 1`, and run the callback only when it moved -- which
+    // is also why the draw hides the left arrow on the first option and
+    // the right one on the last. Returns whether the selection changed.
+    bool CycleSelection(int delta) {
+        const int count = static_cast<int>(m_Options.size());
+        const int next = m_Selection + (delta < 0 ? -1 : delta > 0 ? 1 : 0);
+        if (next < 0 || next >= count || next == m_Selection) return false;
+        m_Selection = next;
+        return true;
     }
+    int optionCount() const { return static_cast<int>(m_Options.size()); }
 
 private:
     int m_X, m_Y;

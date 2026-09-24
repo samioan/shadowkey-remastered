@@ -54,6 +54,7 @@
 #include "simkin_bindings/floating_sprite_executable.h"
 #include "simkin_bindings/game_constants.h"
 #include "simkin_bindings/ghost_mode.h"
+#include "simkin_bindings/button_executable.h"
 #include "simkin_bindings/item_button_executable.h"
 #include "simkin_bindings/item_executable.h"
 #include "simkin_bindings/level_executable.h"
@@ -135,7 +136,21 @@ constexpr uint16_t kStaticTextColor = MenuColor444(sk_bindings::kStaticItemColor
 // MenuColor444(). Note the offset is **+1 in y only**; the left-aligned
 // arm's shadow (`FUN_1007f49c`, colour 0xb96) is offset in x as well.
 constexpr uint16_t kCenteredShadowColor = sk::PackRGB565(0xb1, 0x9c, 0x65);
+// Still the old eyeballed blue, and now only for the two non-menu screens
+// that borrowed it (the loading banner and the vignette caption), whose
+// real draws were never traced. Menu titles use kUiStandardColor below.
 constexpr uint16_t kTitleColor = sk::PackRGB565(140, 180, 255);
+// M118: the UI palette object at `engine+0x28` -- see menu_executable.h.
+// Every widget that draws itself (titles, combos, text areas, table cells,
+// buttons, floating labels) takes +8, switches to +10 while it has focus,
+// and draws its rectangle in +0xc.
+constexpr uint16_t kUiStandardColor = MenuColor444(sk_bindings::kUiStandardColor444);
+constexpr uint16_t kUiHighlightColor = MenuColor444(sk_bindings::kUiHighlightColor444);
+constexpr uint16_t kUiBoxColor = MenuColor444(sk_bindings::kUiBoxColor444);
+constexpr uint16_t kInventoryEquippedColor =
+    MenuColor444(sk_bindings::kInventoryEquippedColor444);
+constexpr uint16_t kInventoryClassBarredColor =
+    MenuColor444(sk_bindings::kInventoryClassBarredColor444);
 // M112: the slider marker. The geometry itself lives in
 // menu_executable.h next to the menu's other engine-derived constants,
 // so the smoke test can check it; only the colour needs packing here.
@@ -2187,6 +2202,97 @@ void DrawVRun(sk::Backbuffer& backbuffer, int x, int y, int len, uint16_t color)
     for (int i = 0; i < len; ++i) backbuffer.SetPixel(x, y + i, color);
 }
 
+// M118: `FUN_1007f49c`'s left-aligned arm (param_7 == 0): the string once
+// at (x+1, y+1) in 0x0b96, then at (x, y) in its own colour. Every widget
+// that draws its own label at its own x/y goes through this.
+void DrawWidgetLabel(sk::Backbuffer& backbuffer, int x, int y, const std::string& text,
+                     uint16_t color) {
+    if (text.empty()) return;  // `if (param_3 != 0)`: no text, no draw
+    constexpr uint16_t kShadow = MenuColor444(sk_bindings::kTextShadowColor444);
+    sk::BitmapFont::DrawString(backbuffer, x + 1, y + 1, text, kShadow);
+    sk::BitmapFont::DrawString(backbuffer, x, y, text, color);
+}
+
+// M118: the same function's centred arm (param_7 == 1) -- `FUN_1008f97c`,
+// which has no x at all: centred across the full 176px, with a shadow one
+// pixel *below* in (0xb1, 0x9c, 0x65).
+void DrawCenteredWidgetLabel(sk::Backbuffer& backbuffer, int y, const std::string& text,
+                             uint16_t color) {
+    if (text.empty()) return;
+    const int x = (sk::Backbuffer::kWidth - sk::BitmapFont::TextWidth(text)) / 2;
+    sk::BitmapFont::DrawString(backbuffer, x, y + 1, text, kCenteredShadowColor);
+    sk::BitmapFont::DrawString(backbuffer, x, y, text, color);
+}
+
+// M118: `DrawEntitySpriteWithOutline` (`FUN_1007ec80`). The sprite at
+// (x, y), and -- when the widget has focus -- a two-pixel ring around it
+// in the palette's highlight colour, as eight runs:
+//
+//     HRun(x,   y-1,   w)   HRun(x,   y,     w)    top, two rows
+//     HRun(x,   y+h,   w)   HRun(x,   y+h+1, w)    bottom, two rows
+//     VRun(x,   y,     h)   VRun(x-1, y,     h)    left, two columns
+//     VRun(x+w, y,     h)   VRun(x+w+1, y,   h)    right, two columns
+//
+// The inner row and column overwrite the sprite's own edge pixels, and the
+// four corners are never filled, so the ring has notched corners. A
+// negative id, or one the cache does not hold, draws nothing at all.
+void DrawSpriteWithOutline(sk::Backbuffer& backbuffer, sk::SpriteArchive& sprites, int slot,
+                           int x, int y, bool focused) {
+    if (slot < 0) return;
+    const sk::Sprite* art = sprites.GetSprite(slot);
+    if (!art) return;
+    backbuffer.Blit(x, y, *art);
+    if (!focused) return;
+    const int w = art->width, h = art->height;
+    DrawHRun(backbuffer, x, y - 1, w, kUiHighlightColor);
+    DrawHRun(backbuffer, x, y, w, kUiHighlightColor);
+    DrawHRun(backbuffer, x, y + h, w, kUiHighlightColor);
+    DrawHRun(backbuffer, x, y + h + 1, w, kUiHighlightColor);
+    DrawVRun(backbuffer, x, y, h, kUiHighlightColor);
+    DrawVRun(backbuffer, x - 1, y, h, kUiHighlightColor);
+    DrawVRun(backbuffer, x + w, y, h, kUiHighlightColor);
+    DrawVRun(backbuffer, x + w + 1, y, h, kUiHighlightColor);
+}
+
+// M118: the rectangle `FUN_1007f050` and `FUN_10032aa4` draw -- see
+// kWidgetBoxDX/DY in menu_executable.h. Four runs of a length from one
+// corner, so the right and bottom edges land one pixel outside w x h.
+void DrawWidgetBox(sk::Backbuffer& backbuffer, int x, int y, int w, int h) {
+    const int left = x + sk_bindings::kWidgetBoxDX;
+    const int top = y + sk_bindings::kWidgetBoxDY;
+    DrawHRun(backbuffer, left, top, w, kUiBoxColor);
+    DrawHRun(backbuffer, left, top + h, w, kUiBoxColor);
+    DrawVRun(backbuffer, left, top, h, kUiBoxColor);
+    DrawVRun(backbuffer, left + w, top, h, kUiBoxColor);
+}
+
+// M118: the text-area widget's own draw (`FUN_1008f458`): word-wrapped at
+// `widthChars`, each line through the left-aligned arm, 0xc apart. The
+// wrap itself is DrawWrappedText's, which M109 already matched against
+// every shipped class/race description.
+void DrawTextAreaLines(sk::Backbuffer& backbuffer, int x, int y, const std::string& text,
+                       int widthChars, uint16_t color) {
+    if (widthChars <= 0) widthChars = 27;
+    std::vector<std::string> lines;
+    std::string current;
+    std::istringstream words(text);
+    std::string word;
+    while (words >> word) {
+        std::string candidate = current.empty() ? word : current + " " + word;
+        if (static_cast<int>(candidate.size()) > widthChars && !current.empty()) {
+            lines.push_back(current);
+            current = word;
+        } else {
+            current = candidate;
+        }
+    }
+    if (!current.empty()) lines.push_back(current);
+    for (const std::string& line : lines) {
+        DrawWidgetLabel(backbuffer, x, y, line, color);
+        y += sk_bindings::kMenuRowPitch;
+    }
+}
+
 void RenderPopup(sk::Backbuffer& backbuffer, sk_bindings::PopupMenuExecutable& popup,
                   const sk::StringTable& strings) {
     int x0 = 10, y0 = 60, x1 = sk::Backbuffer::kWidth - 10, y1 = 150;
@@ -2290,20 +2396,13 @@ void RenderMenu(sk::Backbuffer& backbuffer, sk_bindings::MenuExecutable& menu,
     // drew titles left-aligned at x=4 with no shadow, so every titled
     // screen in the game had its heading in the wrong place.
     //
-    // NOT resolved: the colour. It is `*(ushort *)(engine->+0x28 + 8)` --
-    // a word in a global UI palette object, not one of the three colours
-    // the menu itself carries, and nothing in the shipped data files
-    // holds it. kTitleColor below is still the old eyeballed blue, which
-    // is certainly wrong (nothing else in this UI is blue) but replacing
-    // one guess with another is not progress. This is the next thing to
-    // chase; the palette object also supplies `+0x28 + 10`, the override
-    // `FUN_1007f49c` applies when its param_4 is set.
+    // M118: and the colour is resolved. `*(ushort *)(engine->+0x28 + 8)`
+    // is the ScreenModeController's standard word, 0x733 -- the same
+    // brick red as an unselected menu item, not the blue this port drew
+    // (see kUiStandardColor444 for where the pointer is assigned).
     for (const auto& title : menu.titles()) {
         if (title.textId < 0) continue;
-        const std::string text = strings.Get(title.textId);
-        const int titleX = (sk::Backbuffer::kWidth - sk::BitmapFont::TextWidth(text)) / 2;
-        sk::BitmapFont::DrawString(backbuffer, titleX, title.y + 1, text, kCenteredShadowColor);
-        sk::BitmapFont::DrawString(backbuffer, titleX, title.y, text, kTitleColor);
+        DrawCenteredWidgetLabel(backbuffer, title.y, strings.Get(title.textId), kUiStandardColor);
     }
 
     // M110: the softkey captions along the bottom -- `case 0xb` of
@@ -2363,55 +2462,65 @@ void RenderMenu(sk::Backbuffer& backbuffer, sk_bindings::MenuExecutable& menu,
             case RowKind::StaticItem: {
                 std::string label = RowText(row.textId, row.literalText, strings);
                 int textW = sk::BitmapFont::TextWidth(label);
-                // M36: a real AddButton() that carries art draws that art
-                // rather than its (usually empty) label -- the
-                // inventory/equip screen's five category tabs are exactly
-                // this shape. The two slot ids are the button's normal and
-                // highlighted states; which of the pair is which isn't
-                // recorded anywhere, so the selected tab additionally gets
-                // the outline the real screen shows around it, making the
-                // selection unambiguous either way round.
-                if (row.x >= 0 && row.spriteNormal >= 0) {
-                    int slot = isSelected && row.spriteSelected >= 0 ? row.spriteSelected
-                                                                      : row.spriteNormal;
-                    const sk::Sprite* art = sprites.GetSprite(slot);
-                    if (!art) art = sprites.GetSprite(row.spriteNormal);
-                    if (art) {
-                        backbuffer.Blit(row.x, row.y, *art);
-                        if (isSelected) {
-                            DrawRectOutline(backbuffer, row.x - 1, row.y - 1, art->width + 2,
-                                             art->height + 2, kSelectedTextColor);
-                        }
-                        if (!label.empty()) {
-                            sk::BitmapFont::DrawString(backbuffer, row.x, row.y + art->height,
-                                                        label, color);
-                        }
-                        break;
-                    }
-                }
+                // Every widget below draws itself (the menu draw's
+                // `default:` arm), so none of them uses the row colour the
+                // list picked: they take the palette's standard word, and
+                // its highlight word while focused.
+                const uint16_t widgetColor = isSelected ? kUiHighlightColor : kUiStandardColor;
+                auto* button = dynamic_cast<sk_bindings::ButtonExecutable*>(row.widget.get());
                 if (row.isQuitButton) {
-                    // M36: the real screens put this softkey label at the
-                    // bottom of the page (see the shipped equip screen),
-                    // not inline in the vertical flow -- which is where it
-                    // used to land, printing "Back" straight over the
-                    // category icons.
-                    sk::BitmapFont::DrawString(backbuffer, (sk::Backbuffer::kWidth - textW) / 2,
-                                                sk::Backbuffer::kHeight - lineHeight - 4, label,
-                                                color);
+                    // M118: CORRECTED. M36 centred this across the bottom
+                    // of the page. `AddQuitButton` is `FUN_1007fb78(menu,
+                    // text, callback, 0x47, 0xc1, 1, 0)`: a floating label
+                    // (kind 7, drawn by `FUN_1007f7c8`) at a fixed
+                    // (71, 193), through the left-aligned arm.
+                    DrawWidgetLabel(backbuffer, sk_bindings::kQuitButtonX,
+                                    sk_bindings::kQuitButtonY, label, widgetColor);
+                    break;
+                }
+                if (button && row.x >= 0) {
+                    // M118: AddButton's widget is the engine's icon widget,
+                    // and this is its draw, `FUN_1007f050`, whole:
+                    //
+                    //   if (!pageSelected) {                    // +0xb2
+                    //     if (activeArt == -1) {                // +0x9c
+                    //       if ((focused || ShowBorder) && w > 0 && h > 0)
+                    //         box(x-5, y+HAdjust-10, w, h, palette+0xc);
+                    //     } else
+                    //       DrawEntitySpriteWithOutline(+0x98, focused);
+                    //     label(x, y, left-aligned, palette+8 / +10);
+                    //   } else if (activeArt != -1)
+                    //     DrawEntitySpriteWithOutline(activeArt, focused);
+                    //
+                    // So a text button's label is *not* centred in its box
+                    // -- it sits at the script's own (x, y), and the box is
+                    // drawn around it from 5 left and 10 above -- and a
+                    // plain text button gets a box while focused even
+                    // without ShowBorder. A tab never swaps art on focus;
+                    // it gets the highlight ring instead.
+                    if (!button->pageSelected()) {
+                        if (button->spriteActive() == -1) {
+                            if ((isSelected || row.showBorder) && row.w > 0 && row.h > 0) {
+                                DrawWidgetBox(backbuffer, row.x, row.y + button->hAdjust(), row.w,
+                                              row.h);
+                            }
+                        } else {
+                            DrawSpriteWithOutline(backbuffer, sprites, button->spriteCurrent(),
+                                                  row.x, row.y, isSelected);
+                        }
+                        DrawWidgetLabel(backbuffer, row.x, row.y, label, widgetColor);
+                    } else if (button->spriteActive() != -1) {
+                        DrawSpriteWithOutline(backbuffer, sprites, button->spriteActive(), row.x,
+                                              row.y, isSelected);
+                    }
                     break;
                 }
                 if (row.x >= 0) {
-                    // M25: a real AddButton()/AddFloatingText() position
-                    // (charactermanager.s's whole real layout) -- centered
-                    // within the row's own real width when it has one
-                    // (a button box, e.g. Stats/Equip/Quest), else drawn
-                    // left-anchored at its own real x (a plain stat-text
-                    // line, e.g. health/gold, which never sets a width).
-                    int textX = row.w > 0 ? row.x + (row.w - textW) / 2 : row.x;
-                    sk::BitmapFont::DrawString(backbuffer, textX, row.y, label, color);
-                    if (row.showBorder && row.w > 0 && row.h > 0) {
-                        DrawRectOutline(backbuffer, row.x, row.y, row.w, row.h, kPopupBorderColor);
-                    }
+                    // M118: AddFloatingText -- `FUN_1007f8bc`, kind 7, drawn
+                    // by `FUN_1007f7c8`: its label at its own (x, y) through
+                    // the left-aligned arm, in the palette's colours. (It
+                    // was drawn in the *static* item colour with no shadow.)
+                    DrawWidgetLabel(backbuffer, row.x, row.y, label, widgetColor);
                 } else if (row.kind == RowKind::StaticItem && !row.centered) {
                     // M80: `FUN_10076b64` case 0 -> `FUN_1007f49c` with
                     // `param_7 == 0` -- the left-aligned arm, drawn at the
@@ -2477,34 +2586,42 @@ void RenderMenu(sk::Backbuffer& backbuffer, sk_bindings::MenuExecutable& menu,
             case RowKind::ItemButton: {
                 auto* item = static_cast<sk_bindings::ItemButtonExecutable*>(row.widget.get());
                 if (item->visible()) {
-                    // M25: real AddItemButton(x,y,w,h) position
-                    // (charactermanager.s's left/right-hand equip-slot
-                    // boxes) when given one; the icon is drawn at the
-                    // box's own top-left, falling back to the old
-                    // vertical-list placement (icon+label on one running-
-                    // cursor line) for any other real AddItemButton()
-                    // call site this port doesn't otherwise position.
-                    int boxX = row.x >= 0 ? row.x : 12;
-                    int boxY = row.x >= 0 ? row.y : y;
-                    // Real icon (docs/GRAPHICS_FORMAT.md) when the
-                    // real ItemExecutable::SetIcon() id resolved to a
-                    // decoded, row-sized slot -- global.spr's icon ids
-                    // aren't all small row icons (some of the same
-                    // ids item scripts use are full-screen 176x208
-                    // panels, presumably for a detail/examine view
-                    // this port doesn't have), so only draw ones that
-                    // actually fit a list row; anything bigger falls
-                    // back to the label-only rendering below, same as
-                    // a missing/undecoded slot.
-                    int textX = boxX;
-                    int textY = boxY;
-                    const sk::Sprite* icon = sprites.GetSprite(item->icon());
-                    if (icon && icon->width <= 40 && icon->height <= 40) {
-                        backbuffer.Blit(textX, textY, *icon);
-                        textY += icon->height + 2;
+                    // M118: the hand-item button's own draw, `FUN_10032aa4`,
+                    // whole -- the last of charactermanager.s's rectangles:
+                    //
+                    //   sprite(+0x98) at (x + 0x2d, y + 0x19)
+                    //   if (w > 0 && h > 0)
+                    //     box(x-5, y-10, w, h, palette+0xc)   // always
+                    //   child text area: this button's text at (x, y)
+                    //
+                    // The box does not depend on focus -- both hands are
+                    // always framed -- and the icon sits in the box's
+                    // lower right, not at its corner. The name is the
+                    // child text-area widget (`+0xb4`, see
+                    // item_button_executable.h): trimmed to 0x17 + "..."
+                    // when SetTrimText is on, wrapped at SetTextWidth, and
+                    // coloured by focus like every other widget.
+                    //
+                    // This used to draw the icon at the box's top-left and
+                    // no box at all, which is why "Left Hand"/"Right Hand"
+                    // floated unframed under the Stats/Equip buttons.
+                    const int boxX = row.x >= 0 ? row.x : 12;
+                    const int boxY = row.x >= 0 ? row.y : y;
+                    const sk::Sprite* icon = item->icon() >= 0 ? sprites.GetSprite(item->icon())
+                                                               : nullptr;
+                    if (icon) {
+                        backbuffer.Blit(boxX + sk_bindings::kItemButtonIconDX,
+                                        boxY + sk_bindings::kItemButtonIconDY, *icon);
                     }
+                    if (row.w > 0 && row.h > 0) DrawWidgetBox(backbuffer, boxX, boxY, row.w, row.h);
                     std::string label = RowText(item->textId(), item->itemText(), strings);
-                    sk::BitmapFont::DrawString(backbuffer, textX, textY, label, color);
+                    const sk_bindings::ItemButtonTextArea& area = item->textArea();
+                    if (area.trimText() &&
+                        static_cast<int>(label.size()) > sk_bindings::kTextAreaTrimChars) {
+                        label = label.substr(0, sk_bindings::kTextAreaTrimChars) + "...";
+                    }
+                    DrawTextAreaLines(backbuffer, boxX, boxY, label, area.textWidth(),
+                                      isSelected ? kUiHighlightColor : kUiStandardColor);
                     if (row.x < 0) {
                         y += lineHeight;
                     }
@@ -2578,8 +2695,22 @@ void RenderMenu(sk::Backbuffer& backbuffer, sk_bindings::MenuExecutable& menu,
                         // to add to the line.
                         if (!cell.empty() && cell != " ") line += "  " + cell;
                     }
-                    uint16_t rowColor = (isSelected && r == selected) ? kSelectedTextColor
-                                                                       : kTextColor;
+                    // M118: the name cell's own tint (`FUN_100a0cec`) --
+                    // an equipped item in 0x00a, a class-barred one in
+                    // 0xc33 -- under the focus override every cell gets
+                    // from `FUN_1007f49c`'s param_4.
+                    uint16_t rowColor = kUiStandardColor;
+                    switch (table->CellTint(r, 0)) {
+                        case sk_bindings::TableExecutable::NameTint::Equipped:
+                            rowColor = kInventoryEquippedColor;
+                            break;
+                        case sk_bindings::TableExecutable::NameTint::ClassBarred:
+                            rowColor = kInventoryClassBarredColor;
+                            break;
+                        default:
+                            break;
+                    }
+                    if (isSelected && r == selected) rowColor = kUiHighlightColor;
                     // M88: cell+0x2c bit 1 -- the engine drops the
                     // left-aligned shadowed draw for a centred one (see
                     // table_executable.h's TableCell::displayFlags). It is
@@ -2666,7 +2797,6 @@ void RenderMenu(sk::Backbuffer& backbuffer, sk_bindings::MenuExecutable& menu,
                 // M95: a numerical combo draws the number itself.
                 const std::string text =
                     combo->numericalMode() ? std::to_string(value) : strings.Get(value);
-                std::string label = value >= 0 ? ("< " + text + " >") : "< -- >";
                 // M108: at its own x/y, and the row cursor is untouched --
                 // the same shape as the text area above.
                 //
@@ -2684,7 +2814,34 @@ void RenderMenu(sk::Backbuffer& backbuffer, sk_bindings::MenuExecutable& menu,
                 // to some other widget class. Positions come from
                 // `+0x78`/`+0x7c`, which the shared tail at LAB_10079d28
                 // fills in from the script's own arguments.
-                sk::BitmapFont::DrawString(backbuffer, combo->x(), combo->y(), label, color);
+                //
+                // M118: and this is the draw itself, `FUN_1008e974`. The
+                // "< Assassin >" this port printed was its own invention;
+                // the engine draws two arrow sprites and the option text
+                // between them:
+                //
+                //   if (sel != 0)          blit slot 207 at (x, y)
+                //   text centred across the screen at y, palette +8/+10
+                //   if (sel < count - 1)   blit slot 208 at (x + w - 5, y)
+                //
+                // An arrow is missing exactly when there is nothing more
+                // that way, because the combo clamps rather than wraps.
+                if (value < 0) break;  // `if (sel < count)`: no options, no draw
+                if (combo->selection() != 0) {
+                    if (const sk::Sprite* left = sprites.GetSprite(sk_bindings::kComboLeftArrowSlot)) {
+                        backbuffer.Blit(combo->x(), combo->y(), *left);
+                    }
+                }
+                DrawCenteredWidgetLabel(backbuffer, combo->y(), text,
+                                        isSelected ? kUiHighlightColor : kUiStandardColor);
+                if (combo->selection() < combo->optionCount() - 1) {
+                    if (const sk::Sprite* right =
+                            sprites.GetSprite(sk_bindings::kComboRightArrowSlot)) {
+                        backbuffer.Blit(
+                            combo->x() + combo->width() - sk_bindings::kComboRightArrowInset,
+                            combo->y(), *right);
+                    }
+                }
                 break;
             }
             case RowKind::TextArea: {
@@ -2708,10 +2865,13 @@ void RenderMenu(sk::Backbuffer& backbuffer, sk_bindings::MenuExecutable& menu,
                 // instead of 5 runs off the right edge of a 176px screen --
                 // which is why the class descriptions read "considerabl"
                 // and "quie".
-                const int taX = textArea->x();
-                int taY = textArea->y();
-                DrawWrappedText(backbuffer, taX, taY, strings.Get(row.textId),
-                                 textArea->textWidth(), color);
+                //
+                // M118: and each line through the left-aligned arm (so it
+                // has the 0x0b96 shadow), 0xc apart rather than 15, in the
+                // palette's colours rather than the static-item one.
+                DrawTextAreaLines(backbuffer, textArea->x(), textArea->y(), strings.Get(row.textId),
+                                  textArea->textWidth(),
+                                  isSelected ? kUiHighlightColor : kUiStandardColor);
                 break;
             }
             case RowKind::FloatingSprite: {
@@ -2724,10 +2884,16 @@ void RenderMenu(sk::Backbuffer& backbuffer, sk_bindings::MenuExecutable& menu,
                 // never got a real sprite id (ChoosePortraitMenu.s's own
                 // rows, which are chosen by callback, not by rendering a
                 // sprite) or whose id doesn't decode.
+                //
+                // M118: AddFloatingSprite's widget (`FUN_1007f784`) draws
+                // with `DrawEntitySpriteWithOutline` itself, so a focused
+                // one -- the portrait under the cursor on the gender
+                // screen -- gets the two-pixel highlight ring.
                 const sk::Sprite* portrait =
                     fsprite->spriteId() >= 0 ? sprites.GetSprite(fsprite->spriteId()) : nullptr;
                 if (portrait && row.x >= 0) {
-                    backbuffer.Blit(row.x, row.y, *portrait);
+                    DrawSpriteWithOutline(backbuffer, sprites, fsprite->spriteId(), row.x, row.y,
+                                          isSelected);
                 } else {
                     std::string label = "[ " + SpriteLabel(fsprite->callback()) + " ]";
                     if (row.x >= 0) {
@@ -3324,6 +3490,11 @@ int main(int argc, char** argv) {
                     std::printf("  SKIP %-40s (no menu)\n", name.c_str());
                     continue;
                 }
+                // M118: as the game loop does every tick before drawing --
+                // and as the engine does itself, focusing the first
+                // selectable widget as it is added (LAB_10079d40) -- so the
+                // sheet shows each screen's focus the way a player sees it.
+                m->EnsureValidSelection();
                 RenderMenu(shot, *m, stack.player(), strings, spriteArchive);
                 std::string flat = name;
                 for (char& c : flat) {

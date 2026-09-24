@@ -2650,6 +2650,9 @@ algorithms.
       list drew over the icons instead of below them), and AddQuitButton's
       "Back" label drew inline in the vertical flow instead of at the
       bottom of the page. Checked against the shipped screen.
+      CORRECTED (M118): the pair is the active-page and dormant art, picked
+      by the page flag rather than by focus; focus adds a two-pixel ring;
+      and "Back" is a label at the fixed (71, 193), not centred.
     - **The reported crash was not reproduced** and is not fixed. A
       creature spawned in melee range, attacking a player with a weapon
       equipped, ran clean; reading every path M35 touched found nothing.
@@ -10217,7 +10220,8 @@ the best evidence available.
 
 The contact sheet makes these obvious, and none is fixed yet:
 
-- **The title colour.** It is `*(ushort *)(engine->+0x28 + 8)` -- a word
+- **The title colour.** CORRECTED (M118): resolved -- 0x733, the
+  ScreenModeController's standard word; see M118. It is `*(ushort *)(engine->+0x28 + 8)` -- a word
   in a global UI palette object, not one of the menu's own three, and it
   is in none of the shipped data files (`6r51.cfg` is the game-manager
   XML stub, not a palette). `kTitleColor` is still the old eyeballed blue,
@@ -10963,6 +10967,129 @@ every tick instead of once and then on a cadence.
   shot the other way hitting nothing. Two M48 checks that asserted the
   old 0 were corrected.
 - **The suite**: 102 executables, 102 pass; soft-fail unchanged at 5.
+
+
+## M118 -- the widgets that draw themselves, and the palette M108 could not find
+
+Four play reports, all on screens built from widgets that draw themselves
+rather than rows the menu lays out: the class and race pickers had no
+proper left/right arrows, the character manager's rectangles were wrong,
+an equipped weapon or item was not highlighted in the inventory, and the
+focused portrait on the gender screen had no white border. Every one of
+them went back to a widget's own vtable draw that this port had never
+read. The fixes below come from those draws, not from screenshots.
+
+- **The UI palette is found.** M108 through M117 carried "the title
+  colour" as an open item: `*(ushort *)(engine->+0x28 + 8)`, a word in an
+  object whose pointer nothing seemed to assign. It is assigned by
+  `GameEngine_FirstTickBootstrap`, through the bootstrap's own pointer to
+  the engine (`*(*(this+0x30) + 0x28) = new ScreenModeController`), which
+  is why a search for writes to `engine+0x28` never found it.
+  `ScreenModeController_ctor` seeds it:
+    - `+8 = 0x733`, the standard widget text. This is the same value as
+      `menu+0x90`, so every title in the game was blue when it should have
+      been the brick red of an ordinary menu item.
+    - `+10 = 0xddd`, which `FUN_1007f49c` substitutes when its `param_4`
+      (the widget's focus flag) is set, and the colour of the selection
+      ring. It is near-white, which is the "white border" from the report.
+    - `+0xc = 0x730`, the colour of every widget rectangle.
+
+  Its base constructor writes 0xfff/0xff0/0xff0 first and the derived
+  constructor overwrites all three. The only other writers are the player
+  natives `SetStandardColor` and `SetHighlightColor`, which no shipped
+  script calls.
+- **The combo box (`FUN_1008e974`).** The `< Assassin >` this port printed
+  was its own invention. The engine draws global.spr **207** at the
+  combo's (x, y) when the selection is not the first option, and **208**
+  at (x + SetWidth - 5, y) when it is not the last. Those slots are the
+  loaded-image cache's fixed `engine+0x479c`/`+0x47a0`. The option text
+  goes between them, centred across the whole screen with the centred
+  shadow, in +8, or +10 while focused.
+  CORRECTED: the combo does **not wrap**. Its vtable `+0x20`/`+0x24`
+  (`FUN_1008eeb4`/`FUN_1008f0b8`) step only while there is somewhere to go
+  and run the callback only when the selection moved, which is why an
+  arrow is missing at each end. `m95_gamestate_smoke`'s check that
+  asserted the wrap is corrected.
+- **The portrait ring (`DrawEntitySpriteWithOutline`, `FUN_1007ec80`).**
+  AddFloatingSprite's widget (`FUN_1007f784`) draws with this function.
+  When focused it adds a two-pixel ring in +10: eight runs, with the inner
+  row and column over the sprite's own edge and the four corners left
+  open. The inventory tabs use the same function, so a focused tab gets
+  the same ring. M36's 1px `kSelectedTextColor` box is gone.
+- **AddButton is the icon widget (`FUN_1007f650`, draw `FUN_1007f050`).**
+  CORRECTED, M36 and M25:
+    - The 5th and 6th arguments are not "normal" and "focused" art. They
+      are the art for the **active page** (`+0x9c`) and the **dormant**
+      art (`+0xa0`). Which one is drawn depends on the page flag `+0xb2`,
+      which only `FUN_1007f61c` sets, from `FUN_10033c88` on every
+      `DisplayXPage` call. Focus never swaps the art; it adds the ring.
+    - A text button (`+0x9c == -1`) draws its label **left-aligned at its
+      own (x, y)**, not centred in its box.
+    - The rectangle is drawn from (x-5, y+SetHAdjust-10), in w x h, as four
+      runs, so the right and bottom edges sit one pixel outside. It is
+      drawn when the button has focus *or* ShowBorder is set.
+    - The box is in +0xc, not the port's `kPopupBorderColor` blue.
+    - A button that never calls SetWidth/SetHeight is 0x3c square.
+    - SetHAdjust is real (it moves the box). SetActiveSprite writes
+      `+0x9c`. SetXAdjust writes `+0xb0`, which no draw reads, and
+      SetDormantSprite is an empty function.
+- **The hand-item buttons (`FUN_10032aa4`).** These are the character
+  manager's missing rectangles:
+    - The box at (x-5, y-10, w, h) is drawn **always**, not only on focus.
+    - The icon goes at (x+0x2d, y+0x19), inside the box's lower right.
+    - The name is drawn by the button's child text area (`+0xb4`). It
+      wraps at SetTextWidth and, with SetTrimText, is cut to 0x17
+      characters plus "...". Both setters were no-ops here.
+- **AddQuitButton** is `FUN_1007fb78(menu, text, cb, 0x47, 0xc1, 1, 0)`: a
+  kind-7 label at a fixed (71, 193), left-aligned. M36 centred it.
+  **AddFloatingText** is the same kind-7 widget (`FUN_1007f7c8`). It was
+  drawn in the static-item colour with no shadow; it now uses the
+  left-aligned arm in +8/+10.
+- **Text areas (`FUN_1008f458`)** draw each line through the left-aligned
+  arm, which adds the 0x0b96 shadow, **0xc apart** (the port used 15), in
+  +8/+10 rather than the static-item colour.
+- **The equipped highlight (`FUN_100a0cec`).** The inventory name cell is
+  drawn in **0x00a** when its item is in either hand or a worn slot
+  (`FUN_100453e0`) or waiting in either hand's queue (`FUN_10045520`).
+  With no item (the buy page), the test is whether something of that
+  typeId is held or worn (`FUN_10045474`). Otherwise the cell is drawn in
+  **0xc33** if the class may not use the item, else in +8. A focused row
+  overrides all of this with +10.
+  CORRECTED: the port's inventory and sell pages cleared the name cell's
+  `+0x42`, which `FUN_10032f78` never writes, so the tint arm was
+  unreachable. "May not use" also calls `FUN_100450a0`, a per-class
+  proficiency table this port does not have. An owned item is therefore
+  never class-barred here, consistent with IsItemEnabledFor already
+  answering "yes"; only the buy page can show 0xc33.
+- **`SK_DUMP_MENUS` now focuses each screen the way the game loop does**
+  (`EnsureValidSelection` before drawing). The engine does the same when
+  it adds a widget (LAB_10079d40). Without it, no ring or highlight
+  appeared on the contact sheet.
+- **Test**: `port/src/tests/m118_menu_widgets_smoke.cpp`, 36 checks:
+    - the palette and geometry constants;
+    - both combos clamping at each end in both directions;
+    - the five inventory tabs' size, art and page flag across a page
+      change;
+    - a wielded, a queued and a carried weapon tinting Equipped, Equipped
+      and Standard, with equip and unequip toggling it;
+    - the character manager's hand boxes, text-area settings and the
+      Quests button's HAdjust.
+- **The suite**: 103 executables, 103 pass; soft-fail unchanged at 5.
+
+### Still open
+
+- **The inventory table's row pitch.** `FUN_1008cca8` advances a table row
+  by 0xf, not the 0xc this port uses, and it lays a row's cells out with
+  their own per-cell widths. The table is still drawn with M36's simplified
+  layout.
+- **The combo's move sound.** Both step functions call
+  `SecretSequence_OnComplete(engine, 100, 100, 0, 0, 1, 1)` when the
+  selection moves. That is almost certainly a misnamed sound call playing
+  slot 100, but it was not traced.
+- **`FUN_100450a0`'s per-class proficiency table** (`engine+0x28 + 0x148`),
+  as above.
+- The loading banner and the vignette caption still use the old blue; their
+  real draws were not traced in this pass.
 
 
 ## Next milestones (not yet started)
