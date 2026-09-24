@@ -242,6 +242,31 @@ void PlayerExecutable::ResetQueue(int hand) {
     }
 }
 
+// M116: the two cycle keys. The input poll (`FUN_1001c9c0`) opens with
+// them, edge-triggered on bound actions 10 and 11, each a bare call through
+// the player's own vtable (0x100fd044):
+//
+//     +0x26c  FUN_100a0934:  head = RotateForward(player + 0xf4c);
+//                            if (head) stats->SetLeftItem(head);   // +0x2c
+//     +0x270  FUN_100a0968:  head = RotateForward(player + 0xf68);
+//                            if (head) stats->SetRightItem(head);  // +0x30
+//
+// M105 wrote the keys off as dead because the rotate *wrappers* at
+// `FUN_10044c9c`/`FUN_10044cdc` have no caller -- true, but these two are
+// separate, inlined copies, and they are what the vtable holds. The hand
+// set is the bare stats setter (the same two slots `FUN_1003d8e0` uses on
+// pickup): no class gate and no "hand must be empty" test, which is fine
+// because nothing enters a queue without passing both already.
+ItemExecutable* PlayerExecutable::CycleQueue(int hand) {
+    ItemExecutable* head = queue(hand).RotateForward();
+    if (!head) return nullptr;
+    ItemExecutable*& held = hand == kEquipSlotRight ? m_RightItem : m_LeftItem;
+    if (held && held != head) held->SetEquipped(false);
+    held = head;
+    head->SetEquipped(true);
+    return head;
+}
+
 void PlayerExecutable::QueueDrop(std::unique_ptr<ItemExecutable> item) {
     if (item) m_PendingDrops.push_back(std::move(item));
 }

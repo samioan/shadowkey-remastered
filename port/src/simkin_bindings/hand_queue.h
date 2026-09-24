@@ -26,14 +26,15 @@
 // the last (that is what `GetLastItem()` is for), so the two failing cases
 // are exactly the two the player is never offered.
 //
-// The rotates (`FUN_10044c9c`/`FUN_10044cdc`, which wrap them and then set
-// the hand's equipped item) are **dead in the shipped binary**: neither
-// wrapper has a caller, a pointer, or any other mention anywhere in the
-// image. So the default control scheme's "Cycle Left Queue" (KD_ASTERISK)
-// and "Cycle Right Queue" (KD_0) actions -- docs/INPUT_HANDLING.md lists
-// both -- never ran on the device either. They are implemented here
-// because the container has them and they cost two loops; nothing in this
-// port calls them either, and that is faithful.
+// CORRECTED (M116): the cycle keys are live. M105 found the rotate
+// wrappers `FUN_10044c9c`/`FUN_10044cdc` with no caller and concluded the
+// default scheme's "Cycle Left Queue" (KD_ASTERISK) and "Cycle Right
+// Queue" (KD_0) did nothing on the device. The wrappers really are dead,
+// but the input poll (`FUN_1001c9c0`) dispatches actions 11 and 10 through
+// player vtable +0x26c/+0x270, which hold two *other* copies --
+// `FUN_100a0934` (left) and `FUN_100a0968` (right) -- that call
+// RotateForward and put the new head in the hand. See
+// PlayerExecutable::CycleQueue. RotateBackward stays uncalled.
 
 #include <array>
 #include <cstddef>

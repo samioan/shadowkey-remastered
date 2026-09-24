@@ -261,6 +261,21 @@ bool ItemExecutable::InvokeOnUse() {
     return false;
 }
 
+void ItemExecutable::InvokeOnUsedBy(skiExecutable* user) {
+    if (!m_Interpreter) return;
+    m_Owner = user;
+    skRValueArray noArgs;
+    skRValue ret;
+    skExecutableContext ctxt(m_Interpreter);
+    try {
+        skScriptedExecutable::method(skString("OnUse"), noArgs, ret, ctxt);
+    } catch (skParseException& e) {
+        std::printf("ItemExecutable: PARSE ERROR in OnUse(): %s\n", e.toString().ptr());
+    } catch (skRuntimeException& e) {
+        std::printf("ItemExecutable: RUNTIME ERROR in OnUse(): %s\n", e.toString().ptr());
+    }
+}
+
 void ItemExecutable::InvokeHitTarget(skiExecutable* target) {
     if (!m_Interpreter) return;
     skRValueArray args;

@@ -90,6 +90,10 @@ public:
         // in SetButton (called directly from the key callback) instead
         // of at tick time removes that race entirely; ConsumeJustPressed
         // clears the latch once the tick that reads it has acted on it.
+        // M116: a slot the game released (ReleaseBound) stays up until
+        // the physical key really comes up. See ReleaseBound().
+        if (!down) releasedByGame_[i] = false;
+        if (down && releasedByGame_[i]) return;
         if (down && !current_[i]) justPressed_[i] = true;
         current_[i] = down;
     }
@@ -165,6 +169,26 @@ public:
         justPressed_.fill(false);
         repeat_.fill(false);
         holdTicks_.fill(0);
+        releasedByGame_.fill(false);
+    }
+
+    // M116: `InputState_SetBoundButton(input, action, 0)` -- the game
+    // itself forcing a held key up. The hand-use wrappers
+    // (`FUN_10044c04`/`FUN_10044c50`, player vtable +0x27c/+0x278) do this
+    // when the use returns 0, which only the consumable arm does -- so a
+    // held key drinks one potion, not one a tick. On the device the slot
+    // then stays up because Symbian sends a key-down only once; Windows
+    // re-sends WM_KEYDOWN while a key is held, so this port additionally
+    // ignores the slot's presses until its real key-up arrives.
+    void ReleaseBound(Action action) {
+        const int slot = bindingOffset_[static_cast<size_t>(action)];
+        if (slot < 0) return;
+        const size_t i = static_cast<size_t>(slot);
+        current_[i] = false;
+        justPressed_[i] = false;
+        repeat_[i] = false;
+        holdTicks_[i] = 0;
+        releasedByGame_[i] = true;
     }
 
     // M90: drop every *pending* edge and repeat, but leave the held keys
@@ -332,6 +356,7 @@ private:
     std::array<bool, static_cast<size_t>(ButtonSlot::kCount)> justPressed_{};
     std::array<bool, static_cast<size_t>(ButtonSlot::kCount)> repeat_{};
     std::array<int, static_cast<size_t>(ButtonSlot::kCount)> holdTicks_{};
+    std::array<bool, static_cast<size_t>(ButtonSlot::kCount)> releasedByGame_{};
     std::array<int, static_cast<size_t>(Action::kCount)> bindingOffset_{};
 };
 

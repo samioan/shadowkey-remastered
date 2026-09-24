@@ -374,6 +374,11 @@ public:
     // re-file everything that was in it by each item's own preferred hand,
     // dropping anything whose `+0x1c0` names neither (kEquipSlotNone).
     void ResetQueue(int hand);
+    // M116: "Cycle Left Queue" / "Cycle Right Queue" -- player vtable
+    // +0x26c (`FUN_100a0934`, the left queue) and +0x270 (`FUN_100a0968`,
+    // the right). Rotate that hand's queue forward and, if it was not
+    // empty, put the new head in the hand. Returns the new head.
+    ItemExecutable* CycleQueue(int hand);
 
     int health() const { return m_Health; }
     int maxHealth() const { return m_MaxHealth; }

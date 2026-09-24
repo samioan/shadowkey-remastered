@@ -99,6 +99,12 @@ public:
     // runs its own native default instead (see main.cpp's Use handling).
     bool InvokeOnUse();
 
+    // M116: item vtable +0x90 called from the host -- what `FUN_10042394`
+    // case 4 runs for a consumable in the hand whose attack key is down.
+    // Same body as the `OnUsedBy` native below (inventory.s's Use row):
+    // bind `user` as GetOwner(), then run the script's OnUse if it has one.
+    void InvokeOnUsedBy(skiExecutable* user);
+
     // M22: runs the real script's HitTarget(target) handler -- a real
     // spell's own damage/effect entry point, never called from any
     // script (native-triggered only, same "opaque native combat"

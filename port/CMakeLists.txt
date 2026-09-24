@@ -804,6 +804,10 @@ target_link_libraries(action_queue_smoke PRIVATE sk_bindings sk_world)
 add_executable(popup_selectable_smoke src/tests/m106_popup_selectable_smoke.cpp)
 target_link_libraries(popup_selectable_smoke PRIVATE sk_bindings sk_world)
 
+# M116 milestone smoke test -- see src/tests/m116_queue_cycle_smoke.cpp.
+add_executable(queue_cycle_smoke src/tests/m116_queue_cycle_smoke.cpp)
+target_link_libraries(queue_cycle_smoke PRIVATE sk_bindings sk_world)
+
 # M108 milestone smoke test -- see src/tests/m108_menu_layout_smoke.cpp.
 add_executable(menu_layout_smoke src/tests/m108_menu_layout_smoke.cpp)
 target_link_libraries(menu_layout_smoke PRIVATE sk_bindings sk_world)

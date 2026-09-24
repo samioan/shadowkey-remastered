@@ -7030,11 +7030,14 @@ int main(int argc, char** argv) {
                 };
                 // `FUN_10042394` -- the type switch that is the only way
                 // into an attack, a cast or a use.
-                auto useHandItem = [&](sk_bindings::ItemExecutable* handItem) {
+                // Returns the engine's own return value: 1 everywhere except
+                // the consumable arm, whose 0 makes the caller release the
+                // key (see below).
+                auto useHandItem = [&](sk_bindings::ItemExecutable* handItem) -> bool {
                     // `if (param_2 != 0)` wraps the entire function. An
                     // empty hand is not an attack, not a miss and not a
                     // sound -- there is no bare-handed combat here.
-                    if (!handItem) return;
+                    if (!handItem) return true;
                     const int type = handItem->itemType();
                     if (type == sk_bindings::kItemTypeWeapon) {
                         // `FUN_1006d508(item) == 1`. The one thing between
@@ -7044,13 +7047,19 @@ int main(int argc, char** argv) {
                         // means you cannot swing.
                         if (stack.player().actorStats().periodicKind() ==
                             sk_bindings::ActorStats::kPeriodicSanctuaryTimer) {
-                            return;
+                            return true;
                         }
                         playerAttack(handItem);
-                        return;
+                        return true;
                     }
-                    if (type == sk_bindings::kItemTypeSpell ||
-                        handItem->spellTypeId() != 0) {
+                    // M116: the type alone, as the engine tests it. This
+                    // used to be `|| spellTypeId() != 0`, left over from
+                    // before M74 made the type real -- and spellTypeId()
+                    // falls back to the template id, which every item
+                    // spawned from entities.txt has. So every real potion
+                    // and loaf of bread was sent here, failed to cast, and
+                    // never reached the consumable arm below.
+                    if (type == sk_bindings::kItemTypeSpell) {
                         // `FUN_1006d508(item) == 2`. M48: the real cast
                         // never looks for a target -- it charges the
                         // caster, applies its self-targeted half and
@@ -7068,17 +7077,21 @@ int main(int argc, char** argv) {
                         // refire cooldown and by magicka.
                         if (!runSpellCast(handItem, &stack.player(), gameCamera.x, gameCamera.y,
                                           gameCamera.z, gameCamera.yaw, gameCamera.pitch)) {
-                            return;
+                            return true;
                         }
                         sk_bindings::StartSpellSwing(gameWeaponViewmodel);
-                        return;
+                        return true;
                     }
-                    // `FUN_1006d508(item) == 4` is a consumable, and the
-                    // real branch calls the item's own use through its
-                    // vtable +0x90. This port has no use-from-the-hand
-                    // path for consumables yet, so a potion in a hand does
-                    // nothing on the attack key -- still closer than the
-                    // melee swing it used to produce. See PORT_ROADMAP.
+                    // `FUN_1006d508(item) == 4`: a consumable. M116: the
+                    // real arm is `item->vtable[0x90](item, player, 0)` --
+                    // the same OnUsedBy the inventory's Use row runs -- and
+                    // it is the one arm that returns **0**. Anything else
+                    // (misc, armour) falls out of the switch with a 1.
+                    if (type == sk_bindings::kItemTypeConsumable) {
+                        handItem->InvokeOnUsedBy(&stack.player());
+                        return false;
+                    }
+                    return true;
                 };
                 // The real input handler's own order and its own read: the
                 // right hand's bound button (0xf) first, then the left
@@ -7122,13 +7135,34 @@ int main(int argc, char** argv) {
                                                 handItem->itemType() == sk_bindings::kItemTypeSpell);
                     gameActiveHandItem = drawable ? handItem : nullptr;
                 };
+                // M116: the two cycle keys, which the real input poll
+                // (`FUN_1001c9c0`) handles first of everything, as edges:
+                // action 10 (Cycle Right Queue, keypad 0) -> player vtable
+                // +0x270, action 11 (Cycle Left Queue, keypad *) -> +0x26c.
+                // Each rotates that hand's action queue and wields the new
+                // head. They run before this tick's hand use, as there.
+                if (input.ConsumeBoundJustPressed(sk::Action::CycleRightQueue)) {
+                    stack.player().CycleQueue(sk_bindings::kEquipSlotRight);
+                }
+                if (input.ConsumeBoundJustPressed(sk::Action::CycleLeftQueue)) {
+                    stack.player().CycleQueue(sk_bindings::kEquipSlotLeft);
+                }
+                // M116: each hand's use goes through a wrapper (player
+                // vtable +0x27c right, `FUN_10044c04`; +0x278 left,
+                // `FUN_10044c50`) that forces the key up when the use
+                // returns 0 -- the consumable arm -- so holding the key
+                // drinks one potion, while a weapon keeps swinging.
                 if (useRightHeld) {
                     setActiveHandItem(stack.player().rightItem());
-                    useHandItem(stack.player().rightItem());
+                    if (!useHandItem(stack.player().rightItem())) {
+                        input.ReleaseBound(sk::Action::UseRightAction);
+                    }
                 }
                 if (useLeftHeld) {
                     setActiveHandItem(stack.player().leftItem());
-                    useHandItem(stack.player().leftItem());
+                    if (!useHandItem(stack.player().leftItem())) {
+                        input.ReleaseBound(sk::Action::UseLeftAction);
+                    }
                 }
 
                 // M81: the back-stop for every other way a creature reaches

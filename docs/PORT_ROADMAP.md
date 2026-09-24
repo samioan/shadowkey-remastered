@@ -9878,6 +9878,11 @@ soft-fails 39 -> 39, all 14 tracked `.ppm` renders byte-identical,
       full now. The format's own limit stays: a slot names an item by
       typeId, so it cannot distinguish two copies of the same thing --
       which no shipped screen can put in a queue anyway.
+    - **CORRECTED (M116): the cycle keys are live** -- the claim below is
+      wrong. The wrappers it names really are dead, but the input poll
+      dispatches actions 10/11 through player vtable +0x270/+0x26c, which
+      hold two *other* rotate-and-wield functions (`FUN_100a0968`,
+      `FUN_100a0934`). See M116.
     - **The two rotates are dead.** `FUN_1006c560`/`FUN_1006c5c8` rotate a
       queue and `FUN_10044c9c`/`FUN_10044cdc` wrap them and equip the new
       head -- exactly the default control scheme's "Cycle Left Queue"
@@ -10854,6 +10859,67 @@ through each other the first time an update was actually offered.
   signature and no checksum. Publishing a `checksums.txt` beside the zip and
   verifying it would close that gap; the asset picker already ignores
   non-zip assets, so the release could carry one tomorrow.
+
+## M116 -- the cycle keys, and a potion in the hand
+
+Reported from play: you can put several weapons or spells in a hand but not
+switch between them, and an item in the item hand can only be used from the
+inventory, never from its key. Two separate causes, one of them a false
+M105 claim.
+
+- **The cycle keys were never dead.** M105 found the rotate wrappers
+  `FUN_10044c9c`/`FUN_10044cdc` with no caller and concluded "Cycle Left
+  Queue" (keypad `*`, **C** here) and "Cycle Right Queue" (keypad 0, **G**)
+  did nothing on the device either. The input poll `FUN_1001c9c0` opens by
+  edge-testing bound actions 10 and 11 and calling player vtable **+0x270**
+  and **+0x26c**. The player vtable is at `0x100fd044` (found by pairing
+  the known +0x274 `FUN_10042e44` and +0x288 `FUN_100425bc` entries), and
+  those slots hold **`FUN_100a0968`** and **`FUN_100a0934`**: separate,
+  inlined copies of the same idea that no search for the wrappers would
+  find:
+
+      head = FUN_1006c5c8(player + 0xf68);   // RotateForward, right queue
+      if (head) stats->vtable[0x30](head);   // SetRightItem
+      // +0x26c: the same on player + 0xf4c and vtable[0x2c], SetLeftItem
+
+  `0x2c`/`0x30` are the same two setters `FUN_1003d8e0` uses on pickup,
+  which confirms which is which. The disassembly confirms `r1` is the new
+  head. `PlayerExecutable::CycleQueue` does this, and the game tick calls it
+  on the two edges before the hand use, which is the order the poll uses.
+  The equipped flag moves with the hand, because the save writes it.
+- **A consumable in the hand does something now.** `FUN_10042394` case 4
+  was the gap M78 recorded: `item->vtable[0x90](item, player, 0)`, the
+  same `OnUsedBy` the inventory's Use row calls (M103). It is the only arm
+  that returns **0**, and both hand wrappers (`FUN_10044c04` right,
+  `FUN_10044c50` left, player vtable +0x27c/+0x278) respond to a 0 with
+  `InputState_SetBoundButton(input, 0xf/0xe, 0)` -- `r2` is that return --
+  which forces the key up. So holding the key drinks **one** potion while a
+  weapon keeps swinging. On the device the slot stays up because Symbian
+  sends a key-down only once. Windows repeats `WM_KEYDOWN` while a key is
+  held, so `InputState::ReleaseBound` also ignores that slot's presses
+  until its real key-up.
+- **And a second reason it did not work, found in play.** The spell test
+  in front of that branch read `type == 2 || spellTypeId() != 0`, left over
+  from M48, before M74 made the type real. `spellTypeId()` falls back to the
+  template id, which every item spawned from entities.txt has, so every
+  real potion and loaf of bread went to the spell cast, failed, and never
+  reached the consumable branch. The first version of the test missed this
+  because it called `InvokeOnUsedBy` directly and skipped the type check.
+  The engine tests the stored type alone (`FUN_1006d508`), and so does the
+  port now.
+- **Not verified:** what the viewmodel shows right after a cycle. The
+  engine's draw reads `player+0x204`, which the cycle does not write, so the
+  device may keep drawing the old weapon until the next attack press, unless
+  `SetRightItem` does more than store. This port's M78 fallback shows the
+  newly wielded item at once.
+- **Test**: `port/src/tests/m116_queue_cycle_smoke.cpp`, 27 checks: three
+  real weapons cycled right, including the equipped flag and wrap-around;
+  an empty queue left alone; the item types the hand-use switch reads
+  (potion and bread are type 4 despite a nonzero `spellTypeId()`, Blaze
+  type 2); two real potions cycled left, the healing
+  potion used from the hand (+30, consumed, hand emptied, queue compacted);
+  and `ReleaseBound` holding through an auto-repeat.
+- **The suite**: 101 executables, 101 pass; soft-fail unchanged at 5.
 
 
 ## Next milestones (not yet started)
