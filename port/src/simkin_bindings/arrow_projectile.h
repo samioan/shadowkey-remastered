@@ -90,6 +90,7 @@
 #include <functional>
 #include <vector>
 
+#include "engine/interp_serial.h"
 #include "simkin_bindings/spell_actor.h"
 
 namespace sk_bindings {
@@ -134,6 +135,7 @@ struct ArrowProjectile {
     int vx = 0, vy = 0, vz = 0;    // +0x98 / +0xa0 / +0xa6
     int yaw = 0, pitch = 0;        // +0xb6 / +0xa8, both copied from the shooter
     bool alive = true;
+    uint32_t interpSerial = sk::NextInterpSerial();  // M119, render-side only
 };
 
 // FUN_10005730. `yaw`/`pitch` are engine angle units (spell_projectile.h's

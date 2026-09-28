@@ -20,7 +20,7 @@ with tools.
 | **F1** or **`** | open / close the console |
 | **Shift+F1** | toggle the one-line fps/position readout |
 | **F2** / **Shift+F2** | next / previous overlay page |
-| **F5–F12** | free — `bind` your own commands to them |
+| **F5–F10**, **F12** | free — `bind` your own commands to them (F11 is the game's fullscreen toggle since M120) |
 | **Esc** (console open) | close the console |
 | **Ctrl+↑ / Ctrl+↓**, **PgUp / PgDn** | scroll the scrollback |
 | **↑ / ↓** | command history |

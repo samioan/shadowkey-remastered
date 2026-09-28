@@ -60,6 +60,8 @@ bool LoadLauncherConfig(const std::string& path, LauncherConfig& out) {
             } catch (const std::exception&) {
                 // keep the default
             }
+        } else if (key == "fullscreen") {  // M120
+            out.fullscreen = value != "0" && value != "false";
         }
         // Anything else is someone else's key (or a future one) -- ignored.
     }
@@ -73,7 +75,8 @@ bool SaveLauncherConfig(const std::string& path, const LauncherConfig& config) {
          << "# Rewritten by the launcher; hand-edits to known keys are kept.\n"
          << "gameData=" << ToForwardSlashes(config.gameData) << "\n"
          << "font=" << ToForwardSlashes(config.font) << "\n"
-         << "scale=" << config.scale << "\n";
+         << "scale=" << config.scale << "\n"
+         << "fullscreen=" << (config.fullscreen ? 1 : 0) << "\n";
     return static_cast<bool>(file);
 }
 

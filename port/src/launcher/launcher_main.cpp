@@ -96,6 +96,9 @@ constexpr int kRow3Caption = 142;
 constexpr int kScaleY = 162;
 constexpr int kScaleWidth = 44;
 constexpr int kScaleHeight = 28;
+// M120: the fourth display choice, borderless fullscreen -- wider, for its
+// word of a caption.
+constexpr int kFullscreenWidth = 104;
 constexpr int kPlayY = 140;
 constexpr int kPlayHeight = 44;
 constexpr int kStatusY = 196;
@@ -110,10 +113,13 @@ enum ControlId : int {
     IDC_CHOOSE_FONT = 1002,
     IDC_PLAY = 1003,
     IDC_UPDATE = 1004,
-    IDC_SCALE_FIRST = 1010,  // +0 => 2x, +1 => 3x, +2 => 4x
+    IDC_SCALE_FIRST = 1010,  // +0 => 2x, +1 => 3x, +2 => 4x, +3 => fullscreen (M120)
 };
 
 constexpr int kScaleChoices[] = {2, 3, 4};
+// M120: the three window sizes plus Fullscreen, one radio row.
+constexpr int kDisplayChoiceCount = 4;
+constexpr int kFullscreenChoice = 3;
 
 // M115: what the update worker thread sends back. The thread never touches
 // the launcher's state directly -- it posts a heap-allocated result the
@@ -251,7 +257,7 @@ struct Impl {
     Button chooseFont;
     Button play;
     Button update;
-    Button scale[3];
+    Button scale[kDisplayChoiceCount];  // 2x, 3x, 4x windowed, and fullscreen (M120)
 
     // M115
     UpdateState updateState = UpdateState::Checking;
@@ -377,8 +383,10 @@ void Refresh(Impl& impl) {
     EnableWindow(impl.play.hwnd, impl.dataOk && !busy);
     EnableWindow(impl.chooseData.hwnd, !busy);
     EnableWindow(impl.chooseFont.hwnd, !busy);
-    for (int i = 0; i < 3; ++i) {
-        impl.scale[i].style.selected = kScaleChoices[i] == impl.config.scale;
+    for (int i = 0; i < kDisplayChoiceCount; ++i) {
+        impl.scale[i].style.selected =
+            i == kFullscreenChoice ? impl.config.fullscreen
+                                   : !impl.config.fullscreen && kScaleChoices[i] == impl.config.scale;
         EnableWindow(impl.scale[i].hwnd, !busy);
     }
 
@@ -597,6 +605,9 @@ void Play(Impl& impl) {
     // find, and SK_SCALE replaces what used to be a hardcoded 3x window.
     SetEnvironmentVariableW(L"SK_USER_DIR", Widen(userDir).c_str());
     SetEnvironmentVariableW(L"SK_SCALE", std::to_wstring(impl.config.scale).c_str());
+    // M120: and whether it opens fullscreen. The window size still goes
+    // with it -- it is what the game returns to when F11 leaves fullscreen.
+    SetEnvironmentVariableW(L"SK_FULLSCREEN", impl.config.fullscreen ? L"1" : L"0");
 
     // argv[1] is the script root, argv[2] the font -- quoted because both
     // routinely contain spaces, and the font argument is passed even when
@@ -809,7 +820,7 @@ void PaintWindow(Impl& impl, HDC target) {
 
     // Row 3 -- the window size.
     DrawTextLine(dc, impl.captionFont, kCaption, margin, impl.P(kRow3Caption), impl.S(400),
-                 impl.S(18), L"WINDOW SIZE");
+                 impl.S(18), L"DISPLAY   ·   WINDOW SIZE OR FULLSCREEN");
 
     // The status line, and the version in the corner.
     if (!impl.status.empty()) {
@@ -922,11 +933,13 @@ void CreateControls(Impl& impl) {
     MakeButton(impl, impl.update, L"Update", IDC_UPDATE, buttonX, impl.P(kUpdateY),
                kButtonWidth, kButtonHeight, ButtonStyle{});
     ShowWindow(impl.update.hwnd, SW_HIDE);  // only shown when one exists
-    for (int i = 0; i < 3; ++i) {
-        const std::wstring caption = std::to_wstring(kScaleChoices[i]) + L"×";
+    for (int i = 0; i < kDisplayChoiceCount; ++i) {
+        const bool fullscreen = i == kFullscreenChoice;
+        const std::wstring caption =
+            fullscreen ? std::wstring(L"Fullscreen") : std::to_wstring(kScaleChoices[i]) + L"×";
         MakeButton(impl, impl.scale[i], caption.c_str(), IDC_SCALE_FIRST + i,
-                   impl.S(kMargin + i * (kScaleWidth + 8)), impl.P(kScaleY), kScaleWidth,
-                   kScaleHeight, ButtonStyle{});
+                   impl.S(kMargin + i * (kScaleWidth + 8)), impl.P(kScaleY),
+                   fullscreen ? kFullscreenWidth : kScaleWidth, kScaleHeight, ButtonStyle{});
     }
 }
 
@@ -959,7 +972,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam) 
                 case IDC_UPDATE: button = &impl->update; break;
                 default:
                     if (static_cast<int>(wParam) >= IDC_SCALE_FIRST &&
-                        static_cast<int>(wParam) < IDC_SCALE_FIRST + 3) {
+                        static_cast<int>(wParam) < IDC_SCALE_FIRST + kDisplayChoiceCount) {
                         button = &impl->scale[static_cast<int>(wParam) - IDC_SCALE_FIRST];
                     }
                     break;
@@ -984,8 +997,13 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam) 
                                      L". Please don't close this window.",
                           kCaption);
                 StartInstall(hwnd, impl->installRoot, impl->availableRelease);
-            } else if (id >= IDC_SCALE_FIRST && id < IDC_SCALE_FIRST + 3) {
-                impl->config.scale = kScaleChoices[id - IDC_SCALE_FIRST];
+            } else if (id >= IDC_SCALE_FIRST && id < IDC_SCALE_FIRST + kDisplayChoiceCount) {
+                if (id - IDC_SCALE_FIRST == kFullscreenChoice) {
+                    impl->config.fullscreen = true;
+                } else {
+                    impl->config.fullscreen = false;
+                    impl->config.scale = kScaleChoices[id - IDC_SCALE_FIRST];
+                }
                 Save(*impl);
                 Refresh(*impl);
             }

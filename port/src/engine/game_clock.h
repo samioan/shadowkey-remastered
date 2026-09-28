@@ -8,8 +8,11 @@
 // simulation update and frame present inside that single tick -- kept
 // coupled here too, faithfully, for this milestone). Decoupling update
 // rate from present rate is a real, already-documented port-goal
-// improvement (see that doc's "For a PC port this means..." section) but
-// deliberately out of scope until the coupled baseline is proven correct.
+// improvement (see that doc's "For a PC port this means..." section).
+// M119: done, as a setting -- the tick stays exactly this; above the
+// Original frame rate, main.cpp draws interpolated frames between ticks
+// (engine/frame_interpolation.h). At Original, tick and present are still
+// the one coupled step described above.
 namespace sk {
 
 class GameClock {

@@ -234,7 +234,7 @@ void RegisterDebugCommands(CommandContext& context) {
         });
 
     add("bind", "bind <key> \"<command>\"", "meta",
-        "run a command when a key is pressed with the console closed (F1-F12, F5-F12 are free)",
+        "run a command when a key is pressed with the console closed (F5-F10 and F12 are free; F11 is fullscreen)",
         [&console](const std::vector<std::string>& args) -> std::string {
             if (args.empty()) {
                 if (console.bindings().empty()) return "(no bindings)";

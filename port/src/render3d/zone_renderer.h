@@ -252,6 +252,12 @@ struct PlacedEntity {
     // the whole reason Poly3D_RasterizeTextured_v8 exists. See
     // HitFlashRamps above.
     int flashLevel = -1;
+    // M119: which thing in the world this is, stable from one tick to the
+    // next -- how a Frame Rate above the original pairs this tick's entry
+    // with the last tick's to draw it in between (engine/frame_interpolation.h).
+    // 0 means "never moves" (a static prop) and is drawn where it stands.
+    // Ignored by Render.
+    uint64_t interpKey = 0;
 };
 
 // ---- M79: the sprite billboard, `FUN_1008b25c` + `FUN_1004f91c` ----
@@ -299,6 +305,7 @@ struct SpriteBillboard {
     int halfWidth = 0, halfHeight = 0;
     int blendMode = 0;    // entity+0x58
     int blendLevel = 0x100;  // entity+0x138
+    uint64_t interpKey = 0;  // M119, as PlacedEntity::interpKey
 };
 
 // `FUN_1004f91c`'s own `if ((int)depth < 5) return;`, in raw world units.
@@ -502,6 +509,12 @@ public:
     // m70_skybox_smoke turns it off to measure what the sky contributes.
     bool drawSkybox = true;
 
+    // M119: the most horizontal bands a frame larger than 176x208 is split
+    // into for the worker threads (see Render). 0 lets the machine decide;
+    // 1 draws in one pass -- which m119_pc_settings_smoke uses to show the
+    // bands change no pixel.
+    int bandLimit = 0;
+
     // `entities`/`models` are optional (default: none drawn) so M6/M7
     // call sites and smoke tests that only care about tile-grid geometry
     // don't need to change. `models` is non-const because Model parsing
@@ -517,14 +530,33 @@ public:
     // always describes the frame just drawn. `mutable` only so Render can
     // stay const for the dozen smoke tests that hold the renderer by
     // value; nothing outside Render writes it.
+    //
+    // M119: (x, y) is always a *native* screen point -- the engine's five
+    // melee probes are fixed 176x208 coordinates -- whatever size the frame
+    // was drawn at. At a higher Resolution the buffer is a whole multiple
+    // of 176x208 and the probe reads the centre of the block that native
+    // pixel became; at the native size that is the pixel itself.
     uint8_t ObjectIdAt(int x, int y) const {
         if (x < 0 || y < 0 || x >= Backbuffer::kWidth || y >= Backbuffer::kHeight) return 0;
-        return m_ObjectIds[static_cast<size_t>(y) * Backbuffer::kWidth + x];
+        // M120: and at a wider Aspect Ratio the device's 176 columns are
+        // the middle of the target, so the probe is offset into them.
+        const int scale = m_IdHeight / Backbuffer::kHeight;
+        const int column = (m_IdWidth / (scale < 1 ? 1 : scale) - Backbuffer::kWidth) / 2;
+        x += column;
+        if (scale <= 1) return m_ObjectIds[static_cast<size_t>(y) * m_IdWidth + x];
+        const int hx = x * scale + scale / 2;
+        const int hy = y * scale + scale / 2;
+        return m_ObjectIds[static_cast<size_t>(hy) * m_IdWidth + hx];
     }
 
 private:
     mutable std::vector<uint8_t> m_ObjectIds =
         std::vector<uint8_t>(static_cast<size_t>(Backbuffer::kWidth) * Backbuffer::kHeight, 0);
+    mutable int m_IdWidth = Backbuffer::kWidth;
+    mutable int m_IdHeight = Backbuffer::kHeight;  // M120
+    // M119: kept between frames rather than reallocated every Render --
+    // 5MB a frame at 6x is worth not churning at 144 frames a second.
+    mutable std::vector<float> m_DepthBuffer;
 };
 
 }  // namespace sk

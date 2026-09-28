@@ -66,7 +66,42 @@ public:
     void RunMessageLoop(const IdleCallback& onIdle);
 
     // Presents the backbuffer, nearest-neighbor scaled to the client area.
+    // M119: any size -- see the Resolution setting (graphics/scene_upscale.h).
     void Present(const Backbuffer& backbuffer);
+
+    // M119: whether this window is the one the user is using. A gamepad is
+    // read whatever window has focus, so the game ignores it while it is
+    // in the background, the same way it gets no keys.
+    bool IsForeground() const;
+
+    // M119: blocks until the desktop compositor's next frame (DwmFlush) --
+    // the Frame Rate setting's V-Sync pacing. False when that is not
+    // available, and the caller falls back to a timed rate.
+    bool WaitForCompositor();
+
+    // M119: the client area's current size in pixels (0x0 while minimized).
+    void ClientSize(int* width, int* height) const;
+
+    // M120: borderless fullscreen on the monitor the window is on, and back.
+    // Leaving restores the window's previous position and size. F11 and
+    // Alt+Enter toggle it from inside the window itself (neither reaches
+    // the key callback, so neither is a game key).
+    void SetFullscreen(bool on);
+    bool IsFullscreen() const;
+    // M120: whether the window is maximized -- the Aspect Ratio setting
+    // leaves such a window's shape alone, as it does a fullscreen one.
+    bool IsMaximized() const;
+    // M120: resizes the windowed client area, kept inside the work area of
+    // the monitor it is on and centred where it was. Ignored while
+    // fullscreen or maximized.
+    void SetClientSize(int width, int height);
+
+    // M119: asks Windows for its 1ms scheduler tick (timeBeginPeriod) while
+    // `on`. The default ~15.6ms tick is fine for the original 25Hz -- every
+    // wait overshoots, but by less than a tick -- and cannot pace 60 frames a
+    // second or more, so it is requested only while the Frame Rate setting
+    // is above Original, and handed back when it returns there.
+    static void SetFineTimer(bool on);
 
     bool ShouldClose() const { return shouldClose_; }
 

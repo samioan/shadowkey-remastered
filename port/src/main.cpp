@@ -10,6 +10,7 @@
 // direction the user chose. M6 added the 3D zone renderer, M7 tile-grid
 // collision, M8 placed-entity rendering -- see docs/PORT_ROADMAP.md.
 #include <algorithm>
+#include <array>
 #include <cctype>
 #include <chrono>
 #include <cmath>
@@ -35,15 +36,21 @@
 #include "assets/string_table.h"
 #include "assets/zone_display_names.h"
 #include "audio/audio_engine.h"
+#include "engine/frame_interpolation.h"
 #include "engine/game_clock.h"
+#include "engine/gamepad_map.h"
 #include "engine/input_state.h"
 #include "engine/pc_key_map.h"
+#include "engine/pc_settings.h"
 #include "engine/screen_mode.h"
 #include "graphics/backbuffer.h"
 #include "graphics/bitmap_font.h"
+#include "graphics/scene_upscale.h"
+#include "graphics/viewport.h"
 #include "platform/win32/console_tee.h"
 #include "platform/win32/crash_report.h"
 #include "platform/win32/exe_dir.h"
+#include "platform/win32/gamepad.h"
 #include "platform/win32/window.h"
 #include "render3d/camera.h"
 #include "render3d/zone_renderer.h"
@@ -442,6 +449,14 @@ public:
 private:
     sk::Zone* m_Zone = nullptr;
 };
+
+// M119: the interpolation keys of things identified by a serial rather than
+// by their script object (engine/interp_serial.h). Tagged into the top bits
+// so they can never equal a script pointer, which is how creatures, doors
+// and pickups are keyed.
+constexpr uint64_t kInterpArrowTag = 1ull << 61;
+constexpr uint64_t kInterpSpellTag = 2ull << 61;
+constexpr uint64_t kInterpEffectTag = 3ull << 61;
 
 struct MonsterInstance {
     std::unique_ptr<sk_bindings::MonsterExecutable> script;
@@ -2093,8 +2108,10 @@ bool LiveDebugHost::ScriptEval(const std::string& receiver, const std::string& c
 // The only non-zero positions the real function produces are the bob (0..10
 // px on each axis while idle/walking) and the 124px drop while a weapon
 // swap is raising the new weapon into view.
+// M120: `layout` places it in a wider view -- see sk::ViewLayout. The
+// default is the device's own frame, where every x below is 0.
 void RenderWeaponViewmodel(sk::Backbuffer& backbuffer, const sk_bindings::WeaponViewmodel& vm,
-                            sk::SpriteArchive& sprites) {
+                            sk::SpriteArchive& sprites, const sk::ViewLayout& layout = {}) {
     sk_bindings::ViewmodelDraw draw = sk_bindings::ResolveViewmodelDraw(vm);
     if (!draw.visible || draw.spriteSlot < 0) return;
 #if SK_DEBUG_SUITE
@@ -2110,7 +2127,23 @@ void RenderWeaponViewmodel(sk::Backbuffer& backbuffer, const sk_bindings::Weapon
     // to the weapon's own base frame rather than blinking out.
     if (!sprite) sprite = sprites.GetSprite(vm.item->weaponSprite());
     if (!sprite) return;
-    backbuffer.Blit(draw.x, draw.y, *sprite);
+    // M120: a weapon to the right edge of a wide view, anything else in its
+    // middle. Decided from the item's own resting frame, not the frame on
+    // screen, so a swing never jumps between the two mid-animation: a
+    // weapon's resting canvas has its arm running off the right edge (every
+    // shipped one does), a spell's two hands sit either side of the centre.
+    int x0 = layout.centreX();
+    if (layout.wide()) {
+        const sk::Sprite* rest = sprites.GetSprite(vm.item->weaponSprite());
+        if (rest && rest->width == sk::Backbuffer::kWidth) {
+            bool touchesRight = false;
+            for (int y = 0; y < rest->height && !touchesRight; ++y) {
+                touchesRight = rest->opaque[static_cast<size_t>(y) * rest->width + rest->width - 1];
+            }
+            if (touchesRight) x0 = layout.rightX();
+        }
+    }
+    backbuffer.Blit(x0 + draw.x, draw.y, *sprite);
 }
 
 // M25: a plain outline rectangle -- ButtonExecutable's real ShowBorder
@@ -3033,8 +3066,14 @@ void RenderAutomapOverlay(sk::Backbuffer& backbuffer, const sk::Zone& zone,
 constexpr int kHurtOverlaySlot = 218;
 constexpr int kHurtFrameFlashRow = 1;
 
+// M120: `layout` places it in a wider view (sk::ViewLayout): the banner and
+// the hit slash centred, the vitals frame on the left edge. The default is
+// the device's own frame, where both offsets are 0.
 void RenderHud(sk::Backbuffer& backbuffer, const sk_bindings::PlayerExecutable& player,
-                sk::SpriteArchive& sprites, float cameraYaw, int hurtTimer = 0) {
+                sk::SpriteArchive& sprites, float cameraYaw, int hurtTimer = 0,
+                const sk::ViewLayout& layout = {}) {
+    const int cx = layout.centreX();
+    const int lx = layout.leftX();
     const sk::Sprite* compassTape = sprites.GetSprite(0);
     const sk::Sprite* compassFrame = sprites.GetSprite(1);
     if (compassTape && compassFrame) {
@@ -3046,14 +3085,14 @@ void RenderHud(sk::Backbuffer& backbuffer, const sk_bindings::PlayerExecutable& 
         // way round and against the automap marker, which had already
         // taken `-yaw` on the same field.
         int offset = (std::min)((CameraHeadingUnits(cameraYaw) >> 8) & 0xff, 254);
-        backbuffer.BlitRegion(52, 5, *compassTape, offset, 68);
-        backbuffer.Blit(0, 0, *compassFrame);
+        backbuffer.BlitRegion(cx + 52, 5, *compassTape, offset, 68);
+        backbuffer.Blit(cx, 0, *compassFrame);
     }
 
     auto drawHandIcon = [&](sk_bindings::ItemExecutable* handItem, int x) {
         if (!handItem) return;
         const sk::Sprite* icon = sprites.GetSprite(handItem->icon());
-        if (icon && icon->width <= 32 && icon->height <= 32) backbuffer.Blit(x, 5, *icon);
+        if (icon && icon->width <= 32 && icon->height <= 32) backbuffer.Blit(cx + x, 5, *icon);
     };
     drawHandIcon(player.leftItem(), 5);
     drawHandIcon(player.rightItem(), 139);
@@ -3066,7 +3105,7 @@ void RenderHud(sk::Backbuffer& backbuffer, const sk_bindings::PlayerExecutable& 
                               ? (std::max)(0.0f, static_cast<float>(value)) / static_cast<float>(maxValue)
                               : 0.0f;
         int fillWidth = static_cast<int>(fill->width * (std::min)(1.0f, fraction));
-        backbuffer.BlitRegion(10, y, *fill, 0, fillWidth);
+        backbuffer.BlitRegion(lx + 10, y, *fill, 0, fillWidth);
         return true;
     };
     bool health = drawVitalBar(162, 182, player.health(), player.maxHealth());
@@ -3118,11 +3157,11 @@ void RenderHud(sk::Backbuffer& backbuffer, const sk_bindings::PlayerExecutable& 
     }
     if (vitalsFrame && (health || magicka || fatigue)) {
         if (hurt) {
-            backbuffer.BlitRamped(0, 162, *vitalsFrame, hurtRamp);
+            backbuffer.BlitRamped(lx, 162, *vitalsFrame, hurtRamp);
             const sk::Sprite* slash = sprites.GetSprite(kHurtOverlaySlot);
-            if (slash) backbuffer.BlitBlend(0, 0, *slash);
+            if (slash) backbuffer.BlitBlend(cx, 0, *slash);
         } else {
-            backbuffer.Blit(0, 162, *vitalsFrame);
+            backbuffer.Blit(lx, 162, *vitalsFrame);
         }
     } else {
         // Fallback (missing asset): flat bars, same footprint the real
@@ -3134,7 +3173,7 @@ void RenderHud(sk::Backbuffer& backbuffer, const sk_bindings::PlayerExecutable& 
             filled = (std::min)(filled, kBarWidth);
             for (int dy = 0; dy < kBarHeight; ++dy) {
                 for (int dx = 0; dx < kBarWidth; ++dx) {
-                    backbuffer.SetPixel(10 + dx, y + dy,
+                    backbuffer.SetPixel(lx + 10 + dx, y + dy,
                                          dx < filled ? color : kPopupBorderColor);
                 }
             }
@@ -3287,6 +3326,15 @@ int WindowScale() {
     return 3;
 }
 
+// M120: whether the game opens in borderless fullscreen -- the default, as
+// in the sister ports' launchers. `SK_FULLSCREEN=0` (the launcher's window
+// sizes) opens a window of WindowScale() instead. F11 / Alt+Enter switch
+// either way at any time (platform/win32/window.h).
+bool StartFullscreen() {
+    const char* fromEnvironment = std::getenv("SK_FULLSCREEN");
+    return !(fromEnvironment && fromEnvironment[0] == '0');
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -3427,6 +3475,16 @@ int main(int argc, char** argv) {
     const std::string saveDirectory =
         userDirectory.empty() ? sk::ExecutableDirectory() : userDirectory;
     stack.SetSaveDirectory(saveDirectory);
+    // M119: the Options screen's Resolution and Frame Rate rows
+    // (engine/pc_settings.h). Their own file beside dragonstar.set, and
+    // attached this early so SK_DUMP_MENUS below draws the rows too.
+    sk::PcSettingsStore pcSettings(saveDirectory + "/" + sk::PcSettingsStore::kFileName);
+    if (pcSettings.Load()) {
+        std::printf("loaded %s (resolution %d, frame rate %d)\n",
+                    sk::PcSettingsStore::kFileName, pcSettings.settings().resolutionScale(),
+                    pcSettings.settings().frameRate());
+    }
+    stack.SetPcSettings(&pcSettings);
     // M21: Level.CreateEntity() needs entities.txt to resolve a typeId --
     // see level_executable.h's class comment.
     stack.level().SetEntityTypes(&entityTypes);
@@ -3526,6 +3584,30 @@ int main(int argc, char** argv) {
     sk::Window window(sk::Backbuffer::kWidth * windowScale,
                       sk::Backbuffer::kHeight * windowScale,
                       L"The Elder Scrolls Travels: Shadowkey");
+    // M120: a fixed Aspect Ratio gives the window its shape -- the height
+    // WindowScale() chose, the width the ratio's -- and Original gives it
+    // back the device's. Only when the setting changes (or fullscreen is
+    // left), and never to a fullscreen or maximized window, so a window the
+    // player has shaped by hand is left alone otherwise. Auto follows the
+    // window, so it has nothing to apply.
+    int appliedAspectIndex = -1;
+    bool appliedFullscreen = false;
+    auto applyAspectToWindow = [&]() {
+        const sk::PcSettings& settings = pcSettings.settings();
+        const bool fullscreen = window.IsFullscreen();
+        if (settings.aspectIndex == appliedAspectIndex && fullscreen == appliedFullscreen) return;
+        appliedAspectIndex = settings.aspectIndex;
+        appliedFullscreen = fullscreen;
+        if (fullscreen || window.IsMaximized() || settings.aspect() == sk::kAspectAuto) return;
+        int clientW = 0, clientH = 0;
+        window.ClientSize(&clientW, &clientH);
+        if (clientH <= 0) return;
+        const int viewWidth = sk::ViewWidthFor(settings, 0, 0);
+        const int wantW = (clientH * viewWidth + sk::Backbuffer::kHeight / 2) / sk::Backbuffer::kHeight;
+        if (wantW != clientW) window.SetClientSize(wantW, clientH);
+    };
+    applyAspectToWindow();
+    if (StartFullscreen()) window.SetFullscreen(true);
 
     sk::InputState input;
     // M80: `ParseActionText` has to name whichever key an action is bound
@@ -3583,6 +3665,15 @@ int main(int argc, char** argv) {
         }
     } configWriter{stack};
 
+    // M119: a controller presses the same slots the keyboard does
+    // (engine/gamepad_map.h), so a slot is held while *either* holds it --
+    // releasing W must not stop a walk the left stick is still making, nor
+    // the other way round. Each side keeps its own record; every change
+    // writes the OR of the two.
+    std::array<bool, static_cast<size_t>(sk::ButtonSlot::kCount)> keyHeld{};
+    sk::GamepadMapper padMapper;
+    sk::Gamepad gamepad;
+
     window.SetKeyCallback([&](int vkCode, bool down) {
 #if SK_DEBUG_SUITE
         // SK_DEBUG_SUITE (M68): first refusal on every key. When the console
@@ -3596,12 +3687,19 @@ int main(int argc, char** argv) {
         if (debugSuite.capturingInput() && down) return;
 #endif
         if (auto slot = sk::MapPcKeyToButtonSlot(vkCode)) {
-            input.SetButton(*slot, down);
+            keyHeld[static_cast<size_t>(*slot)] = down;
+            input.SetButton(*slot, down || padMapper.SlotHeld(*slot));
         }
     });
     // M69: alt-tabbing away with a key held would otherwise leave that slot
     // latched down forever -- see InputState::ReleaseAll.
-    window.SetFocusLostCallback([&]() { input.ReleaseAll(); });
+    // M119: the pad lets go too. It is not read again until the window is
+    // back in front, and a control still held then presses afresh.
+    window.SetFocusLostCallback([&]() {
+        keyHeld.fill(false);
+        padMapper.ReleaseAll([](sk::ButtonSlot, bool) {});
+        input.ReleaseAll();
+    });
     window.SetCharCallback([&](wchar_t ch) {
 #if SK_DEBUG_SUITE
         // SK_DEBUG_SUITE (M68): before the name-entry handler, so typing a
@@ -3856,10 +3954,162 @@ int main(int argc, char** argv) {
     window.SetOverlayCallback([&](sk::OverlaySurface& surface) { debugSuite.Render(surface); });
 #endif
 
-    window.RunMessageLoop([&]() {
-        if (window.ShouldClose()) return;
-        if (!clock.PollTick()) return;
+    // M119: the gameplay frame -- everything the 3D view draws, as a function
+    // of the camera and render lists it is handed, so the tick and the Frame
+    // Rate setting's in-between frames draw through one path. It has no side
+    // effects on the game: the tick has already advanced every animation,
+    // flash and timer, and chosen the prompt line, before it gets here.
+    //
+    // The scene goes through beginScene/endScene/presentScene, which at the
+    // original Resolution are the native Backbuffer, nothing, and a plain
+    // Present -- the pre-M119 frame exactly. Above it the scene is drawn at
+    // a whole multiple and the 2D layer composited over it
+    // (graphics/scene_upscale.h).
+    std::string gameplayLabel;  // the prompt line the tick chose, "" for none
+    // M119: the last two gameplay ticks' render lists (engine/
+    // frame_interpolation.h), and whether the tick that just ran ended in
+    // the 3D view -- only then is there anything to draw between ticks.
+    sk::FrameInterpolator gameplayFrames;
+    bool tickWasGameplay = false;
+    sk::HiResScene hiResScene;
+    int sceneScale = 1;
+    // M120: the view the frame is drawn at -- the device's 176 columns, or
+    // wider at a wider Aspect Ratio -- and, when wider, the 2D layer as wide
+    // as it (graphics/scene_upscale.h's ViewLayout). At the original shape
+    // the 2D layer is the Backbuffer itself.
+    sk::ViewLayout sceneLayout;
+    sk::Backbuffer wideLayer;
+    auto currentViewWidth = [&]() {
+        if (pcSettings.settings().originalAspect()) return sk::Backbuffer::kWidth;
+        int clientW = 0, clientH = 0;
+        window.ClientSize(&clientW, &clientH);
+        return sk::ViewWidthFor(pcSettings.settings(), clientW, clientH);
+    };
+    auto currentRenderScale = [&](int viewWidth) {
+        if (pcSettings.settings().originalResolution()) return 1;
+        int clientW = 0, clientH = 0;
+        window.ClientSize(&clientW, &clientH);
+        const sk::Viewport view =
+            sk::FitPreservingAspect(clientW, clientH, viewWidth, sk::Backbuffer::kHeight);
+        return sk::RenderScaleFor(pcSettings.settings(), view.height);
+    };
+    auto composited = [&]() { return sceneScale > 1 || sceneLayout.wide(); };
+    auto sceneLayer = [&]() -> sk::Backbuffer& {
+        return sceneLayout.wide() ? wideLayer : backbuffer;
+    };
+    auto beginScene = [&]() -> sk::Backbuffer& {
+        sceneLayout.width = currentViewWidth();
+        sceneScale = currentRenderScale(sceneLayout.width);
+        return composited() ? hiResScene.BeginScene(sceneScale, sceneLayout.width) : backbuffer;
+    };
+    auto endScene = [&]() {
+        if (composited()) hiResScene.EndScene(sceneLayer());
+    };
+    auto presentScene = [&]() {
+        // M120: a wide frame leaves its middle 176 columns in the Backbuffer
+        // too, so anything that later draws over "the last frame" finds the
+        // picture it would have found at the original shape.
+        if (sceneLayout.wide()) sk::CopyColumnOut(wideLayer, sceneLayout.centreX(), backbuffer);
+#if SK_DEBUG_SUITE
+        // SK_DEBUG_SUITE (M68): what the Resolution setting costs outside
+        // the renderer -- the composite and the GDI blit.
+        const sk::Backbuffer* frame = &backbuffer;
+        if (composited()) {
+            sk_debug::ScopedTimer composeTimer("compose");
+            frame = &hiResScene.Compose(sceneLayer());
+        }
+        sk_debug::ScopedTimer presentTimer("present");
+        window.Present(*frame);
+#else
+        window.Present(composited() ? hiResScene.Compose(sceneLayer()) : backbuffer);
+#endif
+    };
+    // The 2D layer over the scene. `overlays` adds what only the live 3D
+    // view draws -- the map, the coordinate readout, the prompt line.
+    //
+    // M120: at the original shape this is the pre-M120 sequence of draws,
+    // into the Backbuffer. Wider, the viewmodel and HUD draw straight into
+    // the wide layer at their ViewLayout places, and the overlays -- which
+    // are native-only code (text, the automap) and belong in the middle --
+    // draw into the Backbuffer holding the layer's middle 176 columns, which
+    // is then put back.
+    auto drawHudLayer = [&](const sk::Camera& camera, bool overlays) {
+        sk::Backbuffer& layer = sceneLayer();
+        // M79: **the viewmodel goes under the HUD, not over it.**
+        // `FUN_10029cb0`'s in-game arm draws them in one fixed
+        // order, and the viewmodel is first:
+        //
+        //     if (player->+0x204) FUN_1002b1b0(this);  // viewmodel
+        //     FUN_1002acd4(this);
+        //     if (screenMode == 5) {
+        //         FUN_1002ae88(this);   // the three vitals bars
+        //         FUN_1002ba64(this);   // the compass banner
+        //         FUN_1002bb54(this);   // the hand icons
+        //     }
+        //     if (player->+0x3a4) FUN_1002b430(this);   // the map
+        //
+        // This port drew the HUD first and the viewmodel over it,
+        // which nothing noticed while every viewmodel was a weapon
+        // held bottom-right. A spell's is a pair of hands that
+        // reaches across the bottom of the frame, so it covered the
+        // vitals bars -- reported the moment spells got their art.
+        // The same `if (player->+0x204)` guard is why the draw can
+        // dereference the active item without a null check.
+        RenderWeaponViewmodel(layer, gameWeaponViewmodel, spriteArchive, sceneLayout);
+        RenderHud(layer, stack.player(), spriteArchive, camera.yaw, stack.player().hurtTimer(),
+                  sceneLayout);
+        if (!overlays) return;
+        const bool column = sceneLayout.wide() && (gameMapOpen || stack.player().coordsEnabled() ||
+                                                   !gameplayLabel.empty());
+        if (column) sk::CopyColumnOut(wideLayer, sceneLayout.centreX(), backbuffer);
+        // M57: last, over everything -- the map is an overlay, and
+        // the game underneath it keeps running.
+        if (gameMapOpen) {
+            RenderAutomapOverlay(backbuffer, *gameZone, gameExplored, camera,
+                                  spriteArchive, strings, stack.currentLevelName());
+        }
+        // M95: `EnableCoords()` -- `FUN_1002c104`, drawn straight
+        // after the map in `FUN_10029cb0` (and so over it; unlike the
+        // HUD text layer it has no map-open early-out). Its whole
+        // body is `sprintf("%d %d", player->x, player->y)` handed
+        // to the UI text draw at (0x14, 0x14) in 0xfff, raw world
+        // units -- the same numbers a script's SetPosition takes,
+        // which is the point of a teleport cheat's readout.
+        if (stack.player().coordsEnabled()) {
+            char coords[32];
+            std::snprintf(coords, sizeof(coords), "%d %d",
+                          static_cast<int>(gameCamera.x), static_cast<int>(gameCamera.y));
+            sk::BitmapFont::DrawString(backbuffer, 0x14, 0x14, coords,
+                                        sk::PackRGB565(255, 255, 255));
+        }
+        if (!gameplayLabel.empty()) {
+            sk::BitmapFont::DrawString(backbuffer, 4, 34, gameplayLabel, kSelectedTextColor);
+        }
+        if (column) sk::CopyColumnIn(backbuffer, wideLayer, sceneLayout.centreX());
+    };
+    auto drawGameplayFrame = [&](const sk::Camera& camera,
+                                 const std::vector<sk::PlacedEntity>& entities,
+                                 const std::vector<sk::SpriteBillboard>& billboards) {
+        sk::Backbuffer& scene = beginScene();
+#if SK_DEBUG_SUITE
+        // SK_DEBUG_SUITE (M68): a counter and a timer around the 3D pass.
+        sk_debug::Count("render.frames");
+        {
+            sk_debug::ScopedTimer renderTimer("render3d");
+            zoneRenderer.Render(scene, *gameZone, camera, entities, &modelArchive, billboards);
+        }
+#else
+        zoneRenderer.Render(scene, *gameZone, camera, entities, &modelArchive, billboards);
+#endif
+        endScene();
+        drawHudLayer(camera, /*overlays=*/true);
+        presentScene();
+    };
 
+    // One 40ms engine tick: input, simulation, scripts -- and, at the
+    // original frame rate, the frame it produces. Everything below was the
+    // message loop's own body until M119 split out the pacing around it.
+    auto runTick = [&]() {
 #if SK_DEBUG_SUITE
         // SK_DEBUG_SUITE (M68): rolls the metrics frame and runs any command
         // queued by a keystroke since the last tick. Deliberately here, at
@@ -7801,6 +8051,9 @@ int main(int argc, char** argv) {
                     // back to the ordinary rasterizers).
                     pe.objectId = m.objectId;
                     pe.flashLevel = m.flash.row;
+                    // M119: its identity for the in-between frames (and its
+                    // attached weapon's, which copies this whole entry).
+                    pe.interpKey = reinterpret_cast<uintptr_t>(m.script.get());
                     frameEntities.push_back(pe);
                     // M46: the creature's SetAttachedWeapon() model, drawn
                     // as a second whole model sharing the body's transform
@@ -7856,6 +8109,7 @@ int main(int argc, char** argv) {
                     door.rotA = d.rotA;
                     door.rotB = d.rotB;
                     door.scale = d.scale;
+                    door.interpKey = reinterpret_cast<uintptr_t>(d.script.get());  // M119
                     frameEntities.push_back(door);
                 }
                 // M19: still-in-world pickups -- gamePickups shrinks as
@@ -7871,6 +8125,7 @@ int main(int argc, char** argv) {
                     pickup.rotA = p.rotA;  // M71
                     pickup.rotB = p.rotB;
                     pickup.scale = p.scale;
+                    pickup.interpKey = reinterpret_cast<uintptr_t>(p.script.get());  // M119
                     frameEntities.push_back(pickup);
                 }
                 // M49: arrows in flight. An arrow is a *model*, not a
@@ -7882,10 +8137,11 @@ int main(int argc, char** argv) {
                 // along +y) to this port's.
                 for (const sk_bindings::ArrowProjectile& shot : gameArrows) {
                     if (shot.modelIndex < 0) continue;
-                    frameEntities.push_back(
-                        {static_cast<float>(shot.x), static_cast<float>(shot.y),
-                          static_cast<float>(shot.z), shot.modelIndex,
-                          sk_bindings::PortYawFromEngineYaw(shot.yaw)});
+                    sk::PlacedEntity arrow{static_cast<float>(shot.x), static_cast<float>(shot.y),
+                                           static_cast<float>(shot.z), shot.modelIndex,
+                                           sk_bindings::PortYawFromEngineYaw(shot.yaw)};
+                    arrow.interpKey = kInterpArrowTag | shot.interpSerial;  // M119
+                    frameEntities.push_back(arrow);
                 }
                 // M79: the animated-sprite entities. Spell projectiles and
                 // scripted effects are one C++ class in the engine
@@ -7909,6 +8165,7 @@ int main(int argc, char** argv) {
                         sk_bindings::SpriteHalfExtent(sk_bindings::kProjectileDrawSize, art->height);
                     bb.blendMode = sk_bindings::kProjectileBlendMode;
                     bb.blendLevel = sk_bindings::kProjectileBlendLevel;
+                    bb.interpKey = kInterpSpellTag | shot.interpSerial;  // M119
                     frameBillboards.push_back(bb);
                 }
                 for (const sk_bindings::EffectEntity& fx : stack.level().effects()) {
@@ -7924,72 +8181,21 @@ int main(int argc, char** argv) {
                     bb.halfHeight = sk_bindings::EffectHalfHeight(fx, art->height);
                     bb.blendMode = fx.drawFlags;
                     bb.blendLevel = fx.scale;
+                    bb.interpKey = kInterpEffectTag | fx.interpSerial;  // M119
                     frameBillboards.push_back(bb);
                 }
 #if SK_DEBUG_SUITE
-                // SK_DEBUG_SUITE (M68): two counters and a timer around the
-                // 3D pass. Cheap enough to leave on -- one clock read either
-                // side and an integer add.
+                // SK_DEBUG_SUITE (M68): the render-list counters. The frame
+                // counter and the 3D-pass timer moved into
+                // drawGameplayFrame (M119), which runs once per drawn frame.
                 sk_debug::Count("render.entities", static_cast<long long>(frameEntities.size()));
                 sk_debug::Count("render.billboards",
                                 static_cast<long long>(frameBillboards.size()));
-                sk_debug::Count("render.frames");
-                {
-                    sk_debug::ScopedTimer renderTimer("render3d");
-                    zoneRenderer.Render(backbuffer, *gameZone, gameCamera, frameEntities,
-                                         &modelArchive, frameBillboards);
-                }
-#else
-                zoneRenderer.Render(backbuffer, *gameZone, gameCamera, frameEntities, &modelArchive,
-                                     frameBillboards);
 #endif
-                // M79: **the viewmodel goes under the HUD, not over it.**
-                // `FUN_10029cb0`'s in-game arm draws them in one fixed
-                // order, and the viewmodel is first:
-                //
-                //     if (player->+0x204) FUN_1002b1b0(this);  // viewmodel
-                //     FUN_1002acd4(this);
-                //     if (screenMode == 5) {
-                //         FUN_1002ae88(this);   // the three vitals bars
-                //         FUN_1002ba64(this);   // the compass banner
-                //         FUN_1002bb54(this);   // the hand icons
-                //     }
-                //     if (player->+0x3a4) FUN_1002b430(this);   // the map
-                //
-                // This port drew the HUD first and the viewmodel over it,
-                // which nothing noticed while every viewmodel was a weapon
-                // held bottom-right. A spell's is a pair of hands that
-                // reaches across the bottom of the frame, so it covered the
-                // vitals bars -- reported the moment spells got their art.
-                // The same `if (player->+0x204)` guard is why the draw can
-                // dereference the active item without a null check.
-                RenderWeaponViewmodel(backbuffer, gameWeaponViewmodel, spriteArchive);
                 // M86: `FUN_1002ae88` counts the hit timer down inside the
                 // HUD draw, so this port does too -- one place, and it
                 // stops while a menu holds the world.
                 stack.player().TickHurtTimer(sk_bindings::kAiFrameDeltaUnits);
-                RenderHud(backbuffer, stack.player(), spriteArchive, gameCamera.yaw,
-                           stack.player().hurtTimer());
-                // M57: last, over everything -- the map is an overlay, and
-                // the game underneath it keeps running.
-                if (gameMapOpen) {
-                    RenderAutomapOverlay(backbuffer, *gameZone, gameExplored, gameCamera,
-                                          spriteArchive, strings, stack.currentLevelName());
-                }
-                // M95: `EnableCoords()` -- `FUN_1002c104`, drawn straight
-                // after the map in `FUN_10029cb0` (and so over it; unlike the
-                // HUD text layer it has no map-open early-out). Its whole
-                // body is `sprintf("%d %d", player->x, player->y)` handed
-                // to the UI text draw at (0x14, 0x14) in 0xfff, raw world
-                // units -- the same numbers a script's SetPosition takes,
-                // which is the point of a teleport cheat's readout.
-                if (stack.player().coordsEnabled()) {
-                    char coords[32];
-                    std::snprintf(coords, sizeof(coords), "%d %d",
-                                  static_cast<int>(gameCamera.x), static_cast<int>(gameCamera.y));
-                    sk::BitmapFont::DrawString(backbuffer, 0x14, 0x14, coords,
-                                                sk::PackRGB565(255, 255, 255));
-                }
                 // Minimal combat/interact feedback -- name + HP of
                 // whatever *aggressive* monster is currently in the
                 // player's actual attack range/facing cone, else the
@@ -8030,11 +8236,11 @@ int main(int argc, char** argv) {
                     facingMonster = &m;
                     break;
                 }
+                gameplayLabel.clear();
                 if (facingMonster) {
-                    std::string label = facingMonster->script->name() + "  " +
-                                         std::to_string(facingMonster->script->currentHealth()) + "/" +
-                                         std::to_string(facingMonster->script->maxHealth());
-                    sk::BitmapFont::DrawString(backbuffer, 4, 34, label, kSelectedTextColor);
+                    gameplayLabel = facingMonster->script->name() + "  " +
+                                    std::to_string(facingMonster->script->currentHealth()) + "/" +
+                                    std::to_string(facingMonster->script->maxHealth());
                 } else {
                     DoorInstance* door = findNearbyDoor();
                     MonsterInstance* npc = findNearbyUsableMonster();
@@ -8051,12 +8257,18 @@ int main(int argc, char** argv) {
                     } else if (door) {
                         useTextId = door->script->useTextId();
                     }
-                    if (useTextId >= 0) {
-                        sk::BitmapFont::DrawString(backbuffer, 4, 34, strings.Get(useTextId),
-                                                    kSelectedTextColor);
-                    }
+                    if (useTextId >= 0) gameplayLabel = strings.Get(useTextId);
                 }
-                window.Present(backbuffer);
+                // M119: what this tick draws, handed to the frame loop. At the
+                // original frame rate it is drawn right here, the same frame
+                // the same tick always drew; above it, the loop draws it --
+                // and the frames between it and the next tick -- itself.
+                // Everything above this line is the tick's; everything in
+                // drawGameplayFrame is only drawing.
+                gameplayFrames.Push(gameCamera, frameEntities, frameBillboards);
+                tickWasGameplay = true;
+                if (!pcSettings.settings().originalFrameRate()) return;
+                drawGameplayFrame(gameCamera, frameEntities, frameBillboards);
                 return;
             }
         }
@@ -8129,13 +8341,14 @@ int main(int argc, char** argv) {
             // IsMenuActive() would keep answering true in the 3D view and
             // ratherb.s/pergan_asuul.s would never start their scenes.
             stack.SetMenuActive(false);
-            zoneRenderer.Render(backbuffer, *gameZone, gameCamera, gameEntities, &modelArchive);
+            // M119: through the Resolution setting's scene target, which at
+            // the original Resolution is the Backbuffer itself.
+            zoneRenderer.Render(beginScene(), *gameZone, gameCamera, gameEntities, &modelArchive);
+            endScene();
             // M79: the viewmodel under the HUD here too -- see the main
             // in-game draw above for FUN_10029cb0's own order.
-            RenderWeaponViewmodel(backbuffer, gameWeaponViewmodel, spriteArchive);
-            RenderHud(backbuffer, stack.player(), spriteArchive, gameCamera.yaw,
-                       stack.player().hurtTimer());
-            window.Present(backbuffer);
+            drawHudLayer(gameCamera, /*overlays=*/false);
+            presentScene();
             return;
         }
 
@@ -8292,12 +8505,86 @@ int main(int argc, char** argv) {
         }
 
         if (menu) {
+            // M119: a handler that just ran `ClearMenu(); Init();` (options.s's
+            // Mute and language rows) has dropped the Resolution and Frame
+            // Rate rows since the top of this tick -- put them back before
+            // the frame is drawn, not after it.
+            menu->EnsurePcSettingRows();
             RenderMenu(backbuffer, *menu, stack.player(), strings, spriteArchive);
         } else {
             backbuffer.Fill(kBackgroundColor);
         }
         window.Present(backbuffer);
+    };
+
+    // M119: the controller, read every time round the loop rather than once
+    // a tick, so a quick tap between two ticks still lands -- InputState
+    // latches the press until the tick consumes it, exactly as it does for
+    // a key. Ignored while the window is in the background (a pad, unlike a
+    // keyboard, reaches every window at once) and while the debug console
+    // has the keyboard.
+    auto pollGamepad = [&]() {
+        sk::PadFrame pad;
+        if (window.IsForeground()) pad = gamepad.Poll();
+#if SK_DEBUG_SUITE
+        if (debugSuite.capturingInput()) pad = sk::PadFrame{};
+#endif
+        padMapper.Update(pad, inGame && gameZone != nullptr, input,
+                         [&](sk::ButtonSlot slot, bool held) {
+                             input.SetButton(slot, held || keyHeld[static_cast<size_t>(slot)]);
+                         });
+    };
+
+    // M119: the Frame Rate setting's pacing. At Original the loop is what it
+    // always was -- a tick when one is due, and the tick draws its own frame.
+    // Above it, the gameplay frames between ticks are drawn here, from the
+    // last two ticks' render lists, `alpha` of the way from one to the next.
+    using FrameClock = std::chrono::steady_clock;
+    FrameClock::time_point lastTickAt = FrameClock::now();
+    FrameClock::time_point nextFrameAt = lastTickAt;
+    sk::Camera interpCamera;
+    std::vector<sk::PlacedEntity> interpEntities;
+    std::vector<sk::SpriteBillboard> interpBillboards;
+    auto frameDue = [&](FrameClock::time_point now, int fps) {
+        if (fps <= 0) return true;  // V-Sync (paced by the compositor) and Unlimited
+        const auto interval = std::chrono::duration_cast<FrameClock::duration>(
+            std::chrono::duration<double>(1.0 / fps));
+        if (now < nextFrameAt) return false;
+        nextFrameAt += interval;
+        if (nextFrameAt < now) nextFrameAt = now + interval;  // fell behind: resync
+        return true;
+    };
+
+    window.RunMessageLoop([&]() {
+        if (window.ShouldClose()) return;
+        pollGamepad();
+        applyAspectToWindow();  // M120: only acts when Aspect Ratio or fullscreen changed
+        const int fps = pcSettings.settings().frameRate();
+        const bool originalRate = fps == sk::kFrameRateOriginal;
+        sk::Window::SetFineTimer(!originalRate);
+
+        if (clock.PollTick()) {
+            lastTickAt = FrameClock::now();
+            tickWasGameplay = false;
+            runTick();
+            // Anything but gameplay breaks the chain: a menu, a load, a
+            // vignette. The next gameplay tick starts it again from itself.
+            if (!tickWasGameplay) gameplayFrames.Reset();
+            if (originalRate) return;
+        }
+        if (originalRate || !tickWasGameplay || !gameplayFrames.ready() || !gameZone ||
+            window.ShouldClose()) {
+            return;
+        }
+        const FrameClock::time_point now = FrameClock::now();
+        if (!frameDue(now, fps)) return;
+        const float alpha = std::chrono::duration<float>(now - lastTickAt).count() /
+                            std::chrono::duration<float>(sk::GameClock::kTickInterval).count();
+        gameplayFrames.Build(alpha, interpCamera, interpEntities, interpBillboards);
+        drawGameplayFrame(interpCamera, interpEntities, interpBillboards);
+        if (fps == sk::kFrameRateVSync) window.WaitForCompositor();
     });
+    sk::Window::SetFineTimer(false);
 
     return 0;
 }

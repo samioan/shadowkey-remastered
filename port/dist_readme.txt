@@ -56,13 +56,54 @@ CONTROLS
     Enter            confirm
     Esc              back / cancel. During play this opens the menu,
                      which is where Save Game lives.
+    F11 / Alt+Enter  fullscreen on / off
 
-All of these can be rebound in Options -> Customize Controls. The window
-size (2x, 3x or 4x) is set in the launcher, not in the game.
+All of these (but F11) can be rebound in Options -> Customize Controls. The
+game starts in borderless fullscreen; the launcher's display row picks that
+or a window (2x, 3x or 4x).
 
 These are the N-Gage's own controls mapped onto a keyboard: the original
 had a D-pad and a numeric keypad, so W/A/S/D is the D-pad and the rest of
 the keys stand in for the number keys.
+
+  Controller (any XInput pad: Xbox-style, or others through Steam Input)
+
+    Left stick       walk forward / backward, sidestep
+    Right stick      turn left / right, look up / down
+    D-pad            the N-Gage D-pad: walk and turn
+    A                use (confirm in menus)
+    B / Start        open the menu (back in menus)
+    Y                jump
+    RT / LT          attack with your right / left hand
+    RB / LB          cycle what is in your right / left hand
+    X                character manager
+    Back             map
+
+  The buttons follow Customize Controls: move Use to another key and A
+  still uses.
+
+
+DISPLAY SETTINGS
+----------------
+
+Options (from the main menu or the in-game menu) has three rows under the
+volume sliders. All start on Original, which is the game exactly as the
+N-Gage drew it. Enter or Right steps a row forward, Left steps it back.
+
+  Resolution     Original (176x208), Auto (match the window), or 2x to 6x.
+                 Sharpens the 3D view; the HUD, menus and sprites keep their
+                 original pixels.
+  Aspect Ratio   Original (the N-Gage's tall screen), Auto (fill the
+                 screen), 4:3, 16:10, 16:9 or 21:9. Widescreen without
+                 stretching: the view gets wider at the same height, so you
+                 see more to each side. The HUD keeps its original pixels --
+                 the compass centred, the vitals on the left edge, a weapon
+                 on the right -- and menus keep their original shape.
+  Frame Rate     Original (25), V-Sync, 30 to 240, or Unlimited. The game
+                 still runs at its original 25 steps a second, so nothing
+                 plays differently; the frames in between are interpolated.
+
+They are kept in user\pc_settings.cfg.
 
 
 WHERE YOUR FILES GO

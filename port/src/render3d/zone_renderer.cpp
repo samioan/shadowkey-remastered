@@ -4,6 +4,8 @@
 #include <cmath>
 #include <vector>
 
+#include "render3d/band_pool.h"
+
 namespace sk {
 
 // ---- M86: the hit-flash ramps and their timer ----
@@ -517,6 +519,18 @@ int FogLevelOf(float fogScalar) {
     return std::clamp(static_cast<int>(fogScalar) >> 12, 0, 15);
 }
 
+// M119: the rows [begin, end) of the target one pass may write. The whole
+// frame is one span at the original Resolution; above it the frame is split
+// into horizontal bands drawn on separate threads (see ZoneRenderer::Render),
+// and every rasterizer clips its row range to its band. Nothing in any of
+// them reads or writes a pixel outside the row it is on, so the bands never
+// touch, and each pixel is computed by exactly the arithmetic it would have
+// been in one pass.
+struct RowSpan {
+    int begin;
+    int end;
+};
+
 // 4-bit-per-channel color (docs/GRAPHICS_FORMAT.md), 0x0RGB -> RGB565 for
 // the backbuffer. `brightness` (M9, [0,1]-ish) scales each channel before
 // packing -- see Zone::BakeLighting()/LightLevelToBrightness().
@@ -545,7 +559,7 @@ int SurfaceDetailMask(float depthA, float depthB, float depthC) {
     return 0x78;
 }
 
-void RasterizeTriangle(Backbuffer& backbuffer, std::vector<float>& depthBuffer,
+void RasterizeTriangle(Backbuffer& backbuffer, std::vector<float>& depthBuffer, const RowSpan& rows,
                         const ProjectedVertex& a, const ProjectedVertex& b,
                         const ProjectedVertex& c, const Zone& zone, int textureIndex,
                         uint8_t hueGroup) {
@@ -555,9 +569,9 @@ void RasterizeTriangle(Backbuffer& backbuffer, std::vector<float>& depthBuffer,
 
     int minX = std::max(0, static_cast<int>(std::floor(std::min({a.sx, b.sx, c.sx}))));
     int maxX =
-        std::min(Backbuffer::kWidth - 1, static_cast<int>(std::ceil(std::max({a.sx, b.sx, c.sx}))));
-    int minY = std::max(0, static_cast<int>(std::floor(std::min({a.sy, b.sy, c.sy}))));
-    int maxY = std::min(Backbuffer::kHeight - 1,
+        std::min(backbuffer.width() - 1, static_cast<int>(std::ceil(std::max({a.sx, b.sx, c.sx}))));
+    int minY = std::max(rows.begin, static_cast<int>(std::floor(std::min({a.sy, b.sy, c.sy}))));
+    int maxY = std::min(rows.end - 1,
                          static_cast<int>(std::ceil(std::max({a.sy, b.sy, c.sy}))));
     if (minX > maxX || minY > maxY) return;
 
@@ -574,7 +588,7 @@ void RasterizeTriangle(Backbuffer& backbuffer, std::vector<float>& depthBuffer,
 
             float invW = l0 * a.invW + l1 * b.invW + l2 * c.invW;
             if (invW <= 0.0f) continue;
-            int depthIndex = py * Backbuffer::kWidth + px;
+            int depthIndex = py * backbuffer.width() + px;
             if (invW <= depthBuffer[static_cast<size_t>(depthIndex)]) continue;  // farther, skip
 
             float u = (l0 * a.u + l1 * b.u + l2 * c.u) / invW;
@@ -635,6 +649,7 @@ void RasterizeTriangle(Backbuffer& backbuffer, std::vector<float>& depthBuffer,
 // the M35 light/fog factor. Skipping the cutout is faithful rather than
 // load-bearing -- no shipped `.zsk` skin contains a single 0x0f0f texel.
 void RasterizeModelTriangle(Backbuffer& backbuffer, std::vector<float>& depthBuffer,
+                            const RowSpan& rows,
                              const ProjectedVertex& a, const ProjectedVertex& b,
                              const ProjectedVertex& c, const Model& model, int skinIndex,
                              bool asSkybox = false, uint8_t* objectIds = nullptr,
@@ -662,9 +677,9 @@ void RasterizeModelTriangle(Backbuffer& backbuffer, std::vector<float>& depthBuf
 
     int minX = std::max(0, static_cast<int>(std::floor(std::min({a.sx, b.sx, c.sx}))));
     int maxX =
-        std::min(Backbuffer::kWidth - 1, static_cast<int>(std::ceil(std::max({a.sx, b.sx, c.sx}))));
-    int minY = std::max(0, static_cast<int>(std::floor(std::min({a.sy, b.sy, c.sy}))));
-    int maxY = std::min(Backbuffer::kHeight - 1,
+        std::min(backbuffer.width() - 1, static_cast<int>(std::ceil(std::max({a.sx, b.sx, c.sx}))));
+    int minY = std::max(rows.begin, static_cast<int>(std::floor(std::min({a.sy, b.sy, c.sy}))));
+    int maxY = std::min(rows.end - 1,
                          static_cast<int>(std::ceil(std::max({a.sy, b.sy, c.sy}))));
     if (minX > maxX || minY > maxY) return;
 
@@ -681,7 +696,7 @@ void RasterizeModelTriangle(Backbuffer& backbuffer, std::vector<float>& depthBuf
 
             float invW = l0 * a.invW + l1 * b.invW + l2 * c.invW;
             if (invW <= 0.0f) continue;
-            int depthIndex = py * Backbuffer::kWidth + px;
+            int depthIndex = py * backbuffer.width() + px;
             if (!asSkybox && invW <= depthBuffer[static_cast<size_t>(depthIndex)]) {
                 continue;  // farther, skip
             }
@@ -755,6 +770,187 @@ void RasterizeModelTriangle(Backbuffer& backbuffer, std::vector<float>& depthBuf
     }
 }
 
+// M119: a billboard after projection -- what FillBillboard needs to draw it.
+struct BillboardQuad {
+    const Sprite* sprite;
+    float x0, x1, y0, y1, spanX, spanY, invW;
+    int blendMode, level;
+};
+
+// M119: the second half of the billboard blit -- everything after the quad
+// is projected -- split out so a recorded frame can replay it per band.
+void FillBillboard(Backbuffer& backbuffer, std::vector<float>& depthBuffer, const RowSpan& rows,
+                   const BillboardQuad& q) {
+    const Sprite* sprite = q.sprite;
+    const float x0 = q.x0, x1 = q.x1, y0 = q.y0, y1 = q.y1;
+    const float spanX = q.spanX, spanY = q.spanY, invW = q.invW;
+    const int blendMode = q.blendMode, level = q.level;
+    const int px0 = std::max(0, static_cast<int>(std::floor(x0)));
+    const int px1 = std::min(backbuffer.width(), static_cast<int>(std::ceil(x1)));
+    const int py0 = std::max(rows.begin, static_cast<int>(std::floor(y0)));
+    const int py1 = std::min(rows.end, static_cast<int>(std::ceil(y1)));
+
+    for (int py = py0; py < py1; ++py) {
+        const int sy = static_cast<int>((static_cast<float>(py) + 0.5f - y0) / spanY *
+                                         static_cast<float>(sprite->height));
+        if (sy < 0 || sy >= sprite->height) continue;
+        uint16_t* row = backbuffer.Row(py);
+        for (int px = px0; px < px1; ++px) {
+            const int sx = static_cast<int>((static_cast<float>(px) + 0.5f - x0) / spanX *
+                                             static_cast<float>(sprite->width));
+            if (sx < 0 || sx >= sprite->width) continue;
+            const size_t si = static_cast<size_t>(sy) * static_cast<size_t>(sprite->width) +
+                              static_cast<size_t>(sx);
+            // The real blit's own colour-key test (`!= 0x0f0f`), which the
+            // decoder already turned into this mask.
+            if (!sprite->opaque[si]) continue;
+            const size_t di = static_cast<size_t>(py) * backbuffer.width() + static_cast<size_t>(px);
+            if (invW <= depthBuffer[di]) continue;  // something nearer is already there
+            const uint16_t src = sprite->pixels[si];
+            uint16_t out = src;
+            if (blendMode == 1) {
+                // `(src >> k & mask) + (dst >> k & mask)` on 4-bit channels
+                // in the original; the same weights on this port's RGB565.
+                const uint16_t dst = row[px];
+                auto mix = [&](int shift, int mask) {
+                    const int s = (src >> shift) & mask;
+                    const int d = (dst >> shift) & mask;
+                    int v = 0;
+                    if (level == 1) v = (s + 3 * d) / 4;
+                    else if (level == 2) v = (s + d) / 2;
+                    else v = (3 * s + d) / 4;
+                    return v > mask ? mask : v;
+                };
+                out = static_cast<uint16_t>((mix(11, 0x1f) << 11) | (mix(5, 0x3f) << 5) |
+                                             mix(0, 0x1f));
+            }
+            row[px] = out;
+            depthBuffer[di] = invW;
+        }
+    }
+}
+
+// M119: where the submit functions below send each primitive once it is
+// projected.
+//
+// A *direct* sink rasterizes it on the spot over the whole frame -- the
+// single pass this renderer always was, and still is at the original
+// 176x208. A *recording* sink stores it instead, in submission order, so
+// that at a higher Resolution the transform, clip and projection happen
+// once and the horizontal bands (see ZoneRenderer::Render) only rasterize:
+// each band replays the list over its own rows. Replaying calls exactly the
+// rasterizer the direct sink would have, with exactly the values it would
+// have passed, so a band's pixels are the one-pass frame's pixels.
+class TriangleSink {
+public:
+    TriangleSink(Backbuffer& backbuffer, std::vector<float>& depthBuffer, bool recording)
+        : backbuffer_(backbuffer), depthBuffer_(depthBuffer), recording_(recording) {}
+
+    int width() const { return backbuffer_.width(); }
+    int height() const { return backbuffer_.height(); }
+
+    void Surface(const ProjectedVertex& a, const ProjectedVertex& b, const ProjectedVertex& c,
+                 const Zone& zone, int textureIndex, uint8_t hueGroup) {
+        if (!recording_) {
+            RasterizeTriangle(backbuffer_, depthBuffer_, FullFrame(), a, b, c, zone, textureIndex,
+                              hueGroup);
+            return;
+        }
+        surfaces_.push_back(SurfaceTri{a, b, c, &zone, textureIndex, hueGroup});
+        Record(Kind::Surface, surfaces_.size() - 1, a, b, c);
+    }
+
+    void ModelTriangle(const ProjectedVertex& a, const ProjectedVertex& b,
+                       const ProjectedVertex& c, const Model& model, int skinIndex, bool asSkybox,
+                       uint8_t* objectIds, uint8_t objectId, int flashLevel, const Zone* zone) {
+        if (!recording_) {
+            RasterizeModelTriangle(backbuffer_, depthBuffer_, FullFrame(), a, b, c, model,
+                                   skinIndex, asSkybox, objectIds, objectId, flashLevel, zone);
+            return;
+        }
+        models_.push_back(
+            ModelTri{a, b, c, &model, skinIndex, asSkybox, objectIds, objectId, flashLevel, zone});
+        Record(Kind::Model, models_.size() - 1, a, b, c);
+    }
+
+    void Billboard(const BillboardQuad& q) {
+        if (!recording_) {
+            FillBillboard(backbuffer_, depthBuffer_, FullFrame(), q);
+            return;
+        }
+        quads_.push_back(q);
+        commands_.push_back(Command{Kind::Billboard, quads_.size() - 1,
+                                    static_cast<int>(std::floor(q.y0)),
+                                    static_cast<int>(std::ceil(q.y1))});
+    }
+
+    // Draws every recorded primitive, in order, clipped to `rows`.
+    void Replay(const RowSpan& rows) const {
+        for (const Command& cmd : commands_) {
+            if (cmd.maxY < rows.begin || cmd.minY >= rows.end) continue;
+            switch (cmd.kind) {
+                case Kind::Surface: {
+                    const SurfaceTri& t = surfaces_[cmd.index];
+                    RasterizeTriangle(backbuffer_, depthBuffer_, rows, t.a, t.b, t.c, *t.zone,
+                                      t.textureIndex, t.hueGroup);
+                    break;
+                }
+                case Kind::Model: {
+                    const ModelTri& t = models_[cmd.index];
+                    RasterizeModelTriangle(backbuffer_, depthBuffer_, rows, t.a, t.b, t.c,
+                                           *t.model, t.skinIndex, t.asSkybox, t.objectIds,
+                                           t.objectId, t.flashLevel, t.zone);
+                    break;
+                }
+                case Kind::Billboard:
+                    FillBillboard(backbuffer_, depthBuffer_, rows, quads_[cmd.index]);
+                    break;
+            }
+        }
+    }
+
+private:
+    enum class Kind : uint8_t { Surface, Model, Billboard };
+    struct Command {
+        Kind kind;
+        size_t index;
+        int minY, maxY;  // a conservative row range, for skipping whole bands
+    };
+    struct SurfaceTri {
+        ProjectedVertex a, b, c;
+        const Zone* zone;
+        int textureIndex;
+        uint8_t hueGroup;
+    };
+    struct ModelTri {
+        ProjectedVertex a, b, c;
+        const Model* model;
+        int skinIndex;
+        bool asSkybox;
+        uint8_t* objectIds;
+        uint8_t objectId;
+        int flashLevel;
+        const Zone* zone;
+    };
+
+    RowSpan FullFrame() const { return RowSpan{0, backbuffer_.height()}; }
+
+    void Record(Kind kind, size_t index, const ProjectedVertex& a, const ProjectedVertex& b,
+                const ProjectedVertex& c) {
+        commands_.push_back(Command{kind, index,
+                                    static_cast<int>(std::floor(std::min({a.sy, b.sy, c.sy}))),
+                                    static_cast<int>(std::ceil(std::max({a.sy, b.sy, c.sy})))});
+    }
+
+    Backbuffer& backbuffer_;
+    std::vector<float>& depthBuffer_;
+    bool recording_;
+    std::vector<Command> commands_;
+    std::vector<SurfaceTri> surfaces_;
+    std::vector<ModelTri> models_;
+    std::vector<BillboardQuad> quads_;
+};
+
 // Transforms and rasterizes every face of one model instance, positioned
 // by a tile-space X/Y offset plus a raw-world-unit Z offset -- shared by
 // M8's per-entity placement loop and M70's skybox (which passes the
@@ -772,8 +968,7 @@ void RasterizeModelTriangle(Backbuffer& backbuffer, std::vector<float>& depthBuf
 // open. Zero for every caller before M15 (the skybox, and every entity
 // but a live door), so this is purely additive -- cosEntityYaw=1/
 // sinEntityYaw=0 reduces the new rotation to a no-op.
-void SubmitModel(Backbuffer& backbuffer, std::vector<float>& depthBuffer, const Zone& zone,
-                  const Model& model, int skinIndex, float offsetTileX, float offsetTileY,
+void SubmitModel(TriangleSink& sink, const Zone& zone, const Model& model, int skinIndex, float offsetTileX, float offsetTileY,
                   float offsetZ, float camX, float camY, float camZ, float cosYaw, float sinYaw,
                   float cosPitch, float sinPitch, float focalX, float focalY,
                   float entityYaw = 0.0f, float scale = 1.0f, int frameIndex = 0,
@@ -896,8 +1091,8 @@ void SubmitModel(Backbuffer& backbuffer, std::vector<float>& depthBuffer, const 
         ProjectedVertex pvc[4];
         for (int i = 0; i < clippedCount; ++i) {
             pvc[i].invW = 1.0f / clipped[i].forward;
-            pvc[i].sx = Backbuffer::kWidth * 0.5f + clipped[i].right * focalX * pvc[i].invW;
-            pvc[i].sy = Backbuffer::kHeight * 0.5f - clipped[i].up * focalY * pvc[i].invW;
+            pvc[i].sx = sink.width() * 0.5f + clipped[i].right * focalX * pvc[i].invW;
+            pvc[i].sy = sink.height() * 0.5f - clipped[i].up * focalY * pvc[i].invW;
             pvc[i].depthWorld = clipped[i].forward * kTileScale;
             pvc[i].u = clipped[i].u * pvc[i].invW;
             pvc[i].v = clipped[i].v * pvc[i].invW;
@@ -905,8 +1100,8 @@ void SubmitModel(Backbuffer& backbuffer, std::vector<float>& depthBuffer, const 
             pvc[i].fog = FogScalar(pvc[i].depthWorld);  // M89
         }
         for (int i = 1; i + 1 < clippedCount; ++i) {
-            RasterizeModelTriangle(backbuffer, depthBuffer, pvc[0], pvc[i], pvc[i + 1], model,
-                                    skinIndex, asSkybox, objectIds, objectId, flashLevel, &zone);
+            sink.ModelTriangle(pvc[0], pvc[i], pvc[i + 1], model, skinIndex, asSkybox, objectIds,
+                               objectId, flashLevel, &zone);
         }
     }
 }
@@ -921,7 +1116,7 @@ void SubmitModel(Backbuffer& backbuffer, std::vector<float>& depthBuffer, const 
 // pipeline. Reproduced with this port's own `invW` convention (larger is
 // nearer), which makes the test the same comparison the model rasteriser
 // already uses.
-void SubmitBillboard(Backbuffer& backbuffer, std::vector<float>& depthBuffer,
+void SubmitBillboard(TriangleSink& sink,
                       const SpriteBillboard& bb, float camX, float camY, float camZ,
                       float cosYaw, float sinYaw, float cosPitch, float sinPitch, float focalX,
                       float focalY) {
@@ -958,56 +1153,14 @@ void SubmitBillboard(Backbuffer& backbuffer, std::vector<float>& depthBuffer,
     const float invW = 1.0f / forward;
     // The two corners the engine projects, and only those two: a billboard
     // is axis-aligned on screen, so everything between them is a stretch.
-    const float x0 = Backbuffer::kWidth * 0.5f + (right - halfW) * focalX * invW;
-    const float x1 = Backbuffer::kWidth * 0.5f + (right + halfW) * focalX * invW;
-    const float y1 = Backbuffer::kHeight * 0.5f - up * focalY * invW;  // bottom
-    const float y0 = Backbuffer::kHeight * 0.5f - (up + 2.0f * halfH) * focalY * invW;  // top
+    const float x0 = sink.width() * 0.5f + (right - halfW) * focalX * invW;
+    const float x1 = sink.width() * 0.5f + (right + halfW) * focalX * invW;
+    const float y1 = sink.height() * 0.5f - up * focalY * invW;  // bottom
+    const float y0 = sink.height() * 0.5f - (up + 2.0f * halfH) * focalY * invW;  // top
     const float spanX = x1 - x0, spanY = y1 - y0;
     if (spanX <= 0.0f || spanY <= 0.0f) return;
 
-    const int px0 = std::max(0, static_cast<int>(std::floor(x0)));
-    const int px1 = std::min(Backbuffer::kWidth, static_cast<int>(std::ceil(x1)));
-    const int py0 = std::max(0, static_cast<int>(std::floor(y0)));
-    const int py1 = std::min(Backbuffer::kHeight, static_cast<int>(std::ceil(y1)));
-
-    for (int py = py0; py < py1; ++py) {
-        const int sy = static_cast<int>((static_cast<float>(py) + 0.5f - y0) / spanY *
-                                         static_cast<float>(sprite->height));
-        if (sy < 0 || sy >= sprite->height) continue;
-        uint16_t* row = backbuffer.Row(py);
-        for (int px = px0; px < px1; ++px) {
-            const int sx = static_cast<int>((static_cast<float>(px) + 0.5f - x0) / spanX *
-                                             static_cast<float>(sprite->width));
-            if (sx < 0 || sx >= sprite->width) continue;
-            const size_t si = static_cast<size_t>(sy) * static_cast<size_t>(sprite->width) +
-                              static_cast<size_t>(sx);
-            // The real blit's own colour-key test (`!= 0x0f0f`), which the
-            // decoder already turned into this mask.
-            if (!sprite->opaque[si]) continue;
-            const size_t di = static_cast<size_t>(py) * Backbuffer::kWidth + static_cast<size_t>(px);
-            if (invW <= depthBuffer[di]) continue;  // something nearer is already there
-            const uint16_t src = sprite->pixels[si];
-            uint16_t out = src;
-            if (blendMode == 1) {
-                // `(src >> k & mask) + (dst >> k & mask)` on 4-bit channels
-                // in the original; the same weights on this port's RGB565.
-                const uint16_t dst = row[px];
-                auto mix = [&](int shift, int mask) {
-                    const int s = (src >> shift) & mask;
-                    const int d = (dst >> shift) & mask;
-                    int v = 0;
-                    if (level == 1) v = (s + 3 * d) / 4;
-                    else if (level == 2) v = (s + d) / 2;
-                    else v = (3 * s + d) / 4;
-                    return v > mask ? mask : v;
-                };
-                out = static_cast<uint16_t>((mix(11, 0x1f) << 11) | (mix(5, 0x3f) << 5) |
-                                             mix(0, 0x1f));
-            }
-            row[px] = out;
-            depthBuffer[di] = invW;
-        }
-    }
+    sink.Billboard(BillboardQuad{sprite, x0, x1, y0, y1, spanX, spanY, invW, blendMode, level});
 }
 
 }  // namespace
@@ -1025,9 +1178,18 @@ void ZoneRenderer::Render(Backbuffer& backbuffer, const Zone& zone, const Camera
     // M85: the object-ID buffer starts every frame empty, the way
     // `FUN_10015354`'s `memset(engine+0x5b8, 0, 0x8f00)` clears the real
     // one (0x8f00 == 176 * 208) before the scene is drawn.
-    std::fill(m_ObjectIds.begin(), m_ObjectIds.end(), static_cast<uint8_t>(0));
-    std::vector<float> depthBuffer(static_cast<size_t>(Backbuffer::kWidth) * Backbuffer::kHeight,
-                                    0.0f);
+    //
+    // M119: both per-pixel planes are the size of whatever this frame is
+    // drawn into -- the native 176x208, or a whole multiple of it when the
+    // player picked a higher Resolution -- and the depth plane is kept
+    // between frames instead of reallocated. Every entry of both is reset
+    // here, so a frame never sees the previous one's values either way.
+    const size_t pixelCount = static_cast<size_t>(backbuffer.width()) * backbuffer.height();
+    m_ObjectIds.assign(pixelCount, static_cast<uint8_t>(0));
+    m_IdWidth = backbuffer.width();
+    m_IdHeight = backbuffer.height();
+    std::vector<float>& depthBuffer = m_DepthBuffer;
+    depthBuffer.assign(pixelCount, 0.0f);
 
     // M41: the real visible-tile set. `TileGrid_RaycastVisibility` runs
     // once per frame in the original, immediately before its face-drawing
@@ -1050,199 +1212,236 @@ void ZoneRenderer::Render(Backbuffer& backbuffer, const Zone& zone, const Camera
     // 208/176, which makes the horizontal focal length 88 * 208/176 = 104
     // as well. At the real `fovY` (kEngineFovY, pi/2) the expression below
     // evaluates to exactly 104, i.e. `0x6800 >> 8`. See camera.h.
-    float focalY = (Backbuffer::kHeight * 0.5f) / std::tan(camera.fovY * 0.5f);
+    float focalY = (backbuffer.height() * 0.5f) / std::tan(camera.fovY * 0.5f);
     float focalX = focalY;
 
-    // M70: the skybox (<zone>.zsk), first and underneath everything.
-    //
-    // In `Render3DScene` this draw and the flat background fill above are
-    // the two arms of one `if` -- the sky *is* the frame clear -- so it runs
-    // before any wall or actor, writes no depth, and takes no light term.
-    // zone_renderer.h's M70 block has the four independent lines of
-    // evidence that `.zsk` is a skybox, and its kSkyboxScale block the three
-    // placement constants.
-    //
-    // Anchoring it to the camera is the entire behavioural difference from
-    // M11, and it is a translation the port has to write explicitly because
-    // it transforms world-space vertices, where the original transforms
-    // camera-space ones and simply never adds a camera position: passing the
-    // camera's own X/Y/Z as the instance offset makes every sky vertex
-    // camera-relative, which is the same thing.
-    const Model* sky = drawSkybox ? zone.SkyMesh() : nullptr;
-    if (sky) {
-        SubmitModel(backbuffer, depthBuffer, zone, *sky, /*skinIndex=*/0, camX, camY,
-                    camera.z + kSkyboxUpOffset, camX, camY, camZ, cosYaw, sinYaw, cosPitch,
-                    sinPitch, focalX, focalY, /*entityYaw=*/0.0f, kSkyboxScale, /*frameIndex=*/0,
-                    /*asSkybox=*/true);
-    }
-
-    for (const Face& face : faces) {
-        const SurfaceRecord& sur = zone.surface(face.surIndex);
-
-        ViewVertex vv[4];
-        for (int i = 0; i < 4; ++i) {
-            // Raw world units -- the frame the real engine does all of
-            // this in (positions, the .sur UV offsets, and the half-tile
-            // corner nudge are all expressed in it).
-            float worldX = face.corners[i].x * kTileScale;
-            float worldY = face.corners[i].y * kTileScale;
-            float worldZ = face.corners[i].z;
-            // Real half-tile vertex nudge (ZcpEntry::cornerNudge) -- moves
-            // the vertex itself, so it feeds both the projection below and
-            // the UV computation, exactly as in BuildAndProject.
-            zone.ApplyCornerNudge(&worldX, &worldY);
-
-            float rx = worldX / kTileScale - camX;
-            float ry = worldY / kTileScale - camY;
-            float rz = worldZ / kTileScale - camZ;
-
-            vv[i].right = rx * sinYaw - ry * cosYaw;
-            float flatForward = rx * cosYaw + ry * sinYaw;
-            vv[i].forward = flatForward * cosPitch - rz * sinPitch;
-            vv[i].up = rz * cosPitch + flatForward * sinPitch;
-
-            zone.SurfaceUv(sur, face.orient, worldX, worldY, worldZ, &vv[i].u, &vv[i].v);
-
-            // Real per-vertex light (SurfaceFace_BuildAndProject):
-            //     vertex.light = engine+0x484 + cellLight - (viewDepth >> 1)
-            // clamped to [0x400, 0x3f00]. `engine+0x484` is read exactly
-            // once in the entire binary (this one site) and written
-            // nowhere -- a whole-program decompiled grep this session
-            // found zero writers -- so on EKA1's zeroed heap it is
-            // effectively 0, the same "never explicitly initialised"
-            // pattern already established for the eye-height field
-            // (render3d/camera.h). The `- depth/2` term is the engine's
-            // real distance fog; the port had no distance falloff at all
-            // before this.
-            int cellTx = static_cast<int>(std::floor(worldX / kTileScale));
-            int cellTy = static_cast<int>(std::floor(worldY / kTileScale));
-            float cellLight = static_cast<float>(zone.CellAt(cellTx, cellTy).lightLevel);
-            float depthWorld = vv[i].forward * kTileScale;
-            vv[i].light = std::clamp(cellLight - depthWorld * 0.5f,
-                                      static_cast<float>(kMinLightLevel),
-                                      static_cast<float>(kMaxLightLevel));
-        }
-
-        // M66: clip and draw the quad as the two triangles it has always
-        // *been* drawn as, instead of clipping it once as a four-sided
-        // polygon and fanning the result.
-        //
-        // This is the fix for the long-standing `ZoneRenderer::Render`
-        // crash (docs/PORT_ROADMAP.md). The quad handed to the clipper is
-        // not planar -- a tile's floor and ceiling each carry four
-        // independent corner heights -- so once the camera could pitch, the
-        // near-plane test could alternate in/out around its four corners
-        // and ClipNear could return **six** vertices into a five-entry
-        // buffer, writing past the end of both stack arrays below. The
-        // overrun lands on this function's own frame, so the fault surfaces
-        // as a wild read a line or two later rather than at the write that
-        // caused it, which is why the recorded symptom was an access
-        // violation inside this projection loop.
-        //
-        // Splitting first also makes the clip *correct* rather than merely
-        // safe. Triangles are planar by construction, so ClipNear's
-        // `count + 1` bound genuinely holds for them, and the two triangles
-        // below are the exact pair the old fan produced for an unclipped
-        // quad -- so a flat tile renders identically (u, v and light are
-        // affine within a plane, so barycentric interpolation does not care
-        // where the split runs). For a *sloped* tile the old code clipped
-        // a surface that neither triangle actually covered; this clips the
-        // geometry that gets rasterized.
-        //
-        // What visibly changes, measured rather than assumed: twelve of the
-        // fourteen tracked `.ppm` render dumps come out byte-identical
-        // across this change, and the two that move (the entity-render
-        // views at yaw 0 and 270) move *entirely* because of
-        // SurfaceDetailMask. That mask is chosen per triangle from its
-        // three vertex depths, so changing which triangles exist near the
-        // near plane can move a face into a different detail band. Pinning
-        // the mask to a constant makes even those two byte-identical --
-        // which is the check that says the difference is texel precision on
-        // near-camera surfaces and nothing else. It is also the better
-        // answer: the band is now picked from the triangles actually being
-        // rasterized.
-        constexpr int kQuadTriangles[2][3] = {{0, 1, 2}, {0, 2, 3}};
-        for (const auto& tri : kQuadTriangles) {
-            ViewVertex vv3[3] = {vv[tri[0]], vv[tri[1]], vv[tri[2]]};
-
-            ViewVertex clipped[4];
-            int clippedCount = ClipNear(vv3, 3, clipped, 4);
-            if (clippedCount < 3) continue;
-
-            ProjectedVertex pv[4];
-            for (int i = 0; i < clippedCount; ++i) {
-                pv[i].invW = 1.0f / clipped[i].forward;
-                pv[i].sx = Backbuffer::kWidth * 0.5f + clipped[i].right * focalX * pv[i].invW;
-                pv[i].sy = Backbuffer::kHeight * 0.5f - clipped[i].up * focalY * pv[i].invW;
-                pv[i].depthWorld = clipped[i].forward * kTileScale;
-                pv[i].u = clipped[i].u * pv[i].invW;
-                pv[i].v = clipped[i].v * pv[i].invW;
-                pv[i].light = clipped[i].light;
-                pv[i].fog = FogScalar(pv[i].depthWorld);  // M89
-            }
-            for (int i = 1; i + 1 < clippedCount; ++i) {
-                RasterizeTriangle(backbuffer, depthBuffer, pv[0], pv[i], pv[i + 1], zone,
-                                   sur.textureIndex, face.hueGroup);
-            }
-        }
-    }
-
-    // M8: placed entities (props, monsters, doors, ...) resolved via
-    // world/entity_types.h + world/model_archive.h -- see this class's
-    // header comment for what's simplified here (frame 0/skin 0 only,
-    // no orientation, no distance culling).
+    // M119: every model the entities name, resolved here and not in the
+    // passes below. The archive parses a model the first time it is asked
+    // for it, which is a write, and the passes may run on several threads.
+    std::vector<const Model*> entityModels(entities.size(), nullptr);
     if (models) {
-        for (const PlacedEntity& pe : entities) {
-            const Model* model = models->GetModel(pe.modelArchiveIndex);
-            if (!model) continue;
-
-            // Position/axis assumptions (undocumented in MODEL_FORMAT.md,
-            // see zone_renderer.h): the model's local-space vertex units
-            // match the .ent record's world-unit position scale
-            // directly (no extra per-instance scale factor -- unverified,
-            // simplest hypothesis absent contrary evidence), so the same
-            // /kTileScale conversion used for x/y tile-float coordinates
-            // above applies to vertex x/y too; z stays in raw world
-            // units like the tile faces' heights do.
-            //
-            // The model's local axes are Y-up (local Y -> world Z),
-            // *not* a direct X/Y/Z passthrough -- confirmed empirically
-            // this session: a real barrel model's bounding box is
-            // roughly circular in local X/Z (a barrel's round footprint)
-            // and elongated in local Y (its height), which only makes
-            // sense if local Y is "up." A real door model's bounding box
-            // is thin in local Z, wide in local X, and tall in local Y --
-            // consistent with the same convention (a door is a thin
-            // panel, tall along its up axis).
-            float baseTileX = pe.x / kTileScale;
-            float baseTileY = pe.y / kTileScale;
-            // M71: `Actor3D_TransformAndSubmitModel`'s own `-0x40` -- see
-            // kEntityDrawZOffset. The offset is a *render* constant, not a
-            // position one, so it deliberately lives here rather than in
-            // the placement: collision, tile stamps, use-range and the
-            // automap all keep reading the .ent Z the engine stores.
-            float baseZ = pe.z + kEntityDrawZOffset;
-
-            // Real per-instance skin/scale (PlacedEntity), clamped to what
-            // this resource actually has -- a script naming a skin the
-            // model doesn't carry falls back to skin 0 rather than reading
-            // past the pixel buffer.
-            int skin = (pe.skinIndex >= 0 && pe.skinIndex < model->skinCount) ? pe.skinIndex : 0;
-            SubmitModel(backbuffer, depthBuffer, zone, *model, skin, baseTileX, baseTileY, baseZ,
-                        camX, camY, camZ, cosYaw, sinYaw, cosPitch, sinPitch, focalX, focalY,
-                        pe.yaw, pe.scale, pe.frameIndex, /*asSkybox=*/false, pe.rotA, pe.rotB,
-                        m_ObjectIds.data(), static_cast<uint8_t>(pe.objectId & 0xFF),
-                        pe.flashLevel);
+        for (size_t i = 0; i < entities.size(); ++i) {
+            entityModels[i] = models->GetModel(entities[i].modelArchiveIndex);
         }
     }
 
-    // M79: the animated-sprite entities -- spell projectiles and scripted
-    // effects. Last, like the engine's own draw order, and depth-tested
-    // against everything above.
-    for (const SpriteBillboard& bb : billboards) {
-        SubmitBillboard(backbuffer, depthBuffer, bb, camX, camY, camZ, cosYaw, sinYaw, cosPitch,
-                        sinPitch, focalX, focalY);
+    // The frame's four passes -- sky, tile faces, models, billboards -- in
+    // the engine's order, into `sink` (see TriangleSink).
+    auto submitAll = [&](TriangleSink& sink) {
+        // M70: the skybox (<zone>.zsk), first and underneath everything.
+        //
+        // In `Render3DScene` this draw and the flat background fill above are
+        // the two arms of one `if` -- the sky *is* the frame clear -- so it runs
+        // before any wall or actor, writes no depth, and takes no light term.
+        // zone_renderer.h's M70 block has the four independent lines of
+        // evidence that `.zsk` is a skybox, and its kSkyboxScale block the three
+        // placement constants.
+        //
+        // Anchoring it to the camera is the entire behavioural difference from
+        // M11, and it is a translation the port has to write explicitly because
+        // it transforms world-space vertices, where the original transforms
+        // camera-space ones and simply never adds a camera position: passing the
+        // camera's own X/Y/Z as the instance offset makes every sky vertex
+        // camera-relative, which is the same thing.
+        const Model* sky = drawSkybox ? zone.SkyMesh() : nullptr;
+        if (sky) {
+            SubmitModel(sink, zone, *sky, /*skinIndex=*/0, camX, camY,
+                        camera.z + kSkyboxUpOffset, camX, camY, camZ, cosYaw, sinYaw, cosPitch,
+                        sinPitch, focalX, focalY, /*entityYaw=*/0.0f, kSkyboxScale, /*frameIndex=*/0,
+                        /*asSkybox=*/true);
+        }
+
+        for (const Face& face : faces) {
+            const SurfaceRecord& sur = zone.surface(face.surIndex);
+
+            ViewVertex vv[4];
+            for (int i = 0; i < 4; ++i) {
+                // Raw world units -- the frame the real engine does all of
+                // this in (positions, the .sur UV offsets, and the half-tile
+                // corner nudge are all expressed in it).
+                float worldX = face.corners[i].x * kTileScale;
+                float worldY = face.corners[i].y * kTileScale;
+                float worldZ = face.corners[i].z;
+                // Real half-tile vertex nudge (ZcpEntry::cornerNudge) -- moves
+                // the vertex itself, so it feeds both the projection below and
+                // the UV computation, exactly as in BuildAndProject.
+                zone.ApplyCornerNudge(&worldX, &worldY);
+
+                float rx = worldX / kTileScale - camX;
+                float ry = worldY / kTileScale - camY;
+                float rz = worldZ / kTileScale - camZ;
+
+                vv[i].right = rx * sinYaw - ry * cosYaw;
+                float flatForward = rx * cosYaw + ry * sinYaw;
+                vv[i].forward = flatForward * cosPitch - rz * sinPitch;
+                vv[i].up = rz * cosPitch + flatForward * sinPitch;
+
+                zone.SurfaceUv(sur, face.orient, worldX, worldY, worldZ, &vv[i].u, &vv[i].v);
+
+                // Real per-vertex light (SurfaceFace_BuildAndProject):
+                //     vertex.light = engine+0x484 + cellLight - (viewDepth >> 1)
+                // clamped to [0x400, 0x3f00]. `engine+0x484` is read exactly
+                // once in the entire binary (this one site) and written
+                // nowhere -- a whole-program decompiled grep this session
+                // found zero writers -- so on EKA1's zeroed heap it is
+                // effectively 0, the same "never explicitly initialised"
+                // pattern already established for the eye-height field
+                // (render3d/camera.h). The `- depth/2` term is the engine's
+                // real distance fog; the port had no distance falloff at all
+                // before this.
+                int cellTx = static_cast<int>(std::floor(worldX / kTileScale));
+                int cellTy = static_cast<int>(std::floor(worldY / kTileScale));
+                float cellLight = static_cast<float>(zone.CellAt(cellTx, cellTy).lightLevel);
+                float depthWorld = vv[i].forward * kTileScale;
+                vv[i].light = std::clamp(cellLight - depthWorld * 0.5f,
+                                          static_cast<float>(kMinLightLevel),
+                                          static_cast<float>(kMaxLightLevel));
+            }
+
+            // M66: clip and draw the quad as the two triangles it has always
+            // *been* drawn as, instead of clipping it once as a four-sided
+            // polygon and fanning the result.
+            //
+            // This is the fix for the long-standing `ZoneRenderer::Render`
+            // crash (docs/PORT_ROADMAP.md). The quad handed to the clipper is
+            // not planar -- a tile's floor and ceiling each carry four
+            // independent corner heights -- so once the camera could pitch, the
+            // near-plane test could alternate in/out around its four corners
+            // and ClipNear could return **six** vertices into a five-entry
+            // buffer, writing past the end of both stack arrays below. The
+            // overrun lands on this function's own frame, so the fault surfaces
+            // as a wild read a line or two later rather than at the write that
+            // caused it, which is why the recorded symptom was an access
+            // violation inside this projection loop.
+            //
+            // Splitting first also makes the clip *correct* rather than merely
+            // safe. Triangles are planar by construction, so ClipNear's
+            // `count + 1` bound genuinely holds for them, and the two triangles
+            // below are the exact pair the old fan produced for an unclipped
+            // quad -- so a flat tile renders identically (u, v and light are
+            // affine within a plane, so barycentric interpolation does not care
+            // where the split runs). For a *sloped* tile the old code clipped
+            // a surface that neither triangle actually covered; this clips the
+            // geometry that gets rasterized.
+            //
+            // What visibly changes, measured rather than assumed: twelve of the
+            // fourteen tracked `.ppm` render dumps come out byte-identical
+            // across this change, and the two that move (the entity-render
+            // views at yaw 0 and 270) move *entirely* because of
+            // SurfaceDetailMask. That mask is chosen per triangle from its
+            // three vertex depths, so changing which triangles exist near the
+            // near plane can move a face into a different detail band. Pinning
+            // the mask to a constant makes even those two byte-identical --
+            // which is the check that says the difference is texel precision on
+            // near-camera surfaces and nothing else. It is also the better
+            // answer: the band is now picked from the triangles actually being
+            // rasterized.
+            constexpr int kQuadTriangles[2][3] = {{0, 1, 2}, {0, 2, 3}};
+            for (const auto& tri : kQuadTriangles) {
+                ViewVertex vv3[3] = {vv[tri[0]], vv[tri[1]], vv[tri[2]]};
+
+                ViewVertex clipped[4];
+                int clippedCount = ClipNear(vv3, 3, clipped, 4);
+                if (clippedCount < 3) continue;
+
+                ProjectedVertex pv[4];
+                for (int i = 0; i < clippedCount; ++i) {
+                    pv[i].invW = 1.0f / clipped[i].forward;
+                    pv[i].sx = backbuffer.width() * 0.5f + clipped[i].right * focalX * pv[i].invW;
+                    pv[i].sy = backbuffer.height() * 0.5f - clipped[i].up * focalY * pv[i].invW;
+                    pv[i].depthWorld = clipped[i].forward * kTileScale;
+                    pv[i].u = clipped[i].u * pv[i].invW;
+                    pv[i].v = clipped[i].v * pv[i].invW;
+                    pv[i].light = clipped[i].light;
+                    pv[i].fog = FogScalar(pv[i].depthWorld);  // M89
+                }
+                for (int i = 1; i + 1 < clippedCount; ++i) {
+                    sink.Surface(pv[0], pv[i], pv[i + 1], zone, sur.textureIndex, face.hueGroup);
+                }
+            }
+        }
+
+        // M8: placed entities (props, monsters, doors, ...) resolved via
+        // world/entity_types.h + world/model_archive.h -- see this class's
+        // header comment for what's simplified here (frame 0/skin 0 only,
+        // no orientation, no distance culling).
+        if (models) {
+            for (size_t entityIndex = 0; entityIndex < entities.size(); ++entityIndex) {
+                const PlacedEntity& pe = entities[entityIndex];
+                const Model* model = entityModels[entityIndex];
+                if (!model) continue;
+
+                // Position/axis assumptions (undocumented in MODEL_FORMAT.md,
+                // see zone_renderer.h): the model's local-space vertex units
+                // match the .ent record's world-unit position scale
+                // directly (no extra per-instance scale factor -- unverified,
+                // simplest hypothesis absent contrary evidence), so the same
+                // /kTileScale conversion used for x/y tile-float coordinates
+                // above applies to vertex x/y too; z stays in raw world
+                // units like the tile faces' heights do.
+                //
+                // The model's local axes are Y-up (local Y -> world Z),
+                // *not* a direct X/Y/Z passthrough -- confirmed empirically
+                // this session: a real barrel model's bounding box is
+                // roughly circular in local X/Z (a barrel's round footprint)
+                // and elongated in local Y (its height), which only makes
+                // sense if local Y is "up." A real door model's bounding box
+                // is thin in local Z, wide in local X, and tall in local Y --
+                // consistent with the same convention (a door is a thin
+                // panel, tall along its up axis).
+                float baseTileX = pe.x / kTileScale;
+                float baseTileY = pe.y / kTileScale;
+                // M71: `Actor3D_TransformAndSubmitModel`'s own `-0x40` -- see
+                // kEntityDrawZOffset. The offset is a *render* constant, not a
+                // position one, so it deliberately lives here rather than in
+                // the placement: collision, tile stamps, use-range and the
+                // automap all keep reading the .ent Z the engine stores.
+                float baseZ = pe.z + kEntityDrawZOffset;
+
+                // Real per-instance skin/scale (PlacedEntity), clamped to what
+                // this resource actually has -- a script naming a skin the
+                // model doesn't carry falls back to skin 0 rather than reading
+                // past the pixel buffer.
+                int skin =
+                    (pe.skinIndex >= 0 && pe.skinIndex < model->skinCount) ? pe.skinIndex : 0;
+                SubmitModel(sink, zone, *model, skin, baseTileX,
+                            baseTileY, baseZ, camX, camY, camZ, cosYaw, sinYaw, cosPitch, sinPitch, focalX, focalY,
+                            pe.yaw, pe.scale, pe.frameIndex, /*asSkybox=*/false, pe.rotA, pe.rotB,
+                            m_ObjectIds.data(), static_cast<uint8_t>(pe.objectId & 0xFF),
+                            pe.flashLevel);
+            }
+        }
+
+        // M79: the animated-sprite entities -- spell projectiles and scripted
+        // effects. Last, like the engine's own draw order, and depth-tested
+        // against everything above.
+        for (const SpriteBillboard& bb : billboards) {
+            SubmitBillboard(sink, bb, camX, camY, camZ, cosYaw, sinYaw,
+                            cosPitch, sinPitch, focalX, focalY);
+        }    };
+
+    // M119: at the original 176x208 the frame is drawn in one pass on this
+    // thread, exactly as it always was. A higher Resolution multiplies the
+    // pixels by the square of its scale, so there the passes are recorded
+    // once and the rows split into bands rasterized on the shared worker
+    // pool -- same pixels, same arithmetic, a fraction of the time.
+    const int height = backbuffer.height();
+    int bands = 1;
+    if (backbuffer.width() > Backbuffer::kWidth) {
+        bands = std::max(1, std::min(height / 16, BandPool::Shared().threadCount() * 3));
+        if (bandLimit > 0) bands = std::min(bands, bandLimit);
     }
+    if (bands == 1) {
+        TriangleSink direct(backbuffer, depthBuffer, /*recording=*/false);
+        submitAll(direct);
+        return;
+    }
+    TriangleSink recorded(backbuffer, depthBuffer, /*recording=*/true);
+    submitAll(recorded);
+    BandPool::Shared().Run(bands, [&](int band) {
+        recorded.Replay(RowSpan{height * band / bands, height * (band + 1) / bands});
+    });
+
 }
 
 uint16_t FlashRamp565(int row, int step) {

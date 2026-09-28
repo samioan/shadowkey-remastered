@@ -39,7 +39,9 @@ constexpr int kVkOem3 = 0xC0;  // the `~ key, left of 1
 // and F4 to the game (the N-Gage's green and red softkeys), so the suite
 // moved off them entirely -- F3/F4 must reach the game, not open a debug
 // panel. The two secondary functions went onto Shift rather than onto more
-// function keys, which keeps all eight of F5-F12 free for `bind`.
+// function keys, which keeps F5-F12 free for `bind` -- all but F11, which
+// M120 made the fullscreen toggle (handled inside the window, it never
+// reaches the suite).
 //
 //   F1          console          Shift+F1   mini bar
 //   F2          next page        Shift+F2   previous page
@@ -88,7 +90,7 @@ void DebugSuite::Attach(DebugHost& host, skInterpreter& interpreter,
     m_Attached = true;
 
     m_Console.Print("F1 console  F2 overlay page (Shift+F2 back)  Shift+F1 mini bar  "
-                     "F5-F12 free for `bind`",
+                     "F5-F10, F12 free for `bind`",
                      LineKind::Notice);
     m_Console.Print("`help` for the command list. `mark`, do a thing, `diff` shows what ran.",
                      LineKind::Notice);

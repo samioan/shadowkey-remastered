@@ -62,6 +62,7 @@
 #include <functional>
 #include <vector>
 
+#include "engine/interp_serial.h"
 #include "simkin_bindings/item_executable.h"
 #include "simkin_bindings/spell_actor.h"
 
@@ -129,6 +130,7 @@ struct SpellProjectile {
     int age = 0;                      // +0x160
     bool invokeHitTarget = true;      // +0x180, which the cast sets to 1
     bool alive = true;
+    uint32_t interpSerial = sk::NextInterpSerial();  // M119, render-side only
 };
 
 // FUN_1005f0b4 plus the fields the cast writes straight afterwards.

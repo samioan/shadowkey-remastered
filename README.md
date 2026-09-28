@@ -37,8 +37,33 @@ number keys. All of it is rebindable in **Options → Customize Controls**.
 | `M` | map |
 | `Enter` | confirm |
 | `Esc` | back / cancel; during play, opens the menu (Save Game is there) |
+| `F11` / `Alt+Enter` | fullscreen on / off |
 
-Window size (2×, 3× or 4×) is set in the launcher.
+The game starts in borderless fullscreen; the launcher's display row picks
+that or a window (2×, 3× or 4×).
+
+**Controller** (any XInput pad — Xbox-style, or others through Steam Input):
+left stick walks and sidesteps, right stick turns and looks, the d-pad is
+the N-Gage d-pad; A uses (confirms in menus), B / Start open the menu (back
+in menus), Y jumps, RT / LT attack with the right / left hand, RB / LB cycle
+the hands, X is the character manager, Back is the map. The buttons follow
+whatever you set in Customize Controls.
+
+**Display settings** — three rows under the volume sliders in **Options**,
+reached from both the main menu and the in-game menu. All default to *Original*, which is the
+game exactly as the N-Gage drew it:
+
+- **Resolution** — the 3D view drawn at 2× to 6× the original 176×208, or
+  *Auto* to match the window. The HUD, menus and sprites keep their original
+  pixels.
+- **Aspect Ratio** — widescreen: 4:3, 16:10, 16:9, 21:9, or *Auto* to fill
+  the screen. The view widens at the same height, so nothing is stretched —
+  you simply see more to each side. The compass banner stays centred, the
+  vitals move to the left edge and a weapon to the right; menus keep their
+  original shape.
+- **Frame Rate** — 30 to 240, *V-Sync* or *Unlimited*. The game still runs
+  at its original 25 ticks a second, so nothing plays differently; the
+  frames between ticks are interpolated.
 
 Building it yourself: `port\build.bat` for the everyday build (then
 `port\run_tests.ps1` from the repository root), or `port\build_dist.bat` for

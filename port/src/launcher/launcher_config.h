@@ -13,6 +13,7 @@
 //     gameData=data
 //     font=data/Ceurope.gdr
 //     scale=3
+//     fullscreen=1
 //
 // Paths are stored relative to the install root when they live inside it
 // (which, after the setup flow copies the game data in, they always do), so
@@ -37,6 +38,11 @@ struct LauncherConfig {
     // Integer window scale over the native 176x208. The game hardcoded 3
     // before this milestone, which stays the default.
     int scale = 3;
+    // M120: borderless fullscreen on the monitor the game opens on, instead
+    // of a window of `scale`. The default -- the game starts fullscreen
+    // unless the player picks a window size. Passed as SK_FULLSCREEN; F11
+    // or Alt+Enter still switch in game.
+    bool fullscreen = true;
 
     static constexpr int kMinScale = 1;
     static constexpr int kMaxScale = 8;

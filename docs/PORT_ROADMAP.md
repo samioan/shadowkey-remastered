@@ -11092,6 +11092,223 @@ read. The fixes below come from those draws, not from screenshots.
   real draws were not traced in this pass.
 
 
+## M119 -- Resolution, Frame Rate, and a controller
+
+Three PC features the device never had, done the way the sister ports did
+them (`tes-travels-decomp`'s stormhold/dawnstar gamepad and display
+settings) but shaped by this engine: its menus are scripts, its 3D view is
+a software rasterizer, and its whole simulation is tuned to one 40ms tick.
+The rule throughout: **Original is not an approximation of the device, it
+is the pre-M119 code path.** Both settings default to it, and at it the
+frame is built, drawn and presented by exactly the code that drew it before.
+
+- **Where the settings live.** options.s is the one Options screen, and
+  both the front end and the in-game menu open it through `MenuOptions`,
+  so two rows there cover both. The script cannot be changed (it is game
+  data), so `MenuExecutable::EnsurePcSettingRows` puts them in natively:
+  options.s leaves a two-row gap between the Music slider and Select
+  Language -- `AddStaticItem(714)` twice, the second being the `else` of the
+  God Mode test M99 showed never passes -- and the rows take those two
+  spacers' places *in place*. Every original row keeps its y and its index
+  (so `SetSelectedItem(muteButton)` still names Mute), nothing is added
+  near the parchment's bottom border, and the rows are ordinary menu items
+  in the same face, colours, shadow and pitch. options.s rebuilds itself
+  with `ClearMenu(); Init();` from its language, Mute and God Mode handlers,
+  so the rows are re-added whenever missing -- from `EnsureValidSelection`
+  and again just before the frame is drawn. Enter or Right steps a row,
+  Left steps it back. Labels are the port's own in the six languages
+  (Latin-1, the menu font has the glyphs); the widest is 136px.
+  `PcSettingsStore` (`engine/pc_settings.h`) writes `pc_settings.cfg` beside
+  `dragonstar.set`, by *value* not index; `dragonstar.set` stays the
+  engine's own format.
+- **Resolution** (Original, Auto, 2x..6x) draws the 3D view at a whole
+  multiple of 176x208. The renderer already derived its focal length from
+  the target height, so it needed only its `kWidth/kHeight` uses made the
+  target's own (`Backbuffer` gained a runtime size; a default one is still
+  176x208 and clips exactly as before). Everything 2D -- viewmodel, HUD,
+  map, prompt line, hit overlay, some of it blending -- still draws into the
+  native Backbuffer, untouched: `graphics/scene_upscale.h` samples the hi-res
+  scene down into it, lets the 2D layer draw, and at present restores every
+  pixel the 2D layer did not change to its full-resolution block. The melee
+  probe (`ObjectIdAt`) still takes native coordinates and reads the centre
+  of the block. Present hands a hi-res frame to GDI as 32-bit: GDI's
+  16-bit-bitfields stretch cost 7.4ms a frame at 4x, the widened one 0.65ms.
+  The native frame keeps its old blit.
+- **The renderer runs in bands above 176x208.** Single-threaded, 4x was
+  24fps. The passes are pure per-pixel work over read-only input, so the
+  frame is now *recorded* once (transform, clip, project, in submission
+  order -- `TriangleSink`) and the rows split into bands that each replay
+  the list on `BandPool`'s worker threads. Replay calls the same rasterizer
+  with the same values, so the frame is bit-identical to one pass
+  (`bandLimit = 1` in the test proves it); models are resolved on the
+  calling thread first because the archive parses on first use. At 176x208
+  none of this runs -- the sink is direct.
+- **Frame Rate** (Original, V-Sync, 30..240, Unlimited). The tick stays at
+  25Hz -- see `docs/RENDER_LOOP.md` for why running the simulation faster
+  would change the game. The message loop's body became `runTick`; above
+  Original each gameplay tick hands its camera and render lists to
+  `engine/frame_interpolation.h` instead of drawing, and the loop draws
+  frames between ticks at `alpha` of the way from the previous tick to the
+  latest (one tick of latency, the standard trade). Creatures, doors and
+  pickups are paired across ticks by script pointer, arrows / spell bolts /
+  effects by a serial (`engine/interp_serial.h`); static props, animation
+  frames and anything new are drawn as the tick left them; a jump past four
+  tiles or a quarter turn is drawn where it landed. Any non-gameplay tick
+  resets the chain. Everything the tick did inside the old draw -- the hurt
+  timer, flashes, animation, choosing the prompt line -- stayed in the
+  tick; `drawGameplayFrame` only draws. `timeBeginPeriod(1)` is taken only
+  while the rate is above Original; V-Sync paces on `DwmFlush`.
+- **Controller** (XInput, loaded by name, polled every loop iteration and
+  only while the window is in front). `engine/gamepad_map.h` maps each
+  control to an InputState slot -- the same slots the keyboard presses, so
+  nothing downstream knows a pad exists. Actions go through the binding
+  table (rebind Use and A follows); the d-pad and menu directions are the
+  raw d-pad slots; A / B / Start are the softkeys in a menu. A held control
+  **keeps the slot it pressed** until released, so A held to open a door
+  that starts a conversation does not become a confirm on its first row.
+  Keyboard and pad OR on a slot, so neither releases the other.
+- **Measured** (Release, 12 threads, azra's first room, window 3x):
+
+  | Resolution | render3d | Unlimited |
+  |---|---|---|
+  | Original | 3.5ms | ~140fps |
+  | 3x (528x624) | 4.5ms | ~124fps |
+  | 4x (704x832) | 6.7ms | ~97fps |
+  | 6x (1056x1248) | 13ms | ~59fps |
+
+  Pacing at 3x: 30 -> 30.0, 60 -> 59.9, 144 -> ~127 (the machine's
+  ceiling there), V-Sync -> ~75 (the monitor). Original/Original: 25.0.
+  The Debug build is several times slower (3x is ~7fps before the bands);
+  judge performance on `build_dist.bat` output.
+- **Test**: `port/src/tests/m119_pc_settings_smoke.cpp`, 60 checks: the
+  settings and file; options.s's rows (in the spacers' places, indices
+  kept, Enter/Left/Right, rebuilt and relabelled by SetGerman/SetEnglish,
+  absent from MainMenu and without a control, every label fits); a native
+  target renders identically however made, a 2x scene matches the native
+  view block for block, the probe finds the creature at 2x, banded ==
+  one pass, the composite's blocks; the interpolator (midpoint, heading
+  wrap, teleport, newcomers, reset); the pad mapping (context, bindings,
+  latching across a screen change, keyboard+pad, unplugging).
+- **Regression**: all 14 tracked `.ppm` render dumps byte-identical; the
+  suite 104/104, soft-fail unchanged at 5; a live Original/Original session
+  draws 25.0 frames a second.
+
+### Still open
+
+- No physical controller was available: the mapping is unit-tested and the
+  XInput reader is the sister ports' reader, but no hands-on playtest.
+- The launcher has no controller support (it is a plain Win32 dialog), and
+  window size / fullscreen are still the launcher's and the OS's
+  (maximize); Auto resolution follows whatever the window becomes.
+- At 6x the single-threaded recording pass is most of `render3d`;
+  recording the entities in parallel chunks is the next step if needed.
+- Animation frames are not interpolated (a model's keyframes step at 25Hz).
+
+
+## M120 -- Aspect Ratio (widescreen), and fullscreen by default
+
+The device's screen is 176x208, portrait. This milestone widens the 3D view
+to a landscape screen **without stretching anything**: not the world, not a
+model, not a sprite, not the camera. Same rule as M119 -- **Original is the
+pre-M120 code path**, and it is the default.
+
+- **The setting.** A third PC row in Options, *Aspect Ratio*: Original,
+  Auto (the window's own shape -- the whole screen, fullscreen), 4:3,
+  16:10, 16:9, 21:9. Stored as `aspect=` in `pc_settings.cfg`, by value
+  (`w*100+h`, so 1609 is 16:9). options.s has three one-space spacers, not
+  two: the one above Sound Volume moves down into the gap under the
+  sliders, so the two sliders go up a row and every row from Select
+  Language down keeps its y and its index. The script holds no handle on
+  either slider (only `langButton` and `muteButton`, both below), so no
+  index it uses changes. The widest label is still 136px.
+- **Why nothing stretches.** The renderer already took its focal length
+  from the target's *height* (M71: 104px at 208, the real `fovY` of pi/2)
+  and centred the projection on the target. A wider target with the same
+  height is therefore the same projection with more of it on each side:
+  the vertical field of view and the pixel shape are unchanged, and the
+  middle 176 columns of a 16:9 frame are the original frame -- measured
+  pixel for pixel, 36608 of 36608. The view width is 176 plus an even number
+  (278 / 332 / 370 / 486 for 4:3 / 16:10 / 16:9 / 21:9 at 208 tall), so the
+  original picture sits exactly in the middle.
+- **No culling change was needed.** The engine's visibility raycast
+  (`TileGrid_RaycastVisibility`, world/zone.cpp's TierFor) fans 150 rays
+  of 0xaa -- **140 degrees**, far wider than the device's 80-degree view. 21:9
+  is 134 degrees across, still inside the fan, and is the cap: past it a flat
+  projection is mostly stretched edges, so a wider window is pillarboxed.
+- **The 2D layer is placed, not scaled.** It is 176-pixel pixel art. At a
+  wider shape it is drawn into a 2D layer as wide as the view
+  (`sk::ViewLayout`, graphics/scene_upscale.h), each piece at native size:
+  - *centred*: the compass banner (one piece of art across the whole top,
+    hand icons included), the hit slash, the automap, the prompt line and
+    the coordinate readout, and a **spell's** viewmodel -- its casting
+    frames (153-159) are one composition around the view's centre;
+  - *left edge*: the dragon-head vitals frame, the device's bottom-left
+    corner;
+  - *right edge*: a **weapon's** viewmodel. Every weapon frame is a 176x208
+    canvas whose arm runs off its right edge (every shipped weapon's resting
+    frame touches column 175), so centred it would end in a hard vertical cut
+    in the middle of the screen's right half. Anchored right, the arm comes
+    in from the corner as it did on the device. Chosen per item from its
+    *resting* frame, so a swing never jumps mid-animation. The swing frames
+    that sweep off the canvas's left edge (77, 93, 109, 125, 141) show that
+    edge for their one frame.
+  RenderHud and RenderWeaponViewmodel take the layout, defaulting to the
+  device's frame, where every offset is 0 -- the same calls as before. The
+  overlays that are native-only code (BitmapFont clips at 176, the automap)
+  draw into the Backbuffer holding the layer's middle column, which is then
+  copied back. Menus, dialogue, the loading screen and every other
+  full-screen 2D screen are unchanged and presented at their own 176x208
+  shape, pillarboxed.
+- **Composited at any Resolution.** HiResScene's scene and 2D layer are
+  `viewWidth` wide; at Resolution Original a wide frame is simply its 2D
+  layer (no composite). The melee probe (`ObjectIdAt`) reads the middle
+  column, so the engine's five fixed probes still land where the device's
+  did. Present's viewport now takes the frame's own shape at the native
+  height -- for every 176x208-shaped frame, at any multiple, that is exactly
+  the call it made before.
+- **The window follows a fixed ratio.** Picking 4:3..21:9 while windowed
+  resizes the client to that shape at its current height, centred where it
+  was; Original gives the device's shape back. Only when the setting changes
+  (or fullscreen is left), never to a maximized or fullscreen window, and
+  Auto never resizes -- it follows the window.
+- **Fullscreen by default.** Borderless fullscreen on the monitor the
+  window opens on (as the sister ports' launchers offer), **on unless the
+  player picks a window size**: the launcher's display row is now 2x / 3x /
+  4x / **Fullscreen**, Fullscreen selected on a first run and for any
+  `launcher.cfg` from before this milestone (`fullscreen=` is new). It
+  reaches the game as `SK_FULLSCREEN` (`0` = windowed at `SK_SCALE`);
+  without it the game opens fullscreen. **F11 and Alt+Enter** toggle it in
+  game, handled inside the window so neither reaches the game (Alt+Enter
+  would otherwise also be Enter, a confirm); leaving restores the window's
+  previous placement. The debug suite's `bind` keys are F5-F10 and F12 now.
+- **Measured** (Release, 1920x1080 fullscreen, Auto aspect = 16:9,
+  Unlimited, 12 threads): 1x (370x208) ~144fps; 4x (1480x832) ~54fps;
+  Auto resolution picks 6x there (2220x1248) at ~30fps. Original/Original
+  fullscreen draws 25 frames a second, pillarboxed.
+- **Test**: `pc_settings_smoke` grows to 76 checks -- the row order and
+  the moved spacer, the value file, the widths for every ratio and for Auto
+  (16:9, 16:10, capped at 21:9, never below 176, always even sides), a
+  wide frame's middle column against the native frame, the world drawn in
+  the side columns, the probe at 1x and 2x wide, the wide composite at the
+  edges, the 1x no-composite path, ViewLayout's offsets and the column
+  copies. `m113_launcher_smoke` checks the fullscreen default, its round
+  trip and an old file.
+- **Regression**: all 14 tracked `.ppm` render dumps byte-identical; the
+  suite 104/104, soft-fail unchanged at 5; a live Original/Original session
+  still draws 25 frames a second, windowed and fullscreen.
+
+### Still open
+
+- Auto Resolution picks the smallest multiple at least as tall as the
+  screen (M119's rule), which at 1080p widescreen is 6x -- ~30fps. 4x or 5x
+  is the better trade on that screen; a smarter Auto (or a parallel record
+  pass) would make it the default experience.
+- A weapon swing frame that sweeps off the canvas's left edge shows that
+  edge for one frame at a wide shape; the art simply ends there.
+- There is no in-game Fullscreen row (no fourth spacer in options.s):
+  F11 / Alt+Enter and the launcher are the switches.
+
+
 ## Next milestones (not yet started)
 
 Roughly in priority order for reaching "actually playable," not commitments:

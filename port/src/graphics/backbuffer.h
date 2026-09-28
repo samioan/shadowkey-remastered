@@ -21,19 +21,41 @@ public:
     static constexpr int kWidth = 176;
     static constexpr int kHeight = 208;
 
-    Backbuffer() : pixels_(static_cast<size_t>(kWidth) * kHeight, 0) {}
+    Backbuffer() : Backbuffer(kWidth, kHeight) {}
+
+    // M119: a buffer of any size. Everything the game draws in 2D -- menus,
+    // the HUD, sprites, text -- still goes into a native 176x208 one; the
+    // only other size is the 3D scene rendered at a whole multiple of it
+    // when the player picks a higher Resolution (see
+    // graphics/scene_upscale.h). Every method below clips against this
+    // buffer's own size, which for a native buffer is exactly the old
+    // kWidth/kHeight bounds.
+    Backbuffer(int width, int height)
+        : width_(width), height_(height), pixels_(static_cast<size_t>(width) * height, 0) {}
+
+    int width() const { return width_; }
+    int height() const { return height_; }
+
+    // Reallocates only when the size actually changes; the contents are
+    // undefined afterwards (the renderer clears every frame anyway).
+    void Resize(int width, int height) {
+        if (width == width_ && height == height_) return;
+        width_ = width;
+        height_ = height;
+        pixels_.assign(static_cast<size_t>(width) * height, 0);
+    }
 
     void Fill(uint16_t rgb565) {
         std::fill(pixels_.begin(), pixels_.end(), rgb565);
     }
 
-    uint16_t* Row(int y) { return pixels_.data() + static_cast<size_t>(y) * kWidth; }
-    const uint16_t* Row(int y) const { return pixels_.data() + static_cast<size_t>(y) * kWidth; }
+    uint16_t* Row(int y) { return pixels_.data() + static_cast<size_t>(y) * width_; }
+    const uint16_t* Row(int y) const { return pixels_.data() + static_cast<size_t>(y) * width_; }
     const uint16_t* Data() const { return pixels_.data(); }
 
     void SetPixel(int x, int y, uint16_t rgb565) {
-        if (x < 0 || x >= kWidth || y < 0 || y >= kHeight) return;
-        pixels_[static_cast<size_t>(y) * kWidth + x] = rgb565;
+        if (x < 0 || x >= width_ || y < 0 || y >= height_) return;
+        pixels_[static_cast<size_t>(y) * width_ + x] = rgb565;
     }
 
     // Straight opaque-pixel copy of a decoded assets/sprite_archive.h
@@ -71,13 +93,13 @@ public:
     void BlitRamped(int x, int y, const Sprite& sprite, const uint16_t* ramp565) {
         for (int sy = 0; sy < sprite.height; ++sy) {
             const int dy = y + sy;
-            if (dy < 0 || dy >= kHeight) continue;
+            if (dy < 0 || dy >= height_) continue;
             for (int sx = 0; sx < sprite.width; ++sx) {
                 const int dx = x + sx;
-                if (dx < 0 || dx >= kWidth) continue;
+                if (dx < 0 || dx >= width_) continue;
                 const size_t si = static_cast<size_t>(sy) * sprite.width + static_cast<size_t>(sx);
                 if (!sprite.opaque[si]) continue;
-                pixels_[static_cast<size_t>(dy) * kWidth + static_cast<size_t>(dx)] =
+                pixels_[static_cast<size_t>(dy) * width_ + static_cast<size_t>(dx)] =
                     ramp565[(sprite.pixels[si] >> 12) & 0xF];
             }
         }
@@ -86,15 +108,15 @@ public:
     void BlitRegion(int x, int y, const Sprite& sprite, int srcX, int srcW, bool blend = false) {
         for (int sy = 0; sy < sprite.height; ++sy) {
             int dy = y + sy;
-            if (dy < 0 || dy >= kHeight) continue;
+            if (dy < 0 || dy >= height_) continue;
             for (int i = 0; i < srcW; ++i) {
                 int sx = srcX + i;
                 if (sx < 0 || sx >= sprite.width) continue;
                 int dx = x + i;
-                if (dx < 0 || dx >= kWidth) continue;
+                if (dx < 0 || dx >= width_) continue;
                 size_t si = static_cast<size_t>(sy) * sprite.width + static_cast<size_t>(sx);
                 if (!sprite.opaque[si]) continue;
-                uint16_t& dst = pixels_[static_cast<size_t>(dy) * kWidth +
+                uint16_t& dst = pixels_[static_cast<size_t>(dy) * width_ +
                                         static_cast<size_t>(dx)];
                 if (blend) {
                     dst = static_cast<uint16_t>(
@@ -107,6 +129,8 @@ public:
     }
 
 private:
+    int width_;
+    int height_;
     std::vector<uint16_t> pixels_;
 };
 

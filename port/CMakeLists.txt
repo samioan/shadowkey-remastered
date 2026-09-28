@@ -180,6 +180,7 @@ add_library(sk_bindings STATIC
   src/simkin_bindings/text_area_executable.cpp
   src/simkin_bindings/weapon_viewmodel.cpp
   src/simkin_bindings/zone_script_executable.cpp
+  src/engine/pc_settings.cpp
 )
 target_include_directories(sk_bindings PUBLIC src)
 target_link_libraries(sk_bindings PUBLIC simkin sk_entity_types sk_audio sk_save)
@@ -250,6 +251,7 @@ add_executable(shadowkey_port
   src/platform/win32/console_tee.cpp
   src/platform/win32/crash_report.cpp
   src/platform/win32/exe_dir.cpp
+  src/platform/win32/gamepad.cpp
   src/platform/win32/window.cpp
 )
 
@@ -264,7 +266,9 @@ if(WIN32)
   target_compile_definitions(shadowkey_port PRIVATE UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN)
   # msimg32 is AlphaBlend, used only by the debug overlay's translucent
   # panels (src/platform/win32/window.cpp) -- see SK_DEBUG_SUITE above.
-  target_link_libraries(shadowkey_port PRIVATE user32 gdi32 msimg32)
+  # winmm is timeBeginPeriod: a Frame Rate above the original 25 needs the
+  # 1ms scheduler tick to pace to (M119, engine/pc_settings.h).
+  target_link_libraries(shadowkey_port PRIVATE user32 gdi32 msimg32 winmm)
 endif()
 
 # --- M113: the launcher -----------------------------------------------
@@ -844,5 +848,19 @@ add_executable(launcher_smoke
 )
 target_include_directories(launcher_smoke PRIVATE src)
 target_link_libraries(launcher_smoke PRIVATE puff ole32 windowscodecs winhttp)
+
+# M119 milestone smoke test -- see src/tests/m119_pc_settings_smoke.cpp: the
+# Resolution/Frame Rate settings, the Options rows through the real
+# options.s, the hi-res compositor and the controller mapping. Compiles the
+# font sources itself (they are shadowkey_port's, not a library's) for the
+# label-width check.
+add_executable(pc_settings_smoke
+  src/tests/m119_pc_settings_smoke.cpp
+  src/graphics/bitmap_font.cpp
+  src/assets/gdr_font.cpp
+  src/assets/sprite_archive.cpp
+)
+target_link_libraries(pc_settings_smoke PRIVATE sk_bindings sk_render3d sk_world)
+target_compile_definitions(pc_settings_smoke PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
 
 endif()  # NOT SK_DIST

@@ -3,11 +3,13 @@
 #include <algorithm>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 
 #include "assets/string_table.h"
 #include "assets/zone_display_names.h"
 #include "audio/audio_engine.h"
 #include "engine/input_state.h"
+#include "engine/pc_settings.h"
 #include "simkin_bindings/action_text.h"
 #include "simkin_bindings/button_executable.h"
 #include "simkin_bindings/combo_box_executable.h"
@@ -706,7 +708,96 @@ bool MenuExecutable::NavigateDirectional(int dx, int dy) {
     return true;
 }
 
+void MenuExecutable::EnsurePcSettingRows() {
+    sk::PcSettingsControl* pc = m_Stack.pcSettings();
+    if (!pc) return;
+    // The screen mainmenu.s creates as `CreateMenu("Options")` -- the one
+    // both the front end and the in-game menu open with `MenuOptions`.
+    if (_stricmp(m_ScriptName.c_str(), "Options") != 0) return;
+    const int language = m_Stack.language();
+    bool present = false;
+    for (MenuRow& row : m_Rows) {
+        if (row.pcSetting <= 0) continue;
+        row.literalText = pc->RowText(row.pcSetting - 1, language);
+        present = true;
+    }
+    if (present) return;
+
+    // Where they go: options.s leaves a two-row gap between the Music slider
+    // and Select Language -- `AddStaticItem(714)` twice, the one-space
+    // spacer (the second is the `else` of the God Mode test, which M99
+    // showed never passes in the shipped game). The rows take those
+    // spacers' places, in place: every row from Select Language down stays
+    // at exactly the y it always had, the list gains nothing at the bottom
+    // (where the parchment's border and the Back caption are), and every
+    // row index the script holds still names the same row.
+    //
+    // M120: there are three rows now and the gap is two. options.s opens
+    // with a third spacer, above Sound Volume, so that one is moved down
+    // into the gap: the two sliders go up a row, and everything else is
+    // where it was. The script holds no handle on either slider (it keeps
+    // only `langButton` and `muteButton`, both below), so no index it uses
+    // changes.
+    constexpr int kSpacerTextId = 714;
+    auto isSpacer = [&](size_t i) {
+        return i < m_Rows.size() && m_Rows[i].kind == RowKind::StaticItem &&
+               m_Rows[i].textId == kSpacerTextId && m_Rows[i].pcSetting == 0;
+    };
+    const int needed = pc->RowCount();
+    size_t firstSlider = 0, lastSlider = 0;
+    bool haveSlider = false;
+    for (size_t i = 0; i < m_Rows.size(); ++i) {
+        if (m_Rows[i].kind == RowKind::Slider) {
+            if (!haveSlider) firstSlider = i;
+            lastSlider = i;
+            haveSlider = true;
+        }
+    }
+    if (haveSlider) {
+        size_t first = lastSlider + 1;
+        int after = 0;
+        while (after < needed && isSpacer(first + static_cast<size_t>(after))) ++after;
+        int before = 0;
+        while (before < needed - after && firstSlider >= static_cast<size_t>(before) + 1 &&
+               isSpacer(firstSlider - static_cast<size_t>(before) - 1)) {
+            ++before;
+        }
+        if (after + before >= needed) {
+            if (before > 0) {
+                // [spacers][sliders...] -> [sliders...][spacers]
+                const size_t from = firstSlider - static_cast<size_t>(before);
+                std::rotate(m_Rows.begin() + static_cast<std::ptrdiff_t>(from),
+                            m_Rows.begin() + static_cast<std::ptrdiff_t>(firstSlider),
+                            m_Rows.begin() + static_cast<std::ptrdiff_t>(first));
+                // A selection already on a slider follows it up.
+                const int sel = m_SelectedItem - 1;
+                if (sel >= static_cast<int>(firstSlider) && sel < static_cast<int>(first)) {
+                    m_SelectedItem -= before;
+                }
+                first -= static_cast<size_t>(before);
+            }
+            for (int k = 0; k < needed; ++k) {
+                MenuRow& row = m_Rows[first + static_cast<size_t>(k)];
+                row.kind = RowKind::MenuItem;
+                row.textId = -1;
+                row.selectable = true;
+                row.centered = true;
+                row.literalText = pc->RowText(k, language);
+                row.pcSetting = k + 1;
+            }
+            return;
+        }
+    }
+    // A layout this code does not recognise: after the script's rows.
+    for (int i = 0; i < needed; ++i) {
+        MenuRow& row = AddRow(RowKind::MenuItem, -1, "", true);
+        row.literalText = pc->RowText(i, language);
+        row.pcSetting = i + 1;
+    }
+}
+
 void MenuExecutable::EnsureValidSelection() {
+    EnsurePcSettingRows();  // M119
     if (m_SelectedItem >= 1 && static_cast<size_t>(m_SelectedItem) <= m_Rows.size() &&
         m_Rows[static_cast<size_t>(m_SelectedItem - 1)].selectable &&
         m_Rows[static_cast<size_t>(m_SelectedItem - 1)].visible) {
@@ -724,6 +815,13 @@ void MenuExecutable::EnsureValidSelection() {
 void MenuExecutable::CycleSelectedCombo(int delta) {
     if (m_SelectedItem < 1 || static_cast<size_t>(m_SelectedItem) > m_Rows.size()) return;
     MenuRow& row = m_Rows[static_cast<size_t>(m_SelectedItem - 1)];
+    if (row.pcSetting > 0) {  // M119: see EnsurePcSettingRows()
+        if (sk::PcSettingsControl* pc = m_Stack.pcSettings()) {
+            pc->Cycle(row.pcSetting - 1, delta);
+            row.literalText = pc->RowText(row.pcSetting - 1, m_Stack.language());
+        }
+        return;
+    }
     if (row.kind == RowKind::Slider) {
         // M28: the real Options screen's SoundFXSlider/MusicSlider rows.
         auto* slider = static_cast<SliderExecutable*>(row.widget.get());
@@ -766,6 +864,12 @@ void MenuExecutable::ActivateSelected() {
         // callback naming a native (`AddMenuItem(3747, "Quit")`) is
         // ordinary Simkin and the corpus is full of it.
         case RowKind::MenuItem:
+            // M119: a PC settings row has no script callback -- Enter steps
+            // it forward, the way Right does. See EnsurePcSettingRows().
+            if (row.pcSetting > 0) {
+                CycleSelectedCombo(1);
+                break;
+            }
             InvokeCallback(row.callback);
             break;
         case RowKind::ComboBox:

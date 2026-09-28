@@ -31,6 +31,7 @@ class StringTable;
 class SoundArchive;
 class AudioEngine;
 class InputState;
+class PcSettingsControl;
 }
 
 namespace sk_bindings {
@@ -82,6 +83,13 @@ public:
     // to mute on PC.
     bool muteOnCall() const { return m_MuteOnCall; }
     void SetMuteOnCall(bool mute) { m_MuteOnCall = mute; }
+
+    // M119: the PC-only Resolution and Frame Rate rows the Options screen
+    // gains (engine/pc_settings.h, MenuExecutable::EnsurePcSettingRows).
+    // Null -- every smoke test that predates M119 -- means the Options
+    // screen is exactly the script's own.
+    sk::PcSettingsControl* pcSettings() const { return m_PcSettings; }
+    void SetPcSettings(sk::PcSettingsControl* settings) { m_PcSettings = settings; }
 
     // ---- M99: the Options screen's language and the settings file ----
 
@@ -550,6 +558,7 @@ private:
     // otherwise -- the GameEngine constructor stores `engine+0x14a79 = 1`
     // on the line before it runs the config loader.
     bool m_MuteOnCall = true;
+    sk::PcSettingsControl* m_PcSettings = nullptr;  // M119, see pcSettings()
     GameClock m_GameClock;      // M53: see gameClock() above
     bool m_CloseMenuRequested = false;  // M30: see closeMenuRequested() above
     bool m_MenuActive = false;          // M95: see menuActive() above

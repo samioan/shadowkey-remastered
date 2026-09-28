@@ -1,11 +1,14 @@
 #include "platform/win32/window.h"
 
+#include <algorithm>
 #include <cstdint>
 #include <utility>
+#include <vector>
 
 #include "graphics/viewport.h"
 
 #include <windows.h>
+#include <timeapi.h>
 
 // <windows.h> #defines DrawText to DrawTextW, which silently renames
 // OverlaySurface::DrawText's override out of existence. The overlay never
@@ -132,6 +135,13 @@ struct Window::Impl {
     HGDIOBJ backOldBitmap = nullptr;
     int backWidth = 0;
     int backHeight = 0;
+    // M119: a high-resolution frame widened to 32 bits for GDI -- see
+    // Present(). Kept between frames; empty until one is presented.
+    std::vector<uint32_t> wide;
+    // M120: borderless fullscreen, and the windowed placement to go back to.
+    bool fullscreen = false;
+    DWORD windowedStyle = 0;
+    WINDOWPLACEMENT windowedPlacement{sizeof(WINDOWPLACEMENT)};
 };
 
 namespace {
@@ -157,6 +167,8 @@ void ReleaseBackBuffer(Window::Impl* impl) {
 
 namespace {
 
+void ToggleFullscreen(HWND hwnd);
+
 LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     auto* impl = reinterpret_cast<Window::Impl*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
     switch (msg) {
@@ -176,6 +188,19 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         case WM_SYSKEYUP:
         case WM_KEYDOWN:
         case WM_KEYUP:
+            // M120: F11 and Alt+Enter are the fullscreen toggle, handled
+            // here and kept from the game -- Alt+Enter would otherwise also
+            // be an Enter, a confirm in every menu. Auto-repeat (bit 30)
+            // is ignored, so holding the key toggles once.
+            if ((msg == WM_KEYDOWN && wParam == VK_F11) ||
+                (msg == WM_SYSKEYDOWN && wParam == VK_RETURN)) {
+                if (!(lParam & (1 << 30))) ToggleFullscreen(hwnd);
+                return 0;
+            }
+            if ((msg == WM_KEYUP && wParam == VK_F11) ||
+                (msg == WM_SYSKEYUP && wParam == VK_RETURN)) {
+                return 0;
+            }
             if (impl && impl->keyCallback) {
                 bool down = (msg == WM_KEYDOWN || msg == WM_SYSKEYDOWN);
                 impl->keyCallback(static_cast<int>(wParam), down);
@@ -230,6 +255,38 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         default:
             return DefWindowProcW(hwnd, msg, wParam, lParam);
     }
+}
+
+// M120: the toggle F11 / Alt+Enter run. A free function because WndProc is
+// one; it goes through the Window-level implementation below.
+void ApplyFullscreen(Window::Impl* impl, bool on) {
+    HWND hwnd = impl->hwnd;
+    if (!hwnd || on == impl->fullscreen) return;
+    if (on) {
+        impl->windowedStyle = static_cast<DWORD>(GetWindowLongW(hwnd, GWL_STYLE));
+        impl->windowedPlacement.length = sizeof(WINDOWPLACEMENT);
+        GetWindowPlacement(hwnd, &impl->windowedPlacement);
+        MONITORINFO mi{sizeof(mi)};
+        if (!GetMonitorInfoW(MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST), &mi)) return;
+        SetWindowLongW(hwnd, GWL_STYLE,
+                       static_cast<LONG>((impl->windowedStyle & ~WS_OVERLAPPEDWINDOW) | WS_POPUP));
+        SetWindowPos(hwnd, HWND_TOP, mi.rcMonitor.left, mi.rcMonitor.top,
+                     mi.rcMonitor.right - mi.rcMonitor.left, mi.rcMonitor.bottom - mi.rcMonitor.top,
+                     SWP_FRAMECHANGED | SWP_NOOWNERZORDER | SWP_SHOWWINDOW);
+    } else {
+        SetWindowLongW(hwnd, GWL_STYLE,
+                       static_cast<LONG>(impl->windowedStyle ? impl->windowedStyle
+                                                             : WS_OVERLAPPEDWINDOW | WS_VISIBLE));
+        SetWindowPlacement(hwnd, &impl->windowedPlacement);
+        SetWindowPos(hwnd, nullptr, 0, 0, 0, 0,
+                     SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOOWNERZORDER | SWP_FRAMECHANGED);
+    }
+    impl->fullscreen = on;
+}
+
+void ToggleFullscreen(HWND hwnd) {
+    auto* impl = reinterpret_cast<Window::Impl*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
+    if (impl) ApplyFullscreen(impl, !impl->fullscreen);
 }
 
 }  // namespace
@@ -301,6 +358,73 @@ void Window::SetFocusLostCallback(FocusLostCallback callback) {
 // SK_DEBUG_SUITE (M68).
 void Window::SetOverlayCallback(OverlayCallback callback) {
     impl_->overlayCallback = std::move(callback);
+}
+
+bool Window::IsForeground() const {
+    return impl_->hwnd != nullptr && GetForegroundWindow() == impl_->hwnd;
+}
+
+bool Window::WaitForCompositor() {
+    // DwmFlush returns once the desktop compositor has presented its next
+    // frame -- i.e. it paces to the monitor's refresh. Loaded by name so the
+    // exe keeps no link-time dependency on dwmapi.dll for a setting most
+    // players will never pick.
+    using DwmFlushFn = HRESULT(WINAPI*)();
+    static DwmFlushFn flush = []() -> DwmFlushFn {
+        HMODULE dwm = LoadLibraryW(L"dwmapi.dll");
+        return dwm ? reinterpret_cast<DwmFlushFn>(GetProcAddress(dwm, "DwmFlush")) : nullptr;
+    }();
+    return flush != nullptr && SUCCEEDED(flush());
+}
+
+void Window::ClientSize(int* width, int* height) const {
+    RECT client{};
+    if (impl_->hwnd) GetClientRect(impl_->hwnd, &client);
+    if (width) *width = client.right - client.left;
+    if (height) *height = client.bottom - client.top;
+}
+
+void Window::SetFullscreen(bool on) { ApplyFullscreen(impl_, on); }
+
+bool Window::IsFullscreen() const { return impl_->fullscreen; }
+
+bool Window::IsMaximized() const { return impl_->hwnd != nullptr && IsZoomed(impl_->hwnd); }
+
+void Window::SetClientSize(int width, int height) {
+    HWND hwnd = impl_->hwnd;
+    if (!hwnd || impl_->fullscreen || IsZoomed(hwnd) || IsIconic(hwnd)) return;
+    const DWORD style = static_cast<DWORD>(GetWindowLongW(hwnd, GWL_STYLE));
+    RECT rect{0, 0, width, height};
+    AdjustWindowRect(&rect, style, FALSE);
+    int w = rect.right - rect.left, h = rect.bottom - rect.top;
+    RECT now{};
+    GetWindowRect(hwnd, &now);
+    MONITORINFO mi{sizeof(mi)};
+    GetMonitorInfoW(MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST), &mi);
+    const RECT work = mi.rcWork;
+    if (work.right > work.left) {
+        w = (std::min)(w, static_cast<int>(work.right - work.left));
+        h = (std::min)(h, static_cast<int>(work.bottom - work.top));
+    }
+    // Grown or shrunk about its own centre, then pulled back on screen.
+    int x = (now.left + now.right) / 2 - w / 2;
+    int y = (now.top + now.bottom) / 2 - h / 2;
+    if (work.right > work.left) {
+        x = (std::max)(static_cast<int>(work.left), (std::min)(x, static_cast<int>(work.right) - w));
+        y = (std::max)(static_cast<int>(work.top), (std::min)(y, static_cast<int>(work.bottom) - h));
+    }
+    SetWindowPos(hwnd, nullptr, x, y, w, h, SWP_NOZORDER | SWP_NOOWNERZORDER);
+}
+
+void Window::SetFineTimer(bool on) {
+    static bool active = false;
+    if (on == active) return;
+    if (on) {
+        active = timeBeginPeriod(1) == TIMERR_NOERROR;
+    } else {
+        timeEndPeriod(1);
+        active = false;
+    }
 }
 
 void Window::Close() {
@@ -391,8 +515,15 @@ void Window::Present(const Backbuffer& backbuffer) {
     // costs two FillRects; it also means a freshly exposed strip after a
     // resize is covered by the very next tick, with no WM_PAINT handler
     // and no erase-background of its own (WM_ERASEBKGND is suppressed).
-    const Viewport view =
-        FitPreservingAspect(destW, destH, Backbuffer::kWidth, Backbuffer::kHeight);
+    //
+    // M120: the shape is the frame's own, at the native height -- 176x208
+    // for every frame the game drew before the Aspect Ratio setting, at any
+    // Resolution (a whole multiple has exactly that shape, so this is the
+    // same call as before for all of them), and wider when it is on.
+    const int logicalWidth = backbuffer.height() > 0
+                                 ? backbuffer.width() * Backbuffer::kHeight / backbuffer.height()
+                                 : Backbuffer::kWidth;
+    const Viewport view = FitPreservingAspect(destW, destH, logicalWidth, Backbuffer::kHeight);
     if (view.x > 0 || view.y > 0) {
         HBRUSH black = static_cast<HBRUSH>(GetStockObject(BLACK_BRUSH));
         RECT bars[4] = {
@@ -406,11 +537,45 @@ void Window::Present(const Backbuffer& backbuffer) {
         }
     }
 
+    // M119: the source is whatever size the frame is -- the native 176x208,
+    // or the Resolution setting's whole multiple of it. The viewport above
+    // is deliberately computed from the native height: a multiple has the
+    // same shape, so switching Resolution can never move the picture by a
+    // pixel of rounding.
     SetStretchBltMode(target, COLORONCOLOR);
-    StretchDIBits(
-        target, view.x, view.y, view.width, view.height, 0, 0, Backbuffer::kWidth,
-        Backbuffer::kHeight, backbuffer.Data(), reinterpret_cast<const BITMAPINFO*>(&impl_->bmi),
-        DIB_RGB_COLORS, SRCCOPY);
+    if (backbuffer.width() == Backbuffer::kWidth && backbuffer.height() == Backbuffer::kHeight) {
+        impl_->bmi.header.biWidth = Backbuffer::kWidth;
+        impl_->bmi.header.biHeight = -Backbuffer::kHeight;
+        StretchDIBits(target, view.x, view.y, view.width, view.height, 0, 0, Backbuffer::kWidth,
+                      Backbuffer::kHeight, backbuffer.Data(),
+                      reinterpret_cast<const BITMAPINFO*>(&impl_->bmi), DIB_RGB_COLORS, SRCCOPY);
+    } else {
+        // A high-resolution frame goes to GDI as 32-bit pixels. GDI's own
+        // 16-bit-bitfields path converts every source pixel while it scales,
+        // which measured at over 7ms a frame for a 4x frame -- longer than
+        // rendering it. Widening here first (each 5/6-bit channel with its
+        // top bits repeated below it, so full scale stays full scale) and
+        // handing GDI the format the screen already has costs a fraction of
+        // that. The native frame above keeps the exact path it always had.
+        const int w = backbuffer.width(), h = backbuffer.height();
+        impl_->wide.resize(static_cast<size_t>(w) * h);
+        uint32_t* out = impl_->wide.data();
+        const uint16_t* in = backbuffer.Data();
+        for (size_t i = 0, n = impl_->wide.size(); i < n; ++i) {
+            const uint32_t c = in[i];
+            const uint32_t r = (c >> 11) & 0x1f, g = (c >> 5) & 0x3f, b = c & 0x1f;
+            out[i] = ((r << 3 | r >> 2) << 16) | ((g << 2 | g >> 4) << 8) | (b << 3 | b >> 2);
+        }
+        BITMAPINFO wideInfo{};
+        wideInfo.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+        wideInfo.bmiHeader.biWidth = w;
+        wideInfo.bmiHeader.biHeight = -h;
+        wideInfo.bmiHeader.biPlanes = 1;
+        wideInfo.bmiHeader.biBitCount = 32;
+        wideInfo.bmiHeader.biCompression = BI_RGB;
+        StretchDIBits(target, view.x, view.y, view.width, view.height, 0, 0, w, h, out, &wideInfo,
+                      DIB_RGB_COLORS, SRCCOPY);
+    }
 
     // SK_DEBUG_SUITE (M68): the debug overlay, drawn over the finished
     // frame at native resolution. Deliberately after the blit and outside

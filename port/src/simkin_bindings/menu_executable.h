@@ -337,6 +337,26 @@ public:
     // happens to press Up or Down. Cheap and idempotent -- called once per
     // tick from the input loop.
     void EnsureValidSelection();
+
+    // M119: the Options screen's two PC-only rows, Resolution and Frame
+    // Rate, as ordinary menu items in the same face, colours and pitch as
+    // options.s's own -- so they read as part of the screen rather than
+    // bolted onto it. They take the places of the two blank spacer rows
+    // below the volume sliders (see the .cpp). Enter steps a row forward,
+    // Left/Right step it either way (the same keys the sliders use).
+    //
+    // options.s rebuilds itself with `ClearMenu(); Init();` from half its
+    // handlers (every language, Mute, God Mode), so the rows cannot be
+    // added once; this re-adds them whenever they are missing and refreshes
+    // their text otherwise (a language change relabels them). Called by
+    // EnsureValidSelection() and by the host just before drawing, which
+    // between them cover every path that can rebuild the screen. Rows are
+    // replaced in place, never inserted, so every index a script holds
+    // (`SetSelectedItem(muteButton)`) still names the row it named.
+    //
+    // A no-op on every other screen, and when the stack has no settings
+    // control (every pre-M119 smoke test).
+    void EnsurePcSettingRows();
     // Cycles the currently selected row's value if it's a ComboBox (fires
     // its SetCallback() handler on change) or nudges it if it's a Slider
     // (M28, the real Options screen's two volume rows -- applies the new
@@ -528,6 +548,10 @@ public:
         // separator convention, which centres instead. See the
         // AddStaticItem handler and RenderMenu().
         bool centered = false;
+        // M119: 1 + the row of stack.pcSettings() this is (Resolution,
+        // Frame Rate), or 0 for every row a script built. See
+        // EnsurePcSettingRows().
+        int pcSetting = 0;
     };
     const std::vector<MenuRow>& rows() const { return m_Rows; }
     int backgroundId() const { return m_BackgroundId; }

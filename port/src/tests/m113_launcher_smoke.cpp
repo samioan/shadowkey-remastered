@@ -250,6 +250,7 @@ int main(int argc, char** argv) {
         written.gameData = "data";
         written.font = "data/Ceurope.gdr";
         written.scale = 4;
+        written.fullscreen = false;  // M120
         Check(SaveLauncherConfig(path, written), "SaveLauncherConfig writes the file");
 
         LauncherConfig read;
@@ -257,12 +258,13 @@ int main(int argc, char** argv) {
         Check(read.gameData == written.gameData, "gameData survives the round trip");
         Check(read.font == written.font, "font survives the round trip");
         Check(read.scale == written.scale, "scale survives the round trip");
+        Check(!read.fullscreen, "a windowed choice survives the round trip (M120)");
 
         LauncherConfig missing;
         Check(!LoadLauncherConfig((scratch / "nope.cfg").string(), missing),
               "a missing file reports failure");
-        Check(missing.scale == 3 && missing.gameData.empty(),
-              "...and still yields the first-run defaults");
+        Check(missing.scale == 3 && missing.gameData.empty() && missing.fullscreen,
+              "...and still yields the first-run defaults (3x, fullscreen)");
 
         // Hand-edited files are a thing people do, so neither an unknown
         // key nor a nonsense value may take the launcher down with it.
@@ -275,6 +277,7 @@ int main(int argc, char** argv) {
         Check(LoadLauncherConfig(odd, loaded), "a file of unknown keys still loads");
         Check(loaded.gameData == "spaced", "whitespace around a value is trimmed");
         Check(loaded.scale == 3, "an out-of-range scale keeps the default");
+        Check(loaded.fullscreen, "a file from before M120 (no fullscreen key) starts fullscreen");
     }
 
     // -- 3. paths relative to the install root --

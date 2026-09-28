@@ -146,6 +146,8 @@
 #include <cstdint>
 #include <vector>
 
+#include "engine/interp_serial.h"
+
 namespace sk_bindings {
 
 // Both `animRate` and `lifetime` are stored multiplied by this. It is 15,
@@ -194,6 +196,7 @@ struct EffectEntity {
     int drawFlags = 0;
 
     bool alive = true;  // FUN_1001b484's deferred destroy
+    uint32_t interpSerial = sk::NextInterpSerial();  // M119, render-side only
 };
 
 // The case body, verbatim: the constructor's defaults with the ten script
