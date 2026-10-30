@@ -882,6 +882,16 @@ public:
     std::vector<std::pair<int, int>> RaycastVisibleTiles(float cameraWorldX, float cameraWorldY,
                                                           float cameraYawRadians,
                                                           int zoomScale = kDefaultZoomScale) const;
+    // M123: the same march with an explicit tier and caps -- the engine's
+    // are 0x19c (stop collecting) and 0x200 (hard break). Used for a view
+    // distance longer than the device's, where both have to grow with it.
+    static constexpr size_t kVisibleSoftCap = 0x19c;
+    static constexpr size_t kVisibleHardCap = 0x200;
+    struct VisibilityTier;
+    std::vector<std::pair<int, int>> RaycastVisibleTiles(float cameraWorldX, float cameraWorldY,
+                                                          float cameraYawRadians,
+                                                          const VisibilityTier& tier,
+                                                          size_t softCap, size_t hardCap) const;
 
     // The tier `zoomScale` selects, exposed so the three sets of constants
     // can be asserted directly rather than inferred from a tile set. The

@@ -11517,6 +11517,51 @@ the last one found a rule nobody had wired.
   gated on `+0x1b8`, whose writer was not traced; not reproduced.
 
 
+## M123 -- Fog, frame rate at high resolutions, and the bag that stays
+
+- **A Fog row on the options screen**, the fourth PC row after Resolution,
+  Frame Rate and Aspect Ratio (appended, because `AddMenuItem` handles are
+  row indices). Values: Original, 150%, 200%, Off, 25%, 50%, 75%; saved as
+  `fog=` in `pc_settings.cfg`, labelled in all five languages. It scales
+  the engine's own fog scalar (`depth * CMap+0x5c8 >> 8`, top nibble
+  selects the `.zfg` level) -- exact at Original -- and the visibility
+  raycast tier with it (more steps and rays when the fog thins, capped at
+  64 steps; the 0x19c/0x200 collection caps scale too), so thinner fog
+  shows more of the world, not more fog-coloured void.
+- **Rendering at high resolutions.** Everything the rasterizer does at
+  native resolution is unchanged: the tracked `.ppm` dumps are
+  byte-identical. Above native:
+  - each triangle's rows are narrowed to its real span before the edge
+    tests (double precision with slack; m119 checks over 48 frames that
+    narrowing never changes a pixel),
+  - the RGB444 expansion is a lookup table,
+  - a `kFast` instantiation of the triangle loops uses reciprocal
+    arithmetic and incremental edge functions anchored at the bounding
+    box's left edge,
+  - the skybox is drawn after the opaque passes and only into pixels
+    still at depth 0 -- the identical frame, minus all the overdraw,
+  - Release builds use link-time optimisation.
+
+  Measured on azra/snowline: 4x **57 -> 83 fps**, 6x **30-33 -> 53 fps**,
+  1x unchanged.
+- **An emptied loot bag leaves the world.** lootmenu.s's `LootExit` calls
+  `QuitAndDestroyOpener()` only when `GetOpener().GetDestroy()` (`+0x180`)
+  is set, and both engine bag spawners -- the death drop (`FUN_10084438`)
+  and the inventory drop (`FUN_1002c3a8`) -- set it to 1. The port set it
+  on neither, so every creature's bag stayed behind, empty. Set on both
+  now, and saved and restored with the bag. Placed chests keep 0, as on
+  the device. Also fixed: the console's `ent:<n>` resolved pickups by name
+  alone, and every bag and chest is called "Examine".
+- **NPC heights: no change.** The draw path matches the engine: the
+  model goes at `z - eye(+0x224) - 0x40`, and creatures stand at floor +
+  0x80. How tall they look depends on the camera's eye height, which is
+  `CMap+0x1a` -- the field M122 showed nothing in the binary ever writes.
+  The port's 0x200 is derived (M84). Settling it needs a reference
+  screenshot from a device.
+- **Test**: m119 gains the fog row and the narrowing identity check
+  (77/77). Suite **105/105**.
+
+
 ## Next milestones (not yet started)
 
 Roughly in priority order for reaching "actually playable," not commitments:

@@ -1,6 +1,17 @@
 cmake_minimum_required(VERSION 3.20)
 project(shadowkey_port CXX C)
 
+# M123: link-time code generation for optimized builds. The rasterizers'
+# per-pixel helpers (Zone::TexelAt / PaletteColor / FogColor) live in
+# another translation unit, so without it every textured pixel pays three
+# real calls. Debug builds are untouched.
+include(CheckIPOSupported)
+check_ipo_supported(RESULT SK_IPO_SUPPORTED OUTPUT SK_IPO_OUTPUT LANGUAGES CXX)
+if(SK_IPO_SUPPORTED)
+  set(CMAKE_INTERPROCEDURAL_OPTIMIZATION_RELEASE ON)
+  set(CMAKE_INTERPROCEDURAL_OPTIMIZATION_RELWITHDEBINFO ON)
+endif()
+
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)

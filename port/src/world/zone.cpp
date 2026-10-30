@@ -946,10 +946,17 @@ Zone::VisibilityTier Zone::TierFor(int zoomScale) {
 std::vector<std::pair<int, int>> Zone::RaycastVisibleTiles(float cameraWorldX, float cameraWorldY,
                                                             float cameraYawRadians,
                                                             int zoomScale) const {
+    return RaycastVisibleTiles(cameraWorldX, cameraWorldY, cameraYawRadians, TierFor(zoomScale),
+                               kVisibleSoftCap, kVisibleHardCap);
+}
+
+std::vector<std::pair<int, int>> Zone::RaycastVisibleTiles(float cameraWorldX, float cameraWorldY,
+                                                            float cameraYawRadians,
+                                                            const VisibilityTier& tier,
+                                                            size_t softCap, size_t hardCap) const {
     std::vector<std::pair<int, int>> visible;
     if (width_ <= 0 || height_ <= 0) return visible;
 
-    const VisibilityTier tier = TierFor(zoomScale);
     const int rayCount = tier.rayCount;
     const int maxSteps = tier.maxSteps;
     const int angleStep = tier.angleStep;
@@ -1013,7 +1020,7 @@ std::vector<std::pair<int, int>> Zone::RaycastVisibleTiles(float cameraWorldX, f
     int active = rayCount;
     // The real outer loop runs while any ray is live and fewer than 0x19c
     // tiles have been collected; the inner append hard-breaks at 0x200.
-    while (active != 0 && visible.size() < 0x19c) {
+    while (active != 0 && visible.size() < softCap) {
         for (Ray& r : rays) {
             if (r.done) continue;
             const int fx = static_cast<int>(r.x);
@@ -1054,7 +1061,7 @@ std::vector<std::pair<int, int>> Zone::RaycastVisibleTiles(float cameraWorldX, f
             if (!stamp) {
                 stamp = 1;
                 visible.emplace_back(tx, ty);
-                if (visible.size() > 0x1ff) break;
+                if (visible.size() >= hardCap) break;
             }
             r.x += r.dx;
             r.y += r.dy;

@@ -1,6 +1,7 @@
 #include "render3d/zone_renderer.h"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <vector>
 
@@ -510,9 +511,39 @@ struct ProjectedVertex {
 // saturates at ~12 tiles.
 constexpr int kDefaultZoomScale = 0x100;
 
-float FogScalar(float depthWorld) {
+float FogScalar(float depthWorld, int fogPercent) {
     static const float kScale = static_cast<float>(Zone::FogScaleFor(kDefaultZoomScale));
-    return std::clamp(depthWorld * kScale / 256.0f, 0.0f, 65535.0f);
+    if (fogPercent == 100) return std::clamp(depthWorld * kScale / 256.0f, 0.0f, 65535.0f);
+    // M123: the Fog setting scales `engine+0x5c8` and nothing else.
+    const float scale = kScale * static_cast<float>(fogPercent) / 100.0f;
+    return std::clamp(depthWorld * scale / 256.0f, 0.0f, 65535.0f);
+}
+
+// M123: how far the visibility march reaches for a fog density. At the
+// device's density the fog is opaque at half the default tier's 25 steps,
+// well inside what is drawn; lighter fog moves that point out, so the march
+// is lengthened to keep the drawn edge behind it -- same 140-degree fan, the
+// rays multiplied so their spacing at the far end is unchanged, and both
+// tile caps grown with the area. Capped at 64 tiles (half a map), which is
+// what Off draws.
+Zone::VisibilityTier VisibilityTierForFog(int fogPercent, size_t& softCap, size_t& hardCap) {
+    Zone::VisibilityTier tier = Zone::TierFor(kDefaultZoomScale);
+    softCap = Zone::kVisibleSoftCap;
+    hardCap = Zone::kVisibleHardCap;
+    if (fogPercent >= 100) return tier;
+    constexpr int kMaxSteps = 64;
+    const int base = tier.maxSteps;
+    int steps = fogPercent <= 0 ? kMaxSteps : (base * 100 + fogPercent - 1) / fogPercent;
+    steps = std::clamp(steps, base, kMaxSteps);
+    if (steps == base) return tier;
+    tier.rayCount = tier.rayCount * steps / base;
+    tier.angleStep = tier.angleStep * base / steps;
+    tier.maxSteps = steps;
+    const size_t area = static_cast<size_t>(steps) * static_cast<size_t>(steps);
+    const size_t baseArea = static_cast<size_t>(base) * static_cast<size_t>(base);
+    softCap = Zone::kVisibleSoftCap * area / baseArea;
+    hardCap = Zone::kVisibleHardCap * area / baseArea;
+    return tier;
 }
 
 int FogLevelOf(float fogScalar) {
@@ -544,6 +575,73 @@ uint16_t ExpandRGB444(uint16_t raw444, float brightness) {
     return PackRGB565(shade(r), shade(g), shade(b));
 }
 
+// M123: every rasterizer writes `ExpandRGB444(raw, 1.0f)`, a float multiply
+// and clamp per channel per pixel. At brightness 1 it is a pure function of
+// the 12-bit colour, so it is a 4096-entry table filled by that same
+// function -- the same values, without the arithmetic.
+uint16_t ExpandRGB444Full(uint16_t raw444) {
+    static const std::array<uint16_t, 4096> table = [] {
+        std::array<uint16_t, 4096> t{};
+        for (int i = 0; i < 4096; ++i) t[static_cast<size_t>(i)] = ExpandRGB444(static_cast<uint16_t>(i), 1.0f);
+        return t;
+    }();
+    return table[raw444 & 0x0fff];
+}
+
+// M123: **which pixels of a row can be inside a triangle.** The rasterizers
+// below test every pixel of the triangle's bounding box with three edge
+// functions; a large near-camera triangle leaves half its box empty, and at
+// a high Resolution that is most of the frame's work. On one row each edge
+// function is linear in x, `w(x) = A*x + K`, so the inside run is an
+// interval this solves for -- in double precision, and widened by the
+// worst-case rounding of the float test the loop still runs on every pixel
+// it visits. The narrowing only ever skips pixels that test would reject,
+// so the output is identical bit for bit (the tracked .ppm dumps, and
+// m119's narrowed-vs-full comparison at 3x, check exactly that). An edge
+// too close to horizontal to bound a row reliably is simply not used.
+bool g_SpanNarrowing = true;
+
+void ClipRowToTriangle(const ProjectedVertex& a, const ProjectedVertex& b,
+                       const ProjectedVertex& c, float area, int py, int boxW, int boxH,
+                       int& lo, int& hi) {
+    if (!g_SpanNarrowing) return;
+    const double sy = static_cast<double>(py) + 0.5;
+    const double sign = area > 0 ? 1.0 : -1.0;
+    // The float test's error is a few ulps of its largest product, which is
+    // bounded by the box's area; 4e-6 of it is a generous multiple of that.
+    const double err = 4e-6 * (static_cast<double>(boxW) + 2.0) * (static_cast<double>(boxH) + 2.0);
+    double xmin = static_cast<double>(lo), xmax = static_cast<double>(hi) + 1.0;
+    auto edge = [&](const ProjectedVertex& p, const ProjectedVertex& q) {
+        // w = (p.sx - x) * (q.sy - y) - (p.sy - y) * (q.sx - x)
+        //   = x * (p.sy - q.sy) + [p.sx * (q.sy - y) - (p.sy - y) * q.sx]
+        const double A = (static_cast<double>(p.sy) - q.sy) * sign;
+        const double K = (static_cast<double>(p.sx) * (q.sy - sy) -
+                          (static_cast<double>(p.sy) - sy) * q.sx) * sign;
+        if (std::fabs(A) < 0.25) return;  // too flat to bound a row safely
+        const double root = -K / A;
+        const double slack = 1.0 + err / std::fabs(A);
+        if (A > 0) {
+            xmin = std::max(xmin, root - slack);
+        } else {
+            xmax = std::min(xmax, root + slack);
+        }
+    };
+    edge(b, c);
+    edge(c, a);
+    edge(a, b);
+    // Pixel px is sampled at px + 0.5.
+    const double first = std::floor(xmin - 0.5);
+    const double last = std::ceil(xmax - 0.5);
+    if (first > lo) lo = static_cast<int>(std::min(first, static_cast<double>(hi) + 1.0));
+    if (last < hi) hi = static_cast<int>(std::max(last, static_cast<double>(lo) - 1.0));
+}
+
+}  // namespace
+
+void SetRasterSpanNarrowingForTest(bool enabled) { g_SpanNarrowing = enabled; }
+
+namespace {
+
 // The real detail-reduction mask (SurfaceFace_ClipAndDispatch, 0x1005d074):
 // the texel index is AND-ed with 0x7f/0x7e/0x7c/0x78 depending on the
 // triangle's own average view depth (its three vertices weighted 1:2:1,
@@ -559,12 +657,15 @@ int SurfaceDetailMask(float depthA, float depthB, float depthC) {
     return 0x78;
 }
 
-void RasterizeTriangle(Backbuffer& backbuffer, std::vector<float>& depthBuffer, const RowSpan& rows,
+// M123: `kFast` is the above-native variant -- see RasterizeTriangle below.
+template <bool kFast>
+void RasterizeTriangleT(Backbuffer& backbuffer, std::vector<float>& depthBuffer, const RowSpan& rows,
                         const ProjectedVertex& a, const ProjectedVertex& b,
                         const ProjectedVertex& c, const Zone& zone, int textureIndex,
                         uint8_t hueGroup) {
     float area = (b.sx - a.sx) * (c.sy - a.sy) - (b.sy - a.sy) * (c.sx - a.sx);
     if (std::fabs(area) < 1e-6f) return;
+    const float invArea = 1.0f / area;  // M123, kFast only
     const int detailMask = SurfaceDetailMask(a.depthWorld, b.depthWorld, c.depthWorld);
 
     int minX = std::max(0, static_cast<int>(std::floor(std::min({a.sx, b.sx, c.sx}))));
@@ -576,23 +677,59 @@ void RasterizeTriangle(Backbuffer& backbuffer, std::vector<float>& depthBuffer, 
     if (minX > maxX || minY > maxY) return;
 
     for (int py = minY; py <= maxY; ++py) {
-        for (int px = minX; px <= maxX; ++px) {
-            float sx = static_cast<float>(px) + 0.5f;
-            float sy = static_cast<float>(py) + 0.5f;
-            float w0 = (b.sx - sx) * (c.sy - sy) - (b.sy - sy) * (c.sx - sx);
-            float w1 = (c.sx - sx) * (a.sy - sy) - (c.sy - sy) * (a.sx - sx);
-            float w2 = (a.sx - sx) * (b.sy - sy) - (a.sy - sy) * (b.sx - sx);
+        int rowLo = minX, rowHi = maxX;  // M123: see ClipRowToTriangle
+        ClipRowToTriangle(a, b, c, area, py, maxX - minX + 1, maxY - minY + 1, rowLo, rowHi);
+        // M123: above native, the edge functions along a row are a start and
+        // a slope (`w(x) = w(minX) + (x - minX) * dw`) instead of the full
+        // form. Anchored at the box's own left edge, not the narrowed span's,
+        // so a pixel's value never depends on where the narrowing began.
+        const float rowSy = static_cast<float>(py) + 0.5f;
+        const float rowSx = static_cast<float>(minX) + 0.5f;
+        const float w0Lo = (b.sx - rowSx) * (c.sy - rowSy) - (b.sy - rowSy) * (c.sx - rowSx);
+        const float w1Lo = (c.sx - rowSx) * (a.sy - rowSy) - (c.sy - rowSy) * (a.sx - rowSx);
+        const float w2Lo = (a.sx - rowSx) * (b.sy - rowSy) - (a.sy - rowSy) * (b.sx - rowSx);
+        const float dw0 = b.sy - c.sy, dw1 = c.sy - a.sy, dw2 = a.sy - b.sy;
+        for (int px = rowLo; px <= rowHi; ++px) {
+            float w0, w1, w2;
+            if constexpr (kFast) {
+                const float dx = static_cast<float>(px - minX);
+                w0 = w0Lo + dx * dw0;
+                w1 = w1Lo + dx * dw1;
+                w2 = w2Lo + dx * dw2;
+            } else {
+                float sx = static_cast<float>(px) + 0.5f;
+                float sy = static_cast<float>(py) + 0.5f;
+                w0 = (b.sx - sx) * (c.sy - sy) - (b.sy - sy) * (c.sx - sx);
+                w1 = (c.sx - sx) * (a.sy - sy) - (c.sy - sy) * (a.sx - sx);
+                w2 = (a.sx - sx) * (b.sy - sy) - (a.sy - sy) * (b.sx - sx);
+            }
             bool inside = (w0 >= 0 && w1 >= 0 && w2 >= 0) || (w0 <= 0 && w1 <= 0 && w2 <= 0);
             if (!inside) continue;
-            float l0 = w0 / area, l1 = w1 / area, l2 = w2 / area;
+            float l0, l1, l2;
+            if constexpr (kFast) {
+                l0 = w0 * invArea;
+                l1 = w1 * invArea;
+                l2 = w2 * invArea;
+            } else {
+                l0 = w0 / area;
+                l1 = w1 / area;
+                l2 = w2 / area;
+            }
 
             float invW = l0 * a.invW + l1 * b.invW + l2 * c.invW;
             if (invW <= 0.0f) continue;
             int depthIndex = py * backbuffer.width() + px;
             if (invW <= depthBuffer[static_cast<size_t>(depthIndex)]) continue;  // farther, skip
 
-            float u = (l0 * a.u + l1 * b.u + l2 * c.u) / invW;
-            float v = (l0 * a.v + l1 * b.v + l2 * c.v) / invW;
+            float u, v;
+            if constexpr (kFast) {
+                const float rcpW = 1.0f / invW;
+                u = (l0 * a.u + l1 * b.u + l2 * c.u) * rcpW;
+                v = (l0 * a.v + l1 * b.v + l2 * c.v) * rcpW;
+            } else {
+                u = (l0 * a.u + l1 * b.u + l2 * c.u) / invW;
+                v = (l0 * a.v + l1 * b.v + l2 * c.v) / invW;
+            }
             // Real texel addressing: `mask & (uv >> 8)` -- a *wrap*, not a
             // clamp, so a surface whose real .sur shift makes its texture
             // repeat several times across a face genuinely tiles (see
@@ -624,7 +761,7 @@ void RasterizeTriangle(Backbuffer& backbuffer, std::vector<float>& depthBuffer, 
             raw444 = zone.FogColor(FogLevelOf(fogF), raw444);
 
             depthBuffer[static_cast<size_t>(depthIndex)] = invW;
-            backbuffer.SetPixel(px, py, ExpandRGB444(raw444, 1.0f));
+            backbuffer.SetPixel(px, py, ExpandRGB444Full(raw444));
         }
     }
 }
@@ -648,13 +785,14 @@ void RasterizeTriangle(Backbuffer& backbuffer, std::vector<float>& depthBuffer, 
 // drawn afterwards passes its own test over the sky), and don't scale by
 // the M35 light/fog factor. Skipping the cutout is faithful rather than
 // load-bearing -- no shipped `.zsk` skin contains a single 0x0f0f texel.
-void RasterizeModelTriangle(Backbuffer& backbuffer, std::vector<float>& depthBuffer,
+template <bool kFast>
+void RasterizeModelTriangleT(Backbuffer& backbuffer, std::vector<float>& depthBuffer,
                             const RowSpan& rows,
                              const ProjectedVertex& a, const ProjectedVertex& b,
                              const ProjectedVertex& c, const Model& model, int skinIndex,
-                             bool asSkybox = false, uint8_t* objectIds = nullptr,
-                             uint8_t objectId = 0, int flashLevel = -1,
-                             const Zone* zone = nullptr) {
+                             bool asSkybox, uint8_t* objectIds,
+                             uint8_t objectId, int flashLevel,
+                             const Zone* zone) {
     // M66: a model with no skin pixels has nothing to sample. Every texel
     // would come back as the chroma key anyway (Model::TexelAt returns
     // 0x0f0f for any out-of-range coordinate), so this changes nothing
@@ -674,6 +812,7 @@ void RasterizeModelTriangle(Backbuffer& backbuffer, std::vector<float>& depthBuf
 
     float area = (b.sx - a.sx) * (c.sy - a.sy) - (b.sy - a.sy) * (c.sx - a.sx);
     if (std::fabs(area) < 1e-6f) return;
+    const float invArea = 1.0f / area;  // M123, kFast only
 
     int minX = std::max(0, static_cast<int>(std::floor(std::min({a.sx, b.sx, c.sx}))));
     int maxX =
@@ -684,15 +823,44 @@ void RasterizeModelTriangle(Backbuffer& backbuffer, std::vector<float>& depthBuf
     if (minX > maxX || minY > maxY) return;
 
     for (int py = minY; py <= maxY; ++py) {
-        for (int px = minX; px <= maxX; ++px) {
-            float sx = static_cast<float>(px) + 0.5f;
-            float sy = static_cast<float>(py) + 0.5f;
-            float w0 = (b.sx - sx) * (c.sy - sy) - (b.sy - sy) * (c.sx - sx);
-            float w1 = (c.sx - sx) * (a.sy - sy) - (c.sy - sy) * (a.sx - sx);
-            float w2 = (a.sx - sx) * (b.sy - sy) - (a.sy - sy) * (b.sx - sx);
+        int rowLo = minX, rowHi = maxX;  // M123: see ClipRowToTriangle
+        ClipRowToTriangle(a, b, c, area, py, maxX - minX + 1, maxY - minY + 1, rowLo, rowHi);
+        // M123: above native, the edge functions along a row are a start and
+        // a slope (`w(x) = w(minX) + (x - minX) * dw`) instead of the full
+        // form. Anchored at the box's own left edge, not the narrowed span's,
+        // so a pixel's value never depends on where the narrowing began.
+        const float rowSy = static_cast<float>(py) + 0.5f;
+        const float rowSx = static_cast<float>(minX) + 0.5f;
+        const float w0Lo = (b.sx - rowSx) * (c.sy - rowSy) - (b.sy - rowSy) * (c.sx - rowSx);
+        const float w1Lo = (c.sx - rowSx) * (a.sy - rowSy) - (c.sy - rowSy) * (a.sx - rowSx);
+        const float w2Lo = (a.sx - rowSx) * (b.sy - rowSy) - (a.sy - rowSy) * (b.sx - rowSx);
+        const float dw0 = b.sy - c.sy, dw1 = c.sy - a.sy, dw2 = a.sy - b.sy;
+        for (int px = rowLo; px <= rowHi; ++px) {
+            float w0, w1, w2;
+            if constexpr (kFast) {
+                const float dx = static_cast<float>(px - minX);
+                w0 = w0Lo + dx * dw0;
+                w1 = w1Lo + dx * dw1;
+                w2 = w2Lo + dx * dw2;
+            } else {
+                float sx = static_cast<float>(px) + 0.5f;
+                float sy = static_cast<float>(py) + 0.5f;
+                w0 = (b.sx - sx) * (c.sy - sy) - (b.sy - sy) * (c.sx - sx);
+                w1 = (c.sx - sx) * (a.sy - sy) - (c.sy - sy) * (a.sx - sx);
+                w2 = (a.sx - sx) * (b.sy - sy) - (a.sy - sy) * (b.sx - sx);
+            }
             bool inside = (w0 >= 0 && w1 >= 0 && w2 >= 0) || (w0 <= 0 && w1 <= 0 && w2 <= 0);
             if (!inside) continue;
-            float l0 = w0 / area, l1 = w1 / area, l2 = w2 / area;
+            float l0, l1, l2;
+            if constexpr (kFast) {
+                l0 = w0 * invArea;
+                l1 = w1 * invArea;
+                l2 = w2 * invArea;
+            } else {
+                l0 = w0 / area;
+                l1 = w1 / area;
+                l2 = w2 / area;
+            }
 
             float invW = l0 * a.invW + l1 * b.invW + l2 * c.invW;
             if (invW <= 0.0f) continue;
@@ -700,15 +868,24 @@ void RasterizeModelTriangle(Backbuffer& backbuffer, std::vector<float>& depthBuf
             if (!asSkybox && invW <= depthBuffer[static_cast<size_t>(depthIndex)]) {
                 continue;  // farther, skip
             }
+            // M123: the sky fills only what nothing opaque claimed.
+            if (asSkybox && depthBuffer[static_cast<size_t>(depthIndex)] != 0.0f) continue;
 
-            float u = (l0 * a.u + l1 * b.u + l2 * c.u) / invW;
-            float v = (l0 * a.v + l1 * b.v + l2 * c.v) / invW;
+            float u, v;
+            if constexpr (kFast) {
+                const float rcpW = 1.0f / invW;
+                u = (l0 * a.u + l1 * b.u + l2 * c.u) * rcpW;
+                v = (l0 * a.v + l1 * b.v + l2 * c.v) * rcpW;
+            } else {
+                u = (l0 * a.u + l1 * b.u + l2 * c.u) / invW;
+                v = (l0 * a.v + l1 * b.v + l2 * c.v) / invW;
+            }
             int tx = std::clamp(static_cast<int>(u), 0, model.width - 1);
             int ty = std::clamp(static_cast<int>(v), 0, model.height - 1);
 
             uint16_t raw444 = model.TexelAt(skinIndex, tx, ty);
             if (asSkybox) {
-                backbuffer.SetPixel(px, py, ExpandRGB444(raw444, 1.0f));
+                backbuffer.SetPixel(px, py, ExpandRGB444Full(raw444));
                 continue;
             }
             if (raw444 == 0x0f0f) continue;  // chroma-key cutout
@@ -760,13 +937,48 @@ void RasterizeModelTriangle(Backbuffer& backbuffer, std::vector<float>& depthBuf
                 const HitFlashRamps& ramps = FlashRamps();
                 const int row = std::clamp(flashLevel, 0, 13);
                 const int step = (raw444 >> 8) & 0xF;
-                backbuffer.SetPixel(px, py, ExpandRGB444(ramps.entry[row][step], 1.0f));
+                backbuffer.SetPixel(px, py, ExpandRGB444Full(ramps.entry[row][step]));
                 continue;
             }
             const float fogF = l0 * a.fog + l1 * b.fog + l2 * c.fog;
             if (zone != nullptr) raw444 = zone->FogColor(FogLevelOf(fogF), raw444);
-            backbuffer.SetPixel(px, py, ExpandRGB444(raw444, 1.0f));
+            backbuffer.SetPixel(px, py, ExpandRGB444Full(raw444));
         }
+    }
+}
+
+// M123: **the above-native rasterizers trade the last bit for speed.** Five
+// float divides a pixel (three barycentric `w / area`, two perspective
+// `/ invW`) become one reciprocal and multiplies. That moves results in the
+// last bit, so it is used only when the frame is larger than the device's:
+// at Resolution Original every pixel is still the arithmetic the tracked
+// .ppm dumps pin. Chosen by the target's size, never by the band schedule,
+// so a banded frame and a one-pass frame of the same size stay identical.
+void RasterizeTriangle(Backbuffer& backbuffer, std::vector<float>& depthBuffer, const RowSpan& rows,
+                        const ProjectedVertex& a, const ProjectedVertex& b,
+                        const ProjectedVertex& c, const Zone& zone, int textureIndex,
+                        uint8_t hueGroup) {
+    if (backbuffer.width() > Backbuffer::kWidth) {
+        RasterizeTriangleT<true>(backbuffer, depthBuffer, rows, a, b, c, zone, textureIndex,
+                                 hueGroup);
+    } else {
+        RasterizeTriangleT<false>(backbuffer, depthBuffer, rows, a, b, c, zone, textureIndex,
+                                  hueGroup);
+    }
+}
+
+void RasterizeModelTriangle(Backbuffer& backbuffer, std::vector<float>& depthBuffer,
+                            const RowSpan& rows, const ProjectedVertex& a,
+                            const ProjectedVertex& b, const ProjectedVertex& c,
+                            const Model& model, int skinIndex, bool asSkybox = false,
+                            uint8_t* objectIds = nullptr, uint8_t objectId = 0,
+                            int flashLevel = -1, const Zone* zone = nullptr) {
+    if (backbuffer.width() > Backbuffer::kWidth) {
+        RasterizeModelTriangleT<true>(backbuffer, depthBuffer, rows, a, b, c, model, skinIndex,
+                                      asSkybox, objectIds, objectId, flashLevel, zone);
+    } else {
+        RasterizeModelTriangleT<false>(backbuffer, depthBuffer, rows, a, b, c, model, skinIndex,
+                                       asSkybox, objectIds, objectId, flashLevel, zone);
     }
 }
 
@@ -973,7 +1185,8 @@ void SubmitModel(TriangleSink& sink, const Zone& zone, const Model& model, int s
                   float cosPitch, float sinPitch, float focalX, float focalY,
                   float entityYaw = 0.0f, float scale = 1.0f, int frameIndex = 0,
                   bool asSkybox = false, float rotA = 0.0f, float rotB = 0.0f,
-                  uint8_t* objectIds = nullptr, uint8_t objectId = 0, int flashLevel = -1) {
+                  uint8_t* objectIds = nullptr, uint8_t objectId = 0, int flashLevel = -1,
+                  int fogPercent = 100) {
     // M35: see kModelForwardYawOffset -- a model's forward is its local
     // +Z, so a heading measured from world +X needs a quarter turn taken
     // out of it before it can be used as a rotation of the local axes.
@@ -1097,7 +1310,7 @@ void SubmitModel(TriangleSink& sink, const Zone& zone, const Model& model, int s
             pvc[i].u = clipped[i].u * pvc[i].invW;
             pvc[i].v = clipped[i].v * pvc[i].invW;
             pvc[i].light = clipped[i].light;  // M35
-            pvc[i].fog = FogScalar(pvc[i].depthWorld);  // M89
+            pvc[i].fog = FogScalar(pvc[i].depthWorld, fogPercent);  // M89, M123
         }
         for (int i = 1; i + 1 < clippedCount; ++i) {
             sink.ModelTriangle(pvc[0], pvc[i], pvc[i + 1], model, skinIndex, asSkybox, objectIds,
@@ -1196,8 +1409,15 @@ void ZoneRenderer::Render(Backbuffer& backbuffer, const Zone& zone, const Camera
     // loop, and this pipeline is that loop -- so the two are called in the
     // same order and for the same reason. Replaces M6's fixed-radius
     // square scan, the last placeholder left in this pipeline.
-    std::vector<std::pair<int, int>> visibleTiles =
-        zone.RaycastVisibleTiles(camera.x, camera.y, camera.yaw);
+    std::vector<std::pair<int, int>> visibleTiles;
+    if (fogPercent >= 100) {
+        visibleTiles = zone.RaycastVisibleTiles(camera.x, camera.y, camera.yaw);
+    } else {
+        size_t softCap = 0, hardCap = 0;  // M123
+        const Zone::VisibilityTier tier = VisibilityTierForFog(fogPercent, softCap, hardCap);
+        visibleTiles =
+            zone.RaycastVisibleTiles(camera.x, camera.y, camera.yaw, tier, softCap, hardCap);
+    }
     std::vector<Face> faces = CollectFaces(zone, visibleTiles, camera.x, camera.y, camera.z);
 
     float camX = camera.x / kTileScale, camY = camera.y / kTileScale, camZ = camera.z / kTileScale;
@@ -1243,13 +1463,7 @@ void ZoneRenderer::Render(Backbuffer& backbuffer, const Zone& zone, const Camera
         // camera-space ones and simply never adds a camera position: passing the
         // camera's own X/Y/Z as the instance offset makes every sky vertex
         // camera-relative, which is the same thing.
-        const Model* sky = drawSkybox ? zone.SkyMesh() : nullptr;
-        if (sky) {
-            SubmitModel(sink, zone, *sky, /*skinIndex=*/0, camX, camY,
-                        camera.z + kSkyboxUpOffset, camX, camY, camZ, cosYaw, sinYaw, cosPitch,
-                        sinPitch, focalX, focalY, /*entityYaw=*/0.0f, kSkyboxScale, /*frameIndex=*/0,
-                        /*asSkybox=*/true);
-        }
+        // M123: submitted further down -- see "the sky, last".
 
         for (const Face& face : faces) {
             const SurfaceRecord& sur = zone.surface(face.surIndex);
@@ -1353,7 +1567,7 @@ void ZoneRenderer::Render(Backbuffer& backbuffer, const Zone& zone, const Camera
                     pv[i].u = clipped[i].u * pv[i].invW;
                     pv[i].v = clipped[i].v * pv[i].invW;
                     pv[i].light = clipped[i].light;
-                    pv[i].fog = FogScalar(pv[i].depthWorld);  // M89
+                    pv[i].fog = FogScalar(pv[i].depthWorld, fogPercent);  // M89, M123
                 }
                 for (int i = 1; i + 1 < clippedCount; ++i) {
                     sink.Surface(pv[0], pv[i], pv[i + 1], zone, sur.textureIndex, face.hueGroup);
@@ -1408,7 +1622,26 @@ void ZoneRenderer::Render(Backbuffer& backbuffer, const Zone& zone, const Camera
                             baseTileY, baseZ, camX, camY, camZ, cosYaw, sinYaw, cosPitch, sinPitch, focalX, focalY,
                             pe.yaw, pe.scale, pe.frameIndex, /*asSkybox=*/false, pe.rotA, pe.rotB,
                             m_ObjectIds.data(), static_cast<uint8_t>(pe.objectId & 0xFF),
-                            pe.flashLevel);
+                            pe.flashLevel, fogPercent);
+            }
+        }
+
+        // M123: **the sky, last of the opaque passes, and only where nothing
+        // opaque landed.** The engine draws it first as the frame clear: it
+        // writes no depth and everything else covers it. Every surface and
+        // model pixel that is drawn writes depth, so after them a pixel
+        // still at depth 0 is exactly a pixel the sky would have shown --
+        // and drawing it there now gives the identical frame while skipping
+        // every pixel that was going to be overdrawn (all of them, indoors).
+        // Still before the billboards, which blend over whatever is beneath.
+        {
+            const Model* sky = drawSkybox ? zone.SkyMesh() : nullptr;
+            if (sky) {
+                SubmitModel(sink, zone, *sky, /*skinIndex=*/0, camX, camY,
+                            camera.z + kSkyboxUpOffset, camX, camY, camZ, cosYaw, sinYaw,
+                            cosPitch, sinPitch, focalX, focalY, /*entityYaw=*/0.0f, kSkyboxScale,
+                            /*frameIndex=*/0, /*asSkybox=*/true, 0.0f, 0.0f, nullptr, 0, -1,
+                            fogPercent);
             }
         }
 

@@ -2012,7 +2012,12 @@ skiExecutable* LiveDebugHost::ResolveReceiver(const std::string& receiver,
             }
             if (m_Refs.pickups) {
                 for (PickupInstance& p : *m_Refs.pickups) {
-                    if (p.script && p.script->name() == row.name) return p.script.get();
+                    // Position too, like the monsters: every loot bag and
+                    // chest is named "Examine", so the name alone always
+                    // resolved to the first one in the list.
+                    if (p.script && p.x == row.x && p.y == row.y && p.script->name() == row.name) {
+                        return p.script.get();
+                    }
                 }
             }
         }
@@ -4051,6 +4056,7 @@ int main(int argc, char** argv) {
             // A container's contents are its Spellbook list, typeId and
             // count per entry -- and its `+0x160` Init guard is set, which
             // is what keeps a looted chest from restocking on the way back.
+            rec.spellbook.destroy = item.destroyWhenEmpty() ? 1 : 0;  // M123: +0x180
             if (p.isContainer) {
                 rec.spellbook.initDone = 1;
                 rec.spellbook.isContainer = 1;
@@ -4324,6 +4330,7 @@ int main(int argc, char** argv) {
                                  const std::vector<sk::PlacedEntity>& entities,
                                  const std::vector<sk::SpriteBillboard>& billboards) {
         sk::Backbuffer& scene = beginScene();
+        zoneRenderer.fogPercent = pcSettings.settings().fogPercent();  // M123
 #if SK_DEBUG_SUITE
         // SK_DEBUG_SUITE (M68): a counter and a timer around the 3D pass.
         sk_debug::Count("render.frames");
@@ -4436,6 +4443,8 @@ int main(int argc, char** argv) {
                 std::printf("  [drop] %s -> loot bag at (%.0f, %.0f)\n",
                             dropped->name().c_str(), inst.x, inst.y);
                 bag->AddContent(std::move(dropped));
+                // M123: FUN_1002c3a8's `+0x180 = 1` -- emptied, it goes.
+                bag->SetDestroyWhenEmpty(true);
                 inst.script = std::move(bag);
                 gamePickups.push_back(std::move(inst));
             }
@@ -5172,6 +5181,7 @@ int main(int argc, char** argv) {
                                                          ? saved->weapon.quantity
                                                          : saved->stackable.quantity;
                                 if (quantity > 0) item->SetQuantity(quantity);
+                                item->SetDestroyWhenEmpty(saved->spellbook.destroy != 0);  // M123
                                 if (saved->entity.flags & 0x1) {  // M122: hidden
                                     callRestoreNative(*item, "ShowEntity", skRValue(false));
                                 }
@@ -7553,6 +7563,11 @@ int main(int argc, char** argv) {
                     // but this keeps GetPositionX/Y/Z honest afterwards.
                     bag->SetWorldPosition(static_cast<int>(inst.x), static_cast<int>(inst.y),
                                           static_cast<int>(inst.z));
+                    // M123: FUN_10084438's `+0x180 = 1` on the bag it spawns:
+                    // lootmenu.s takes an emptied one out of the world only
+                    // when this is set, and before this every creature's bag
+                    // stayed behind empty and unusable.
+                    bag->SetDestroyWhenEmpty(true);
                     inst.script = std::move(bag);
                     gamePickups.push_back(std::move(inst));
                 };
@@ -8958,6 +8973,7 @@ int main(int argc, char** argv) {
             stack.SetMenuActive(false);
             // M119: through the Resolution setting's scene target, which at
             // the original Resolution is the Backbuffer itself.
+            zoneRenderer.fogPercent = pcSettings.settings().fogPercent();  // M123
             zoneRenderer.Render(beginScene(), *gameZone, gameCamera, gameEntities, &modelArchive);
             endScene();
             // M79: the viewmodel under the HUD here too -- see the main

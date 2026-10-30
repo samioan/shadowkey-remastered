@@ -495,11 +495,22 @@ constexpr int kFlashPeriodUnits = 8;
 constexpr int kFlashRedMin = 0, kFlashRedMax = 5;
 constexpr int kFlashGreenMin = 7, kFlashGreenMax = 0xc;
 
+// M123: the rasterizers' per-row span narrowing (zone_renderer.cpp's
+// ClipRowToTriangle) is on unless a test switches it off to compare a frame
+// drawn both ways. It never changes a pixel; that comparison is the proof.
+void SetRasterSpanNarrowingForTest(bool enabled);
+
 class ZoneRenderer {
 public:
     // Tile radius (in tiles) around the camera to scan for faces to
     // draw -- a stand-in for the real TileGrid_RaycastVisibility.
     int renderRadius = 20;
+
+    // M123: fog density in percent of the engine's (the Options screen's
+    // Fog row). 100 is the original arithmetic exactly. Below 100 the view
+    // also reaches further, so that the edge of the drawn world stays inside
+    // the fog: see Render().
+    int fogPercent = 100;
 
     // Draw the zone's skybox, or flat-fill the frame with a background
     // colour instead. This is the real `engine+0xbe0e`: the zone loader

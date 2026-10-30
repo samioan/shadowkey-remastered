@@ -246,8 +246,15 @@ int main(int argc, char** argv) {
             if (rows[i].pcSetting == 2) aspectRow = static_cast<int>(i);
             if (rows[i].pcSetting == 3) rateRow = static_cast<int>(i);
         }
-        Check(rows.size() == plain.size(), "no row is added: " + std::to_string(rows.size()) +
-                                               " rows, as the script built");
+        // M123: the fourth row (Fog) is the only one added, and it is the
+        // last row -- every row the script built keeps its index.
+        int fogRow = -1;
+        for (size_t i = 0; i < rows.size(); ++i) {
+            if (rows[i].pcSetting == 4) fogRow = static_cast<int>(i);
+        }
+        Check(rows.size() == plain.size() + 1 && fogRow == static_cast<int>(rows.size()) - 1,
+              "one row is added, Fog, after the script's last: " + std::to_string(rows.size()) +
+                  " rows");
         Check(resRow >= 1 && aspectRow == resRow + 1 && rateRow == resRow + 2 &&
                   rows[resRow - 1].kind == Menu::RowKind::Slider,
               "the three rows sit straight after the Music slider");
@@ -259,7 +266,7 @@ int main(int argc, char** argv) {
                   RowLabel(rows[0], strings) == plain[1] && RowLabel(rows[1], strings) == plain[2],
               "in the places of options.s's three spacers: the sliders up one, the gap under them");
         bool othersUnchanged = true;
-        for (size_t i = static_cast<size_t>(rateRow) + 1; i < rows.size(); ++i) {
+        for (size_t i = static_cast<size_t>(rateRow) + 1; i < plain.size(); ++i) {  // M123: not Fog
             if (RowLabel(rows[i], strings) != plain[i] || rows[i].kind != plainKinds[i]) {
                 othersUnchanged = false;
             }
@@ -302,8 +309,9 @@ int main(int argc, char** argv) {
         // options.s's own handlers rebuild the screen with ClearMenu(); Init();.
         call(options, "SetGerman");
         options->EnsurePcSettingRows();
-        Check(options->rows().size() == plain.size() &&
+        Check(options->rows().size() == plain.size() + 1 &&  // M123: + Fog
                   options->rows()[resRow].pcSetting == 1 &&
+                  RowLabel(options->rows().back(), strings) == "Nebel: Original" &&
                   RowLabel(options->rows()[resRow], strings) == "Aufl\xF6sung: Original" &&
                   RowLabel(options->rows()[aspectRow], strings) == "Format: 16:9" &&
                   RowLabel(options->rows()[rateRow], strings) == "Bildrate: 60",
@@ -528,6 +536,47 @@ int main(int argc, char** argv) {
                 }
             }
             Check(identical, "a 3x frame drawn in bands on the worker threads is the one-pass frame");
+        }
+
+        // M123: the rasterizers' row-span narrowing skips only pixels the
+        // per-pixel test would reject -- so a frame drawn with it is the
+        // frame drawn testing every pixel of every bounding box, at the
+        // native size and at 3x, from eight headings and three pitches.
+        {
+            bool identical = true;
+            int frames = 0;
+            for (int scale : {1, 3}) {
+                for (int turn = 0; turn < 8; ++turn) {
+                    for (float pitch : {-0.5f, 0.0f, 0.4f}) {
+                        sk::Camera view = camera;
+                        view.yaw = camera.yaw + static_cast<float>(turn) * 0.785398f;
+                        view.pitch = pitch;
+                        sk::Backbuffer fast(sk::Backbuffer::kWidth * scale,
+                                            sk::Backbuffer::kHeight * scale);
+                        sk::Backbuffer full(sk::Backbuffer::kWidth * scale,
+                                            sk::Backbuffer::kHeight * scale);
+                        sk::ZoneRenderer r;
+                        r.bandLimit = 1;
+                        sk::SetRasterSpanNarrowingForTest(true);
+                        r.Render(fast, zone, view, list, &models);
+                        sk::SetRasterSpanNarrowingForTest(false);
+                        r.Render(full, zone, view, list, &models);
+                        sk::SetRasterSpanNarrowingForTest(true);
+                        ++frames;
+                        for (int y = 0; y < fast.height() && identical; ++y) {
+                            for (int x = 0; x < fast.width(); ++x) {
+                                if (fast.Row(y)[x] != full.Row(y)[x]) {
+                                    identical = false;
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            Check(identical && frames == 48,
+                  "row-span narrowing draws every pixel exactly as testing the whole box does "
+                  "(48 frames, 1x and 3x)");
         }
 
         // The composite: a 2D pixel over the scene replaces its block; an

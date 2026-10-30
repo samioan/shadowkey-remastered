@@ -20,14 +20,16 @@ struct Labels {
     const char* original;
     const char* unlimited;
     const char* aspect;  // M120
+    const char* fog;     // M123
+    const char* off;     // M123
 };
 constexpr Labels kLabels[] = {
-    {"Resolution", "Frame Rate", "Original", "Unlimited", "Aspect Ratio"},
-    {"Resoluci\xf3n", "Fotogramas", "Original", "Ilimitado", "Formato"},
-    {"Aufl\xf6sung", "Bildrate", "Original", "Unbegrenzt", "Format"},
-    {"R\xe9solution", "Images/s", "Originale", "Illimit\xe9", "Format"},
-    {"Risoluzione", "Fotogrammi", "Originale", "Illimitati", "Formato"},
-    {"Resolution", "Frame Rate", "Original", "Unlimited", "Aspect Ratio"},
+    {"Resolution", "Frame Rate", "Original", "Unlimited", "Aspect Ratio", "Fog", "Off"},
+    {"Resoluci\xf3n", "Fotogramas", "Original", "Ilimitado", "Formato", "Niebla", "No"},
+    {"Aufl\xf6sung", "Bildrate", "Original", "Unbegrenzt", "Format", "Nebel", "Aus"},
+    {"R\xe9solution", "Images/s", "Originale", "Illimit\xe9", "Format", "Brouillard", "Non"},
+    {"Risoluzione", "Fotogrammi", "Originale", "Illimitati", "Formato", "Nebbia", "No"},
+    {"Resolution", "Frame Rate", "Original", "Unlimited", "Aspect Ratio", "Fog", "Off"},
 };
 
 const Labels& LabelsFor(int language) {
@@ -86,6 +88,12 @@ std::string FrameRateValueText(int fps, int language) {
     return std::to_string(fps);
 }
 
+std::string FogValueText(int percent, int language) {
+    if (percent == kFogOriginal) return LabelsFor(language).original;
+    if (percent == 0) return LabelsFor(language).off;
+    return std::to_string(percent) + "%";
+}
+
 PcSettingsStore::PcSettingsStore(std::string path) : path_(std::move(path)) {}
 
 void PcSettingsStore::Set(const PcSettings& settings) {
@@ -93,6 +101,7 @@ void PcSettingsStore::Set(const PcSettings& settings) {
     settings_.resolutionIndex = Wrap(settings_.resolutionIndex, kResolutionOptionCount);
     settings_.frameRateIndex = Wrap(settings_.frameRateIndex, kFrameRateOptionCount);
     settings_.aspectIndex = Wrap(settings_.aspectIndex, kAspectOptionCount);
+    settings_.fogIndex = Wrap(settings_.fogIndex, kFogOptionCount);
 }
 
 bool PcSettingsStore::Load() {
@@ -121,6 +130,10 @@ bool PcSettingsStore::Load() {
             for (int i = 0; i < kAspectOptionCount; ++i) {
                 if (kAspectRatios[i] == value) settings_.aspectIndex = i;
             }
+        } else if (std::strcmp(key, "fog") == 0) {  // M123
+            for (int i = 0; i < kFogOptionCount; ++i) {
+                if (kFogDensities[i] == value) settings_.fogIndex = i;
+            }
         }
     }
     std::fclose(f);
@@ -141,8 +154,10 @@ bool PcSettingsStore::Save() const {
                  "# framerate: 25 = original, -1 = v-sync, 0 = unlimited, else frames a second\n"
                  "# aspect: 0 = original, -1 = auto (fill the window), else w*100+h "
                  "(1609 = 16:9)\n"
-                 "resolution=%d\nframerate=%d\naspect=%d\n",
-                 settings_.resolutionScale(), settings_.frameRate(), settings_.aspect());
+                 "# fog: density in percent of the original, 100 = original, 0 = off\n"
+                 "resolution=%d\nframerate=%d\naspect=%d\nfog=%d\n",
+                 settings_.resolutionScale(), settings_.frameRate(), settings_.aspect(),
+                 settings_.fogPercent());
     std::fclose(f);
     return true;
 }
@@ -160,6 +175,9 @@ std::string PcSettingsStore::RowText(int row, int language) const {
     if (row == kRowAspect) {
         return std::string(labels.aspect) + ": " + AspectValueText(settings_.aspect(), language);
     }
+    if (row == kRowFog) {
+        return std::string(labels.fog) + ": " + FogValueText(settings_.fogPercent(), language);
+    }
     return std::string();
 }
 
@@ -170,6 +188,8 @@ void PcSettingsStore::Cycle(int row, int delta) {
         settings_.frameRateIndex = Wrap(settings_.frameRateIndex + delta, kFrameRateOptionCount);
     } else if (row == kRowAspect) {
         settings_.aspectIndex = Wrap(settings_.aspectIndex + delta, kAspectOptionCount);
+    } else if (row == kRowFog) {
+        settings_.fogIndex = Wrap(settings_.fogIndex + delta, kFogOptionCount);
     } else {
         return;
     }

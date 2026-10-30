@@ -417,6 +417,11 @@ public:
     // crypt1/shadowkeygate.s); a placed chest never does, so a chest stays
     // in the world (just `SetUsable(false)`) while a dropped bag vanishes.
     bool destroyWhenEmpty() const { return m_DestroyWhenEmpty; }
+    // M123: the engine's own bag spawners write `+0x180 = 1` themselves
+    // (FUN_10084438 for a creature's loot, FUN_1002c3a8 for a dropped item),
+    // which is what lootmenu.s's `GetDestroy()` reads before taking an
+    // emptied bag out of the world.
+    void SetDestroyWhenEmpty(bool destroy) { m_DestroyWhenEmpty = destroy; }
 
     // M36: lootmenu.s's `Opener.GetTemplate() != 306` (which suppresses the
     // pickup sound for one specific container type). The real value is the

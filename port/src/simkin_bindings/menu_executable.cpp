@@ -762,7 +762,15 @@ void MenuExecutable::EnsurePcSettingRows() {
                isSpacer(firstSlider - static_cast<size_t>(before) - 1)) {
             ++before;
         }
-        if (after + before >= needed) {
+        // M123: four rows now, and options.s has only three spacers. The
+        // gap takes as many as fit (Resolution, Aspect Ratio, Frame Rate --
+        // M120's layout, unchanged) and the rest go after the script's last
+        // row (Fog, under Mute). Appending is the one place a row can go
+        // without moving any row the script holds a handle to: AddMenuItem's
+        // handles are row indices, and options.s keeps two of them.
+        constexpr int kSpacersInOptions = 3;  // options.s's own, all of them
+        const int inGap = (std::min)(needed, after + before);
+        if (inGap >= (std::min)(needed, kSpacersInOptions)) {
             if (before > 0) {
                 // [spacers][sliders...] -> [sliders...][spacers]
                 const size_t from = firstSlider - static_cast<size_t>(before);
@@ -776,12 +784,17 @@ void MenuExecutable::EnsurePcSettingRows() {
                 }
                 first -= static_cast<size_t>(before);
             }
-            for (int k = 0; k < needed; ++k) {
+            for (int k = 0; k < inGap; ++k) {
                 MenuRow& row = m_Rows[first + static_cast<size_t>(k)];
                 row.kind = RowKind::MenuItem;
                 row.textId = -1;
                 row.selectable = true;
                 row.centered = true;
+                row.literalText = pc->RowText(k, language);
+                row.pcSetting = k + 1;
+            }
+            for (int k = inGap; k < needed; ++k) {
+                MenuRow& row = AddRow(RowKind::MenuItem, -1, "", true);
                 row.literalText = pc->RowText(k, language);
                 row.pcSetting = k + 1;
             }

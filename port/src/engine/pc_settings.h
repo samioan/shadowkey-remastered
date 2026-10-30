@@ -66,14 +66,26 @@ constexpr int kAspectOptionCount =
 // is pillarboxed instead.
 constexpr int kMaxViewWidth = 486;
 
+// M123: fog density, as a percentage of the engine's own. The fog level is
+// `depth * engine+0x5c8 >> 8` (zone_renderer.cpp's FogScalar), so a
+// percentage scales that factor and nothing else: 100 is the device, and
+// the original code path. Ordered so that cycling right from Original goes
+// heavier first and wraps through Off back up to it.
+constexpr int kFogOriginal = 100;
+constexpr int kFogDensities[] = {kFogOriginal, 150, 200, 0, 25, 50, 75};
+constexpr int kFogOptionCount =
+    static_cast<int>(sizeof(kFogDensities) / sizeof(kFogDensities[0]));
+
 struct PcSettings {
     int resolutionIndex = 0;  // into kResolutionScales; 0 = Original
     int frameRateIndex = 0;   // into kFrameRates; 0 = Original
     int aspectIndex = 0;      // into kAspectRatios; 0 = Original (M120)
+    int fogIndex = 0;         // into kFogDensities; 0 = Original (M123)
 
     int resolutionScale() const { return kResolutionScales[resolutionIndex]; }
     int frameRate() const { return kFrameRates[frameRateIndex]; }
     int aspect() const { return kAspectRatios[aspectIndex]; }
+    int fogPercent() const { return kFogDensities[fogIndex]; }
     bool originalResolution() const { return resolutionScale() == 1; }
     bool originalFrameRate() const { return frameRate() == kFrameRateOriginal; }
     bool originalAspect() const { return aspect() == kAspectOriginal; }
@@ -123,7 +135,13 @@ public:
     bool Load();
     bool Save() const;
 
-    enum Row { kRowResolution = 0, kRowAspect = 1, kRowFrameRate = 2, kRowCount = 3 };
+    enum Row {
+        kRowResolution = 0,
+        kRowAspect = 1,
+        kRowFrameRate = 2,
+        kRowFog = 3,  // M123
+        kRowCount = 4
+    };
     int RowCount() const override { return kRowCount; }
     std::string RowText(int row, int language) const override;
     void Cycle(int row, int delta) override;
@@ -137,5 +155,6 @@ private:
 std::string ResolutionValueText(int scale, int language);
 std::string FrameRateValueText(int fps, int language);
 std::string AspectValueText(int aspect, int language);
+std::string FogValueText(int percent, int language);
 
 }  // namespace sk
