@@ -10,6 +10,7 @@
 // direction the user chose. M6 added the 3D zone renderer, M7 tile-grid
 // collision, M8 placed-entity rendering -- see docs/PORT_ROADMAP.md.
 #include <algorithm>
+#include <ctime>
 #include <array>
 #include <cctype>
 #include <chrono>
@@ -65,6 +66,10 @@
 #include "simkin_bindings/item_button_executable.h"
 #include "simkin_bindings/item_executable.h"
 #include "simkin_bindings/level_executable.h"
+#include "simkin_bindings/native_binding_common.h"
+#include "simkin_bindings/script_vars.h"
+#include "assets/save_records.h"
+#include "assets/save_stream.h"
 #include "simkin_bindings/menu_executable.h"
 #include "simkin_bindings/menu_stack.h"
 #include "simkin_bindings/monster_executable.h"
@@ -518,6 +523,10 @@ struct MonsterInstance {
     // AddTrigger()...SetEntityID(id) kill-count trigger, e.g. ghstpass.s's
     // zombieTrigger.SetEntityID(104)) matches kills against this.
     int typeId = -1;
+    // Post-M120: the placement's other two orientation channels and scale,
+    // raw, so the level-state record can carry them back (see
+    // SnapshotLevelState in main()).
+    uint16_t rotARaw = 0, rotBRaw = 0, scaleRaw = 256;
     // M45: the real `actor+0x2e4` backlink -- which encounter region
     // spawned this creature, so its death can decrement that region's
     // live count (`FUN_10083c04` calls `FUN_1008b118(actor->region)`).
@@ -635,6 +644,8 @@ struct DoorInstance {
     // trapped doors are matched purely by name.
     int typeId = -1;
     std::string name;
+    // Post-M120: raw placement channels for the level-state record.
+    uint16_t rotARaw = 0, rotBRaw = 0, scaleRaw = 256;
 };
 
 // M38: a placed entity a zone-root script's own AddTrigger() watches as a
@@ -681,6 +692,11 @@ struct PickupInstance {
     // menu instead of transferring itself. Kept explicitly rather than
     // inferred, so an empty container still prompts correctly.
     bool isContainer = false;
+    // Post-M120: what the level-state record needs to rebuild it -- the
+    // entities.txt typeId (-1 when the creator did not know one) and the
+    // raw placement channels.
+    int typeId = -1;
+    uint16_t yawRaw = 0, rotARaw = 0, rotBRaw = 0, scaleRaw = 256;
 };
 
 #if SK_DEBUG_SUITE
@@ -3042,12 +3058,16 @@ void RenderAutomapOverlay(sk::Backbuffer& backbuffer, const sk::Zone& zone,
     // `FUN_100290a8` is the engine's own internal-zone-name -> display-
     // string lookup, which this port already has as
     // assets/zone_display_names.h (M26 found it from the loading screen).
+    //
+    // Post-M120: the draw is `FUN_1008f97c(gc, name, 10, 0xfff, 1, 0, 0, 0)`
+    // -- the centred arm, shadow on (one pixel below, in 0xb1/0x9c/0x65),
+    // legend face, and **white**. The port drew it in the static-item brown
+    // 0x752 with no shadow, which all but vanished into the map backdrop.
     int nameId = sk::ZoneDisplayNameStringId(zoneName);
     if (nameId >= 0) {
-        std::string caption = strings.Get(nameId);
-        int textW = sk::BitmapFont::TextWidth(caption);
-        sk::BitmapFont::DrawString(backbuffer, (sk::Backbuffer::kWidth - textW) / 2,
-                                    sk::kAutomapCaptionY, caption, kStaticTextColor);
+        constexpr uint16_t kAutomapCaptionColor = MenuColor444(0xfff);
+        DrawCenteredWidgetLabel(backbuffer, sk::kAutomapCaptionY, strings.Get(nameId),
+                                kAutomapCaptionColor);
     }
     // The engine's angle unit is 0x10000 per turn; this port's camera
     // carries radians, and yaw runs the opposite way round -- M61 derived
@@ -3920,6 +3940,181 @@ int main(int argc, char** argv) {
     // visible popup, which owns the back key outright.
     bool gamePausedForMenu = false;
 
+    // ---- Post-M120: the level-state record (`<level>.dat`) -------------
+    //
+    // `FUN_100187d0` -- the level being played, as the member `current.sav`
+    // keeps for it: the level object's own record (the automap's explored
+    // bitmap, the zone script's variables, the tile-change journal), then
+    // every saveable entity as `typeId` + its class's save chain. The
+    // engine walks its one entity list; this port's live objects are in
+    // three, and scenery that runs no script never changes, so it is the
+    // three that are written. See MenuStack::StoreLevelState for where the
+    // bytes go and the zone-load block for where they come back.
+    //
+    // `gameLoadedZoneName` is the level these live objects belong to.
+    // stack.currentLevelName() cannot answer that during a transition: the
+    // travel prompt's LoadLevel has already overwritten it with the
+    // destination, exactly as the engine's `app+0x28` is.
+    std::string gameLoadedZoneName;
+    auto savedKindForType = [&entityTypes](int32_t typeId) {
+        const sk::EntityTypeDescriptor* d = entityTypes.Lookup(typeId);
+        return sk::SavedKindForCategory(d ? d->category : -1);
+    };
+    // A script's location as the record's `+0xe2` carries it -- relative to
+    // the script root, the way the `.ent` record names a placement's
+    // script.
+    auto relativeScriptPath = [&](const sk_bindings::EntityBaseRef& ent) -> std::string {
+        skTreeNodeObject* node = ent.entityScriptNode();
+        if (!node) return std::string();
+        std::string path = sk_bindings::ToStdString(node->getLocation());
+        std::replace(path.begin(), path.end(), '\\', '/');
+        // The root arrives with the platform's separators (it is built from
+        // the executable's own directory), the location with whichever the
+        // loader joined it with -- compare both in one spelling.
+        std::string root = std::string(scriptRoot) + "/";
+        std::replace(root.begin(), root.end(), '\\', '/');
+        if (path.compare(0, root.size(), root) == 0) path = path.substr(root.size());
+        return path;
+    };
+    auto fillEntityRecord = [&](sk::SavedEntity& rec, int typeId,
+                                const sk_bindings::EntityBaseRef& ent, int yawRaw, int pitchRaw,
+                                int rollRaw, int scaleRaw) {
+        rec.typeId = typeId;
+        rec.kind = savedKindForType(typeId);
+        rec.entity.x = ent.positionX();
+        rec.entity.y = ent.positionY();
+        rec.entity.z = static_cast<int16_t>(ent.positionZ());
+        rec.entity.yaw = static_cast<int16_t>(yawRaw & 0xffff);
+        rec.entity.pitch = static_cast<int16_t>(pitchRaw & 0xffff);
+        rec.entity.roll = static_cast<int16_t>(rollRaw & 0xffff);
+        rec.drawable.scale = static_cast<int16_t>(scaleRaw);
+        rec.entity.objectId = ent.entityId();
+        rec.entity.artName = relativeScriptPath(ent);
+        rec.entity.passable = ent.entityPassable() ? 1 : 0;
+        rec.entity.shortNameStringId = static_cast<uint16_t>(ent.entityNameId() & 0xffff);
+        if (skTreeNodeObject* node = ent.entityScriptNode()) {
+            rec.entity.scriptVars = sk_bindings::CollectScriptVars(*node);
+        }
+    };
+    auto snapshotLevelState = [&]() -> std::vector<uint8_t> {
+        sk::SavedLevelState state;
+        // engine+0xbe0e: a level the player is standing in has rendered.
+        state.renderEnabled = 1;
+        if (gameZone) {
+            state.level.exploredWidth = gameExplored.width();
+            state.level.exploredHeight = gameExplored.height();
+            state.level.explored = gameExplored.bytes();
+            for (const sk::Zone::TileChange& c : gameZone->tileChanges()) {
+                state.level.tileChanges.push_back(
+                    {c.x, c.y, static_cast<int16_t>(c.blockFlags)});
+            }
+        }
+        if (gameZoneScript) {
+            state.level.scriptVars = sk_bindings::CollectScriptVars(*gameZoneScript);
+        }
+        // `vtable+0x104`, "am I saveable": an entity a script has taken out
+        // of the world is gone from the engine's list by now, so it is not
+        // written -- which is the whole of why a dead creature stays dead.
+        for (const DoorInstance& d : gameDoors) {
+            if (!d.script || d.script->entityRemoved()) continue;
+            sk::SavedEntity rec;
+            // The door's one heading, `+0xb6`: placement plus every
+            // AddRotationTurn so far. It comes back as the placement.
+            fillEntityRecord(rec, d.typeId, *d.script, d.script->headingRaw(), d.rotARaw,
+                             d.rotBRaw, d.scaleRaw);
+            rec.entity.usable = d.script->usable() ? 1 : 0;
+            if (d.script->useTextId() >= 0) {
+                rec.entity.nameStringId = static_cast<uint32_t>(d.script->useTextId());
+            }
+            state.entities.push_back(std::move(rec));
+        }
+        for (const PickupInstance& p : gamePickups) {
+            if (!p.script || p.typeId < 0) continue;
+            const sk_bindings::ItemExecutable& item = *p.script;
+            if (item.markedForRemoval() || item.entityRemoved()) continue;
+            sk::SavedEntity rec;
+            fillEntityRecord(rec, p.typeId, item, p.yawRaw, p.rotARaw, p.rotBRaw, p.scaleRaw);
+            rec.entity.usable = item.usable() ? 1 : 0;
+            if (item.useTextId() >= 0) {
+                rec.entity.nameStringId = static_cast<uint32_t>(item.useTextId());
+            }
+            rec.stackable.quantity = item.quantity();
+            rec.weapon.quantity = item.quantity();
+            // A container's contents are its Spellbook list, typeId and
+            // count per entry -- and its `+0x160` Init guard is set, which
+            // is what keeps a looted chest from restocking on the way back.
+            if (p.isContainer) {
+                rec.spellbook.initDone = 1;
+                rec.spellbook.isContainer = 1;
+                for (const auto& content : item.contents()) {
+                    if (!content || content->templateId() < 0) continue;
+                    sk::SavedSpellEntry entry;
+                    entry.typeId = static_cast<int16_t>(content->templateId());
+                    entry.charges = content->quantity();
+                    rec.spellbook.spells.push_back(entry);
+                }
+            }
+            state.entities.push_back(std::move(rec));
+        }
+        for (const MonsterInstance& m : gameMonsters) {
+            if (!m.script || m.typeId <= 0 || m.script->destroyed()) continue;
+            const sk_bindings::MonsterExecutable& mon = *m.script;
+            sk::SavedEntity rec;
+            // The creature's heading is wherever it last turned, which this
+            // port keeps as the instance's facing.
+            fillEntityRecord(rec, m.typeId, mon, sk_bindings::EngineYawFromPortYaw(m.facingYaw),
+                             m.rotARaw, m.rotBRaw, m.scaleRaw);
+            // Where the creature actually is: the instance moves, and the
+            // script's mirror is only refreshed for scripted teleports.
+            rec.entity.x = static_cast<int32_t>(m.x);
+            rec.entity.y = static_cast<int32_t>(m.y);
+            rec.entity.z = static_cast<int16_t>(m.z);
+            rec.entity.usable = mon.usable() ? 1 : 0;
+            if (mon.useTextId() >= 0) {
+                rec.entity.nameStringId = static_cast<uint32_t>(mon.useTextId());
+            }
+            rec.stats.health = static_cast<int16_t>(mon.currentHealth());
+            rec.stats.maxHealth = static_cast<int16_t>(mon.maxHealth());
+            rec.actor.aggressive = mon.aggressive() ? 1 : 0;
+            // `+0x1e4`, the byte the death routine's first line tests: set
+            // on a corpse. Its five-second decay is the native timer.
+            rec.holder.active = mon.alive() ? 0 : 1;
+            if (mon.decayArmed()) {
+                rec.entity.timerArmed = 1;
+                rec.entity.timerDeadline = static_cast<int32_t>(mon.decayDeadline());
+            }
+            state.entities.push_back(std::move(rec));
+        }
+        sk::SaveStream stream;
+        state.Write(stream);
+        return stream.bytes();
+    };
+    stack.SetLevelSnapshotter([&]() {
+        return gameZone ? snapshotLevelState() : std::vector<uint8_t>();
+    });
+
+    // Post-M120: **what a creature shows when it is struck** -- the visible
+    // half of its take-damage handler, `FUN_10081844`, which this port has
+    // no single copy of (every attack path applies damage its own way), so
+    // each of them calls this at the moment of the hit. The handler's whole
+    // body sits under `if (!+0x1e4 && !+0x1e2)` -- **a dead or invulnerable
+    // creature takes no hit at all**, so it neither bleeds nor flashes. The
+    // port armed the red flash regardless, which turned every essential NPC
+    // and every corpse caught in a blast red. Then, in the handler's order:
+    // the blood spurt (`FUN_10081e5c`, skipped for typeId 0x3f7, the Lothna
+    // crystal -- effect_entity.h has every field) and `FUN_10067c3c(self, 8,
+    // 0, 5)`, the red ramp rows.
+    auto onCreatureStruck = [&](MonsterInstance& victim) {
+        if (!victim.script || !victim.script->alive() || victim.script->invulnerable()) return;
+        if (victim.typeId != sk_bindings::kBloodImmuneTypeId) {
+            stack.level().effects().push_back(sk_bindings::MakeBloodSpurt(
+                static_cast<int>(victim.x), static_cast<int>(victim.y),
+                static_cast<int>(victim.z), static_cast<int>(gameCamera.x),
+                static_cast<int>(gameCamera.y), [] { return std::rand(); }));
+        }
+        victim.flash.Arm(sk::kFlashPeriodUnits, sk::kFlashRedMin, sk::kFlashRedMax);
+    };
+
 #if SK_DEBUG_SUITE
     // SK_DEBUG_SUITE (M68): now that every game local exists, point the
     // debug host at them and bring the suite up. Pointers to locals of
@@ -4059,14 +4254,30 @@ int main(int argc, char** argv) {
         RenderHud(layer, stack.player(), spriteArchive, camera.yaw, stack.player().hurtTimer(),
                   sceneLayout);
         if (!overlays) return;
+        const bool levelUpCaption = stack.player().levelUpPoints() > 0;  // post-M120
         const bool column = sceneLayout.wide() && (gameMapOpen || stack.player().coordsEnabled() ||
-                                                   !gameplayLabel.empty());
+                                                   levelUpCaption || !gameplayLabel.empty());
         if (column) sk::CopyColumnOut(wideLayer, sceneLayout.centreX(), backbuffer);
         // M57: last, over everything -- the map is an overlay, and
         // the game underneath it keeps running.
         if (gameMapOpen) {
             RenderAutomapOverlay(backbuffer, *gameZone, gameExplored, camera,
                                   spriteArchive, strings, stack.currentLevelName());
+        }
+        // Post-M120: **the "Level Up" prompt.** `FUN_10029cb0`, straight
+        // after the map: `if (player+0xf44 > 0) FUN_1002c1a8(hud)`, and
+        // that is one call -- `FUN_1008f97c(gc, stringTable[3842], 0xbe,
+        // 0xfff, 0, 1, 0, 0)`: "Level Up", centred, at y=190, white, no
+        // shadow, in the legend face. It stays up for as long as a point
+        // is unspent, and it is the only thing that tells the player the
+        // character key (action 12) now opens levelup.s.
+        if (levelUpCaption) {
+            constexpr int kLevelUpStringId = 3842;
+            constexpr int kLevelUpCaptionY = 0xbe;
+            const std::string caption = strings.Get(kLevelUpStringId);
+            sk::BitmapFont::DrawString(
+                backbuffer, (sk::Backbuffer::kWidth - sk::BitmapFont::TextWidth(caption)) / 2,
+                kLevelUpCaptionY, caption, MenuColor444(0xfff));
         }
         // M95: `EnableCoords()` -- `FUN_1002c104`, drawn straight
         // after the map in `FUN_10029cb0` (and so over it; unlike the
@@ -4197,6 +4408,7 @@ int main(int argc, char** argv) {
                 inst.modelArchiveIndex =
                     stack.level().EntityModelIndexOf(sk_bindings::kDroppedLootTypeId);
                 inst.isContainer = true;  // the real case re-derives category == 8
+                inst.typeId = sk_bindings::kDroppedLootTypeId;  // post-M120: saveable
                 bag->SetWorldPosition(static_cast<int>(inst.x), static_cast<int>(inst.y),
                                        static_cast<int>(inst.z));
                 std::printf("  [drop] %s -> loot bag at (%.0f, %.0f)\n",
@@ -4245,7 +4457,7 @@ int main(int argc, char** argv) {
                     static_cast<float>(sk_bindings::kAreaSpellRange)) {
                     continue;
                 }
-                victim.flash.Arm(sk::kFlashPeriodUnits, sk::kFlashRedMin, sk::kFlashRedMax);
+                onCreatureStruck(victim);  // post-M120
                 // The attacker the kill credit goes to is the origin when it
                 // is a creature; a bomb the player set off pays the player,
                 // through the same SpellActor slot the area spell uses.
@@ -4315,6 +4527,10 @@ int main(int argc, char** argv) {
             // (FUN_1000e3c4 with keepPlayer 0), so the next session's player
             // is born alive and mortal. This port keeps the object.
             stack.player().ResetForNewSession();
+            // Post-M120: and `current.sav` -- the next session is a New Game
+            // (which clears it again) or a Load (which replaces it).
+            stack.ClearLevelStates();
+            gameLoadedZoneName.clear();
             gameZoneScript.reset();
             gameMonsters.clear();
             gameDoors.clear();
@@ -4425,6 +4641,19 @@ int main(int argc, char** argv) {
                 return;
             }
             loadingScreenActive = false;
+            // Post-M120: `FUN_1006c31c` writes the level being left into
+            // `current.sav` before it loads the next one, so every corpse,
+            // opened door, emptied chest and `saved_*` variable is there
+            // when the player walks back. Not after a Load: that replaced
+            // `current.sav` with the slot's copy, and the level being
+            // abandoned must not overwrite the slot's version of it.
+            {
+                const bool discardDeparting = stack.TakeDiscardDepartingLevel();
+                if (gameZone && !gameLoadedZoneName.empty() && !discardDeparting) {
+                    stack.StoreLevelState(gameLoadedZoneName, snapshotLevelState());
+                }
+                gameLoadedZoneName.clear();
+            }
             // M50: SavedCharacter::levelName -- what a save records and a
             // load returns to. The real engine keeps it in the same place
             // (its app object's own buffer) and FUN_1001ea54 copies it
@@ -4462,6 +4691,7 @@ int main(int argc, char** argv) {
                 // becomes real, and cleared with it in the QuitToMenu
                 // teardown above.
                 stack.SetGameActive(true);
+                gameLoadedZoneName = stack.requestedZone();  // post-M120
 #if SK_DEBUG_SUITE
                 // SK_DEBUG_SUITE (M68)
                 sk_debug::Count("zone.loads");
@@ -4668,7 +4898,121 @@ int main(int argc, char** argv) {
                     return std::string();
                 };
 
+                // Post-M120: **a level the session has already visited comes
+                // back from its `<level>.dat`, not from its `.ent`.** The
+                // engine's order, `GameEngine_InitLevel` -> `FUN_10019780`:
+                // the `.ent` pass runs as normal, then -- when `current.sav`
+                // holds a member for this level -- `FUN_1000e3c4` destroys
+                // every entity it just placed (a tile-stamped door taking its
+                // footprint out of the grid as it goes) and `FUN_100188dc`
+                // rebuilds the level from the record: the level object's own
+                // record first (journal, explored bitmap, the zone script's
+                // variables), then each saved entity, record before `Init`.
+                //
+                // This port never instantiates what the engine would
+                // destroy: a placement that would become a live object is
+                // simply skipped, and the saved objects are fed through the
+                // same per-placement code below with their record attached.
+                // Scenery that runs no script is not in the record (it never
+                // changes), so it still comes from the `.ent`.
+                sk::SavedLevelState savedLevel;
+                bool restoringLevel = false;
+                if (const std::vector<uint8_t>* savedBytes =
+                        stack.FindLevelState(stack.requestedZone())) {
+                    sk::SaveStream savedStream;
+                    savedStream.Reset(*savedBytes);
+                    savedLevel.Read(savedStream, savedKindForType);
+                    restoringLevel = !savedStream.failed();
+                    std::printf("shadowkey-port: %s.dat -- %s (%zu saved entities)\n",
+                                stack.requestedZone().c_str(),
+                                restoringLevel ? "restoring the level from current.sav"
+                                               : "unreadable, loading from the .ent",
+                                savedLevel.entities.size());
+                }
+                auto becomesLiveObject = [](const sk::EntityTypeDescriptor& desc,
+                                            const std::string& scriptPath) {
+                    return !scriptPath.empty() &&
+                           (desc.category == 11 || IsPickupCategory(desc.category) ||
+                            desc.category == 2 || desc.category == 7);
+                };
+                std::vector<std::pair<sk::Zone::EntPlacement, const sk::SavedEntity*>> placements;
                 for (const sk::Zone::EntPlacement& e : gameZone->entities()) {
+                    const sk::EntityTypeDescriptor* desc = entityTypes.Lookup(e.typeId);
+                    if (restoringLevel && desc && becomesLiveObject(*desc, placementScript(e, desc))) {
+                        // M38's trigger candidates are the placements, not
+                        // the live objects -- crypt1.s's trapped doors are
+                        // matched by .ent name -- so they are still taken.
+                        TrapInstance cand;
+                        cand.x = static_cast<float>(e.x);
+                        cand.y = static_cast<float>(e.y);
+                        cand.typeId = e.typeId;
+                        cand.name = e.name;
+                        gameTrapCandidates.push_back(std::move(cand));
+                        // The destroyed door's baked closed footprint (M67)
+                        // goes with it; the restored door stamps its own.
+                        if (desc->category == 11) {
+                            const sk::ModelCollision& dc =
+                                gameModelCollision.At(desc->modelArchiveIndex);
+                            if (dc.tileStamped()) {
+                                gameZone->StampEntityBox(e.x, e.y, e.yawRaw, dc.halfExtentX,
+                                                         dc.halfExtentY, 0x04, false,
+                                                         /*journal=*/false);
+                            }
+                        }
+                        continue;
+                    }
+                    placements.push_back({e, nullptr});
+                }
+                if (restoringLevel) {
+                    // FUN_1002f934 / FUN_10071f2c: the level object first.
+                    std::vector<sk::Zone::TileChange> journal;
+                    for (const sk::SavedLevelObject::TileChange& c : savedLevel.level.tileChanges) {
+                        journal.push_back({c.x, c.y, static_cast<uint16_t>(c.value)});
+                    }
+                    gameZone->RestoreTileChanges(journal);
+                    std::vector<uint8_t>& explored = gameExplored.bytes();
+                    for (size_t i = 0; i < explored.size() && i < savedLevel.level.explored.size();
+                         ++i) {
+                        explored[i] = savedLevel.level.explored[i];
+                    }
+                    if (gameZoneScript) {
+                        sk_bindings::RestoreScriptVars(*gameZoneScript,
+                                                       savedLevel.level.scriptVars);
+                    }
+                    for (const sk::SavedEntity& rec : savedLevel.entities) {
+                        sk::Zone::EntPlacement e;
+                        e.x = rec.entity.x;
+                        e.y = rec.entity.y;
+                        e.z = rec.entity.z;
+                        e.typeId = rec.typeId;
+                        e.yawRaw = static_cast<uint16_t>(rec.entity.yaw);
+                        e.rotARaw = static_cast<uint16_t>(rec.entity.pitch);
+                        e.rotBRaw = static_cast<uint16_t>(rec.entity.roll);
+                        e.scaleRaw = rec.drawable.scale > 0 ? static_cast<uint16_t>(rec.drawable.scale)
+                                                            : static_cast<uint16_t>(256);
+                        e.name = rec.entity.objectId;
+                        e.scriptPath = rec.entity.artName;
+                        placements.push_back({e, &rec});
+                    }
+                }
+                // Runs a native on a restored object through its own
+                // dispatch, the way its script would have.
+                auto callRestoreNative = [&](skiExecutable& target, const char* name,
+                                             const skRValue& arg) {
+                    skRValueArray args;
+                    args.append(arg);
+                    skRValue ret;
+                    skExecutableContext ctxt(&interpreter);
+                    try {
+                        target.method(skString(name), args, ret, ctxt);
+                    } catch (skRuntimeException& ex) {
+                        std::printf("shadowkey-port: restoring %s(): %s\n", name,
+                                    ex.toString().ptr());
+                    }
+                };
+                for (const auto& placement : placements) {
+                    const sk::Zone::EntPlacement& e = placement.first;
+                    const sk::SavedEntity* saved = placement.second;
                     const sk::EntityTypeDescriptor* desc = entityTypes.Lookup(e.typeId);
                     if (!desc) continue;
                     const std::string placementScriptPath = placementScript(e, desc);
@@ -4676,8 +5020,9 @@ int main(int argc, char** argv) {
                     // matched by typeId (lothcav.s's `AddEntity(1013)`) or
                     // by name (crypt1.s's `AddTrigger("door1")`). Filtered
                     // down to the real ones below, once the zone script has
-                    // actually registered its triggers.
-                    {
+                    // actually registered its triggers. (A restored object's
+                    // placement was taken as a candidate above.)
+                    if (!saved) {
                         TrapInstance cand;
                         cand.x = static_cast<float>(e.x);
                         cand.y = static_cast<float>(e.y);
@@ -4717,6 +5062,18 @@ int main(int argc, char** argv) {
                             // `if (GetID() = "11s")` in a handler Init()
                             // can reach.
                             door->SetEntityId(e.name);
+                            // Post-M120: a restored door's variables and its
+                            // passability, before Init -- which is what
+                            // lets door.s's Init read the `saved_Open` it
+                            // was saved with. SetPassable stamps or lifts
+                            // the footprint at the restored heading.
+                            if (saved) {
+                                if (skTreeNodeObject* node = door->entityScriptNode()) {
+                                    sk_bindings::RestoreScriptVars(*node, saved->entity.scriptVars);
+                                }
+                                callRestoreNative(*door, "SetPassable",
+                                                  skRValue(saved->entity.passable != 0));
+                            }
                             skExecutableContext callCtxt(&interpreter);
                             sk_bindings::RunEntityInit(*door, scriptRoot, callCtxt);
                             DoorInstance inst;
@@ -4730,6 +5087,9 @@ int main(int argc, char** argv) {
                             inst.modelArchiveIndex = desc->modelArchiveIndex;
                             inst.typeId = e.typeId;   // M38: zone-trigger identity
                             inst.name = e.name;
+                            inst.rotARaw = e.rotARaw;  // post-M120
+                            inst.rotBRaw = e.rotBRaw;
+                            inst.scaleRaw = e.scaleRaw;
                             inst.script = std::move(door);
                             stack.level().RegisterEntity(e.name, inst.script.get());
                             gameDoors.push_back(std::move(inst));
@@ -4771,8 +5131,49 @@ int main(int argc, char** argv) {
                             // M92: the placement name GetID() answers --
                             // see the door branch above.
                             item->SetEntityId(e.name);
-                            skExecutableContext callCtxt(&interpreter);
-                            sk_bindings::RunEntityInit(*item, scriptRoot, callCtxt);
+                            // Post-M120: a restored item's record. A
+                            // container's `+0x160` Init guard is part of it
+                            // (FUN_10028594 case 0 -- the guard applies to
+                            // what is neither item, actor nor door), so a
+                            // chest is rebuilt from its record and does not
+                            // run its loot roll a second time; anything else
+                            // re-runs Init over its restored variables.
+                            bool initGuarded = false;
+                            if (saved) {
+                                if (skTreeNodeObject* node = item->entityScriptNode()) {
+                                    sk_bindings::RestoreScriptVars(*node, saved->entity.scriptVars);
+                                }
+                                const int quantity = saved->kind == sk::SavedEntityKind::Weapon
+                                                         ? saved->weapon.quantity
+                                                         : saved->stackable.quantity;
+                                if (quantity > 0) item->SetQuantity(quantity);
+                                initGuarded = IsContainerCategory(desc->category) &&
+                                              saved->spellbook.initDone != 0;
+                            }
+                            if (initGuarded) {
+                                if (saved->entity.nameStringId != 0) {
+                                    callRestoreNative(*item, "SetUseText",
+                                                      skRValue(static_cast<int>(
+                                                          saved->entity.nameStringId)));
+                                }
+                                callRestoreNative(*item, "SetUsable",
+                                                  skRValue(saved->entity.usable != 0));
+                                if (saved->entity.shortNameStringId != 0xffff) {
+                                    callRestoreNative(*item, "SetName",
+                                                      skRValue(static_cast<int>(
+                                                          saved->entity.shortNameStringId)));
+                                }
+                                for (const sk::SavedSpellEntry& entry : saved->spellbook.spells) {
+                                    std::unique_ptr<sk_bindings::ItemExecutable> content =
+                                        stack.level().CreateItem(entry.typeId);
+                                    if (!content) continue;
+                                    if (entry.charges > 0) content->SetQuantity(entry.charges);
+                                    item->AddContent(std::move(content));
+                                }
+                            } else {
+                                skExecutableContext callCtxt(&interpreter);
+                                sk_bindings::RunEntityInit(*item, scriptRoot, callCtxt);
+                            }
                             PickupInstance inst;
                             inst.placementYaw = PlacementYawRadians(e.yawRaw);
                             inst.rotA = PlacementRotRadians(e.rotARaw);
@@ -4783,6 +5184,11 @@ int main(int argc, char** argv) {
                             inst.y = static_cast<float>(e.y);
                             inst.z = static_cast<float>(e.z);
                             inst.modelArchiveIndex = desc->modelArchiveIndex;
+                            inst.typeId = e.typeId;  // post-M120
+                            inst.yawRaw = e.yawRaw;
+                            inst.rotARaw = e.rotARaw;
+                            inst.rotBRaw = e.rotBRaw;
+                            inst.scaleRaw = e.scaleRaw;
                             inst.script = std::move(item);
                             // M53: pickups were the one loaded category not
                             // in GetEntity()'s registry, so a zone script
@@ -4826,6 +5232,29 @@ int main(int argc, char** argv) {
                             // M92: the placement name GetID() answers --
                             // see the door branch above.
                             monster->SetEntityId(e.name);
+                            // Post-M120: a restored creature's record, then
+                            // its Init -- the engine's order, so whatever
+                            // Init sets (SetMaxHealth among it) wins as it
+                            // does on the device. A corpse keeps the
+                            // `+0x1e4` flag that stops it dying again and
+                            // whatever is left of its five-second decay.
+                            if (saved) {
+                                if (skTreeNodeObject* node = monster->entityScriptNode()) {
+                                    sk_bindings::RestoreScriptVars(*node, saved->entity.scriptVars);
+                                }
+                                monster->RestoreSavedHealth(saved->stats.health,
+                                                            saved->stats.maxHealth);
+                                if (saved->holder.active != 0) {
+                                    int decaySeconds = 0;
+                                    if (saved->entity.timerArmed) {
+                                        const long long left =
+                                            static_cast<long long>(saved->entity.timerDeadline) -
+                                            static_cast<long long>(std::time(nullptr));
+                                        decaySeconds = static_cast<int>((std::max)(1LL, left));
+                                    }
+                                    monster->SetDead(true, decaySeconds);
+                                }
+                            }
                             skExecutableContext callCtxt(&interpreter);
                             sk_bindings::RunEntityInit(*monster, scriptRoot, callCtxt);
                             // M71: step 5 of GameEngine_InitLevel's own
@@ -4843,6 +5272,9 @@ int main(int argc, char** argv) {
                             inst.z = static_cast<float>(e.z);
                             inst.modelArchiveIndex = desc->modelArchiveIndex;
                             inst.typeId = e.typeId;
+                            inst.rotARaw = e.rotARaw;  // post-M120
+                            inst.rotBRaw = e.rotBRaw;
+                            inst.scaleRaw = e.scaleRaw;
                             inst.script = std::move(monster);
                             inst.script->SetEntityTypeId(inst.typeId);  // M100
                             stack.level().RegisterEntity(e.name, inst.script.get());
@@ -5089,7 +5521,17 @@ int main(int argc, char** argv) {
                 // M90: the engine's own spelling of the name -- see
                 // MenuExecutable::GoBack(), which builds this screen's
                 // back handler (`CharacterManagerBack`) out of it.
-                stack.OpenMenu("CharacterManager");
+                //
+                // Post-M120: **with a level-up point unspent this key opens
+                // the level-up screen instead.** `FUN_1002f694`, the level
+                // tick that owns action 12: `if (player+0xf44 < 1)
+                // FUN_1002c274(ctl, 1) else FUN_1002c274(ctl, 8)` -- mode 1
+                // is CharacterManager, mode 8 the `+0x138` screen that
+                // DisplayLevelUp also raises, i.e. `levelup.s`. No script
+                // ever opens it, so before this a level-up awarded points
+                // the player had no way to spend.
+                stack.OpenMenu(stack.player().levelUpPoints() > 0 ? "LevelUp"
+                                                                  : "CharacterManager");
                 inGame = false;
                 gamePausedForMenu = true;
                 input.ClearPendingEdges();  // M90, see its comment
@@ -5368,13 +5810,34 @@ int main(int argc, char** argv) {
                         gameCamera.y = (std::min)((std::max)(gameCamera.y + my, lo), hiY);
                         return;
                     }
+                    // Post-M120: the engine's own tile rule (`FUN_10000ab8`,
+                    // Zone::ActorTileBlocked) rather than the wall flag
+                    // alone. What it adds is the **step limit**: a tile
+                    // whose floor is more than 0x180 above the player's
+                    // feet stops them, where this used to walk them up any
+                    // rise whose tile was not flagged as a wall -- the
+                    // "can scale vertical walls" report.
+                    //
+                    // The player's Height() is `CMap+0x1a` (FUN_10006230,
+                    // standing stance), a field nothing in the image is
+                    // known to write; 0 is what an untouched CBase field
+                    // holds, and it is also the value that cannot close a
+                    // passage the original leaves open. The headroom terms
+                    // therefore reduce to "not above the ceiling" here, and
+                    // the vertical block's own clamp keeps the eye under it.
+                    constexpr float kPlayerCollisionHeight = 0.0f;
+                    const float feetZ = gameCamera.z - sk::kEyeHeightOffset;
                     float nx = gameCamera.x + mx;
-                    if (!gameZone->CircleHitsWall(nx, gameCamera.y, kPlayerRadius) &&
+                    if (!gameZone->ActorCircleBlocked(nx, gameCamera.y, kPlayerRadius, feetZ,
+                                                      kPlayerCollisionHeight, /*creature=*/false,
+                                                      gameCamera.x, gameCamera.y) &&
                         !blockedByEntity(nx, gameCamera.y)) {
                         gameCamera.x = nx;
                     }
                     float ny = gameCamera.y + my;
-                    if (!gameZone->CircleHitsWall(gameCamera.x, ny, kPlayerRadius) &&
+                    if (!gameZone->ActorCircleBlocked(gameCamera.x, ny, kPlayerRadius, feetZ,
+                                                      kPlayerCollisionHeight, /*creature=*/false,
+                                                      gameCamera.x, gameCamera.y) &&
                         !blockedByEntity(gameCamera.x, ny)) {
                         gameCamera.y = ny;
                     }
@@ -5566,6 +6029,7 @@ int main(int argc, char** argv) {
                         }
                         inst.modelArchiveIndex = desc ? desc->modelArchiveIndex : -1;
                         inst.isContainer = desc && IsContainerCategory(desc->category);
+                        inst.typeId = req.typeId;  // post-M120: saveable
                         script->SetWorldPosition(static_cast<int>(inst.x),
                                                   static_cast<int>(inst.y),
                                                   static_cast<int>(inst.z));
@@ -5849,9 +6313,20 @@ int main(int argc, char** argv) {
                 // to the storey below. Passing `gameCamera.z` is what makes
                 // that branch reachable, and it is the argument
                 // `FloorHeightAt` had no way to take.
-                float floorEyeZ = gameZone->CollisionFloorHeightAt(gameCamera.x, gameCamera.y,
-                                                                    gameCamera.z) +
-                                   sk::kEyeHeightOffset;
+                //
+                // Post-M120: and probed where the engine probes it. The
+                // actor move's ground clamp (`FUN_10000c64`'s tail) asks
+                // `FUN_1001beac` for the floor at **feet + 0x180**, the same
+                // probe the step limit above uses; this passed the *eye*
+                // height, 800 above the feet, which picked a two-storey
+                // tile's upper floor from far below it and stood the player
+                // on top -- the other half of walking up walls.
+                constexpr float kGroundProbe = 384.0f;  // 0x180
+                float floorEyeZ =
+                    gameZone->CollisionFloorHeightAt(
+                        gameCamera.x, gameCamera.y,
+                        gameCamera.z - sk::kEyeHeightOffset + kGroundProbe) +
+                    sk::kEyeHeightOffset;
                 if (gameVelZ <= 0.0f && gameCamera.z <= floorEyeZ) {
                     gameCamera.z = floorEyeZ;
                     gameVelZ = 0.0f;
@@ -5937,9 +6412,45 @@ int main(int argc, char** argv) {
                 // collapse into one shared point on top of the player.
                 constexpr float kMonsterSeparation = 70.0f;
 
-                // Straight ahead first, then progressively wider turns to
-                // either side -- shared by the chase and flee paths.
-                static const float kSteerAngles[] = {0.0f, 0.6f, -0.6f, 1.2f, -1.2f, 1.9f, -1.9f};
+                // Post-M120: **one creature step, the engine's way.** The
+                // original has no pathfinder for a chase: `FUN_100008f0`
+                // turns the creature to its move goal (the target's own
+                // position, rewritten every tick) and walks it forward, and
+                // the actor move then resolves the step against the world
+                // one axis at a time (`FUN_100017c8`) -- which is what
+                // slides a creature along a wall instead of stopping it
+                // dead. This port used to try a fan of seven headings
+                // instead, its own invention, and tested only the wall
+                // flag; the tile rule (Zone::ActorTileBlocked,
+                // `FUN_10000ab8`) also refuses a step more than 0x180 high,
+                // a ceiling too low for the creature's Height(), and the
+                // 0x40 barrier tiles the level designer fenced creatures
+                // out with -- 6242 of them across 13 zones (m121).
+                auto stepCreature = [&](MonsterInstance& m, float sx, float sy) {
+                    const float height =
+                        static_cast<float>(sk::MonsterCollisionHeight(m.modelArchiveIndex));
+                    const float fromX = m.x, fromY = m.y;
+                    if (sx != 0.0f &&
+                        !gameZone->ActorCircleBlocked(m.x + sx, m.y, kMonsterRadius, m.z, height,
+                                                      /*creature=*/true, fromX, fromY)) {
+                        m.x += sx;
+                    }
+                    if (sy != 0.0f &&
+                        !gameZone->ActorCircleBlocked(m.x, m.y + sy, kMonsterRadius, m.z, height,
+                                                      /*creature=*/true, fromX, fromY)) {
+                        m.y += sy;
+                    }
+                };
+                // And where it then stands: the actor move's ground clamp,
+                // `floor(z + 0x180) + 0x80` for anything that is not the
+                // player -- SnapActorToGround, the same snap M62's
+                // SetPosition uses. 1479 of the 1541 placed creatures are
+                // authored at exactly that height (m121); this used to put
+                // a creature that had moved on the bare floor instead, half
+                // a lift below every one that had not.
+                auto groundCreature = [&](MonsterInstance& m) {
+                    m.z = gameZone->SnapActorToGround(m.x, m.y, m.z);
+                };
 
                 // M28: picks the clip a creature should be playing from
                 // its own AI state, and latches the death clip so a corpse
@@ -6048,7 +6559,8 @@ int main(int argc, char** argv) {
                 // ramp (simkin_bindings/effect_entity.h). The gravity term
                 // is left at zero because no scripted effect sets the flag
                 // that reads it.
-                stack.level().TickEffects(sk_bindings::kAiFrameDeltaUnits);
+                stack.level().TickEffects(sk_bindings::kAiFrameDeltaUnits,
+                                          sk_bindings::kEffectGravityUnits);  // post-M120
 
                 // M48: the engine's own 1/256s clock (`level+0x460`), which
                 // the cast cooldown is compared against.
@@ -6110,8 +6622,7 @@ int main(int argc, char** argv) {
                                 static_cast<float>(sk_bindings::kAreaSpellRange)) {
                                 continue;
                             }
-                            victim.flash.Arm(sk::kFlashPeriodUnits, sk::kFlashRedMin,
-                                              sk::kFlashRedMax);  // M86
+                            onCreatureStruck(victim);  // M86, post-M120
                             // M97: sourced to `FUN_1002fd30(caster)`, so
                             // every creature the wave kills pays the caster,
                             // one award (and at most one level) per corpse.
@@ -6273,7 +6784,8 @@ int main(int argc, char** argv) {
                             if (!gameZone->CircleHitsWall(nx, ny, kMonsterRadius)) {
                                 m.x = nx;
                                 m.y = ny;
-                                m.z = gameZone->FloorHeightAt(m.x, m.y);
+                                m.z = gameZone->SnapActorToGround(
+                                    m.x, m.y, gameCamera.z - sk::kEyeHeightOffset);
 #if SK_DEBUG_SUITE
                                 // SK_DEBUG_SUITE (M68)
                                 sk_debug::Count("npc.teleported");
@@ -6315,22 +6827,11 @@ int main(int argc, char** argv) {
                     if (pkg == sk_bindings::MonsterExecutable::kAiFlee) {
                         setAnimClip(m, m.script->walkAnimation(), false);
                         if (dist > 1.0f && !m.script->paralyzed() && !m.script->immobile()) {
-                            float awayX = -mdx / dist, awayY = -mdy / dist;
-                            for (float steer : kSteerAngles) {
-                                float cs = std::cos(steer), sn = std::sin(steer);
-                                float sx = awayX * cs - awayY * sn;
-                                float sy = awayX * sn + awayY * cs;
-                                float nx = m.x + sx * kMonsterMoveSpeed;
-                                float ny = m.y + sy * kMonsterMoveSpeed;
-                                if (!gameZone->CircleHitsWall(nx, ny, kMonsterRadius)) {
-                                    m.x = nx;
-                                    m.y = ny;
-                                    m.facingYaw = std::atan2(sy, sx);
-                                    break;
-                                }
-                            }
+                            const float awayX = -mdx / dist, awayY = -mdy / dist;
+                            m.facingYaw = std::atan2(awayY, awayX);
+                            stepCreature(m, awayX * kMonsterMoveSpeed, awayY * kMonsterMoveSpeed);
                         }
-                        m.z = gameZone->FloorHeightAt(m.x, m.y);
+                        groundCreature(m);
                         continue;
                     }
                     if (pkg != sk_bindings::MonsterExecutable::kAiIdle &&
@@ -6549,15 +7050,8 @@ int main(int argc, char** argv) {
                                 dirX /= dirLen;
                                 dirY /= dirLen;
                             }
-                            // Try straight ahead; if a wall blocks it, try
-                            // progressively wider turns to either side
-                            // before giving up this tick. Not a real
-                            // pathfinder (the original's own .pth
-                            // spawn/patrol data is still undecoded past
-                            // its header, docs/ZONE_FORMAT.md) -- but
-                            // enough that a monster follows a corridor
-                            // round a corner instead of grinding face-first
-                            // into the wall between it and the player.
+                            // Straight at the target and slide along
+                            // whatever is in the way -- see stepCreature.
                             // Stop where the real engine stops -- at the
                             // creature's own attackRange -- but never
                             // closer than bodily contact.
@@ -6565,21 +7059,10 @@ int main(int argc, char** argv) {
                                                          kPlayerRadius + kMonsterRadius);
                             float step = (std::min)(kMonsterMoveSpeed,
                                                      (std::max)(0.0f, dist - standoff));
-                            for (float steer : kSteerAngles) {
-                                float cs = std::cos(steer), sn = std::sin(steer);
-                                float sx = dirX * cs - dirY * sn;
-                                float sy = dirX * sn + dirY * cs;
-                                float nx = m.x + sx * step;
-                                float ny = m.y + sy * step;
-                                if (!gameZone->CircleHitsWall(nx, ny, kMonsterRadius)) {
-                                    m.x = nx;
-                                    m.y = ny;
-                                    if (step > 0.01f) m.facingYaw = std::atan2(sy, sx);
-                                    break;
-                                }
-                            }
+                            if (step > 0.01f) m.facingYaw = std::atan2(dirY, dirX);
+                            stepCreature(m, dirX * step, dirY * step);
                         }
-                        m.z = gameZone->FloorHeightAt(m.x, m.y);
+                        groundCreature(m);
                         continue;
                     }
 
@@ -6603,20 +7086,9 @@ int main(int argc, char** argv) {
                         if (wdist > 1.0f) {
                             const float step = (std::min)(kMonsterMoveSpeed, wdist);
                             const float dirX = wx / wdist, dirY = wy / wdist;
-                            for (float steer : kSteerAngles) {
-                                const float cs = std::cos(steer), sn = std::sin(steer);
-                                const float sx = dirX * cs - dirY * sn;
-                                const float sy = dirX * sn + dirY * cs;
-                                const float nx = m.x + sx * step;
-                                const float ny = m.y + sy * step;
-                                if (!gameZone->CircleHitsWall(nx, ny, kMonsterRadius)) {
-                                    m.x = nx;
-                                    m.y = ny;
-                                    m.facingYaw = std::atan2(sy, sx);
-                                    break;
-                                }
-                            }
-                            m.z = gameZone->FloorHeightAt(m.x, m.y);
+                            m.facingYaw = std::atan2(dirY, dirX);
+                            stepCreature(m, dirX * step, dirY * step);
+                            groundCreature(m);
                             setAnimClip(m, m.script->walkAnimation(), false);
                         }
                     }
@@ -6962,6 +7434,7 @@ int main(int argc, char** argv) {
                         stack.level().EntityModelIndexOf(m.script->lootTypeId());
                     inst.isContainer =
                         IsContainerCategory(stack.level().EntityCategoryOf(m.script->lootTypeId()));
+                    inst.typeId = m.script->lootTypeId();  // post-M120: saveable
                     // The engine sets the spawned object's position after
                     // its Init() rather than before (`FUN_10084438` calls
                     // `vtable+0x14` on the returned object) -- no loot
@@ -7091,9 +7564,22 @@ int main(int argc, char** argv) {
                         // exactly the same handling a killing blow does.
                         for (MonsterInstance& victim : gameMonsters) {
                             if (victim.script.get() != impact.target) continue;
-                            victim.flash.Arm(sk::kFlashPeriodUnits, sk::kFlashRedMin,
-                                              sk::kFlashRedMax);  // M86
-                            if (victim.script->alive()) break;
+                            // M86, post-M120. The impact has already
+                            // applied its damage, but only a live creature
+                            // is ever a target, so a killing shot still
+                            // bleeds: the engine's spurt comes before the
+                            // damage, inside the same handler.
+                            if (victim.script->alive()) {
+                                onCreatureStruck(victim);
+                                break;
+                            }
+                            if (!victim.script->invulnerable() &&
+                                victim.typeId != sk_bindings::kBloodImmuneTypeId) {
+                                stack.level().effects().push_back(sk_bindings::MakeBloodSpurt(
+                                    static_cast<int>(victim.x), static_cast<int>(victim.y),
+                                    static_cast<int>(victim.z), static_cast<int>(gameCamera.x),
+                                    static_cast<int>(gameCamera.y), [] { return std::rand(); }));
+                            }
                             handleDeath(victim);
                             break;
                         }
@@ -7136,9 +7622,22 @@ int main(int argc, char** argv) {
                         if (!impact.hit || !impact.target) continue;
                         for (MonsterInstance& victim : gameMonsters) {
                             if (victim.script.get() != impact.target) continue;
-                            victim.flash.Arm(sk::kFlashPeriodUnits, sk::kFlashRedMin,
-                                              sk::kFlashRedMax);  // M86
-                            if (victim.script->alive()) break;
+                            // M86, post-M120. The impact has already
+                            // applied its damage, but only a live creature
+                            // is ever a target, so a killing shot still
+                            // bleeds: the engine's spurt comes before the
+                            // damage, inside the same handler.
+                            if (victim.script->alive()) {
+                                onCreatureStruck(victim);
+                                break;
+                            }
+                            if (!victim.script->invulnerable() &&
+                                victim.typeId != sk_bindings::kBloodImmuneTypeId) {
+                                stack.level().effects().push_back(sk_bindings::MakeBloodSpurt(
+                                    static_cast<int>(victim.x), static_cast<int>(victim.y),
+                                    static_cast<int>(victim.z), static_cast<int>(gameCamera.x),
+                                    static_cast<int>(gameCamera.y), [] { return std::rand(); }));
+                            }
                             handleDeath(victim);
                             break;
                         }
@@ -7442,8 +7941,7 @@ int main(int argc, char** argv) {
                             // single such handler (M81 hit the same problem
                             // for deaths), so it is armed at each of the four
                             // places an attack damages a creature.
-                            target->flash.Arm(sk::kFlashPeriodUnits, sk::kFlashRedMin,
-                                               sk::kFlashRedMax);
+                            onCreatureStruck(*target);  // post-M120
                             // M97: FUN_100425bc passes `player + 0x3ac` as
                             // the source, so a killing swing pays the player.
                             // M98: and melee is p5 = 0. The source is also
@@ -8050,7 +8548,13 @@ int main(int argc, char** argv) {
                     // flash is not running, which is what routes the draw
                     // back to the ordinary rasterizers).
                     pe.objectId = m.objectId;
-                    pe.flashLevel = m.flash.row;
+                    // Post-M120: and only while it lives -- FUN_10064ffc
+                    // asks `vtable+0x170` first, which is `ldrb r0,
+                    // [r0, #0x1e4]`, the dead flag, and draws a corpse with
+                    // no ramp at all. The killing blow arms the flash on a
+                    // creature that is about to die; this is what keeps the
+                    // corpse from flashing red through its death clip.
+                    pe.flashLevel = m.script->alive() ? m.flash.row : -1;
                     // M119: its identity for the in-between frames (and its
                     // attached weapon's, which copies this whole entry).
                     pe.interpKey = reinterpret_cast<uintptr_t>(m.script.get());

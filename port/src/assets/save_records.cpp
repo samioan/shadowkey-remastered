@@ -16,6 +16,36 @@ const char* const SavedPlayer::kGlobalFlagNames[SavedPlayer::kTrailingInts] = {
 
 std::string LevelMemberName(const std::string& levelName) { return levelName + ".dat"; }
 
+SavedEntityKind SavedKindForCategory(int category) {
+    switch (category) {
+        case 1:
+        case 11:
+            return SavedEntityKind::Drawable;
+        case 2:
+        case 7:
+        case 13:
+            return SavedEntityKind::Actor;
+        case 3:
+        case 6:
+        case 9:
+        case 15:
+            return SavedEntityKind::Stackable;
+        case 4:
+        case 16:
+            return SavedEntityKind::Weapon;
+        case 5:
+        case 14:
+            return SavedEntityKind::Wearable;
+        case 8:
+        case 12:
+            return SavedEntityKind::Spellbook;
+        case 10:
+            return SavedEntityKind::InventoryHolder;
+        default:
+            return SavedEntityKind::Entity;
+    }
+}
+
 namespace {
 // FUN_10066614 and FUN_10066cc4 each call time(0) exactly once and use it
 // for both deadlines in the record. Overridable so a round-trip test does
@@ -568,7 +598,70 @@ void SavedEntity::Read(SaveStream& s, const SavedKindResolver& resolve) {
 // ---------------------------------------------------------------------
 // <level>.dat -- FUN_100187d0 / FUN_100188dc
 // ---------------------------------------------------------------------
+void SavedLevelObject::Write(SaveStream& s) const {
+    // FUN_1002fa5c
+    s.WriteI32(exploredWidth);
+    s.WriteI32(exploredHeight);
+    const size_t count = static_cast<size_t>((exploredWidth * exploredHeight) >> 3);
+    for (size_t i = 0; i < count; ++i) s.WriteU8(i < explored.size() ? explored[i] : 0);
+    s.WriteU32(f460);
+    s.WriteU16(f468);
+    s.WriteU16(f478);
+    // FUN_10071ac4
+    s.WriteU16(engineFlag12618);
+    for (const SavedScriptVar& var : scriptVars) {
+        s.WriteU8(SavedEntityBase::kVarPresent);
+        s.WriteStringW(var.name);
+        s.WriteStringW(var.value);
+    }
+    s.WriteU8(SavedEntityBase::kVarListEnd);
+    s.WriteI32(listCount428);
+    for (int32_t v : f38) s.WriteI32(v);
+    s.WriteI16(static_cast<int16_t>(tileChanges.size()));
+    for (const TileChange& c : tileChanges) {
+        s.WriteI16(c.x);
+        s.WriteI16(c.y);
+        s.WriteI16(c.value);
+    }
+}
+
+void SavedLevelObject::Read(SaveStream& s) {
+    // FUN_1002f934
+    exploredWidth = s.ReadI32();
+    exploredHeight = s.ReadI32();
+    explored.clear();
+    const int32_t count = (exploredWidth * exploredHeight) >> 3;
+    for (int32_t i = 0; i < count && !s.failed(); ++i) explored.push_back(s.ReadU8());
+    f460 = s.ReadU32();
+    f468 = s.ReadU16();
+    f478 = s.ReadU16();
+    // FUN_10071f2c -- the same read-tag-first do-while shape as the entity
+    // root's variable list.
+    engineFlag12618 = s.ReadU16();
+    scriptVars.clear();
+    uint8_t tag = s.ReadU8();
+    while (tag != SavedEntityBase::kVarListEnd && !s.failed()) {
+        SavedScriptVar var;
+        var.name = s.ReadStringWAscii();
+        var.value = s.ReadStringWAscii();
+        scriptVars.push_back(std::move(var));
+        tag = s.ReadU8();
+    }
+    listCount428 = s.ReadI32();
+    for (int32_t& v : f38) v = s.ReadI32();
+    const int16_t changes = s.ReadI16();
+    tileChanges.clear();
+    for (int16_t i = 0; i < changes && !s.failed(); ++i) {
+        TileChange c;
+        c.x = s.ReadI16();
+        c.y = s.ReadI16();
+        c.value = s.ReadI16();
+        tileChanges.push_back(c);
+    }
+}
+
 void SavedLevelState::Write(SaveStream& s) const {
+    level.Write(s);
     for (const SavedEntity& e : entities) {
         s.WriteU8(kEntryPresent);
         s.WriteI16(static_cast<int16_t>(e.typeId));
@@ -579,6 +672,7 @@ void SavedLevelState::Write(SaveStream& s) const {
 }
 
 void SavedLevelState::Read(SaveStream& s, const SavedKindResolver& resolve) {
+    level.Read(s);
     entities.clear();
     uint8_t tag = s.ReadU8();
     while (tag != kEntryListEnd && !s.failed()) {

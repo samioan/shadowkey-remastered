@@ -619,13 +619,14 @@ int main(int argc, char** argv) {
             }
             Check(allOk, "GetNextLevelName() is the destination's display name, case-insensitively");
 
-            // `ffarena` is the one zone with no entry in the 3821-3840 run.
-            stack.SetCurrentLevelName("ffarena");
+            // Every shipped zone has an entry (post-M120: ffarena is 3841),
+            // so the fallback is reached only by a name the engine never uses.
+            stack.SetCurrentLevelName("nozone");
             menu->method(skString("GetNextLevelName"), none, ret, ctxt);
-            Check(std::string(ret.str().ptr()) == "ffarena",
+            Check(std::string(ret.str().ptr()) == "nozone",
                   "a zone with no display-name entry falls back to its internal name");
-            Check(sk::ZoneDisplayNameStringId("ffarena") == -1,
-                  "-- which is exactly the one zone the shipped run is missing");
+            Check(sk::ZoneDisplayNameStringId("ffarena") == 3841,
+                  "-- and ffarena is not such a zone: FUN_100290a8 maps it to 3841");
         }
     }
 

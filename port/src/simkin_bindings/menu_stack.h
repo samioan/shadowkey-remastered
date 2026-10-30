@@ -14,6 +14,7 @@
 
 #include <array>
 #include <cstdint>
+#include <functional>
 #include <map>
 #include <memory>
 #include <string>
@@ -359,6 +360,47 @@ public:
     void SetPlayerHeadingUnits(int units) { m_PlayerHeadingUnits = units; }
     int playerHeadingUnits() const { return m_PlayerHeadingUnits; }
 
+    // ---- Post-M120: `current.sav`'s level members ---------------------
+    //
+    // The engine keeps every level the player has visited this session as
+    // a `<level>.dat` member of one archive, `current.sav`. `FUN_1006c31c`
+    // (the level change) writes the level being left into it before it
+    // loads the next; `GameEngine_InitLevel` reads the arriving level's
+    // member back out right after its `.ent` pass (`FUN_10019780` ->
+    // `FUN_100188dc`) and, when there is one, rebuilds every entity from
+    // it instead. `SaveGame` (GameEngine binding 0x31) writes
+    // `current.sav` and `LoadGame` (0x2b) copies a slot over it
+    // (`FUN_1001a970`) before loading. So a slot carries the whole world
+    // the player has touched, and a corpse stays a corpse, an opened door
+    // stays open and a conversation stays where it was -- none of which
+    // this port did until now: it wrote `character.dat` alone and every
+    // zone came back from its `.ent` on every visit.
+    //
+    // Held in memory rather than in a `current.sav` on disk; the archive
+    // only exists between those calls, so nothing can tell the
+    // difference. Keys are lower-cased level names (the container's member
+    // lookup is case-insensitive); values are serialized SavedLevelState
+    // bytes, the member's exact payload.
+    void StoreLevelState(const std::string& levelName, std::vector<uint8_t> bytes);
+    const std::vector<uint8_t>* FindLevelState(const std::string& levelName) const;
+    void ClearLevelStates() { m_LevelStates.clear(); }
+    size_t levelStateCount() const { return m_LevelStates.size(); }
+    // main.cpp owns the live world, so it is what can serialize the level
+    // being played; ActuallySaveGame asks it for a fresh member first, the
+    // way the real writer calls FUN_100187d0 on the live entity list.
+    void SetLevelSnapshotter(std::function<std::vector<uint8_t>()> snapshot) {
+        m_LevelSnapshotter = std::move(snapshot);
+    }
+    // A Load replaces `current.sav` wholesale, so the level the player is
+    // standing in when they load must *not* be written into it on the way
+    // out -- that would overwrite the save's copy of the same level.
+    // Answers true once.
+    bool TakeDiscardDepartingLevel() {
+        const bool discard = m_DiscardDepartingLevel;
+        m_DiscardDepartingLevel = false;
+        return discard;
+    }
+
     // M54: `QuitToMenu()` -- GameEngine root binding index 0x33, the
     // *other* thing a real "Quit" row can mean. RequestQuit() above is
     // `QuitGame()`, which ends the process; this one ends the current
@@ -589,6 +631,9 @@ private:
     // SaveConfirm; saveconfirm.s reads it straight back out with
     // GetSaveSlot() and hands it to ActuallySaveGame().
     int m_SaveSlot = 0;
+    std::map<std::string, std::vector<uint8_t>> m_LevelStates;  // post-M120
+    std::function<std::vector<uint8_t>()> m_LevelSnapshotter;
+    bool m_DiscardDepartingLevel = false;
     bool m_QuitAfterSave = false;        // M54: see quitAfterSave() above
     bool m_CreditsActive = false;
     std::vector<std::string> m_CreditsLines;

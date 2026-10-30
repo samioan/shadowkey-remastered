@@ -260,6 +260,24 @@ bool MenuStack::GameAvailableForLoad(int slot) const {
     return probe(slot);
 }
 
+namespace {
+std::string LowerLevelName(std::string name) {
+    std::transform(name.begin(), name.end(), name.begin(),
+                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    return name;
+}
+}  // namespace
+
+void MenuStack::StoreLevelState(const std::string& levelName, std::vector<uint8_t> bytes) {
+    if (levelName.empty()) return;
+    m_LevelStates[LowerLevelName(levelName)] = std::move(bytes);
+}
+
+const std::vector<uint8_t>* MenuStack::FindLevelState(const std::string& levelName) const {
+    auto it = m_LevelStates.find(LowerLevelName(levelName));
+    return it != m_LevelStates.end() ? &it->second : nullptr;
+}
+
 bool MenuStack::ActuallySaveGame(int slot) {
     if (slot < 0 || slot >= kSaveSlotCount) return false;
     SaveSlot& s = m_SaveSlots[static_cast<size_t>(slot)];
@@ -271,13 +289,13 @@ bool MenuStack::ActuallySaveGame(int slot) {
     std::strftime(buf, sizeof(buf), "%Y-%m-%d %H:%M", &local);
     s.timeStr = buf;
 
-    // One archive, one member: `character.dat`, the player's own record.
-    // The real writer adds a second member here, `<level>.dat`, built
-    // from the live entity list (FUN_100187d0) -- this port has no
-    // per-entity save state to put in one yet, so it writes the character
-    // half only. A missing member is exactly what the real reader's
-    // lookup already handles (FUN_1000b100 returns null and the caller
-    // moves on), so the file stays loadable by its own rules.
+    // `character.dat`, the player's own record, and then -- post-M120 --
+    // `<level>.dat` for the level being played, built from the live entity
+    // list (FUN_100187d0) by main.cpp's snapshotter, plus every other level
+    // `current.sav` already holds from earlier in the session.
+    if (m_LevelSnapshotter && !m_CurrentLevel.empty()) {
+        StoreLevelState(m_CurrentLevel, m_LevelSnapshotter());
+    }
     sk::SaveStream stream;
     sk::SavedEntity record = m_Player->BuildSaveRecord(m_CurrentLevel);
     // M91: **where the player was standing.** The four fields are part of
@@ -295,6 +313,9 @@ bool MenuStack::ActuallySaveGame(int slot) {
     record.Write(stream);
     std::vector<sk::SaveArchive::Record> records;
     records.push_back({sk::kCharacterMemberName, stream.bytes()});
+    for (const auto& level : m_LevelStates) {
+        records.push_back({sk::LevelMemberName(level.first), level.second});
+    }
     const std::vector<uint8_t> bytes = sk::SaveArchive::Serialize(records);
 
     const std::string path = SlotPath(slot);
@@ -345,6 +366,21 @@ std::string MenuStack::LoadGameFromSlot(int slot) {
     }
     m_Player->ApplySaveRecord(record, *this);
     m_CurrentLevel = record.character.levelName;
+    // Post-M120: `FUN_1001a970` copies the slot over `current.sav`, so the
+    // session's level members become exactly the slot's -- every
+    // `<name>.dat` it carries, and nothing the session had before.
+    m_LevelStates.clear();
+    const std::string characterMember = LowerLevelName(sk::kCharacterMemberName);
+    constexpr const char* kLevelSuffix = ".dat";
+    for (const sk::SaveArchive::Record& r : records) {
+        const std::string name = LowerLevelName(r.name);
+        if (name == characterMember || name.size() <= 4 ||
+            name.compare(name.size() - 4, 4, kLevelSuffix) != 0) {
+            continue;
+        }
+        m_LevelStates[name.substr(0, name.size() - 4)] = r.data;
+    }
+    m_DiscardDepartingLevel = true;
     // M91: put the player back where the save found them. The engine has
     // one mechanism for "arrive somewhere other than the .ent start
     // record" -- the SetCameraStart override GameEngine_InitLevel's

@@ -8,8 +8,9 @@
 // one entry per real zone (`azra.zmp` etc., 21 real zones total under
 // system/apps/6r51), in a fixed order that reads like a real zone-index
 // table (3820 itself is "Loading...", the generic/no-destination-named
-// variant). `ffarena` is the one real zone with no entry in this run --
-// left unmapped rather than guessing a slot that isn't actually there.
+// variant). Post-M120: the run actually ends at 3841 -- `FUN_100290a8`, the
+// engine's own lookup, has 22 strcasecmp arms, and the last maps `ffarena`
+// to 3841 "Fearfrost II"; another maps the alias "lakvans" to 3835.
 //
 // Factored out from main.cpp (which also needs sk::StringTable::Get() to
 // turn an id into real text -- not duplicated here) so the lookup table

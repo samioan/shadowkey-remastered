@@ -144,6 +144,7 @@
 // than script-visible bindings.
 
 #include <cstdint>
+#include <functional>
 #include <vector>
 
 #include "engine/interp_serial.h"
@@ -203,6 +204,35 @@ struct EffectEntity {
 // arguments written over them.
 EffectEntity MakeEffect(int firstSprite, int lastSprite, int drawFlags, int x, int y, int z,
                         int animRate, int lifetime, int sizeX, int sizeY);
+
+// Post-M120: **the blood spurt, `FUN_10081e5c`** -- the one engine-built
+// effect, and the only one with gravity. A creature's take-damage handler
+// (`FUN_10081844`) calls it on every hit it does not refuse outright (a
+// dead or invulnerable creature takes no hit at all), except on typeId
+// 0x3f7, the Lothna fortifying crystal. Every field it writes:
+//
+//   global.spr slot 0x47 (71: 32x32, averaging RGB 133/4/7 -- blood), one
+//   frame, rate 0x80, life 0x80 (half a second), size 0x30 both ways,
+//   scale 0x100 ramping to 0x40 over the life, blended (`+0x58 = 1`),
+//   gravity on;
+//   x/y the creature's plus `(rand & 3) * 16`, pulled a 256th of the way
+//   toward the player; z the creature's plus `(rand & 3) * 16 + 0x80`;
+//   vx/vy `(rand + 0x200) & 0xff`, each negated on a coin flip; vz 0x80.
+//
+// `rng` stands in for the engine's `FUN_1001b144`, called in exactly that
+// order.
+constexpr int kBloodSpriteSlot = 0x47;
+constexpr int kBloodImmuneTypeId = 0x3f7;
+EffectEntity MakeBloodSpurt(int creatureX, int creatureY, int creatureZ, int playerX,
+                            int playerY, const std::function<int()>& rng);
+
+// The engine's gravity, `CMap+0x14`, is the same field that brings the
+// player's jump (`vz += 0x500`) back down -- so it is non-zero and
+// downward -- but nothing in the image has been found to write it. This is
+// the port's player gravity (4 world units/tick^2) in this integrator's
+// units: `vz += (frameDelta * g) >> 8` per tick must equal 25 * 4 per
+// tick, so g = 100 * 256 / 10.
+constexpr int kEffectGravityUnits = -2560;
 
 // `FUN_1005ef94` (lifetime, motion, scale ramp) around `FUN_100606d0`
 // (the frame advance). `frameDelta` is the engine's own per-frame delta,

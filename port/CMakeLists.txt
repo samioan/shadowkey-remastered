@@ -174,6 +174,7 @@ add_library(sk_bindings STATIC
   src/simkin_bindings/entity_base_ref.cpp
   src/simkin_bindings/effect_entity.cpp
   src/simkin_bindings/script_delay.cpp
+  src/simkin_bindings/script_vars.cpp
   src/simkin_bindings/table_executable.cpp
   src/simkin_bindings/trap_ref.cpp
   src/simkin_bindings/test_armor_executable.cpp
@@ -598,6 +599,12 @@ target_link_libraries(camera_start_smoke PRIVATE sk_bindings sk_world)
 # See src/tests/m62_set_position_smoke.cpp.
 add_executable(set_position_smoke src/tests/m62_set_position_smoke.cpp)
 target_link_libraries(set_position_smoke PRIVATE sk_bindings sk_world)
+
+# M121: the level-state record (current.sav's <level>.dat members), the
+# story flags, and the engine's own tile rule (FUN_10000ab8).
+# See src/tests/m121_world_state_smoke.cpp.
+add_executable(world_state_smoke src/tests/m121_world_state_smoke.cpp)
+target_link_libraries(world_state_smoke PRIVATE sk_bindings sk_world)
 
 # The level-up screen: the level-up points, UpdateAttributes and the race/
 # class tables behind it, the eight attribute setters, and the experience

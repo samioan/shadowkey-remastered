@@ -7,9 +7,9 @@
 //
 // Real data, read directly off the install image:
 //   stringtable.eng id 3950: "Travel to: "
-//   stringtable.eng ids 3821-3840: one real zone display name each, in
+//   stringtable.eng ids 3821-3841: one real zone display name each, in
 //     real-zone order (azra.zmp etc.) -- "Azra's Crossing", ...,
-//     "Raider's Nest". ffarena has no entry in this real run.
+//     "Raider's Nest", "Fearfrost II" (ffarena).
 #include <cstdio>
 #include <string>
 
@@ -61,13 +61,10 @@ int main(int argc, char** argv) {
     checkZone("GhstPass", 3824, "Ghast's Pass");
     checkZone("LothCav", 3837, "Loth' Na Caverns");
 
-    int ffarenaId = sk::ZoneDisplayNameStringId("ffarena");
-    bool ffarenaOk = ffarenaId < 0;
-    std::printf(
-        "ZoneDisplayNameStringId(\"ffarena\") (real zone, no entry in the real 3821-3840 run): %d "
-        "(expected < 0) %s\n",
-        ffarenaId, ffarenaOk ? "OK" : "FAILED");
-    if (!ffarenaOk) ok = false;
+    // Post-M120: FUN_100290a8's last arm -- the run ends at 3841, not 3840,
+    // and "lakvans" is an alias of lakvan's entry.
+    checkZone("ffarena", 3841, "Fearfrost II");
+    checkZone("lakvans", 3835, "Lakvan's Stronghold");
 
     std::string prefix = strings.Get(3950);
     bool prefixOk = prefix == "Travel to: ";

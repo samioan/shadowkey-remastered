@@ -431,6 +431,13 @@ public:
     int currentHealth() const { return m_CurrentHealth; }
     int maxHealth() const { return m_MaxHealth; }
     bool alive() const { return m_Alive; }
+    // Post-M120: the level-state record's two stats-block fields (`+0x2a`,
+    // `+0x24`), written back before a restored creature's Init() runs --
+    // which, as on the device, may overwrite both through SetMaxHealth.
+    void RestoreSavedHealth(int current, int maximum) {
+        m_MaxHealth = maximum;
+        m_CurrentHealth = current;
+    }
 
     // M23: a real, silent world-removal distinct from combat death (no
     // OnKilled()/loot spawn) -- zone-root scripts call

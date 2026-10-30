@@ -11309,6 +11309,140 @@ pre-M120 code path**, and it is the default.
   F11 / Alt+Enter and the launcher are the switches.
 
 
+## M121 -- the world remembers, and the ground holds
+
+Eight bugs reported from play, each checked against the decompile. Six
+were real port defects, one (the attack interval) measured equal to the
+engine, and one (spawn points) checked out against every shipped arrival.
+
+- **A level is saved, not reloaded from its `.ent` (the big one).**
+  "Loading a game resets dead enemies, quests and dialogs." The engine keeps
+  every level the player has visited this session as a `<level>.dat` member
+  of one archive, `current.sav`: the level change (`FUN_1006c31c`) writes the
+  level being left before it loads the next, `GameEngine_InitLevel` reads
+  the arriving level's member right after its `.ent` pass (`FUN_10019780` ->
+  `FUN_100188dc`) and, when there is one, destroys what it just placed and
+  rebuilds every entity from the record, `SaveGame` (0x31) writes
+  `current.sav` and `LoadGame` (0x2b) copies a slot over it
+  (`FUN_1001a970`). This port wrote `character.dat` alone, so every zone came
+  back from its `.ent` on every visit and every load. Now:
+  - `snapshotLevelState` (main.cpp) builds the member from the live doors,
+    pickups and creatures, each as `typeId` + the save chain its
+    entities.txt category's C++ class writes -- **read out of the binary**,
+    constructor -> vtable -> slot `+0x130`, for all 17 factory arms
+    (`sk::SavedKindForCategory`). A creature taken out of the world is not
+    written, which is the whole of why a dead one stays dead.
+  - `MenuStack` holds `current.sav`'s members in memory; ActuallySaveGame
+    writes every one into the slot beside `character.dat`, LoadGameFromSlot
+    replaces them wholesale and marks the level being abandoned as not to be
+    stored, New Game and quit-to-menu clear them.
+  - The zone-load block skips every `.ent` placement that would become a
+    live object, lifts a skipped door's baked footprint (the engine's
+    destroy does), replays the level record, and feeds each saved entity
+    through the same per-placement code with its record attached --
+    **record first, then Init**, the engine's order. That is what lets
+    `door.s`'s Init read the `saved_Open` it was saved with.
+  - **The Init guard is real and narrow.** `FUN_10028594` case 0 skips a
+    second Init only for what is neither item (`+0xb4`), actor (`+0xe4`)
+    nor door (`+0xc0`) -- i.e. containers. A looted chest is rebuilt from
+    its record (use text, name, contents as typeId + count) and does not
+    roll its loot again; everything else re-runs Init over its restored
+    variables, as on the device (a creature's SetMaxHealth therefore heals
+    it on a load -- faithful).
+- **The level object's own record, which M50 missed.** `FUN_100187d0`
+  starts by calling the level object's `vtable+0x24` with arguments the
+  decompiler dropped; it is `FUN_1002fa5c` (vtable `0x100fcd0c`, paired
+  with the loader `FUN_1002f934` at `+0x28`): the automap's explored
+  bitmap, three scalars, then `FUN_10071ac4` -- the **zone script's own
+  variables** (every `Level.saved_X`), a list count, six words, and **the
+  tile-change journal**, which SAVE_FORMAT.md said nothing serialized. The
+  loader replays it as `cell[(y*w+x)*8+1] = value`, so a LockZone/UnlockZone
+  survives by its bytes. `sk::SavedLevelObject`; m50's envelope check
+  corrected.
+- **Eighteen story flags were never written.** `GetPlayer().saved_Guild`,
+  `saved_Rescue1..4`, `saved_EndGame` and the rest live at
+  `player+0xfd8..+0x101c`, and character.dat has always had the slots; the
+  writer left them zero. Written and restored now, and cleared (with the
+  quest arrays and kill counters) when the engine would build a new player.
+- **The tile rule, `FUN_10000ab8` -- "the player can scale vertical walls".**
+  Player and creature `vtable+0x1e8` both land on it, called for the tile a
+  move ends in and the four push-out probes. Blocking bit 4 always; bit
+  **0x40 for creatures only**; then with `probe = z + 0x180`: room to stand
+  under the ceiling, **a floor no more than 0x180 above z**, and the floor
+  plus Height() under the ceiling (`FUN_1001bdf4`, the ceiling twin of
+  `FUN_1001beac`, returns 0x4000 for open sky). The port followed any floor
+  rise at all; m121 counts **1770** open tile edges in the shipped zones
+  that rise more than 0x180 -- every one a wall you could walk up -- and
+  checks the rule refuses each while passing all 7396 smaller steps. The
+  player's ground probe also moved from the eye (800 above the feet, which
+  stood you on a two-storey tile's upper floor from below) to the engine's
+  feet + 0x180. The player's own Height() is `CMap+0x1a`, still unwritten
+  by anything known, so 0 is used: it cannot close a passage the original
+  leaves open.
+- **Creatures: no pathfinder, by the original's design.** A chase is
+  `FUN_100008f0`: face the move goal (the target's position, rewritten
+  every tick) and walk forward; the actor move then resolves the step one
+  axis at a time. The port's seven-heading steering fan is gone; creatures
+  slide along walls under the same tile rule, which also gives them the
+  **6242 creature-barrier tiles across 13 zones** the port never read. And
+  they stand where the engine's ground clamp puts anything that is not the
+  player, `floor(z + 0x180) + 0x80` -- m121 finds **1479 of 1541** placed
+  creatures authored at exactly that height; a moving creature used to drop
+  to the bare floor.
+- **The hit feedback.** The take-damage handler's whole body sits under
+  `!dead && !invulnerable`, so an essential NPC or a corpse caught in a
+  blast neither flashes nor bleeds; and `FUN_10064ffc` asks `vtable+0x170`
+  -- `ldrb r0,[r0,#0x1e4]`, the dead flag -- before passing the ramp to the
+  draw, so the killing blow no longer leaves a corpse flashing red through
+  its death clip. **The blood** is `FUN_10081e5c`, called on every hit
+  except typeId 0x3f7: global.spr slot 71 thrown with random horizontal
+  velocity and an upward kick under gravity, half a second, fading 0x100 ->
+  0x40 (`sk_bindings::MakeBloodSpurt`). The five places this port applies a
+  hit now share one `onCreatureStruck`. Gravity is `CMap+0x14`, the field
+  that also ends the player's jump, so non-zero; its writer is still not
+  found, and the port's own player gravity stands in (`kEffectGravityUnits`).
+- **The level-up screen.** `levelup.s` had worked since M64, but nothing
+  opened it. `FUN_1002f694` (the level tick that owns action 12, the
+  character key) opens screen mode 8 -- the `+0x138` screen DisplayLevelUp
+  also raises -- instead of CharacterManager while `player+0xf44 > 0`, and
+  the HUD pass draws string **3842 "Level Up"** centred at y=190 for as
+  long as a point is unspent (`FUN_1002c1a8`).
+- **The map's location name.** `FUN_1008f97c(gc, name, 10, 0xfff, 1, 0, 0,
+  0)`: white, shadowed, legend face -- the port drew it in the static-item
+  brown with no shadow, lost in the parchment. And `FUN_100290a8` has 22
+  arms, not 20: `ffarena` is 3841 "Fearfrost II" and `lakvans` aliases
+  3835 (M26's "ffarena has no entry" was the table's last arm unread).
+- **Measured, not changed.** Creature attacks: 11 swings in ~10.4s live,
+  one per `0x100` frame-delta units of `+0x2c4` with the `rand & 0x1f`
+  reset -- exactly the engine's pursue arm. Spawn points: Player 0x39 stores
+  arguments 3/4/5 into `+0x14a34/+0x14a38/+0x14a30`, which InitLevel puts on
+  `+0xa8/+0xb6/+0xb2` -- what the port does; and m121 checks all 49 shipped
+  `LoadLevel` + `SetCameraStart` pairs against their destination zones: 48
+  land on open floor within four tiles of the scripted height.
+- **Test**: new `world_state_smoke` (m121, 22 checks) -- the creature
+  height census, the tile rule against every open edge and a barrier tile,
+  script variables collected/restored on a real `door.s`, the story flags,
+  `current.sav` through a real slot, and the 49 arrivals. m26/m50/m90
+  updated for the two corrections above. Suite **105/105**, soft-fail 5;
+  the tracked `.ppm` dumps unchanged; the shipping (`SK_DIST`) build
+  compiles. **Live**: a zone with 36 rats killed, saved and loaded comes
+  back with all 36 dead and all nine pickups (three placed, six loot bags);
+  the map shows "Azra's Crossing"; LevelUp shows the HUD prompt and Tab
+  opens "Level Up!"; a landed club hit flashes the bandit red and throws
+  blood, a missed one does neither.
+
+### Still open
+
+- `CMap+0x14` (gravity) and `CMap+0x1a` (the standing Height() and eye
+  height) are read everywhere and written nowhere yet found; the port's
+  player physics constants are still its own.
+- A creature's per-tick move is still the port's tuned speed: the engine's
+  is `stats.speed * 30` through the sine table into `+0x98/+0xa0`, but
+  where that delta is damped between ticks was not pinned down.
+- Hidden props (`ShowEntity(false)`) are not in the record; every shipped
+  case is re-derived by an Init from a saved variable.
+
+
 ## Next milestones (not yet started)
 
 Roughly in priority order for reaching "actually playable," not commitments:

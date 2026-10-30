@@ -28,6 +28,36 @@ EffectEntity MakeEffect(int firstSprite, int lastSprite, int drawFlags, int x, i
     return e;
 }
 
+EffectEntity MakeBloodSpurt(int creatureX, int creatureY, int creatureZ, int playerX,
+                            int playerY, const std::function<int()>& rng) {
+    EffectEntity e;
+    e.firstSprite = kBloodSpriteSlot;  // +0x140 = 0x4700
+    e.lastSprite = kBloodSpriteSlot;   // +0x144 = 0x4700
+    e.sprite = kBloodSpriteSlot;       // +0x134 = 0x47
+    e.animRate = 0x80;                 // +0x148, raw -- not through the x15
+    e.animCursor = kBloodSpriteSlot * kEffectFrameStep;  // +0x14c = 0x4700
+    e.life = 0x80;                     // +0x13c
+    e.lifeMax = 0x80;                  // +0x15c
+    e.gravity = true;                  // +0x150 = 1
+    e.x = creatureX + (rng() & 3) * 0x10;
+    e.y = creatureY + (rng() & 3) * 0x10;
+    e.z = static_cast<int16_t>(creatureZ + (rng() & 3) * 0x10 + 0x80);
+    e.x += (playerX - creatureX) >> 8;
+    e.y += (playerY - creatureY) >> 8;
+    e.sizeX = 0x30;                    // +0x12c
+    e.sizeY = 0x30;                    // +0x130
+    e.scaleStart = 0x100;              // +0x154
+    e.scale = 0x100;                   // +0x138
+    e.scaleEnd = 0x40;                 // +0x158
+    e.vx = (rng() + 0x200) & 0xff;
+    if (rng() & 1) e.vx = -e.vx;
+    e.vy = (rng() + 0x200) & 0xff;
+    if (rng() & 1) e.vy = -e.vy;
+    e.vz = 0x80;                       // +0xa6
+    e.drawFlags = 1;                   // +0x58
+    return e;
+}
+
 void TickEffect(EffectEntity& effect, int frameDelta, int gravityUnits) {
     if (!effect.alive) return;
 

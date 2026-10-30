@@ -444,6 +444,11 @@ public:
     };
     static constexpr size_t kMaxTileChanges = 100;
     const std::vector<TileChange>& tileChanges() const { return tileChanges_; }
+    // Post-M120: FUN_10071f2c's tail -- a saved journal replayed onto a
+    // freshly loaded grid, `cell[(y * width + x) * 8 + 1] = value` per
+    // entry. Going through the same writer re-records each entry, so the
+    // journal after a load is the journal that was saved.
+    void RestoreTileChanges(const std::vector<TileChange>& changes);
 
     // M44: `Level.LightRect(x0, y0, x1, y1, level)` -- the zone-effects
     // dispatcher's case 1. Overwrites the *baked* light level of every
@@ -753,6 +758,50 @@ public:
     //   * There is no wall flag in this at all. What stops an arrow is
     //     geometry taller than the arrow.
     float CollisionFloorHeightAt(float worldX, float worldY, float worldZ) const;
+
+    // Post-M120: `FUN_1001bdf4`, CollisionFloorHeightAt's twin for the
+    // ceiling an actor at `probeZ` bumps its head on. A tile with no solid
+    // ceiling surface (no `.sur` index, or one whose `+6` flags carry 0x20)
+    // is open sky, reported as **0x4000**; so is a two-storey tile whose
+    // ceiling the actor is already standing on (`ceiling <= probeZ`).
+    // Otherwise the ceiling, with the same flags-bit-6 corner rule.
+    float CollisionCeilingHeightAt(float worldX, float worldY, float probeZ) const;
+
+    // Post-M120: **`FUN_10000ab8`, the whole of what stops an actor walking
+    // into a tile** -- player vtable `+0x1e8` and creature `+0x1e8` both
+    // land on it, called by the actor move (`FUN_10000c64`) for the tile
+    // the move ends in and by the push-out (`FUN_100017c8`) for the four
+    // points half an extent out on each axis. In order:
+    //
+    //   * `blockFlags & 0x04` blocks outright (the bit LockZone and the
+    //     entity tile stamp share);
+    //   * `blockFlags & 0x40` blocks a **creature** (`vtable+0xe4`, the
+    //     actor predicate) and never the player -- an authored barrier
+    //     this port never read, which is why creatures walked into places
+    //     the level designer fenced off;
+    //   * then the height rule, with `probe = z + 0x180`:
+    //
+    //         z + Height() <= ceiling(probe)     there is room to stand
+    //         floor(probe) <= probe              **a step of at most 0x180**
+    //         floor(probe) + Height() <= ceiling
+    //
+    // `z` is the actor's own `+0xa4` -- the player's feet, a creature's
+    // `floor + 0x80`. The second line is the one this port never had: it
+    // followed any floor rise at all, which is what let the player walk up
+    // a sheer wall whose tile was not flagged as one.
+    //
+    // (The function's last test, a solid entity standing in the tile, is
+    // the caller's -- this port keeps its live objects outside the grid.)
+    bool ActorTileBlocked(float worldX, float worldY, float actorZ, float height,
+                          bool creature) const;
+
+    // CircleHitsWall's tile walk with ActorTileBlocked applied to every
+    // tile the circle overlaps. The tile the actor is standing in now
+    // (`currentX`, `currentY`) is held to the wall test only: the engine
+    // would freeze an actor whose own tile fails the height rule, which a
+    // float position can reach where the fixed-point one could not.
+    bool ActorCircleBlocked(float worldX, float worldY, float radius, float actorZ, float height,
+                            bool creature, float currentX, float currentY) const;
 
     // M62: where an *actor* ends up after being teleported to (x, y, z) --
     // `FUN_100686e0` plus its one caller's trailing lift, which together

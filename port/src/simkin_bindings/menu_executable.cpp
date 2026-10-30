@@ -1563,6 +1563,9 @@ bool MenuExecutable::method(const skString& methodName, skRValueArray& args,
         return true;
     }
     if (methodName == skString("NewGame") && args.entries() == 0) {
+        // Post-M120: a new game starts with an empty `current.sav` -- no
+        // level remembered from whatever session came before it.
+        m_Stack.ClearLevelStates();
         m_Stack.RequestGameStart("azra");
         return true;
     }

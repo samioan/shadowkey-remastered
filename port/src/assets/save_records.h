@@ -147,10 +147,10 @@ struct SavedStats {
 // name/value pair as two wide strings -- but only when the *value* text
 // contains no `{`, i.e. it skips anything that reads like a nested
 // structure or a method body. So script state survives a save as text,
-// which is how a door remembers it was unlocked: not by saving the tile
-// bytes (the tile-change journal at level+0xfc is not serialized at all)
-// but by re-running each entity's `Init` on load with its variables
-// already restored. FUN_100188dc calls exactly that, by name.
+// which is how a door remembers it was unlocked: by re-running each
+// entity's `Init` on load with its variables already restored.
+// FUN_100188dc calls exactly that, by name. (M121: the tile-change journal
+// is saved as well, in the level object's own record -- SavedLevelObject.)
 struct SavedScriptVar {
     std::string name;
     std::string value;
@@ -597,6 +597,21 @@ enum class SavedEntityKind {
 // for a level entry).
 using SavedKindResolver = std::function<SavedEntityKind(int32_t typeId)>;
 
+// Post-M120: an entities.txt category's save chain, read out of the binary
+// rather than inferred. `FUN_1002aa14` (the entity factory, ZONE_FORMAT.md's
+// category table) runs one constructor per category; the last vtable each
+// constructor installs at `+4`, indexed at `+0x130`, names the save function
+// -- and so the chain -- that category's objects write:
+//
+//   default Entity      1, 11 Drawable (11 = every door)
+//   2, 7, 13 Actor      3, 6, 9, 15 Stackable     4, 16 Weapon
+//   5, 14 Wearable      8, 12 Spellbook (the containers)
+//   10 InventoryHolder
+//
+// A resolver built on this plus the typeId -> category lookup is what the
+// level member's reader needs.
+SavedEntityKind SavedKindForCategory(int category);
+
 struct SavedEntity {
     SavedEntityKind kind = SavedEntityKind::Entity;
     // The typeId written immediately *before* this record by whoever owns
@@ -633,9 +648,57 @@ struct SavedEntity {
 };
 
 // ---------------------------------------------------------------------
+// The level object's own record -- written *first* by FUN_100187d0,
+// through the level object's (`engine+0x470`) vtable `+0x24`, and read
+// first by FUN_100188dc through `+0x28`. The decompiler dropped both
+// calls' arguments, which is why M50 recorded the level file as starting
+// at the entity list; the two slots are `FUN_1002fa5c` / `FUN_1002f934`
+// (vtable `0x100fcd0c`, the pair adjacent at `+0x24`/`+0x28`), each of
+// which tail-calls the script half, `FUN_10071ac4` / `FUN_10071f2c`.
+// ---------------------------------------------------------------------
+struct SavedLevelObject {
+    // The automap's explored bitmap (`level+0x45c`, M57): the map's width
+    // and height in tiles, then `(width * height) >> 3` packed bytes.
+    int32_t exploredWidth = 0;
+    int32_t exploredHeight = 0;
+    std::vector<uint8_t> explored;
+    uint32_t f460 = 0;  // +0x460, a u32 written by memcpy
+    uint16_t f468 = 0;  // +0x468
+    uint16_t f478 = 0;  // +0x478
+    // --- FUN_10071ac4: the zone script's half ---
+    // `engine+0x12618`, the first field. FUN_100188dc also sets it to 1
+    // before it reads anything.
+    uint16_t engineFlag12618 = 0;
+    // The zone-root script's variables -- every attribute whose value has
+    // no `{` in it, exactly the entity root's rule (SavedEntityBase). This
+    // is where every `Level.saved_X` lives: `Level` *is* this object.
+    std::vector<SavedScriptVar> scriptVars;
+    // `+0x428`: the count of a list at `+0x420`. Only the count is written,
+    // and the loader clears the list and runs an empty loop over it.
+    int32_t listCount428 = 0;
+    std::array<int32_t, 6> f38{};  // +0x38 .. +0x4c
+    // `+0xfc` / `+0x100`: **the tile-change journal (M44).** SAVE_FORMAT.md
+    // said nothing serializes it; FUN_10071ac4's tail writes the count and
+    // three i16s per 8-byte entry, and FUN_10071f2c's tail replays each one
+    // as `cell[(y * width + x) * 8 + 1] = value` -- so a LockZone/UnlockZone
+    // survives a save by its bytes, not only by its script re-running.
+    struct TileChange {
+        int16_t x = 0;
+        int16_t y = 0;
+        int16_t value = 0;
+    };
+    std::vector<TileChange> tileChanges;
+
+    void Write(SaveStream& s) const;
+    void Read(SaveStream& s);
+};
+
+// ---------------------------------------------------------------------
 // `<level>.dat` -- FUN_100187d0 / FUN_100188dc.
 // ---------------------------------------------------------------------
 struct SavedLevelState {
+    // Post-M120: the level object's record comes before the entity list.
+    SavedLevelObject level;
     // Each entity's own `typeId` is the i16 written in front of it.
     std::vector<SavedEntity> entities;
     // The one field that is not an entity: engine+0xbe0e, written after

@@ -366,15 +366,31 @@ int main(int argc, char** argv) {
         level.renderEnabled = 1;
         sk::SaveStream s;
         level.Write(s);
-        Check(s.bytes().size() == 2 && s.bytes()[0] == 0 && s.bytes()[1] == 1,
-              "an empty level file is two bytes: the 0 terminator and the render flag");
+        // Post-M120: the level object's own record (FUN_1002fa5c +
+        // FUN_10071ac4) comes first -- 49 bytes when everything is empty:
+        // w, h, no bitmap, u32 + 2 x u16, the u16 flag, the 0xff that ends
+        // an empty variable list, the +0x428 count, six i32s and a zero
+        // journal count.
+        constexpr size_t kEmptyLevelObject = 4 + 4 + 4 + 2 + 2 + 2 + 1 + 4 + 6 * 4 + 2;
+        Check(s.bytes().size() == kEmptyLevelObject + 2 &&
+                  s.bytes()[kEmptyLevelObject] == 0 && s.bytes()[kEmptyLevelObject + 1] == 1,
+              "an empty level file is the level object, then the 0 terminator and the render flag");
 
         sk::SavedEntity e = MakeRecord(sk::SavedEntityKind::Actor);
         e.typeId = 203;
         level.entities.push_back(std::move(e));
+        level.level.scriptVars.push_back({"saved_MetTrinket", "1"});
+        level.level.tileChanges.push_back({12, 34, 4});
+        level.level.exploredWidth = 16;
+        level.level.exploredHeight = 2;
+        level.level.explored = {0x81, 0, 0, 0xff};
         sk::SaveStream s2;
         level.Write(s2);
-        Check(s2.bytes()[0] == 1 && s2.bytes()[1] == 203 && s2.bytes()[2] == 0,
+        sk::SaveStream s3;
+        level.level.Write(s3);
+        const size_t objBytes = s3.bytes().size();
+        Check(s2.bytes()[objBytes] == 1 && s2.bytes()[objBytes + 1] == 203 &&
+                  s2.bytes()[objBytes + 2] == 0,
               "each entry is a 1 tag then an i16 typeId -- 16-bit here, 32-bit inside an inventory");
 
         sk::SavedLevelState back;
@@ -382,6 +398,12 @@ int main(int argc, char** argv) {
         Check(!s2.failed() && back.entities.size() == 1 && back.entities[0].typeId == 203 &&
                   back.renderEnabled == 1 && back.entities[0].stats.attack == 62,
               "and reads back through a typeId->class resolver, stats and all");
+        Check(back.level.scriptVars.size() == 1 &&
+                  back.level.scriptVars[0].name == "saved_MetTrinket" &&
+                  back.level.scriptVars[0].value == "1" && back.level.tileChanges.size() == 1 &&
+                  back.level.tileChanges[0].x == 12 && back.level.tileChanges[0].value == 4 &&
+                  back.level.explored.size() == 4 && back.level.explored[3] == 0xff,
+              "the level's own variables, journal and explored bitmap round-trip too");
     }
     {
         // An inventory holder's children are nested records, each with a

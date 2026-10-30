@@ -122,6 +122,18 @@ sk::SavedEntity PlayerExecutable::BuildSaveRecord(const std::string& levelName) 
     rec.player.raceAbility = m_RaceAbility;
     rec.player.ffb8 = static_cast<int16_t>(m_MagickaBonusRace);
     rec.player.ffba = static_cast<uint16_t>(m_MagickaBonusClass);
+    // Post-M120: the eighteen global story flags, `+0xfd8..+0x101c`. The
+    // record has always had the slots and this writer left them zero, so
+    // every `GetPlayer().saved_Guild`/`saved_Rescue1`/`saved_EndGame` --
+    // the flags conversations and quest givers across zones branch on --
+    // came back unset from every load. FUN_1003ebd8 is the player's
+    // setValue and stores each name to its own int, which is all
+    // m_Fields holds for these names.
+    for (int i = 0; i < sk::SavedPlayer::kTrailingInts; ++i) {
+        auto it = m_Fields.find(sk::SavedPlayer::kGlobalFlagNames[i]);
+        rec.player.trailingInts[static_cast<size_t>(i)] =
+            it != m_Fields.end() ? it->second.intValue() : 0;
+    }
 
     // --- the two hand queues (+0xf4c / +0xf68) and their selections ---
     //
@@ -277,6 +289,13 @@ void PlayerExecutable::ApplySaveRecord(const sk::SavedEntity& record, MenuStack&
     m_RaceAbility = record.player.raceAbility;
     m_MagickaBonusRace = record.player.ffb8;
     m_MagickaBonusClass = record.player.ffba;
+    // Post-M120: the story flags -- see BuildSaveRecord. A load replaces
+    // the character, so whatever the session had set goes first.
+    m_Fields.clear();
+    for (int i = 0; i < sk::SavedPlayer::kTrailingInts; ++i) {
+        m_Fields[sk::SavedPlayer::kGlobalFlagNames[i]] =
+            skRValue(record.player.trailingInts[static_cast<size_t>(i)]);
+    }
 
     // Rebuild the inventory from scratch. Everything the port had before
     // is dropped -- a load replaces the character, it does not merge.

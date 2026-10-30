@@ -442,6 +442,16 @@ public:
         m_DeathHandled = false;
         m_DeathPending = false;
         m_Invulnerable = false;
+        // Post-M120: and the story state. The engine's player is a new
+        // object, so its quest arrays (`+0x430`/`+0x530`/`+0x630`), kill
+        // counters and eighteen `saved_*` flags all start at zero; keeping
+        // them here carried one game's quest progress into the next New
+        // Game. A Load replaces them from the record anyway.
+        m_Fields.clear();
+        m_QuestAssigned.clear();
+        m_QuestCompleted.clear();
+        m_QuestSolved.clear();
+        m_MonstersKilled.clear();
     }
 
     // M86: the real `+0x17c` hit timer -- see ApplyDamage's own comment

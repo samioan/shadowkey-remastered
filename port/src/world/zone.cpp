@@ -333,6 +333,12 @@ void Zone::SetBlockFlags(int tileX, int tileY, uint8_t value) {
     tileChanges_.push_back({static_cast<int16_t>(tileX), static_cast<int16_t>(tileY), value});
 }
 
+void Zone::RestoreTileChanges(const std::vector<TileChange>& changes) {
+    for (const TileChange& c : changes) {
+        SetBlockFlags(c.x, c.y, static_cast<uint8_t>(c.blockFlags & 0xff));
+    }
+}
+
 void Zone::LightRect(int x0, int y0, int x1, int y1, int level) {
     // The real loop, in its own order: `for (y = y0; y < y1; ++y) for
     // (x = x0; x < x1; ++x) Map_GetTileAt(map, x << 8, y << 8)->light =
@@ -712,6 +718,67 @@ float Zone::CollisionFloorHeightAt(float worldX, float worldY, float worldZ) con
         t.surIndexCeilingA != 0xff && !surface(t.surIndexCeilingA).disabled();
     if ((cell.blockFlags & 0x02) && solidCeiling && worldZ >= ceilingHeight) return ceilingHeight;
     return floorHeight;
+}
+
+float Zone::CollisionCeilingHeightAt(float worldX, float worldY, float probeZ) const {
+    constexpr float kOpenSky = 16384.0f;  // 0x4000
+    float tx = worldX / kTileScale, ty = worldY / kTileScale;
+    int itx = static_cast<int>(std::floor(tx)), ity = static_cast<int>(std::floor(ty));
+    if (!InBounds(itx, ity)) return 0.0f;
+    const ZmpCell& cell = CellAt(itx, ity);
+    const ZcpEntry& t = TypeOf(cell);
+    const bool solidCeiling =
+        t.surIndexCeilingA != 0xff && !surface(t.surIndexCeilingA).disabled();
+    if (!solidCeiling) return kOpenSky;
+    const float u = tx - itx, v = ty - ity;
+    const float ceilingHeight = (cell.flags & 0x40)
+                                    ? BilinearCorner(t.ceilingHeight, u, v)
+                                    : static_cast<float>(t.ceilingBandThreshold);
+    if ((cell.blockFlags & 0x02) && ceilingHeight <= probeZ) return kOpenSky;
+    return ceilingHeight;
+}
+
+bool Zone::ActorTileBlocked(float worldX, float worldY, float actorZ, float height,
+                            bool creature) const {
+    constexpr uint8_t kCreatureBarrier = 0x40;
+    constexpr float kStepProbe = 384.0f;  // 0x180
+    const int tx = static_cast<int>(std::floor(worldX / kTileScale));
+    const int ty = static_cast<int>(std::floor(worldY / kTileScale));
+    if (!InBounds(tx, ty)) return true;
+    const ZmpCell& cell = CellAt(tx, ty);
+    if (cell.IsBlocked()) return true;
+    if (creature && (cell.blockFlags & kCreatureBarrier)) return true;
+    const float probe = actorZ + kStepProbe;
+    const float ceiling = CollisionCeilingHeightAt(worldX, worldY, probe);
+    const float floor = CollisionFloorHeightAt(worldX, worldY, probe);
+    return !(actorZ + height <= ceiling && floor <= probe && floor + height <= ceiling);
+}
+
+bool Zone::ActorCircleBlocked(float worldX, float worldY, float radius, float actorZ,
+                              float height, bool creature, float currentX,
+                              float currentY) const {
+    const int curTx = static_cast<int>(std::floor(currentX / kTileScale));
+    const int curTy = static_cast<int>(std::floor(currentY / kTileScale));
+    int minTx = static_cast<int>(std::floor((worldX - radius) / kTileScale));
+    int maxTx = static_cast<int>(std::floor((worldX + radius) / kTileScale));
+    int minTy = static_cast<int>(std::floor((worldY - radius) / kTileScale));
+    int maxTy = static_cast<int>(std::floor((worldY + radius) / kTileScale));
+    for (int ty = minTy; ty <= maxTy; ++ty) {
+        for (int tx = minTx; tx <= maxTx; ++tx) {
+            float closestX = std::clamp(worldX, tx * kTileScale, (tx + 1) * kTileScale);
+            float closestY = std::clamp(worldY, ty * kTileScale, (ty + 1) * kTileScale);
+            float dx = worldX - closestX, dy = worldY - closestY;
+            if (dx * dx + dy * dy >= radius * radius) continue;
+            if (!InBounds(tx, ty) || CellAt(tx, ty).IsWall()) return true;
+            if (tx == curTx && ty == curTy) continue;
+            // Sampled at the point of the tile nearest the actor, nudged
+            // inside it so the bilinear floor is the tile's own.
+            const float sx = std::clamp(closestX, tx * kTileScale + 1.0f, (tx + 1) * kTileScale - 1.0f);
+            const float sy = std::clamp(closestY, ty * kTileScale + 1.0f, (ty + 1) * kTileScale - 1.0f);
+            if (ActorTileBlocked(sx, sy, actorZ, height, creature)) return true;
+        }
+    }
+    return false;
 }
 
 namespace {

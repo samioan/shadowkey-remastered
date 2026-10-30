@@ -331,19 +331,22 @@ tag, ending the list with `0xff` — but only for pairs whose *value* text
 contains no `{`, i.e. skipping anything that looks like a nested
 structure or a method body.
 
-That is how a door remembers it was unlocked. The per-level tile-change
-journal at `level+0xfc`/`+0x100` (M44) is **not serialized anywhere** —
-`<level>.dat` contains no tile data at all. Instead the level's `.zmp` is
-reloaded clean, each saved entity is recreated with its variables already
-restored, and `FUN_100188dc` then calls every one of them by name:
-`Init`. A door script whose `saved_Open` came back as 1 re-applies its
-own `UnlockZone` from inside `Init`, and the tile bytes follow.
+That is how a door remembers it was unlocked: each saved entity is
+recreated with its variables already restored, and `FUN_100188dc` then
+calls every one of them by name: `Init`. A door script whose `saved_Open`
+came back as 1 re-applies its own state from inside `Init`.
+
+> **Corrected (M121).** This section said the per-level tile-change
+> journal at `level+0xfc`/`+0x100` (M44) is not serialized anywhere. It is
+> -- in the level object's own record, below, which the decompiler hid by
+> dropping the call's arguments. The loader replays it byte for byte.
 
 ### `<level>.dat`
 
 `FUN_100187d0` / `FUN_100188dc`, and much smaller than it sounds:
 
 ```c
+<the level object's record>   // vtable +0x24 / +0x28, see below (M121)
 repeat {
     u8  1;              // 0 ends the list
     i16 typeId;
@@ -356,6 +359,43 @@ u8 engine->+0xbe0e;
 The writer skips the player (`engine+0x618`) and asks every other entity
 in `engine+0x634` its own `vtable+0x104` — "are you saveable at all" —
 before writing it.
+
+**The level object's record (M121).** Both functions open with a call
+through the level object's (`engine+0x470`) vtable whose arguments Ghidra
+dropped; the slots are `+0x24` = `FUN_1002fa5c` and `+0x28` =
+`FUN_1002f934` (vtable `0x100fcd0c`), each tail-calling the zone-script
+half `FUN_10071ac4` / `FUN_10071f2c`:
+
+```c
+i32 width; i32 height;                  // the automap's explored bitmap
+u8  explored[(width * height) >> 3];    //   (level+0x45c, M57)
+u32 level+0x460;  u16 level+0x468;  u16 level+0x478;
+u16 engine+0x12618;
+repeat { u8 1; wstr name; wstr value; } // the zone script's variables --
+u8  0xff;                               //   every Level.saved_X lives here
+i32 level+0x428;                        // a list's count; only the count
+i32 level+0x38 .. +0x4c;                // six words
+i16 count;                              // the tile-change journal (M44)
+repeat count { i16 x; i16 y; i16 value; }
+```
+
+The loader replays the journal as `cell[(y * width + x) * 8 + 1] = value`.
+Implemented as `sk::SavedLevelObject`.
+
+**Which class writes each entry** is its entities.txt category's, through
+the factory `FUN_1002aa14`: read out of each constructor's vtable at
+`+0x130` -- default Entity; 1, 11 Drawable; 2, 7, 13 Actor; 3, 6, 9, 15
+Stackable; 4, 16 Weapon; 5, 14 Wearable; 8, 12 Spellbook; 10
+InventoryHolder (`sk::SavedKindForCategory`).
+
+**Where these members live.** Every visited level's member sits in
+`current.sav` beside `character.dat`: the level change `FUN_1006c31c`
+writes the level being left, `FUN_10019780` (from `GameEngine_InitLevel`,
+after the `.ent` pass) reads the arriving level's and rebuilds the level
+from it, `SaveGame` writes `current.sav` and `LoadGame` copies the slot
+over it first (`FUN_1001a970`). On restore the `Init` call is skipped only
+by the Spellbook `+0x160` guard, which `FUN_10028594` applies to what is
+neither item, actor nor door -- the containers.
 
 The single trailing byte, `engine+0xbe0e`, is the **"this level is ready
 to render" gate**: `GameEngine`'s constructor sets it to 1,
