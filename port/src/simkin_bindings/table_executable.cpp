@@ -318,6 +318,25 @@ void TableExecutable::ActivateSelected() {
     m_Owner.TryInvokeWithArg(m_Callback, arg);
 }
 
+std::string StatLineText(const ItemExecutable& item, const sk::StringTable* strings,
+                         int playerLevel) {
+    auto label = [&](int id) { return strings ? strings->Get(id) : std::string(); };
+    switch (item.itemType()) {
+        case kItemTypeWeapon:
+            return label(3045) + " " + std::to_string(item.damageMin()) + "-" +
+                   std::to_string(item.damageMax());
+        case kItemTypeArmor:
+            return label(2991) + " " + std::to_string(item.armorValue());
+        case kItemTypeConsumable:
+            return label(3040) + " " + std::to_string(item.quantity());
+        case kItemTypeSpell:
+            return label(3068) + " " +
+                   std::to_string(item.scroll() ? item.spellLevel() : playerLevel);
+        default:
+            return std::string();
+    }
+}
+
 std::string TableExecutable::CellText(int row, int col) const {
     if (row < 0 || row >= m_VisibleRows) return "";
     const TableCell* cell = PeekCell(static_cast<size_t>(row), static_cast<size_t>(col));

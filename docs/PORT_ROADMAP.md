@@ -11621,10 +11621,17 @@ Three play reports, each traced to a function the port had approximated.
     comparison columns draw their real sprites 24/25.
   - **Stats screen:** it gets its real two columns (100 + 60, spacing 10).
   - The quest log's wrapped table keeps its M88 path.
-- **Not done:** the inventory's derived stat line (`FUN_100a0cec`'s
-  `+0x43` branch -- damage range, AV, magicka cost) still has no text; it
-  needs that branch's format strings and item fields.
-- **Test**: m79 grows the cross-item swing check. Suite **105/105**.
+- **The inventory's stat line** (`FUN_100a0cec`'s `+0x43` branch), which
+  the port had always left blank. The formats are read out of the binary at
+  the addresses the branch loads them from (`"%s %d-%d"` for a weapon,
+  `"%s %d"` otherwise):
+  - weapon: "Attack" (string 3045) and SetDamageMin/Max (`+0x1cc`/`+0x1ce`);
+  - armour: "Armor" (2991) and SetArmorValue;
+  - consumable: "Qty" (3040) and the stack count (`+0x1c4`);
+  - spell: "Level" (3068) and a scroll's own SetLevel, or else the
+    player's level.
+  It is StatLineText(); m60 checks "Attack 6-16".
+- **Test**: m79 grows the cross-item swing check, m60 the stat line. Suite **105/105**.
 
 
 ## Next milestones (not yet started)

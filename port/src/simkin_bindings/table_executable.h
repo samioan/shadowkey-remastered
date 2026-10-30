@@ -105,6 +105,23 @@ struct TableCell {
     bool continuation = false;
 };
 
+// M124: the text of a `statLine` cell (`cell+0x43`), built at draw time by
+// FUN_100a0cec from the item it points at -- the inventory's second line
+// under each name:
+//
+//   Weapon      "%s %d-%d"  string 3045 "Attack", +0x1cc/+0x1ce
+//                           (SetDamageMin / SetDamageMax)
+//   Armor       "%s %d"     string 2991 "Armor",  +0x1cc (SetArmorValue)
+//   Consumable  "%s %d"     string 3040 "Qty",    +0x1c4 (the stack count)
+//   Spell       "%s %d"     string 3068 "Level",  a scroll's own SetLevel
+//                           (+0x1d0 when +0x1d4) or else the player's
+//                           level (stats+0x34)
+//
+// Any other type draws nothing (empty string). The four formats are read
+// out of the binary at the addresses the branch loads them from.
+std::string StatLineText(const ItemExecutable& item, const sk::StringTable* strings,
+                         int playerLevel);
+
 // cell+0x2c's only meaningful bit, as `FUN_1008e4b0` reads it.
 constexpr unsigned int kCellFlagCentered = 0x2;
 

@@ -2894,10 +2894,17 @@ void RenderMenu(sk::Backbuffer& backbuffer, sk_bindings::MenuExecutable& menu,
                                 }
                                 if (isSelected && r == selected) color = kUiHighlightColor;
                                 const int limit = table->columnCharLimit(c);
+                                // M124: a stat-line cell holds " " and is
+                                // typeset from its item when drawn.
+                                const std::string text =
+                                    cell->statLine && cell->item
+                                        ? sk_bindings::StatLineText(*cell->item, &strings,
+                                                                    player.level())
+                                        : cell->text;
                                 const std::vector<std::string> parts =
-                                    static_cast<int>(cell->text.size()) < limit
-                                        ? std::vector<std::string>{cell->text}
-                                        : WrapWords(cell->text, limit);
+                                    static_cast<int>(text.size()) < limit
+                                        ? std::vector<std::string>{text}
+                                        : WrapWords(text, limit);
                                 for (size_t k = 0; k < parts.size(); ++k) {
                                     if (draw) DrawWidgetLabel(backbuffer, x, cy, parts[k], color);
                                     if (k + 1 < parts.size()) cy += kCellLine;

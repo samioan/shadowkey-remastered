@@ -480,6 +480,16 @@ int main(int argc, char** argv) {
             const sk_b::TableCell* second = invTable->PeekCell(0, 1);
             Check(second && second->statLine,
                   "its second column is the derived stat line (cell+0x43), not a price");
+            // M124: and what it reads, FUN_100a0cec's "%s %d-%d".
+            if (second && second->item) {
+                const std::string line = sk_b::StatLineText(*second->item, &strings, 1);
+                const std::string want = "Attack " + std::to_string(second->item->damageMin()) +
+                                         "-" + std::to_string(second->item->damageMax());
+                Check(line == want, "a weapon's stat line reads \"" + want + "\" (got \"" +
+                                        line + "\")");
+                Check(second->continuation,
+                      "...on its own line under the name (cell+0x34)");
+            }
             call(inv, "DisplayMiscItemsMenu", tab);
             const sk_b::TableCell* miscSecond = invTable->PeekCell(0, 1);
             Check(invTable->rowCount() == 0 || miscSecond == nullptr ||
