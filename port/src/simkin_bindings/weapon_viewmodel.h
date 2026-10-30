@@ -107,10 +107,10 @@ struct WeaponViewmodel {
     // **not** clamped at zero -- the real decrement runs it negative and
     // the gate's test is `0 < x`, so overshoot is simply free time.
     int attackCooldown = 0;
-    // item+0x17f. Lives on the *Item* in the real engine, but nothing else
-    // reads it and an Item is only ever swung by the player, so keeping it
-    // here avoids widening ItemExecutable for one transient.
-    int swingVariant = 0;
+    // item+0x17f, the swing variant, is ItemExecutable::swingVariant().
+    // **M124: it used to live here**, shared by every item, so a dagger
+    // swing that rolled 5 or 10 left the next Blaze cast drawing frames
+    // past the spell's own five -- the crossbow's strip.
 
     // The engine's own test, `if (0 < player->+0x234)`: a swing is
     // running until its accumulator reaches zero, which is a good half

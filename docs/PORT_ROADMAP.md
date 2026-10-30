@@ -11562,6 +11562,71 @@ the last one found a rule nobody had wired.
   (77/77). Suite **105/105**.
 
 
+## M124 -- the swing that belongs to the weapon, the bridge, and the shop's own layout
+
+Three play reports, each traced to a function the port had approximated.
+
+- **Blaze casting with the crossbow's animation.** The melee swing variant
+  (0 / 5 / 10, which of a weapon's three swing strips plays) is a byte on
+  the *item*, `item+0x17f`: `FUN_100425bc` rolls it on the weapon it
+  swings and the draw (`FUN_1002b1b0`) reads it off whatever is in the
+  hand. The port kept it on the shared viewmodel, so after a dagger swing
+  that rolled 5 or 10 the next cast drew `152 + 5 + 1 + variant` onwards
+  -- slots 163..167 for variant 10, which is exactly the crossbow's strip
+  (`SetWeaponSprite(163)`). It is ItemExecutable::swingVariant() now; m79
+  checks a cast after a variant-10 club swing still draws 153..157.
+- **Azra's bridge would not let you across.** The bridge at tiles 76..81,
+  row 18 is ordinary floor between two `rail.bin` placements (64 x 512,
+  yaw 0) whose rotated footprints are baked on disk along X on rows 17
+  and 19. The port's per-entity test used each prop's box unrotated -- the
+  rail's 512 along Y, across the deck -- against every prop in the level.
+  `FUN_100017c8` only ever walks the entity list of the tile under the
+  mover (`engine+0x6904[ty * w + tx]`), and `FUN_10016358` links each
+  entity into exactly one list, the tile its own position is in. So the
+  test now only considers objects in the mover's own tile, as the engine
+  does; what a wide prop does to its neighbours is the stamp's job.
+  Live: from tile 77 the old build stopped at x=20000 (the rail's box), the
+  new one walks to the second of the two rats the level places on the
+  bridge itself.
+- **Popups: the engine's own draw (`FUN_100876f0`).** The port drew every
+  popup as one navy box at (10,60)-(166,150) -- the "blue submenus" --
+  ignoring the popup's own rectangle, and wrapped its text at 22
+  characters. Now, per the decompile:
+  - **Frame:** one pixel in the UI highlight colour, at `(x-5, y-5)` and
+    `w x h` in size.
+  - **Fill:** RGB444 **0xca5**, parchment. `+0xb8` turns it on, and the
+    constructor `FUN_1008904c` sets that flag already.
+  - **Text:** wrapped at `(w >> 3) + 3` characters by `FUN_1008e634`
+    (transcribed as WrapWords), drawn at the popup's own x, 12px apart.
+  - **Colours:** on a four-argument `CreatePopupMenu` (`+200`), item 0 takes
+    the static-item colour; the selected item takes the highlight colour.
+  - **Selection:** an unset selection (`-1`) draws, and activates, row 0.
+  - **Methods the port used to drop:** SetToWidget (`x = widget.x + dx`,
+    FUN_10088e7c), SetAutoAdjust (height from the laid-out text + 5),
+    SetBackground and SetVOffset.
+- **Store and inventory tables: the engine's own layout (`FUN_1008cca8`).**
+  The port joined each row's cells into one line, so the store's 140px
+  name and 150px "GP : 953 Qty: 1" sat side by side and ran off a 176px
+  screen. The engine lays the row out cell by cell:
+  - **Columns:** each cell is drawn at its column's x, and the x then
+    advances by the column width plus `SetCellSpacing`.
+  - **Wrapping:** a cell is wrapped at `(width >> 3) + 4` characters
+    (FUN_1008e5e0).
+  - **Second line:** a `+0x34` cell starts a new line at the table's left
+    edge 15px down. `FUN_10032f78` sets that flag on column 1 in all three
+    modes, so the price (or stat line) sits under the name.
+  - **Rows:** each row ends 15px below its lowest line.
+  - **Bottom and scroll:** drawing stops after the first line past the
+    table's height less `SetInset`, and sprites 26/27 mark hidden rows. The
+    comparison columns draw their real sprites 24/25.
+  - **Stats screen:** it gets its real two columns (100 + 60, spacing 10).
+  - The quest log's wrapped table keeps its M88 path.
+- **Not done:** the inventory's derived stat line (`FUN_100a0cec`'s
+  `+0x43` branch -- damage range, AV, magicka cost) still has no text; it
+  needs that branch's format strings and item fields.
+- **Test**: m79 grows the cross-item swing check. Suite **105/105**.
+
+
 ## Next milestones (not yet started)
 
 Roughly in priority order for reaching "actually playable," not commitments:

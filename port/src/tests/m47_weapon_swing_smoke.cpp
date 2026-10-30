@@ -196,7 +196,7 @@ int main(int argc, char** argv) {
         sk_bindings::StartWeaponSwing(vm, bow.get());
         Check(vm.swingAccum == (bow->animationFrames() << 8),
               "bandit_longbow (4 frames, SetBow): seeded to 4<<8 = 1024, no +2");
-        Check(vm.swingVariant == 0, "...and a ranged weapon never rolls a swing variant");
+        Check(bow->swingVariant() == 0, "...and a ranged weapon never rolls a swing variant");
     }
 
     // ---- 3. The three melee swing variants ----
@@ -225,7 +225,7 @@ int main(int argc, char** argv) {
     for (int v = 0; v < 3; ++v) {
         VM vm;
         sk_bindings::StartWeaponSwing(vm, club.get());
-        vm.swingVariant = variants[v];
+        club->SetSwingVariant(variants[v]);
         std::vector<int> seq = SwingSequence(vm);
         bool ok = seq.size() == 5;
         for (int i = 0; ok && i < 5; ++i) ok = seq[static_cast<size_t>(i)] == expected[v][i];

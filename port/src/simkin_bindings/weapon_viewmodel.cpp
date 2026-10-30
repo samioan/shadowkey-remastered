@@ -88,9 +88,9 @@ bool StartWeaponSwing(WeaponViewmodel& vm, ItemExecutable* item) {
         // quarter. Each variant is its own `frames`-long swing after the
         // base (idle) slot.
         if ((std::rand() & 1) == 0) {
-            vm.swingVariant = (std::rand() & 1) == 0 ? 10 : 5;
+            item->SetSwingVariant((std::rand() & 1) == 0 ? 10 : 5);
         } else {
-            vm.swingVariant = 0;
+            item->SetSwingVariant(0);
         }
         vm.swingAccum = (frames + 2) << 8;
     } else {
@@ -241,7 +241,7 @@ ViewmodelDraw ResolveViewmodelDraw(const WeaponViewmodel& vm) {
             draw.visible = false;
             return draw;
         }
-        int a = vm.item->animationFrames() + vm.swingVariant + 1;
+        int a = vm.item->animationFrames() + vm.item->swingVariant() + 1;
         draw.spriteSlot = base + (((a << 8) - (vm.swingAccum - kSwingAccumFloor)) >> 8);
         // x and y stay 0: a swing draws the frame flush at the top-left,
         // with no bob at all.

@@ -5,6 +5,7 @@
 
 #include "simkin_bindings/menu_executable.h"
 #include "simkin_bindings/native_binding_common.h"
+#include "simkin_bindings/table_executable.h"
 #include "skRValue.h"
 
 namespace sk_bindings {
@@ -150,10 +151,30 @@ bool PopupMenuExecutable::method(const skString& methodName, skRValueArray& args
         }
         return true;
     }
-    if (methodName == skString("SetBackground") || methodName == skString("SetAutoAdjust") ||
-        methodName == skString("SetToWidget")) {
-        // Purely cosmetic (real background images/precise pixel
-        // repositioning are out of scope, see main.cpp's RenderMenu()).
+    // M124: the three this port used to drop as "purely cosmetic" -- and
+    // they are the whole of where a popup sits and what it looks like.
+    if (methodName == skString("SetBackground")) {
+        m_Background = true;  // case 0xd: `popup+0xb8 = 1`, no argument read
+        return true;
+    }
+    if (methodName == skString("SetAutoAdjust") && args.entries() >= 1) {
+        m_AutoAdjust = args[0].boolValue();  // case 1: `popup+0xb9`
+        return true;
+    }
+    if (methodName == skString("SetVOffset") && args.entries() >= 1) {
+        m_LinePitch = args[0].intValue();  // case 0xb, FUN_10088da4: `+0xa4`
+        return true;
+    }
+    if (methodName == skString("SetToWidget") && args.entries() >= 1) {
+        // Case 9 -> FUN_10088e7c: `x = widget.x + dx; y = widget.y + dy`,
+        // dx the second argument, dy a third (no shipped call passes one).
+        // All five shipped calls aim at a table (buysell.s, inventory.s).
+        int dx = args.entries() >= 2 ? args[1].intValue() : 0;
+        int dy = args.entries() >= 3 ? args[2].intValue() : 0;
+        if (auto* table = dynamic_cast<TableExecutable*>(args[0].obj())) {
+            m_X = table->x() + dx;
+            m_Y = table->y() + dy;
+        }
         return true;
     }
     return SoftFailNativeCall("PopupMenu", methodName, args, returnValue);
@@ -224,6 +245,24 @@ void PopupMenuExecutable::MakeMessagePopup() {
     // 1. Pointing there up front saves the player that press and cannot
     // land anywhere else: row 0 has no callback.
     m_SelectedItem = 2;  // 1-based, see selectedItem()
+}
+
+void PopupMenuExecutable::NormalizeSelectionForDraw() {
+    const int count = static_cast<int>(m_Items.size());
+    if (m_SelectedItem == 0) {  // -1 on the wire
+        m_SelectedItem = 1;
+        return;
+    }
+    int index = m_SelectedItem - 1;
+    if (index < 0 || index >= count) {
+        index = 0;
+    } else {
+        const Item& item = m_Items[static_cast<size_t>(index)];
+        const bool hasText = !item.blanked && (item.textId >= 0 || !item.literalText.empty());
+        if (hasText) return;
+        ++index;
+    }
+    m_SelectedItem = index + 1;
 }
 
 void PopupMenuExecutable::SetMessage(const std::string& text) {

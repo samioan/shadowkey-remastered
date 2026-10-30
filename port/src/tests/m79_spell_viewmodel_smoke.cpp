@@ -208,7 +208,7 @@ int main(int argc, char** argv) {
     {
         VM vm;
         sk_bindings::StartWeaponSwing(vm, club.get());
-        vm.swingVariant = 0;
+        club->SetSwingVariant(0);
         std::vector<int> slots = DrawnSlots(vm);
         bool run = slots.size() == 5;
         for (int i = 0; run && i < 5; ++i) run = slots[static_cast<size_t>(i)] == 89 + i;
@@ -224,6 +224,25 @@ int main(int argc, char** argv) {
             ++ticks;
         }
         Check(ticks == 15, "...in 15 ticks, 0.6s -- not the 45 M78 measured against 0x100");
+    }
+    // M124: the variant is the swung item's own byte (+0x17f). A club swing
+    // that rolled 10, then a swap to Blaze and a cast, must still draw the
+    // spell's 153..157 -- with the variant shared, it drew 163..167.
+    {
+        VM vm;
+        sk_bindings::NotifyWeaponChanged(vm, club.get());
+        while (vm.swapTimer != 0) sk_bindings::TickWeaponViewmodel(vm, 0);
+        sk_bindings::StartWeaponSwing(vm, club.get());
+        club->SetSwingVariant(10);
+        while (vm.swinging()) sk_bindings::TickWeaponViewmodel(vm, 0);
+        sk_bindings::NotifyWeaponChanged(vm, blaze.get());
+        while (vm.swapTimer != 0) sk_bindings::TickWeaponViewmodel(vm, 0);
+        sk_bindings::StartSpellSwing(vm);
+        std::vector<int> slots = DrawnSlots(vm);
+        bool run = slots.size() == 5;
+        for (int i = 0; run && i < 5; ++i) run = slots[static_cast<size_t>(i)] == 153 + i;
+        Check(run, "a cast after a variant-10 club swing still draws 153..157 (got " +
+                       Join(slots) + ")");
     }
 
     // ---- 5. The billboard's geometry ----

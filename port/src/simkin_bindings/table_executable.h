@@ -164,6 +164,20 @@ public:
     // "" if out of range.
     std::string CellText(int row, int col) const;
     int columnCount() const { return static_cast<int>(m_ColumnWidths.size()); }
+    // M124: AddColumn's width (`column+0`), and the character limit
+    // FUN_1008e5e0 derives from it (`column+4`): `(width >> 3) + 4`, never
+    // under 8. A cell whose text is at least that long is wrapped.
+    int columnWidth(int col) const {
+        return col >= 0 && col < columnCount() ? m_ColumnWidths[static_cast<size_t>(col)] : 0;
+    }
+    int columnCharLimit(int col) const {
+        const int limit = (columnWidth(col) >> 3) + 4;
+        return limit < 8 ? 8 : limit;
+    }
+    // M124: SetCellSpacing (table case 1), `table+0xe8` -- the gap the
+    // draw adds after every column's width. statsscreen.s is the one
+    // shipped caller (10).
+    int cellSpacing() const { return m_CellSpacing; }
 
     // What a `comparison` cell resolves to -- FUN_100a0cec's own test,
     // reproduced. The two 10px columns of the store table hold no text;
@@ -233,6 +247,10 @@ public:
     // taller than one line, so the renderer has to know both how wide a
     // line may run and where the table's box ends.
     int width() const { return m_W; }
+    // M124: `widget+0x78` / `+0x7c`, AddTable's x and y -- what a popup's
+    // SetToWidget(table, dx) positions itself against.
+    int x() const { return m_X; }
+    int y() const { return m_Y; }
     int height() const { return m_H; }
     // M88: SetLineWrap(true) -- real, and the quest log is the only
     // shipped caller that passes true (`inventory.s`/`buysell.s` never
@@ -254,6 +272,7 @@ private:
     int m_VisibleRows = 0;
     int m_SelectedRow = -1;
     int m_Inset = 0;
+    int m_CellSpacing = 0;  // M124, table+0xe8
     bool m_LineWrap = false;
 };
 

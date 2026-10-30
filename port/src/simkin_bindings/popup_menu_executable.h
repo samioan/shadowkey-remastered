@@ -114,6 +114,37 @@ public:
     // second message never grows the popup.
     void SetMessage(const std::string& text);
 
+    // M124: what the engine's popup draw (`FUN_100876f0`) reads. See
+    // RenderPopup in main.cpp for the draw itself.
+    //
+    //   +0x78 x, +0x7c y     CreatePopupMenu's first two arguments
+    //   +0x9c w, +0x98 h     its third and fourth (FUN_10088db4/10088dac)
+    //   +0xa4 line pitch     0xc from the constructor (FUN_1008904c);
+    //                        SetVOffset (case 0xb) writes it, no script does
+    //   +0xb8 background     **1 from the constructor**; SetBackground
+    //                        (case 0xd) only ever writes 1 again
+    //   +0xb9 auto-adjust    SetAutoAdjust (case 1): the draw then sets the
+    //                        height from the text it laid out
+    //   +200  title line     1 when CreatePopupMenu got only four
+    //                        arguments: item 0 then draws in the menu's
+    //                        static-item colour instead of the standard one
+    int x() const { return m_X; }
+    int y() const { return m_Y; }
+    int w() const { return m_W; }
+    int h() const { return m_H; }
+    int linePitch() const { return m_LinePitch; }
+    bool background() const { return m_Background; }
+    bool autoAdjust() const { return m_AutoAdjust; }
+    bool titleLine() const { return m_TitleLine; }
+    void SetTitleLine(bool title) { m_TitleLine = title; }
+    // M124: the popup draw's first step on `+0xa0`, every frame: "none"
+    // (-1) becomes row 0; an index past the end becomes 0; an index whose
+    // row has no text moves on by one. So a freshly shown popup lights --
+    // and activates -- its first row, and buysell.s's
+    // `popup.SetSelectedItem(-1)` before showing its Buy/Info/Back popup
+    // means "start on Buy", not "start on nothing".
+    void NormalizeSelectionForDraw();
+
 private:
     MenuExecutable& m_Owner;
     int m_X, m_Y, m_W, m_H;
@@ -122,6 +153,10 @@ private:
     std::string m_BackCallback;
     std::vector<Item> m_Items;
     bool m_ClosesOnActivate = false;  // M103, see MakeMessagePopup()
+    int m_LinePitch = 0xc;     // M124, +0xa4
+    bool m_Background = true;  // M124, +0xb8
+    bool m_AutoAdjust = false; // M124, +0xb9
+    bool m_TitleLine = false;  // M124, +200
 };
 
 }  // namespace sk_bindings

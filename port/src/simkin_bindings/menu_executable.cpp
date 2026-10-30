@@ -481,6 +481,7 @@ void MenuExecutable::PopulatePage(int category, bool clear) {
             name.text = strings ? strings->Get(entry.record->nameStringId) : std::string();
             name.product = entry.record;
             name.item = nullptr;
+            name.continuation = false;
             // classTinted stays at its constructor default (true) -- the
             // name column is the one the class-restriction tint applies
             // to, and the real code sets the flag on nothing.
@@ -489,6 +490,11 @@ void MenuExecutable::PopulatePage(int category, bool clear) {
             cost.text = FormatTwoLabels(gpLabel, entry.price, qtyLabel, entry.quantity);
             cost.product = entry.record;
             cost.classTinted = false;
+            // M124: FUN_10032f78 sets `+0x34 = 1` on column 1 in all three
+            // modes. The table draw (FUN_1008cca8) puts such a cell on a
+            // new line at the table's left edge, so the price sits under
+            // the name -- this port drew it beside it, off the screen.
+            cost.continuation = true;
 
             // The two 10px columns buysell.s calls "rating left"/"rating
             // right": comparison arrows, left hand first.
@@ -498,9 +504,11 @@ void MenuExecutable::PopulatePage(int category, bool clear) {
             left.comparison = true;
             left.compareLeftHand = true;
             left.classTinted = false;
+            left.continuation = false;
 
             TableCell& right = table->CellAt(row, 3);
             right.text = " ";
+            right.continuation = false;
             right.product = entry.record;
             right.comparison = true;
             right.compareLeftHand = false;
@@ -522,6 +530,7 @@ void MenuExecutable::PopulatePage(int category, bool clear) {
         TableCell& name = table->CellAt(row, 0);
         name.text = item->name();
         name.item = item;
+        name.continuation = false;
         // M118: CORRECTED -- this was cleared, and it is the flag that
         // gives an equipped item its highlight. FUN_10032f78 never writes
         // +0x42 on the name cell in either the Inventory or the Sell arm,
@@ -539,6 +548,7 @@ void MenuExecutable::PopulatePage(int category, bool clear) {
                 stat.item = item;
                 stat.statLine = true;
                 stat.classTinted = false;
+                stat.continuation = true;  // M124, see the Buy arm
             }
         } else {
             TableCell& cost = table->CellAt(row, 1);
@@ -550,6 +560,7 @@ void MenuExecutable::PopulatePage(int category, bool clear) {
                             : FormatOneLabel(gpLabel, item->marketValue());
             cost.item = item;
             cost.classTinted = false;
+            cost.continuation = true;  // M124, see the Buy arm
 
             TableCell& left = table->CellAt(row, 2);
             left.text = " ";
@@ -557,9 +568,11 @@ void MenuExecutable::PopulatePage(int category, bool clear) {
             left.comparison = true;
             left.compareLeftHand = true;
             left.classTinted = false;
+            left.continuation = false;
 
             TableCell& right = table->CellAt(row, 3);
             right.text = " ";
+            right.continuation = false;
             right.item = item;
             right.comparison = true;
             right.compareLeftHand = false;
@@ -1412,6 +1425,11 @@ bool MenuExecutable::method(const skString& methodName, skRValueArray& args,
         // -- accepted and ignored rather than requiring exactly 4 args.
         auto* popup = new PopupMenuExecutable(*this, args[0].intValue(), args[1].intValue(),
                                                args[2].intValue(), args[3].intValue());
+        // M124: that 5th argument's meaning is its *presence*: the root
+        // binding (case 0x1b) writes `popup+200 = (argc < 5)`, and the
+        // popup draw gives item 0 of a four-argument popup the static-item
+        // colour -- a title line. Its value is never read.
+        popup->SetTitleLine(args.entries() < 5);
         m_KnownPopups.push_back(popup);
         // No native owner besides the script variable -- created=true so
         // it's freed once Simkin's ref count on it reaches zero.

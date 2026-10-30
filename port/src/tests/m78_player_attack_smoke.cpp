@@ -288,7 +288,7 @@ int main(int argc, char** argv) {
         for (int v = 0; v < 3; ++v) {
             VM vm;
             sk_bindings::StartWeaponSwing(vm, club.get());
-            vm.swingVariant = variants[v];
+            club->SetSwingVariant(variants[v]);
             std::vector<int> slots;
             for (int guard = 0; guard < 1000 && vm.swingAccum != 0; ++guard) {
                 sk_bindings::ViewmodelDraw d = sk_bindings::ResolveViewmodelDraw(vm);

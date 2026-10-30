@@ -423,6 +423,13 @@ public:
     // emptied bag out of the world.
     void SetDestroyWhenEmpty(bool destroy) { m_DestroyWhenEmpty = destroy; }
 
+    // M124: `item+0x17f`, the melee swing variant (0 / 5 / 10). A byte on
+    // the *item*: FUN_100425bc rolls it on the weapon it swings, and the
+    // draw (FUN_1002b1b0) reads it off whatever item is in the hand. Nothing
+    // writes it on a spell, so a cast always plays variant 0.
+    int swingVariant() const { return m_SwingVariant; }
+    void SetSwingVariant(int variant) { m_SwingVariant = variant; }
+
     // M36: lootmenu.s's `Opener.GetTemplate() != 306` (which suppresses the
     // pickup sound for one specific container type). The real value is the
     // entities.txt typeId an object was created from -- known only when it
@@ -605,6 +612,7 @@ private:
     SpellActor* m_SpellOwner = nullptr;  // M43: see SetSpellOwner()
     // M36: see destroyWhenEmpty()/templateId() above.
     bool m_DestroyWhenEmpty = false;
+    int m_SwingVariant = 0;  // M124, +0x17f
     int m_TemplateId = -1;
 };
 

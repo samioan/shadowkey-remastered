@@ -250,8 +250,14 @@ bool TableExecutable::method(const skString& methodName, skRValueArray& args,
         m_LineWrap = args[0].boolValue();
         return true;
     }
+    if (methodName == skString("SetCellSpacing") && args.entries() == 1) {
+        m_CellSpacing = args[0].intValue();  // M124: case 1, `table+0xe8`
+        return true;
+    }
+    // AutoWrapCells is the table dispatcher's case 0, whose whole body is
+    // `break` -- a no-op on the device too.
     if (methodName == skString("SetRowSelect") || methodName == skString("AutoWrapCells") ||
-        methodName == skString("SetCellSpacing") || methodName == skString("SetSelectable")) {
+        methodName == skString("SetSelectable")) {
         // Cosmetic/behavioral flags this port's simplified single-column-
         // of-rows table model doesn't need to branch on -- every table is
         // already row-selectable with wrapped-if-needed text. Accepted so

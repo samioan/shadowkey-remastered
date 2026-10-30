@@ -169,7 +169,7 @@ constexpr uint16_t kInventoryClassBarredColor =
 // The track borrows `menu+0x90`, the *unselected* item colour, and keeps
 // it whether or not the row has focus -- only the label changes colour.
 constexpr uint16_t kSliderMarkerColor = MenuColor444(sk_bindings::kSliderMarkerColor444);
-constexpr uint16_t kPopupBgColor = sk::PackRGB565(40, 40, 60);
+constexpr uint16_t kStaticItemColor = MenuColor444(sk_bindings::kStaticItemColor444);
 constexpr uint16_t kPopupBorderColor = sk::PackRGB565(90, 90, 130);
 
 // Word-wraps `text` at `maxChars` per line, drawing each line starting at
@@ -197,6 +197,47 @@ int DrawWrappedText(sk::Backbuffer& bb, int x, int y, const std::string& text, i
         sk::BitmapFont::DrawString(bb, x, y + static_cast<int>(i) * lineHeight, lines[i], color);
     }
     return static_cast<int>(lines.size());
+}
+
+// M124: `FUN_1008e634`, the engine's own character-count wrap, which the
+// popup draw calls with `(w >> 3) + 3`. A string shorter than the limit is
+// one line, untouched. Otherwise it walks the text keeping the last space
+// or hyphen it passed: a newline ends a line; reaching a space or hyphen
+// with more than `limit` characters since the line began cuts the line at
+// the *previous* break (that character is dropped); and at the end, a tail
+// still over the limit is split once more at its last space. (The tail's
+// other arm -- a single word longer than the limit, hard-cut with a
+// suffix -- is left whole here; no popup string reaches it.)
+std::vector<std::string> WrapWords(const std::string& text, int limit) {
+    if (static_cast<int>(text.size()) < limit) return {text};
+    std::vector<std::string> lines;
+    int start = 0, lastBreak = 0, count = 0;
+    const int n = static_cast<int>(text.size());
+    for (int i = 0; i < n; ++i) {
+        const char c = text[static_cast<size_t>(i)];
+        int nextBreak = lastBreak;
+        if (c == '\n') {
+            lines.push_back(text.substr(static_cast<size_t>(start), static_cast<size_t>(i - start)));
+            start = i + 1;
+            count = 0;
+        } else if (c == ' ' || c == '-') {
+            nextBreak = i;
+            if (limit < count && lastBreak >= start) {
+                lines.push_back(text.substr(static_cast<size_t>(start),
+                                            static_cast<size_t>(lastBreak - start)));
+                start = lastBreak + 1;
+                count = i - lastBreak;
+            }
+        }
+        lastBreak = nextBreak;
+        ++count;
+    }
+    if (limit < count && lastBreak >= start && lastBreak < n && text[static_cast<size_t>(lastBreak)] == ' ') {
+        lines.push_back(text.substr(static_cast<size_t>(start), static_cast<size_t>(lastBreak - start)));
+        start = lastBreak + 1;
+    }
+    if (start < n) lines.push_back(text.substr(static_cast<size_t>(start)));
+    return lines;
 }
 
 // M88: the same word-wrap, but bounded by real pixels instead of a
@@ -2350,30 +2391,75 @@ void DrawTextAreaLines(sk::Backbuffer& backbuffer, int x, int y, const std::stri
     }
 }
 
+// M124: the engine's popup draw, `FUN_100876f0`, replacing a fixed navy
+// box this port drew at (10,60)-(166,150) for every popup in the game --
+// the reported "blue submenus", and the reason a shop's long item names
+// ran past the box: the text was wrapped at a fixed 22 characters with no
+// regard for the popup's own width. In the engine's order:
+//
+//   * a one-pixel frame in the UI palette's highlight colour (+0xa):
+//     top and bottom rows `w` long at y-5 and y+h-5, left and right
+//     columns `h` long at x-5 and x-5+w;
+//   * if `+0xb8` (on unless a script clears it -- none does), the inside
+//     filled row by row in RGB444 **0xca5**, parchment, from y-4 to
+//     y+h-6, starting one pixel in and `w - 1` wide;
+//   * each item with text, wrapped at `(w >> 3) + 3` characters (never
+//     under 8) by FUN_1008e634, every line drawn through FUN_1007f49c at
+//     the popup's own x -- shadowed like every other label -- and `+0xa4`
+//     (12) further down. The selected item takes the highlight colour; on
+//     a four-argument popup item 0 takes the menu's static-item colour;
+//     everything else the standard one.
+//   * with `+0xb9` set, the height becomes the laid-out text plus 5.
+//
+// The engine sizes the frame from the *previous* frame's auto-adjusted
+// height and fixes it after drawing the text; laying the text out first
+// gives the same picture without the one-frame lag.
 void RenderPopup(sk::Backbuffer& backbuffer, sk_bindings::PopupMenuExecutable& popup,
                   const sk::StringTable& strings) {
-    int x0 = 10, y0 = 60, x1 = sk::Backbuffer::kWidth - 10, y1 = 150;
-    for (int y = y0; y < y1; ++y) {
-        for (int x = x0; x < x1; ++x) {
-            bool border = (x == x0 || x == x1 - 1 || y == y0 || y == y1 - 1);
-            backbuffer.SetPixel(x, y, border ? kPopupBorderColor : kPopupBgColor);
-        }
-    }
-    int y = y0 + 6;
+    constexpr uint16_t kFill = MenuColor444(0xca5);
+    popup.NormalizeSelectionForDraw();
+    const int x = popup.x();
+    const int y = popup.y();
+    const int w = popup.w();
+    const int maxChars = (std::max)(8, (w >> 3) + 3);
+
+    struct Line {
+        std::string text;
+        uint16_t color;
+    };
+    std::vector<Line> lines;
     for (size_t i = 0; i < popup.items().size(); ++i) {
         const auto& item = popup.items()[i];
-        if (item.blanked) continue;  // M10: UpdatePopupItem(index, "") hides this row entirely
-        bool selectable = sk_bindings::PopupMenuExecutable::IsSelectable(item);
-        // popup.selectedItem() indexes ALL items, blanked/static ones
-        // included -- see PopupMenuExecutable::IsItemSelected(). This used
-        // to recount only the selectable, non-blanked items, which put the
-        // highlight on the wrong line for every confirm popup in the game
-        // (they all open with a non-selectable message line).
-        bool isSelected = selectable && popup.IsItemSelected(i);
-        uint16_t color = isSelected ? kSelectedTextColor : kTextColor;
+        // `if (item+0x48 != 0)`: UpdatePopupItem(i, "") frees the text
+        // (FUN_1007f9a8), and an item with none takes no line at all.
+        if (item.blanked) continue;
         std::string text = !item.literalText.empty() ? item.literalText : strings.Get(item.textId);
-        int lines = DrawWrappedText(backbuffer, x0 + 6, y, text, 22, color);
-        y += lines * (sk::BitmapFont::kGlyphHeight + 3) + 2;
+        if (text.empty()) continue;
+        uint16_t color = kUiStandardColor;
+        if (popup.titleLine() && i == 0) color = kStaticItemColor;
+        // FUN_1007f49c's `selected` argument is `index == +0xa0`, with no
+        // selectable test: the engine lights whichever row it points at.
+        if (popup.IsItemSelected(i)) color = kUiHighlightColor;
+        for (const std::string& part : WrapWords(text, maxChars)) lines.push_back({part, color});
+    }
+    const int pitch = popup.linePitch();
+    const int h = popup.autoAdjust() ? static_cast<int>(lines.size()) * pitch + 5 : popup.h();
+
+    const int left = (std::max)(0, x - 5);
+    const int top = (std::max)(0, y - 5);
+    DrawHRun(backbuffer, left, top, w, kUiHighlightColor);
+    DrawHRun(backbuffer, left, y + h - 5, w, kUiHighlightColor);
+    DrawVRun(backbuffer, left, top, h, kUiHighlightColor);
+    DrawVRun(backbuffer, left + w, y - 5, h, kUiHighlightColor);
+    if (popup.background()) {
+        for (int row = y; row + 1 < y + h; ++row) {
+            DrawHRun(backbuffer, left + 1, (std::max)(0, row - 4), w - 1, kFill);
+        }
+    }
+    int lineY = y;
+    for (const Line& line : lines) {
+        DrawWidgetLabel(backbuffer, x, lineY, line.text, line.color);
+        lineY += pitch;
     }
 }
 
@@ -2723,6 +2809,151 @@ void RenderMenu(sk::Backbuffer& backbuffer, sk_bindings::MenuExecutable& menu,
                 if (wrapped) {
                     start = (std::max)(0, selected);
                     end = table->rowCount();
+                }
+                // M124: every other table is laid out the way the engine's
+                // table draw (`FUN_1008cca8`) does it, cell by cell:
+                //
+                //   * a row starts at the table's x; each cell is drawn at
+                //     the running x, which then advances by the column's
+                //     width plus SetCellSpacing's gap;
+                //   * a cell whose text is at least the column's character
+                //     limit is wrapped (FUN_1008e634), its lines 15 apart;
+                //   * a `continuation` cell (`+0x34`) goes on a new line,
+                //     15 below the lowest line so far, back at the table's
+                //     x -- the store's "GP : 953 Qty: 3" under the name;
+                //   * the row ends 15 below its lowest line;
+                //   * nothing is drawn past the table's own height less
+                //     SetInset's margin, and sprites 26/27 (`+0xa8`/`+0xac`)
+                //     mark rows hidden above and below, centred on the
+                //     table (FUN_1008e31c).
+                //
+                // This replaces a single line per row with the cells
+                // joined by two spaces, which put a 140px name and a 150px
+                // price side by side on a 176px screen.
+                //
+                // The engine scrolls by its own `+0xa0`; this keeps the
+                // port's rule of scrolling only as far as the selection
+                // needs.
+                if (!wrapped && row.y >= 0) {
+                    constexpr int kCellLine = 0xf;
+                    const int left = tableX;
+                    const int limitY = row.y + table->height();
+                    // FUN_1008cca8 tests after drawing each line: once a
+                    // line's y plus the inset is past the table's bottom it
+                    // stops -- that line is already on screen -- and puts
+                    // the down arrow out. `stopped` reports that.
+                    auto layoutRow = [&](int r, int top, bool draw, bool& stopped) {
+                        int x = left;
+                        int lowest = top;
+                        bool any = false;
+                        for (int c = 0; c < table->columnCount(); ++c) {
+                            const sk_bindings::TableCell* cell = table->PeekCell(
+                                static_cast<size_t>(r), static_cast<size_t>(c));
+                            const int width = table->columnWidth(c);
+                            if (!cell || cell->text.empty()) {
+                                x += width + table->cellSpacing();
+                                continue;
+                            }
+                            any = true;
+                            int cy = top;
+                            if (cell->continuation) {
+                                cy = lowest + kCellLine;
+                                x = left;
+                            }
+                            using Compare = sk_bindings::TableExecutable::CellCompare;
+                            const Compare compare = table->CompareCell(r, c);
+                            if (draw && cell->comparison) {
+                                // FUN_100a0cec: the arrow sprite at the
+                                // cell's own x/y (24 better, 25 worse),
+                                // or the equal mark as text.
+                                if (compare == Compare::Better || compare == Compare::Worse) {
+                                    if (const sk::Sprite* arrow = sprites.GetSprite(
+                                            compare == Compare::Better ? 24 : 25)) {
+                                        backbuffer.Blit(x, cy, *arrow);
+                                    }
+                                } else if (compare == Compare::Equal) {
+                                    DrawWidgetLabel(backbuffer, x, cy, "=", kUiStandardColor);
+                                }
+                            }
+                            if (cell->comparison) {
+                                if (cy + table->inset() > limitY) {
+                                    stopped = true;
+                                    return lowest;
+                                }
+                            } else {
+                                uint16_t color = kUiStandardColor;
+                                switch (table->CellTint(r, c)) {
+                                    case sk_bindings::TableExecutable::NameTint::Equipped:
+                                        color = kInventoryEquippedColor;
+                                        break;
+                                    case sk_bindings::TableExecutable::NameTint::ClassBarred:
+                                        color = kInventoryClassBarredColor;
+                                        break;
+                                    default:
+                                        break;
+                                }
+                                if (isSelected && r == selected) color = kUiHighlightColor;
+                                const int limit = table->columnCharLimit(c);
+                                const std::vector<std::string> parts =
+                                    static_cast<int>(cell->text.size()) < limit
+                                        ? std::vector<std::string>{cell->text}
+                                        : WrapWords(cell->text, limit);
+                                for (size_t k = 0; k < parts.size(); ++k) {
+                                    if (draw) DrawWidgetLabel(backbuffer, x, cy, parts[k], color);
+                                    if (k + 1 < parts.size()) cy += kCellLine;
+                                    if (cy + table->inset() > limitY) {
+                                        stopped = true;
+                                        return (std::max)(lowest, cy);
+                                    }
+                                }
+                            }
+                            lowest = (std::max)(lowest, cy);
+                            x += width + table->cellSpacing();
+                        }
+                        return any ? lowest + kCellLine : lowest;
+                    };
+                    const int rows = table->rowCount();
+                    // The whole pass from `first`, returning the last row
+                    // it reached. After each complete row the engine also
+                    // stops once the row's bottom is past the table's.
+                    int yy = row.y;
+                    bool truncated = false;
+                    auto pass = [&](int first, bool draw) {
+                        yy = row.y;
+                        truncated = false;
+                        int last = first - 1;
+                        for (int r = first; r < rows; ++r) {
+                            bool stopped = false;
+                            const int bottom = layoutRow(r, yy, draw, stopped);
+                            last = r;
+                            if (stopped || bottom > limitY) {
+                                truncated = true;
+                                break;
+                            }
+                            yy = bottom;
+                        }
+                        return last;
+                    };
+                    // Scroll only as far as it takes to reach the selection.
+                    int first = 0;
+                    while (first < selected && pass(first, false) < selected) ++first;
+                    pass(first, true);
+                    auto drawArrow = [&](int slot, bool below) {
+                        const sk::Sprite* arrow = sprites.GetSprite(slot);
+                        if (!arrow) return;
+                        const int ax = left + table->width() / 2 - arrow->width / 2;
+                        const int ay = below ? row.y + table->height() + arrow->height / 2
+                                             : row.y - arrow->height;
+                        backbuffer.Blit(ax, ay, *arrow);
+                    };
+                    if (first > 0) drawArrow(0x1a, false);
+                    if (truncated) drawArrow(0x1b, true);
+                    if (rows == 0) {
+                        sk::BitmapFont::DrawString(backbuffer, tableX, row.y, "(empty)",
+                                                   kStaticTextColor);
+                    }
+                    y = yy;
+                    break;
                 }
                 // AddTable's own real box width, in pixels -- the wrap is
                 // measured in the font that actually draws it.
@@ -5723,17 +5954,19 @@ int main(int argc, char** argv) {
                 // separate X and Y, and a candidate must be solid with
                 // both extents non-zero and not `SetPassable(true)`.
                 //
-                // Two documented departures. The real engine only walks
-                // the entities linked into the tile the mover stands on
-                // (`engine+0x6904`), having baked anything wider than half
-                // a tile into the tile grid instead (`Entity+0x92`, see
-                // ModelCollision::tileStamped) -- this walks the live
-                // lists directly, which reaches the same set without the
-                // grid. And the tile stamp uses the box *rotated* by the
-                // entity's heading, while the per-entity test is
-                // axis-aligned; this port uses the axis-aligned test for
-                // everything, so a rotated fence blocks a slightly
-                // different footprint than the original's.
+                // **M124: only the entities in the mover's own tile.**
+                // `FUN_100017c8` walks one list, `engine+0x6904[(y >> 8) *
+                // w + (x >> 8)]` at the mover's position, and an entity is
+                // linked into exactly one such list -- the tile its own
+                // position is in (`FUN_10016358`, through one `+0x40`
+                // next pointer). So the axis-aligned box below is only
+                // ever tested against what shares the mover's tile; what a
+                // wide prop does to its *neighbours* is the rotated tile
+                // stamp's job, already on disk. This port used to test
+                // every live object in the level, which is what blocked
+                // azra's bridge: its two rails (`rail.bin`, 64 x 512, yaw
+                // 0) are stamped along X on rows 17 and 19, but the
+                // unrotated box reached 512 along Y, across the deck.
                 auto boxOf = [&](float wx, float wy, int modelIndex) {
                     const sk::ModelCollision& c = gameModelCollision.At(modelIndex);
                     return sk::MakeBox(wx, wy, static_cast<float>(c.halfExtentX),
@@ -5745,6 +5978,12 @@ int main(int argc, char** argv) {
                 auto blockedByEntity = [&](float wx, float wy) {
                     sk::CollisionBox mover =
                         sk::MakeBox(wx, wy, sk::kActorHalfExtent, sk::kActorHalfExtent);
+                    const int moverTx = static_cast<int>(std::floor(wx / 256.0f));
+                    const int moverTy = static_cast<int>(std::floor(wy / 256.0f));
+                    auto inMoverTile = [&](float ex, float ey) {
+                        return static_cast<int>(std::floor(ex / 256.0f)) == moverTx &&
+                               static_cast<int>(std::floor(ey / 256.0f)) == moverTy;
+                    };
                     // A closed door is solid; door.s starts every door
                     // closed (`saved_Open [0]`) and only calls
                     // SetPassable(true) from OnUse(). That is the same
@@ -5763,6 +6002,7 @@ int main(int argc, char** argv) {
                         // M92 hidden, M101 removed.
                         if (d.script->entityOutOfWorld()) continue;
                         if (d.script->passable() || !solidAt(d.modelArchiveIndex)) continue;
+                        if (!inMoverTile(d.x, d.y)) continue;
                         if (sk::BoxesOverlap(mover, boxOf(d.x, d.y, d.modelArchiveIndex))) {
                             return true;
                         }
@@ -5778,6 +6018,7 @@ int main(int argc, char** argv) {
                         // its second half.
                         if (m.script->entityPassable()) continue;
                         if (!solidAt(m.modelArchiveIndex)) continue;
+                        if (!inMoverTile(m.x, m.y)) continue;
                         // Vertical separation, so a creature on another
                         // floor of the same tile column doesn't block.
                         // This port's own addition -- the real walk is
@@ -5792,6 +6033,7 @@ int main(int argc, char** argv) {
                     }
                     for (const sk::PlacedEntity& e : gameEntities) {
                         if (!solidAt(e.modelArchiveIndex)) continue;
+                        if (!inMoverTile(e.x, e.y)) continue;
                         if (sk::BoxesOverlap(mover, boxOf(e.x, e.y, e.modelArchiveIndex))) {
                             return true;
                         }
