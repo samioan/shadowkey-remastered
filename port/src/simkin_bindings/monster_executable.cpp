@@ -597,6 +597,7 @@ int* MonsterExecutable::EffectStatSlot(int stat) {
         case kEffectStatArmorValue: return &m_ArmorValue;           // +0x0c
         case kEffectStatExpWorth: return &m_ExpWorth;               // +0x0e
         case kEffectStatWill: return &m_Will;                       // +0x1a
+        case kEffectStatSpeed: return &m_Speed;                     // +0x1c, M122
         case kEffectStatMaxHealth: return &m_MaxHealth;             // +0x24
         case kEffectStatHealth: return &m_CurrentHealth;            // +0x2a
         case kEffectStatFatigue: return &m_Fatigue;                 // +0x2c

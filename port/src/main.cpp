@@ -527,6 +527,9 @@ struct MonsterInstance {
     // raw, so the level-state record can carry them back (see
     // SnapshotLevelState in main()).
     uint16_t rotARaw = 0, rotBRaw = 0, scaleRaw = 256;
+    // M122: `+0x98` / `+0xa0`, the movement delta the walk pushes and the
+    // ground friction decays -- engine units, `v * frameDelta >> 8` a tick.
+    int vx = 0, vy = 0;
     // M45: the real `actor+0x2e4` backlink -- which encounter region
     // spawned this creature, so its death can decrement that region's
     // live count (`FUN_10083c04` calls `FUN_1008b118(actor->region)`).
@@ -3991,6 +3994,11 @@ int main(int argc, char** argv) {
         rec.entity.objectId = ent.entityId();
         rec.entity.artName = relativeScriptPath(ent);
         rec.entity.passable = ent.entityPassable() ? 1 : 0;
+        // M122: `+0x60`, the entity flag word (default 2). ShowEntity is
+        // `vtable[0x58](arg ^ 1)` = `FUN_100a2148`, which sets or clears its
+        // bit 0, and FUN_10064ffc draws nothing while it is set -- so a
+        // hidden prop's state is already in the record the engine writes.
+        rec.entity.flags = static_cast<int16_t>(0x2 | (ent.entityHidden() ? 0x1 : 0x0));
         rec.entity.shortNameStringId = static_cast<uint16_t>(ent.entityNameId() & 0xffff);
         if (skTreeNodeObject* node = ent.entityScriptNode()) {
             rec.entity.scriptVars = sk_bindings::CollectScriptVars(*node);
@@ -4104,6 +4112,20 @@ int main(int argc, char** argv) {
     // the blood spurt (`FUN_10081e5c`, skipped for typeId 0x3f7, the Lothna
     // crystal -- effect_entity.h has every field) and `FUN_10067c3c(self, 8,
     // 0, 5)`, the red ramp rows.
+    // M122: **the death floor.** `FUN_10000498`, the actor tick, on the
+    // cell it stands in: when `blockFlags & 0x20` is set and the actor is at
+    // or below the floor (`FUN_1001beac` at z + 0x180), it takes damage equal
+    // to its whole current health -- `stats->TakeDamage(stats+0x2a, 0, 0, 0)`.
+    // M57 could only say the bit was "a surface you sink into": 13,064 cells
+    // across six zones, and the game's own text calls one of them "the lava
+    // below" (string 1963). This port walked over all of it.
+    auto onDeathFloor = [&](float x, float y, float z) {
+        const int tx = static_cast<int>(x) >> 8, ty = static_cast<int>(y) >> 8;
+        if (!gameZone || !gameZone->InBounds(tx, ty)) return false;
+        if (!(gameZone->CellAt(tx, ty).blockFlags & 0x20)) return false;
+        return z <= gameZone->CollisionFloorHeightAt(x, y, z + 384.0f);
+    };
+
     auto onCreatureStruck = [&](MonsterInstance& victim) {
         if (!victim.script || !victim.script->alive() || victim.script->invulnerable()) return;
         if (victim.typeId != sk_bindings::kBloodImmuneTypeId) {
@@ -5073,6 +5095,9 @@ int main(int argc, char** argv) {
                                 }
                                 callRestoreNative(*door, "SetPassable",
                                                   skRValue(saved->entity.passable != 0));
+                                if (saved->entity.flags & 0x1) {  // M122: hidden
+                                    callRestoreNative(*door, "ShowEntity", skRValue(false));
+                                }
                             }
                             skExecutableContext callCtxt(&interpreter);
                             sk_bindings::RunEntityInit(*door, scriptRoot, callCtxt);
@@ -5147,6 +5172,9 @@ int main(int argc, char** argv) {
                                                          ? saved->weapon.quantity
                                                          : saved->stackable.quantity;
                                 if (quantity > 0) item->SetQuantity(quantity);
+                                if (saved->entity.flags & 0x1) {  // M122: hidden
+                                    callRestoreNative(*item, "ShowEntity", skRValue(false));
+                                }
                                 initGuarded = IsContainerCategory(desc->category) &&
                                               saved->spellbook.initDone != 0;
                             }
@@ -5244,6 +5272,9 @@ int main(int argc, char** argv) {
                                 }
                                 monster->RestoreSavedHealth(saved->stats.health,
                                                             saved->stats.maxHealth);
+                                if (saved->entity.flags & 0x1) {  // M122: hidden
+                                    callRestoreNative(*monster, "ShowEntity", skRValue(false));
+                                }
                                 if (saved->holder.active != 0) {
                                     int decaySeconds = 0;
                                     if (saved->entity.timerArmed) {
@@ -5819,13 +5850,15 @@ int main(int argc, char** argv) {
                     // "can scale vertical walls" report.
                     //
                     // The player's Height() is `CMap+0x1a` (FUN_10006230,
-                    // standing stance), a field nothing in the image is
-                    // known to write; 0 is what an untouched CBase field
-                    // holds, and it is also the value that cannot close a
-                    // passage the original leaves open. The headroom terms
-                    // therefore reduce to "not above the ceiling" here, and
-                    // the vertical block's own clamp keeps the eye under it.
-                    constexpr float kPlayerCollisionHeight = 0.0f;
+                    // standing stance) -- the very field the eye offset is
+                    // read from (`FUN_1001f6f0`, player vtable +0x238:
+                    // `eye = z + CMap+0x1a`), which M84 pinned at 0x200 from
+                    // the creature height table and the melee probes. No
+                    // write to it exists anywhere in the image (M121 checked
+                    // every store, block copy and file read), so this is
+                    // the same derived value. Only 62 of 211,649 open tiles
+                    // have less headroom than that (m121).
+                    constexpr float kPlayerCollisionHeight = sk::kEyeHeightOffset;
                     const float feetZ = gameCamera.z - sk::kEyeHeightOffset;
                     float nx = gameCamera.x + mx;
                     if (!gameZone->ActorCircleBlocked(nx, gameCamera.y, kPlayerRadius, feetZ,
@@ -6276,7 +6309,7 @@ int main(int argc, char** argv) {
                 constexpr float kJumpSpeed = 50.0f;   // world units/tick, initial upward velocity
                 constexpr float kMaxFallSpeed = 200.0f;  // clamp, avoids tunneling through thin
                                                           // floors over one big tick step
-                constexpr float kHeadroom = 60.0f;    // world units, eye-to-ceiling clearance
+                constexpr float kHeadroom = 32.0f;    // 0x20, the engine's eye-to-ceiling gap
                 if (onGround && input.ConsumeBoundJustPressed(sk::Action::Jump)) {
                     // M51: the real jump (FUN_10044400) is not free. It
                     // refuses outright unless current fatigue is above 5,
@@ -6291,6 +6324,22 @@ int main(int argc, char** argv) {
                                                                   : sk::kSoundJumpMale);
                         gameVelZ = kJumpSpeed;
                         onGround = false;
+                    }
+                }
+                // Post-M121: **fall damage**, the actor move's first test
+                // (`FUN_10000c64`): `if (vz < -0xa00 && self == player)
+                // stats->TakeDamage(-vz >> 8, 0, 0, 0)` -- unsourced, and
+                // every tick the fall is that fast, before this tick's
+                // gravity. `vz` is in the engine's per-256-delta units, and
+                // this port's velocity is per tick: x 256 / delta. 0xa00 is
+                // reached after ~1300 units of free fall at the port's
+                // gravity; a short drop never hurts.
+                {
+                    constexpr int kFallDamageSpeed = -0xa00;
+                    const int engineVz = static_cast<int>(
+                        gameVelZ * 256.0f / static_cast<float>(sk_bindings::kAiFrameDeltaUnits));
+                    if (engineVz < kFallDamageSpeed) {
+                        stack.player().ApplyDamage((-engineVz) >> 8);
                     }
                 }
                 gameVelZ -= kGravity;
@@ -6334,7 +6383,19 @@ int main(int argc, char** argv) {
                 } else {
                     onGround = false;
                 }
-                float ceilingZ = gameZone->CeilingHeightAt(gameCamera.x, gameCamera.y);
+                // M122: the death floor, for the player at its own feet.
+                if (onDeathFloor(gameCamera.x, gameCamera.y,
+                                 gameCamera.z - sk::kEyeHeightOffset - 0.5f) &&
+                    stack.player().health() > 0) {
+                    stack.player().ApplyDamage(stack.player().health());
+                }
+                // Post-M121: the engine's eye clamp, in the player's input
+                // poll after `eye = z + CMap+0x1a`: `ceiling(feet + 0x180)
+                // - 0x20`, with FUN_1001bdf4's open sky (0x4000) where the
+                // tile has no solid ceiling or the player is above it.
+                float ceilingZ = gameZone->CollisionCeilingHeightAt(
+                    gameCamera.x, gameCamera.y,
+                    gameCamera.z - sk::kEyeHeightOffset + kGroundProbe);
                 if (gameCamera.z + kHeadroom > ceilingZ) {
                     gameCamera.z = ceilingZ - kHeadroom;
                     if (gameVelZ > 0.0f) gameVelZ = 0.0f;
@@ -6387,16 +6448,10 @@ int main(int argc, char** argv) {
                 // "no RE ground truth" footing as kEyeHeightOffset
                 // (render3d/camera.h) or this port's gravity constants.
                 constexpr float kSpellRange = 300.0f;      // world units
-                // World units/tick at the fixed 25Hz tick. The player
-                // walks at 40 (~3.9 tiles/s); 14 puts a creature at about a
-                // third of that (~1.4 tiles/s), which is enough to close on
-                // a player who stands and fights but leaves retreating a
-                // real option. The previous 22 read as "too fast" in play.
-                // No real constant exists to match: the corpus never calls
-                // SetSpeed with a literal (only `SetSpeed(GetPlayer()...)`,
-                // i.e. relative to the player), so this is a tuned
-                // port-side value.
-                constexpr float kMonsterMoveSpeed = 14.0f;
+                // M122: a creature's walking speed is no longer a tuned
+                // constant here (it was 14 units/tick) -- it is the engine's
+                // force-and-friction walk off the creature's Speed stat, see
+                // stepCreature and monster_ai.h.
                 constexpr float kMonsterRadius = 40.0f;     // world units, wall-collision only
                 // M77: `kAggroMaxHeightDelta` and `kLoseInterestTicks`
                 // used to live here -- a vertical gate on acquisition and a
@@ -6426,19 +6481,60 @@ int main(int argc, char** argv) {
                 // a ceiling too low for the creature's Height(), and the
                 // 0x40 barrier tiles the level designer fenced creatures
                 // out with -- 6242 of them across 13 zones (m121).
-                auto stepCreature = [&](MonsterInstance& m, float sx, float sy) {
+                //
+                // M122: and the step is the engine's own walk, not a tuned
+                // constant: friction, then the creature's Speed pushed along
+                // its heading, then `v * frameDelta >> 8` (monster_ai.h). A
+                // blocked axis loses its delta, as FUN_100017c8 zeroes it.
+                // `maxStep` is the stand-off clamp the chase uses.
+                auto stepCreature = [&](MonsterInstance& m, float dirX, float dirY,
+                                        float maxStep) {
+                    m.vx = sk_bindings::DecayVelocity(m.vx, sk_bindings::kGroundFriction) +
+                           sk_bindings::CreatureThrust(m.script->speed(), dirX);
+                    m.vy = sk_bindings::DecayVelocity(m.vy, sk_bindings::kGroundFriction) +
+                           sk_bindings::CreatureThrust(m.script->speed(), dirY);
+                    float sx = static_cast<float>((m.vx * sk_bindings::kAiFrameDeltaUnits) >> 8);
+                    float sy = static_cast<float>((m.vy * sk_bindings::kAiFrameDeltaUnits) >> 8);
+                    const float len = std::sqrt(sx * sx + sy * sy);
+                    if (len > maxStep && len > 0.0f) {
+                        sx *= maxStep / len;
+                        sy *= maxStep / len;
+                    }
                     const float height =
                         static_cast<float>(sk::MonsterCollisionHeight(m.modelArchiveIndex));
-                    const float fromX = m.x, fromY = m.y;
-                    if (sx != 0.0f &&
-                        !gameZone->ActorCircleBlocked(m.x + sx, m.y, kMonsterRadius, m.z, height,
-                                                      /*creature=*/true, fromX, fromY)) {
-                        m.x += sx;
+                    // FUN_100017c8 tests one probe per side, `x - r`, `x + r`,
+                    // `y - r`, `y + r`, and only the side the actor is moving
+                    // toward can stop the move -- so a creature already
+                    // touching a tile it may not enter can still walk away
+                    // from it. (Testing the whole circle froze one forever.)
+                    // The tile it stands in is held to the wall test only,
+                    // as ActorCircleBlocked does.
+                    const int fromTx = static_cast<int>(m.x) >> 8;
+                    const int fromTy = static_cast<int>(m.y) >> 8;
+                    auto probeBlocked = [&](float px, float py) {
+                        const int tx = static_cast<int>(std::floor(px / sk::kTileScale));
+                        const int ty = static_cast<int>(std::floor(py / sk::kTileScale));
+                        if (!gameZone->InBounds(tx, ty) || gameZone->CellAt(tx, ty).IsWall()) {
+                            return true;
+                        }
+                        if (tx == fromTx && ty == fromTy) return false;
+                        return gameZone->ActorTileBlocked(px, py, m.z, height, /*creature=*/true);
+                    };
+                    if (sx != 0.0f) {
+                        const float lead = sx > 0.0f ? kMonsterRadius : -kMonsterRadius;
+                        if (!probeBlocked(m.x + sx + lead, m.y)) {
+                            m.x += sx;
+                        } else {
+                            m.vx = 0;
+                        }
                     }
-                    if (sy != 0.0f &&
-                        !gameZone->ActorCircleBlocked(m.x, m.y + sy, kMonsterRadius, m.z, height,
-                                                      /*creature=*/true, fromX, fromY)) {
-                        m.y += sy;
+                    if (sy != 0.0f) {
+                        const float lead = sy > 0.0f ? kMonsterRadius : -kMonsterRadius;
+                        if (!probeBlocked(m.x, m.y + sy + lead)) {
+                            m.y += sy;
+                        } else {
+                            m.vy = 0;
+                        }
                     }
                 };
                 // And where it then stands: the actor move's ground clamp,
@@ -6709,6 +6805,16 @@ int main(int argc, char** argv) {
                     // `freezeai` and a stuck creature both visible in `diff`.
                     sk_debug::Count("ai.ticks");
 #endif
+                    // M122: the death floor, FUN_10000498 -- see
+                    // onDeathFloor. A creature is tested half its Height()
+                    // below its own z, which for one standing at floor +
+                    // 0x80 is under the surface.
+                    if (gameZone && wasAliveBeforeTick && !m.script->outOfWorld() &&
+                        onDeathFloor(m.x, m.y,
+                                     m.z - static_cast<float>(
+                                               sk::MonsterCollisionHeight(m.modelArchiveIndex) / 2))) {
+                        m.script->ApplyDamage(m.script->currentHealth());
+                    }
                     m.script->TickAi(sk_bindings::kAiFrameDeltaUnits);
                     // M34: TickAi() is now a path that can actually kill.
                     if (wasAliveBeforeTick && m.script->deathOwed()) {
@@ -6829,7 +6935,7 @@ int main(int argc, char** argv) {
                         if (dist > 1.0f && !m.script->paralyzed() && !m.script->immobile()) {
                             const float awayX = -mdx / dist, awayY = -mdy / dist;
                             m.facingYaw = std::atan2(awayY, awayX);
-                            stepCreature(m, awayX * kMonsterMoveSpeed, awayY * kMonsterMoveSpeed);
+                            stepCreature(m, awayX, awayY, 1e9f);
                         }
                         groundCreature(m);
                         continue;
@@ -6857,6 +6963,9 @@ int main(int argc, char** argv) {
                         const float standAndAttack = m.script->attackRange();
                         const bool inRange = dist <= standAndAttack;
                         if (inRange) {
+                            // M122: `+0x98 = +0xa0 = 0` -- the walk stops.
+                            m.vx = 0;
+                            m.vy = 0;
                             m.aiState = MonsterInstance::AiState::Attacking;
                             if (m.animThenClip < 0) {
                                 setAnimClip(m, m.script->idleAnimation(), false);
@@ -7052,15 +7161,18 @@ int main(int argc, char** argv) {
                             }
                             // Straight at the target and slide along
                             // whatever is in the way -- see stepCreature.
-                            // Stop where the real engine stops -- at the
-                            // creature's own attackRange -- but never
-                            // closer than bodily contact.
-                            float standoff = (std::max)(m.script->attackRange(),
-                                                         kPlayerRadius + kMonsterRadius);
-                            float step = (std::min)(kMonsterMoveSpeed,
-                                                     (std::max)(0.0f, dist - standoff));
-                            if (step > 0.01f) m.facingYaw = std::atan2(dirY, dirX);
-                            stepCreature(m, dirX * step, dirY * step);
+                            // M122: no stand-off clamp at the attack range.
+                            // The engine walks until the AI tick finds the
+                            // creature inside SetAttackRange and zeroes its
+                            // delta (the in-range block above), so it steps
+                            // *into* range; clamping the step to land on
+                            // the range itself left a creature parked a
+                            // fraction outside it, never swinging. Only
+                            // bodily contact still stops it.
+                            const float room =
+                                (std::max)(0.0f, dist - (kPlayerRadius + kMonsterRadius));
+                            if (room > 0.01f) m.facingYaw = std::atan2(dirY, dirX);
+                            stepCreature(m, dirX, dirY, room);
                         }
                         groundCreature(m);
                         continue;
@@ -7084,10 +7196,9 @@ int main(int argc, char** argv) {
                         const float wy = static_cast<float>(m.script->walkOrderY()) - m.y;
                         const float wdist = std::sqrt(wx * wx + wy * wy);
                         if (wdist > 1.0f) {
-                            const float step = (std::min)(kMonsterMoveSpeed, wdist);
                             const float dirX = wx / wdist, dirY = wy / wdist;
                             m.facingYaw = std::atan2(dirY, dirX);
-                            stepCreature(m, dirX * step, dirY * step);
+                            stepCreature(m, dirX, dirY, wdist);
                             groundCreature(m);
                             setAnimClip(m, m.script->walkAnimation(), false);
                         }

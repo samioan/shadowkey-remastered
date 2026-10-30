@@ -175,4 +175,38 @@ inline bool BossAttackDue(int& lastUnits, int attackSpeedSeconds, int nowUnits) 
     return false;
 }
 
+// ---- M122: how fast a creature walks ----
+//
+// Not a speed constant -- a force and a friction, both per frame:
+//
+//   * `FUN_10000498` (the actor tick) decays the movement delta on the
+//     ground, `v = FUN_10068814(v, 0x50)`: `v -= (v * 0x50 +- 0xff) >> 8`,
+//     rounded away from zero, so a little over two thirds survives a tick
+//     and a small delta reaches exactly 0;
+//   * the walk (`FUN_100008f0` -> vtable +0x1cc, `FUN_100065b4`) adds the
+//     creature's move speed along its heading: `speed = Speed * 30`
+//     (`FUN_10086d3c`, the stats block's `+0x1c`), times the sine table's
+//     `>> 3` (32 at full), `>> 8`;
+//   * the actor move then advances the position by `v * frameDelta >> 8`.
+//
+// Every creature's Speed is the stats constructor's 35 (`FUN_100477cc`;
+// SetMob does not touch it and every shipped SetSpeed is on the player),
+// so the steady chase is `v = thrust / (1 - 0xb0/0x100)` ~ 419, i.e. about
+// 16.4 world units a tick -- and it takes a few ticks to get there.
+constexpr int kGroundFriction = 0x50;
+constexpr int kDefaultCreatureSpeed = 35;
+
+inline int DecayVelocity(int v, int k) {
+    int p = v * k;
+    p += p < 0 ? -0xff : 0xff;
+    return v - (p >> 8);
+}
+
+// The per-frame push along a unit direction component `dir` (-1..1).
+inline int CreatureThrust(int speedStat, float dir) {
+    const int moveSpeed = (speedStat * 30) & 0xffff;
+    const int sine = static_cast<int>(dir * 256.0f) >> 3;
+    return (moveSpeed * sine) >> 8;
+}
+
 }  // namespace sk_bindings

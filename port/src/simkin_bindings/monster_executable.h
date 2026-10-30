@@ -429,6 +429,7 @@ public:
     bool TickLifespan(int deltaUnits);
 
     int currentHealth() const { return m_CurrentHealth; }
+    int speed() const { return m_Speed; }
     int maxHealth() const { return m_MaxHealth; }
     bool alive() const { return m_Alive; }
     // Post-M120: the level-state record's two stats-block fields (`+0x2a`,
@@ -953,6 +954,9 @@ private:
     int m_Spellcast = 0;
     int m_MagicResistance = 0;
     int m_Will = 0;  // M37: stats+0x1a -- see spellResistance()
+    // M122: stats+0x1c, Speed -- the stats constructor's 35, read by the
+    // walk (monster_ai.h's CreatureThrust) and moved by timed effects.
+    int m_Speed = kDefaultCreatureSpeed;
     int m_CreatureKind = kCreatureNormal;  // M37: monster+0x2d0
     // M39: see countsForZoneExperience(). M62: the position members that
     // used to sit here moved to EntityBaseRef.

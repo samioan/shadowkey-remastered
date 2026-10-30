@@ -34,6 +34,7 @@
 #include "assets/string_table.h"
 #include "simkin_bindings/door_executable.h"
 #include "simkin_bindings/menu_stack.h"
+#include "simkin_bindings/monster_ai.h"
 #include "simkin_bindings/player_executable.h"
 #include "simkin_bindings/script_vars.h"
 #include "skExecutableContext.h"
@@ -158,6 +159,60 @@ int main(int argc, char** argv) {
                 }
             }
         }
+        // The player's standing Height() is CMap+0x1a, the same field as the
+        // eye offset -- 0x200 (M84). Measure what a 0x200-tall player is
+        // refused that a zero-height one is not: open, unflagged floor
+        // under a ceiling lower than its head.
+        int lowHeadroom = 0, openTiles = 0;
+        for (const char* name : kZones) {
+            sk::Zone zone;
+            if (!zone.Load(root, name)) continue;
+            for (int ty = 1; ty + 1 < zone.height(); ++ty) {
+                for (int tx = 1; tx + 1 < zone.width(); ++tx) {
+                    const sk::ZmpCell& c = zone.CellAt(tx, ty);
+                    if (c.IsWall() || c.IsBlocked()) continue;
+                    const float x = tx * 256.0f + 128.0f, y = ty * 256.0f + 128.0f;
+                    const float f = zone.CollisionFloorHeightAt(x, y, -100000.0f);
+                    if (zone.ActorTileBlocked(x, y, f, 0.0f, false)) continue;
+                    ++openTiles;
+                    if (zone.ActorTileBlocked(x, y, f, 512.0f, false)) ++lowHeadroom;
+                }
+            }
+        }
+        // FUN_10000498: a 0x20 cell kills whatever stands at or below its
+        // floor. Count the hazard cells a player can step onto from safe,
+        // open floor (an edge the tile rule passes), per zone.
+        for (const char* name : kZones) {
+            sk::Zone zone;
+            if (!zone.Load(root, name)) continue;
+            int hazard = 0, steppable = 0, exampleX = -1, exampleY = -1;
+            for (int ty = 1; ty + 1 < zone.height(); ++ty) {
+                for (int tx = 1; tx + 1 < zone.width(); ++tx) {
+                    const sk::ZmpCell& c = zone.CellAt(tx, ty);
+                    if (!(c.blockFlags & 0x20)) continue;
+                    ++hazard;
+                    const float hx = tx * 256.0f + 128.0f, hy = ty * 256.0f + 128.0f;
+                    const int dx[] = {1, -1, 0, 0}, dy[] = {0, 0, 1, -1};
+                    for (int k = 0; k < 4; ++k) {
+                        const sk::ZmpCell& n = zone.CellAt(tx + dx[k], ty + dy[k]);
+                        if (n.IsWall() || n.IsBlocked() || (n.blockFlags & 0x20)) continue;
+                        const float nx = hx + dx[k] * 256.0f, ny = hy + dy[k] * 256.0f;
+                        const float f = zone.CollisionFloorHeightAt(nx, ny, -100000.0f);
+                        if (!zone.ActorTileBlocked(hx, hy, f, 512.0f, false)) {
+                            ++steppable;
+                            if (exampleX < 0) { exampleX = tx; exampleY = ty; }
+                            break;
+                        }
+                    }
+                }
+            }
+            if (hazard) std::printf("  %-12s %5d hazard (0x20) cells, %4d steppable from safe floor\n",
+                                    name, hazard, steppable);
+            if (exampleX >= 0) std::printf("               e.g. tile %d %d\n", exampleX, exampleY);
+        }
+        std::printf("  %d of %d open tiles have under 0x200 of headroom\n", lowHeadroom, openTiles);
+        Check(lowHeadroom * 1000 < openTiles,
+              "a 0x200-tall player is refused almost nowhere a zero-height one walks");
         std::printf("  %d open tile edges rise more than 0x180, %d rise less\n", cliffs, steps);
         std::printf("  %d creature-barrier (0x40) tiles across %d zones\n", barrierTiles,
                     zonesWithBarrier);
@@ -337,6 +392,35 @@ int main(int argc, char** argv) {
         Check(arrivals >= 40, "the shipped scripts' LoadLevel+SetCameraStart pairs were found");
         Check(onFloor * 10 >= arrivals * 9,
               "and SetCameraStart's (x, y, z) puts nearly every one on open ground");
+    }
+
+    // ------------------------------------------------------------------
+    std::printf("\n--- 7. M122: the creature walk ---\n");
+    // ------------------------------------------------------------------
+    {
+        // Friction then thrust, every frame, at the 25Hz delta of 10.
+        int v = 0;
+        int firstStep = 0, steady = 0;
+        for (int tick = 0; tick < 60; ++tick) {
+            v = sk_bindings::DecayVelocity(v, sk_bindings::kGroundFriction) +
+                sk_bindings::CreatureThrust(sk_bindings::kDefaultCreatureSpeed, 1.0f);
+            const int step = (v * 10) >> 8;
+            if (tick == 0) firstStep = step;
+            steady = step;
+        }
+        std::printf("  Speed 35: first tick %d units, steady %d units/tick (v=%d)\n", firstStep,
+                    steady, v);
+        Check(sk_bindings::CreatureThrust(35, 1.0f) == 131,
+              "thrust is Speed*30 through the sine table's >>3, >>8: 131 at Speed 35");
+        Check(steady >= 15 && steady <= 17, "the steady chase is ~16 world units a tick");
+        Check(firstStep < steady, "and a creature accelerates into it rather than starting at it");
+        int coast = v;
+        int ticks = 0;
+        while (coast != 0 && ticks < 100) {
+            coast = sk_bindings::DecayVelocity(coast, sk_bindings::kGroundFriction);
+            ++ticks;
+        }
+        Check(coast == 0 && ticks < 30, "with nothing pushing, the rounding brings it to exactly 0");
     }
 
     std::printf("\nm121_world_state_smoke: %s (%d checks)\n", g_failures == 0 ? "OK" : "FAILED",

@@ -11435,12 +11435,86 @@ engine, and one (spawn points) checked out against every shipped arrival.
 
 - `CMap+0x14` (gravity) and `CMap+0x1a` (the standing Height() and eye
   height) are read everywhere and written nowhere yet found; the port's
-  player physics constants are still its own.
+  player physics constants are still its own. (M122: there is no writer
+  at all; the player's height is now 0x200.)
 - A creature's per-tick move is still the port's tuned speed: the engine's
   is `stats.speed * 30` through the sine table into `+0x98/+0xa0`, but
   where that delta is damped between ticks was not pinned down.
 - Hidden props (`ShowEntity(false)`) are not in the record; every shipped
   case is re-derived by an Init from a saved variable.
+
+
+## M122 -- M121's approximations, read out of the binary
+
+M121 left four things as the port's own guesses. Two are now the engine's,
+one turned out to be a stand-in M121 itself got wrong, and the search for
+the last one found a rule nobody had wired.
+
+- **The player's collision height is 0x200, not 0.** `CMap+0x1a` is read
+  by three things: the standing-stance Height() (`FUN_10006230`), the
+  eye at level load, and -- found here -- the player's input poll every
+  tick (`eye = vtable+0x238(player)` = `FUN_1001f6f0`, `z + CMap+0x1a`,
+  then clamped to `ceiling(z + 0x180) - 0x20`). It is one field, and M84
+  already pinned the eye at 0x200 from the creature height table and the
+  melee probes. M121 used 0 for the collision height; it is 0x200 now, and
+  m121 measures what that costs: **62 of 211,649** open tiles have less
+  headroom. The eye clamp is the engine's too (0x20 under the
+  `FUN_1001bdf4` ceiling, was 60 under the raw corner blend).
+- **The write itself does not exist.** Every halfword and word store to
+  `+0x14..+0x1c` in the image, every `add`+`stm`, every block copy and
+  every `fread` (`FUN_1009ec80`) was checked: nothing writes the engine's
+  `+0x14` (gravity) or `+0x18/+0x1a/+0x1c` (heights). The engine is
+  allocated with plain `__builtin_new` (0x14e14 bytes) rather than
+  CBase's zeroing operator, so the device ran on whatever that heap block
+  held. The derived values stay; the claim that there is a constant to
+  find is retired.
+- **Creatures walk with the engine's force and friction.** The actor tick
+  (`FUN_10000498`) decays `+0x98/+0xa0` on the ground with `FUN_10068814(v,
+  0x50)` -- rounded away from zero, so a coasting creature reaches exactly
+  0 -- and the walk adds `Speed * 30` through the sine table's `>> 3`,
+  `>> 8` (`FUN_10086d3c`, `FUN_100065b4`). Speed is the stats
+  constructor's **35** (`FUN_100477cc`; SetMob never sets it and every
+  shipped SetSpeed is on the player), so a chase accelerates to ~16 world
+  units a tick in a few ticks (the tuned constant was 14). Creature stats
+  gain the Speed slot (`+0x1c`), so a timed effect on it now matters.
+  Two consequences fixed with it: the push-out is the engine's
+  **leading-edge probe** per axis (`FUN_100017c8`'s `x +- r`, `y +- r`),
+  because testing the whole circle froze a creature spawned touching a
+  tile it may not enter; and there is **no stand-off clamp at the attack
+  range** -- the engine walks until the AI tick finds the creature in
+  range and zeroes its delta, while clamping to the range left one parked
+  a fraction outside it, never swinging.
+- **Fall damage** (`FUN_10000c64`'s first test): `if (vz < -0xa00 && self
+  == player) TakeDamage(-vz >> 8)`, unsourced, every tick the fall is that
+  fast. The port had none.
+- **The death floor.** `blockFlags & 0x20` -- M57's "surface you sink
+  into", 13,064 cells in six zones -- is in `FUN_10000498`: an actor at or
+  below the floor of such a cell (a creature tested half its Height()
+  below its z) takes damage equal to its whole current health. The game's
+  text calls one "the lava below" (string 1963). m121 counts how many are
+  one step from safe floor (fearfrst 2462 of 9859).
+- **Hidden props are in the record after all.** ShowEntity is
+  `vtable[0x58](arg ^ 1)` = `FUN_100a2148`, which sets or clears bit 0 of
+  the entity flag word `+0x60` -- a field `SavedEntityBase` already
+  carries, and the bit `FUN_10064ffc` refuses to draw. Written and
+  restored now.
+- **Test**: m121 grows to 27 checks (the walk recurrence, friction to
+  zero, the headroom and hazard censuses). Suite **105/105**, both build
+  configurations compile. **Live**: a bandit spawned 1500 away accelerates
+  in, steps inside its 660 range, stops and swings ~once a second; a
+  hidden rat stays hidden through save and load; standing on fearfrst's
+  tile (3,2) is safe and stepping onto (4,2) is death.
+- **Not a bug, worth knowing when testing:** the console's `zone fearfrst`
+  (and `broken2`) puts a fresh level-1 character beside three goblins that
+  kill it in seconds. The same on M121 and earlier.
+
+### Still open
+
+- Gravity (`CMap+0x14`) is still the port's 4 units/tick^2, now also the
+  scale fall damage is judged against. Its jump impulse already equals
+  the engine's `vz += 0x500` exactly in engine units.
+- FUN_100008f0's slow-down when a creature faces away from its goal is
+  gated on `+0x1b8`, whose writer was not traced; not reproduced.
 
 
 ## Next milestones (not yet started)
