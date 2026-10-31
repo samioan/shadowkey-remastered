@@ -882,3 +882,8 @@ target_link_libraries(pc_settings_smoke PRIVATE sk_bindings sk_render3d sk_world
 target_compile_definitions(pc_settings_smoke PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
 
 endif()  # NOT SK_DIST
+
+# M127: the credits screen -- FUN_1006b168's load and screen mode 0xb's
+# frame (FUN_1006b3fc). See src/tests/m127_credits_smoke.cpp.
+add_executable(credits_smoke src/tests/m127_credits_smoke.cpp)
+target_link_libraries(credits_smoke PRIVATE sk_bindings sk_world)

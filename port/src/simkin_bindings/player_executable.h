@@ -434,10 +434,11 @@ public:
         m_DeathPending = false;
         return pending;
     }
-    // The fresh player object the engine builds for a new session: what
-    // `FUN_1003d670` and the actor constructor `FUN_1001c534` zero that this
-    // port keeps on a player that outlives its session. main.cpp's
-    // quit-to-menu teardown calls it.
+    // The death and story flags a new session's player starts with clear.
+    // M126: no longer the session teardown -- that replaces the whole
+    // object (MenuStack::ResetPlayerForNewSession), because clearing a few
+    // fields here left the inventory, gold and stats behind. Kept for the
+    // smoke tests that reuse one player across cases.
     void ResetForNewSession() {
         m_DeathHandled = false;
         m_DeathPending = false;

@@ -22,14 +22,15 @@ struct Labels {
     const char* aspect;  // M120
     const char* fog;     // M123
     const char* off;     // M123
+    const char* mouseLook;  // M125
 };
 constexpr Labels kLabels[] = {
-    {"Resolution", "Frame Rate", "Original", "Unlimited", "Aspect Ratio", "Fog", "Off"},
-    {"Resoluci\xf3n", "Fotogramas", "Original", "Ilimitado", "Formato", "Niebla", "No"},
-    {"Aufl\xf6sung", "Bildrate", "Original", "Unbegrenzt", "Format", "Nebel", "Aus"},
-    {"R\xe9solution", "Images/s", "Originale", "Illimit\xe9", "Format", "Brouillard", "Non"},
-    {"Risoluzione", "Fotogrammi", "Originale", "Illimitati", "Formato", "Nebbia", "No"},
-    {"Resolution", "Frame Rate", "Original", "Unlimited", "Aspect Ratio", "Fog", "Off"},
+    {"Resolution", "Frame Rate", "Original", "Unlimited", "Aspect Ratio", "Fog", "Off", "Mouse Look"},
+    {"Resoluci\xf3n", "Fotogramas", "Original", "Ilimitado", "Formato", "Niebla", "No", "Vista rat\xf3n"},
+    {"Aufl\xf6sung", "Bildrate", "Original", "Unbegrenzt", "Format", "Nebel", "Aus", "Mausblick"},
+    {"R\xe9solution", "Images/s", "Originale", "Illimit\xe9", "Format", "Brouillard", "Non", "Vue souris"},
+    {"Risoluzione", "Fotogrammi", "Originale", "Illimitati", "Formato", "Nebbia", "No", "Visuale mouse"},
+    {"Resolution", "Frame Rate", "Original", "Unlimited", "Aspect Ratio", "Fog", "Off", "Mouse Look"},
 };
 
 const Labels& LabelsFor(int language) {
@@ -94,6 +95,11 @@ std::string FogValueText(int percent, int language) {
     return std::to_string(percent) + "%";
 }
 
+std::string MouseLookValueText(int percent, int language) {
+    if (percent == kMouseLookOff) return LabelsFor(language).off;
+    return std::to_string(percent) + "%";
+}
+
 PcSettingsStore::PcSettingsStore(std::string path) : path_(std::move(path)) {}
 
 void PcSettingsStore::Set(const PcSettings& settings) {
@@ -102,6 +108,7 @@ void PcSettingsStore::Set(const PcSettings& settings) {
     settings_.frameRateIndex = Wrap(settings_.frameRateIndex, kFrameRateOptionCount);
     settings_.aspectIndex = Wrap(settings_.aspectIndex, kAspectOptionCount);
     settings_.fogIndex = Wrap(settings_.fogIndex, kFogOptionCount);
+    settings_.mouseLookIndex = Wrap(settings_.mouseLookIndex, kMouseLookOptionCount);
 }
 
 bool PcSettingsStore::Load() {
@@ -134,6 +141,10 @@ bool PcSettingsStore::Load() {
             for (int i = 0; i < kFogOptionCount; ++i) {
                 if (kFogDensities[i] == value) settings_.fogIndex = i;
             }
+        } else if (std::strcmp(key, "mouselook") == 0) {  // M125
+            for (int i = 0; i < kMouseLookOptionCount; ++i) {
+                if (kMouseLookSensitivities[i] == value) settings_.mouseLookIndex = i;
+            }
         }
     }
     std::fclose(f);
@@ -155,9 +166,10 @@ bool PcSettingsStore::Save() const {
                  "# aspect: 0 = original, -1 = auto (fill the window), else w*100+h "
                  "(1609 = 16:9)\n"
                  "# fog: density in percent of the original, 100 = original, 0 = off\n"
-                 "resolution=%d\nframerate=%d\naspect=%d\nfog=%d\n",
+                 "# mouselook: mouse sensitivity in percent, 0 = off (the mouse only attacks)\n"
+                 "resolution=%d\nframerate=%d\naspect=%d\nfog=%d\nmouselook=%d\n",
                  settings_.resolutionScale(), settings_.frameRate(), settings_.aspect(),
-                 settings_.fogPercent());
+                 settings_.fogPercent(), settings_.mouseLookPercent());
     std::fclose(f);
     return true;
 }
@@ -178,6 +190,10 @@ std::string PcSettingsStore::RowText(int row, int language) const {
     if (row == kRowFog) {
         return std::string(labels.fog) + ": " + FogValueText(settings_.fogPercent(), language);
     }
+    if (row == kRowMouseLook) {
+        return std::string(labels.mouseLook) + ": " +
+               MouseLookValueText(settings_.mouseLookPercent(), language);
+    }
     return std::string();
 }
 
@@ -190,6 +206,8 @@ void PcSettingsStore::Cycle(int row, int delta) {
         settings_.aspectIndex = Wrap(settings_.aspectIndex + delta, kAspectOptionCount);
     } else if (row == kRowFog) {
         settings_.fogIndex = Wrap(settings_.fogIndex + delta, kFogOptionCount);
+    } else if (row == kRowMouseLook) {
+        settings_.mouseLookIndex = Wrap(settings_.mouseLookIndex + delta, kMouseLookOptionCount);
     } else {
         return;
     }

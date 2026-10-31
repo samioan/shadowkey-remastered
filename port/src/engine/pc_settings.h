@@ -76,16 +76,35 @@ constexpr int kFogDensities[] = {kFogOriginal, 150, 200, 0, 25, 50, 75};
 constexpr int kFogOptionCount =
     static_cast<int>(sizeof(kFogDensities) / sizeof(kFogDensities[0]));
 
+// M125: mouse look -- the mouse turns the view and tilts it, as the right
+// stick does on a controller. The device had no mouse, so there is no
+// "Original" here: the values are sensitivities, as a percentage of
+// kMouseLookRadiansPerCount, and 0 is Off (the pre-M125 behaviour, the
+// cursor free and the mouse only a button). On at 100% by default.
+constexpr int kMouseLookOff = 0;
+constexpr int kMouseLookSensitivities[] = {100, 150, 200, 300, kMouseLookOff, 50, 75};
+constexpr int kMouseLookOptionCount =
+    static_cast<int>(sizeof(kMouseLookSensitivities) / sizeof(kMouseLookSensitivities[0]));
+// At 100%: about 0.13 degrees per count, i.e. a full turn in ~2900 counts
+// (a ~18cm sweep on an 800dpi mouse) -- the usual default of PC shooters.
+constexpr float kMouseLookRadiansPerCount = 0.0022f;
+
 struct PcSettings {
     int resolutionIndex = 0;  // into kResolutionScales; 0 = Original
     int frameRateIndex = 0;   // into kFrameRates; 0 = Original
     int aspectIndex = 0;      // into kAspectRatios; 0 = Original (M120)
     int fogIndex = 0;         // into kFogDensities; 0 = Original (M123)
+    int mouseLookIndex = 0;   // into kMouseLookSensitivities; 0 = 100% (M125)
 
     int resolutionScale() const { return kResolutionScales[resolutionIndex]; }
     int frameRate() const { return kFrameRates[frameRateIndex]; }
     int aspect() const { return kAspectRatios[aspectIndex]; }
     int fogPercent() const { return kFogDensities[fogIndex]; }
+    int mouseLookPercent() const { return kMouseLookSensitivities[mouseLookIndex]; }
+    bool mouseLook() const { return mouseLookPercent() != kMouseLookOff; }
+    float mouseLookRadiansPerCount() const {
+        return kMouseLookRadiansPerCount * static_cast<float>(mouseLookPercent()) / 100.0f;
+    }
     bool originalResolution() const { return resolutionScale() == 1; }
     bool originalFrameRate() const { return frameRate() == kFrameRateOriginal; }
     bool originalAspect() const { return aspect() == kAspectOriginal; }
@@ -139,8 +158,9 @@ public:
         kRowResolution = 0,
         kRowAspect = 1,
         kRowFrameRate = 2,
-        kRowFog = 3,  // M123
-        kRowCount = 4
+        kRowFog = 3,        // M123
+        kRowMouseLook = 4,  // M125
+        kRowCount = 5
     };
     int RowCount() const override { return kRowCount; }
     std::string RowText(int row, int language) const override;
@@ -156,5 +176,6 @@ std::string ResolutionValueText(int scale, int language);
 std::string FrameRateValueText(int fps, int language);
 std::string AspectValueText(int aspect, int language);
 std::string FogValueText(int percent, int language);
+std::string MouseLookValueText(int percent, int language);
 
 }  // namespace sk

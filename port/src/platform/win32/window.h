@@ -103,6 +103,22 @@ public:
     // is above Original, and handed back when it returns there.
     static void SetFineTimer(bool on);
 
+    // M125: mouse look. While `on` (and the window is in front) the cursor
+    // is hidden and held inside the client area, and relative mouse motion
+    // -- raw input, so it is neither accelerated nor stopped by the screen
+    // edge -- accumulates for TakeMouseDelta. Called every loop iteration
+    // with whether gameplay wants it; cheap when nothing changes. Losing
+    // focus lets the cursor go at once; it is taken again only when the
+    // game asks with the window back in front.
+    void SetMouseLook(bool on);
+    bool MouseLookActive() const;
+    // The motion accumulated since the last call, in raw mouse counts
+    // (+x right, +y down), and resets it. Both 0 while mouse look is off.
+    void TakeMouseDelta(int* dx, int* dy);
+    // The same, without resetting it -- what the frame loop adds to an
+    // interpolated frame drawn between two ticks.
+    void PeekMouseDelta(int* dx, int* dy) const;
+
     bool ShouldClose() const { return shouldClose_; }
 
     // Opaque pimpl -- public only so window.cpp's free-function WndProc

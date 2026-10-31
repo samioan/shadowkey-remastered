@@ -138,6 +138,11 @@ struct Window::Impl {
     // M119: a high-resolution frame widened to 32 bits for GDI -- see
     // Present(). Kept between frames; empty until one is presented.
     std::vector<uint32_t> wide;
+    // M125: mouse look -- see Window::SetMouseLook.
+    bool mouseLook = false;
+    RECT mouseClip{};
+    long mouseDx = 0;
+    long mouseDy = 0;
     // M120: borderless fullscreen, and the windowed placement to go back to.
     bool fullscreen = false;
     DWORD windowedStyle = 0;
@@ -237,6 +242,12 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         // input layer needs to hear.
         case WM_KILLFOCUS:
             ReleaseCapture();
+            // M125: never keep the cursor caged behind an alt-tab.
+            if (impl && impl->mouseLook) {
+                impl->mouseLook = false;
+                impl->mouseDx = impl->mouseDy = 0;
+                ClipCursor(nullptr);
+            }
             if (impl && impl->focusLostCallback) impl->focusLostCallback();
             return 0;
         // Post-M68 fix: the other half of the flicker. The window class asks for a
@@ -247,6 +258,28 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         // there is nothing for an erase to usefully do.
         case WM_ERASEBKGND:
             return 1;
+        // M125: relative mouse motion for mouse look. Raw input rather than
+        // WM_MOUSEMOVE so the motion is the device's own counts -- no
+        // pointer acceleration, and no stop at the edge of the clip rect.
+        case WM_INPUT:
+            if (impl && impl->mouseLook) {
+                RAWINPUT raw{};
+                UINT size = sizeof(raw);
+                if (GetRawInputData(reinterpret_cast<HRAWINPUT>(lParam), RID_INPUT, &raw, &size,
+                                    sizeof(RAWINPUTHEADER)) != static_cast<UINT>(-1) &&
+                    raw.header.dwType == RIM_TYPEMOUSE &&
+                    !(raw.data.mouse.usFlags & MOUSE_MOVE_ABSOLUTE)) {
+                    impl->mouseDx += raw.data.mouse.lLastX;
+                    impl->mouseDy += raw.data.mouse.lLastY;
+                }
+            }
+            return DefWindowProcW(hwnd, msg, wParam, lParam);
+        case WM_SETCURSOR:
+            if (impl && impl->mouseLook && LOWORD(lParam) == HTCLIENT) {
+                SetCursor(nullptr);
+                return TRUE;
+            }
+            return DefWindowProcW(hwnd, msg, wParam, lParam);
         case WM_CHAR:
             if (impl && impl->charCallback) {
                 impl->charCallback(static_cast<wchar_t>(wParam));
@@ -330,6 +363,13 @@ Window::Window(int clientWidth, int clientHeight, const std::wstring& title) {
         nullptr, nullptr, hInstance, nullptr);
 
     SetWindowLongPtrW(impl_->hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(impl_));
+    // M125: raw mouse motion for mouse look (usage page 1, usage 2 = mouse).
+    // Without RIDEV_NOLEGACY, so clicks still arrive as WM_LBUTTONDOWN.
+    RAWINPUTDEVICE mouse{};
+    mouse.usUsagePage = 0x01;
+    mouse.usUsage = 0x02;
+    mouse.hwndTarget = impl_->hwnd;
+    RegisterRawInputDevices(&mouse, 1, sizeof(mouse));
     ShowWindow(impl_->hwnd, SW_SHOWNORMAL);
     UpdateWindow(impl_->hwnd);
 }
@@ -425,6 +465,52 @@ void Window::SetFineTimer(bool on) {
         timeEndPeriod(1);
         active = false;
     }
+}
+
+void Window::SetMouseLook(bool on) {
+    HWND hwnd = impl_->hwnd;
+    on = on && hwnd != nullptr && GetForegroundWindow() == hwnd && !IsIconic(hwnd);
+    if (!on) {
+        if (impl_->mouseLook) {
+            impl_->mouseLook = false;
+            impl_->mouseDx = impl_->mouseDy = 0;
+            ClipCursor(nullptr);
+            // Show the arrow again now rather than at the next mouse move.
+            SetCursor(LoadCursorW(nullptr, IDC_ARROW));
+        }
+        return;
+    }
+    // The clip rect follows the window: a move, a resize or fullscreen.
+    RECT client{};
+    GetClientRect(hwnd, &client);
+    POINT tl{client.left, client.top}, br{client.right, client.bottom};
+    ClientToScreen(hwnd, &tl);
+    ClientToScreen(hwnd, &br);
+    const RECT clip{tl.x, tl.y, br.x, br.y};
+    if (!impl_->mouseLook || !EqualRect(&clip, &impl_->mouseClip)) {
+        if (!impl_->mouseLook) {
+            impl_->mouseDx = impl_->mouseDy = 0;
+            // Park the pointer in the middle, so the click that lets it go
+            // later is not on the title bar or a border.
+            SetCursorPos((tl.x + br.x) / 2, (tl.y + br.y) / 2);
+            SetCursor(nullptr);
+        }
+        impl_->mouseLook = true;
+        impl_->mouseClip = clip;
+        ClipCursor(&clip);
+    }
+}
+
+bool Window::MouseLookActive() const { return impl_->mouseLook; }
+
+void Window::TakeMouseDelta(int* dx, int* dy) {
+    PeekMouseDelta(dx, dy);
+    impl_->mouseDx = impl_->mouseDy = 0;
+}
+
+void Window::PeekMouseDelta(int* dx, int* dy) const {
+    if (dx) *dx = impl_->mouseLook ? static_cast<int>(impl_->mouseDx) : 0;
+    if (dy) *dy = impl_->mouseLook ? static_cast<int>(impl_->mouseDy) : 0;
 }
 
 void Window::Close() {

@@ -213,6 +213,19 @@ public:
 
     MenuExecutable* currentMenu() const { return m_Current; }
     PlayerExecutable& player() const { return *m_Player; }
+    // M126: the session teardown's player. The engine's quit thread deletes
+    // the player object (`FUN_1000e3c4` with keepPlayer 0) and the next
+    // session builds a new one, so nothing a character carried -- items,
+    // hands, gold, stats, level, XP, spells, effects, quests -- reaches the
+    // next New Game. This port used to keep the object and clear a handful
+    // of its fields (PlayerExecutable::ResetForNewSession), which let a dead
+    // character's inventory walk into the next game. It now does what the
+    // engine does: the old object, and every item it owns, is destroyed and
+    // a freshly constructed one takes its place. Any reference into the old
+    // player is invalid afterwards; everything in the port reaches the
+    // player through player() on each use, and the scripts' stored
+    // `GetPlayer()` values are method locals.
+    void ResetPlayerForNewSession();
     // M18: the bare global `Level` object -- see level_executable.h. The
     // zone-load block (main.cpp) registers each live named door/monster
     // into it via RegisterEntity()/ClearEntities().

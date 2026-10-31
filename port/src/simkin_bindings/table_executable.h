@@ -41,8 +41,8 @@
 // "GP : 111 Qty: 3" line, and two 10px columns that are **not** a star
 // rating. `FUN_100a0cec`'s renderer compares the product's own rating
 // against whatever the player has in that hand (or, for Armor, in that
-// products.dat armour slot) and draws global.spr sprite 24 for "better"
-// or 25 for "worse" -- the two ids `buysell.s` assigns to
+// products.dat armour slot) and draws global.spr sprite 25 (a plus) for
+// "better" or 24 (a minus) for "worse" -- the two ids `buysell.s` assigns to
 // `image_item_active`/`image_item_dormant` at the top of OnDisplay and
 // then never uses. A Consumable gets no arrow at all (the renderer
 // returns early on category 4), which is why the potions page shows two
@@ -204,8 +204,8 @@ public:
     enum class CellCompare {
         None,    // nothing to compare against -- draws nothing
         Equal,   // same rating as what is equipped
-        Better,  // sprite 24
-        Worse,   // sprite 25
+        Better,  // sprite 25 (a plus)
+        Worse,   // sprite 24 (a minus)
     };
     CellCompare CompareCell(int row, int col) const;
 

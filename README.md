@@ -30,6 +30,7 @@ number keys. All of it is rebindable in **Options → Customize Controls**.
 | `↑` / `↓` | look up / down |
 | `Space` | jump |
 | `E` | use — doors, people, chests, pickups |
+| Mouse | turn and look around (**Options → Mouse Look**); while it is on, `A` / `D` sidestep instead of turning |
 | Left mouse | attack with your right hand |
 | `Q` | attack with your left hand |
 | `G` / `C` | cycle what is in your right / left hand |
@@ -64,6 +65,11 @@ game exactly as the N-Gage drew it:
 - **Frame Rate** — 30 to 240, *V-Sync* or *Unlimited*. The game still runs
   at its original 25 ticks a second, so nothing plays differently; the
   frames between ticks are interpolated.
+- **Fog** — thicker, thinner (which also draws further), or off.
+- **Mouse Look** — mouse sensitivity, 50% to 300%, or *Off*. On at 100% by
+  default: the mouse turns and tilts the view during play, with the pointer
+  hidden and held in the window until a menu, the map or a conversation
+  opens.
 
 Building it yourself: `port\build.bat` for the everyday build (then
 `port\run_tests.ps1` from the repository root), or `port\build_dist.bat` for

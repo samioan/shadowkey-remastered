@@ -526,6 +526,17 @@ public:
     // bands change no pixel.
     int bandLimit = 0;
 
+    // M126: where the last Render() spent its time, in milliseconds. `record`
+    // is everything up to the rasterizer: the visibility raycast, the face
+    // build, and transforming, clipping and projecting every triangle.
+    // `raster` is the pixel work. At the native size the two are
+    // interleaved in one pass, and the whole frame is reported as `record`.
+    struct Timings {
+        double recordMs = 0.0;
+        double rasterMs = 0.0;
+    };
+    Timings lastTimings() const { return m_Timings; }
+
     // `entities`/`models` are optional (default: none drawn) so M6/M7
     // call sites and smoke tests that only care about tile-grid geometry
     // don't need to change. `models` is non-const because Model parsing
@@ -568,6 +579,7 @@ private:
     // M119: kept between frames rather than reallocated every Render --
     // 5MB a frame at 6x is worth not churning at 144 frames a second.
     mutable std::vector<float> m_DepthBuffer;
+    mutable Timings m_Timings;  // M126
 };
 
 }  // namespace sk

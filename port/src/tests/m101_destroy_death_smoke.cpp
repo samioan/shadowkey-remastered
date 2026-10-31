@@ -381,6 +381,38 @@ int main(int argc, char** argv) {
         }
     }
 
+    // ---------------------------------------------------------------
+    // Part 8 (M126): the session teardown replaces the player
+    // ---------------------------------------------------------------
+    // Last, because it destroys the object `player` above refers to.
+    std::printf("\n== Part 8: a new session's player carries nothing ==\n");
+    {
+        sk_b::PlayerExecutable& old = stack.player();
+        old.LoadItemScripts(stack, {"weapons/club.s", "items/bread.s"});
+        call(&old, "SetGold", one(skRValue(500)));
+        call(&old, "SetLevel", one(skRValue(7)));
+        old.setValue(skString("saved_Guild"), skString(), skRValue(2));
+        call(&old, "SetHealth", one(skRValue(10)));
+        old.ApplyDamage(50);
+        Check(!old.inventory().empty() && old.gold() == 500 && old.level() == 7 &&
+                  old.deathHandled(),
+              "a dead character with items, gold, a level and a story flag");
+
+        stack.ResetPlayerForNewSession();
+        sk_b::PlayerExecutable& fresh = stack.player();
+        sk_b::PlayerExecutable reference(&strings);
+        skRValue guild;
+        fresh.getValue(skString("saved_Guild"), skString(), guild);
+        Check(fresh.inventory().empty() && !fresh.leftItem() && !fresh.rightItem(),
+              "the next session's player has no items and nothing in either hand");
+        Check(fresh.gold() == reference.gold() && fresh.level() == reference.level() &&
+                  fresh.health() == reference.health() && fresh.maxHealth() == reference.maxHealth() &&
+                  guild.intValue() == 0 && !fresh.deathHandled(),
+              "and gold, level, vitals and story flags of a newly built one");
+        Check(call(&fresh, "GetGold", none()).intValue() == reference.gold(),
+              "and scripts reach the new object through GetPlayer()'s path");
+    }
+
     std::printf("\nm101_destroy_death_smoke: %d/%d checks passed -- %s\n", g_checks - g_failures,
                 g_checks, g_failures == 0 ? "OK" : "FAILED");
     return g_failures == 0 ? 0 : 1;

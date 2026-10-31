@@ -52,6 +52,8 @@
 #include "platform/win32/crash_report.h"
 #include "platform/win32/exe_dir.h"
 #include "platform/win32/gamepad.h"
+#include "engine/mouse_look_keys.h"
+#include "engine/credits_roll.h"
 #include "platform/win32/window.h"
 #include "render3d/camera.h"
 #include "render3d/zone_renderer.h"
@@ -2864,11 +2866,14 @@ void RenderMenu(sk::Backbuffer& backbuffer, sk_bindings::MenuExecutable& menu,
                             const Compare compare = table->CompareCell(r, c);
                             if (draw && cell->comparison) {
                                 // FUN_100a0cec: the arrow sprite at the
-                                // cell's own x/y (24 better, 25 worse),
-                                // or the equal mark as text.
+                                // cell's own x/y (25 plus = better,
+                                // 24 minus = worse), or the equal mark
+                                // as text.
                                 if (compare == Compare::Better || compare == Compare::Worse) {
                                     if (const sk::Sprite* arrow = sprites.GetSprite(
-                                            compare == Compare::Better ? 24 : 25)) {
+                                            compare == Compare::Better
+                                                ? sk_bindings::kStoreBetterArrowSprite
+                                                : sk_bindings::kStoreWorseArrowSprite)) {
                                         backbuffer.Blit(x, cy, *arrow);
                                     }
                                 } else if (compare == Compare::Equal) {
@@ -3451,16 +3456,22 @@ void RenderHud(sk::Backbuffer& backbuffer, const sk_bindings::PlayerExecutable& 
     }
 }
 
-void RenderCredits(sk::Backbuffer& backbuffer, const std::vector<std::string>& lines,
-                    int scrollOffset) {
-    backbuffer.Fill(kBackgroundColor);
-    const int lineHeight = sk::BitmapFont::kGlyphHeight + 4;
-    int y = 8;
-    int maxLines = sk::Backbuffer::kHeight / lineHeight;
-    for (int i = 0; i < maxLines && (scrollOffset + i) < static_cast<int>(lines.size()); ++i) {
-        sk::BitmapFont::DrawString(backbuffer, 4, y, lines[static_cast<size_t>(scrollOffset + i)],
-                                    kTextColor);
-        y += lineHeight;
+// M127: screen mode 0xb, `FUN_1006b3fc`'s draw -- see engine/credits_roll.h.
+// The backdrop is global.spr slot 20 at (0,0); every line between y=1 and
+// y=164 is drawn centred, shadowed, in the static-item brown. This used to
+// be a placeholder: a navy fill and left-aligned light text, scrolled by
+// hand.
+void RenderCredits(sk::Backbuffer& backbuffer, sk::SpriteArchive& sprites,
+                    const std::vector<std::string>& lines, int scroll) {
+    backbuffer.Fill(kBackgroundColor);  // under the backdrop, if it is missing
+    if (const sk::Sprite* backdrop = sprites.GetSprite(sk::kCreditsBackgroundSprite)) {
+        backbuffer.Blit(0, 0, *backdrop);
+    }
+    constexpr uint16_t kCreditsColor = MenuColor444(sk::kCreditsColor444);
+    for (size_t i = 0; i < lines.size(); ++i) {
+        const int y = sk::CreditsLineY(static_cast<int>(i), scroll);
+        if (y > sk::kCreditsLastVisibleY) break;
+        if (sk::CreditsLineVisible(y)) DrawCenteredWidgetLabel(backbuffer, y, lines[i], kCreditsColor);
     }
 }
 
@@ -3936,7 +3947,14 @@ int main(int argc, char** argv) {
     // releasing W must not stop a walk the left stick is still making, nor
     // the other way round. Each side keeps its own record; every change
     // writes the OR of the two.
-    std::array<bool, static_cast<size_t>(sk::ButtonSlot::kCount)> keyHeld{};
+    // M126: a count, not a flag -- with mouse look on, A and the Left arrow
+    // both press the sidestep slot, and letting go of one must not release
+    // the other. `keySlot` is the slot each key pressed (-1: none), kept
+    // until that key is released so a held key never changes meaning (see
+    // engine/mouse_look_keys.h).
+    std::array<uint8_t, static_cast<size_t>(sk::ButtonSlot::kCount)> keyHeld{};
+    std::array<int, 256> keySlot;
+    keySlot.fill(-1);
     sk::GamepadMapper padMapper;
     sk::Gamepad gamepad;
 
@@ -3952,9 +3970,24 @@ int main(int argc, char** argv) {
         if (debugSuite.HandleKey(vkCode, down, ctrlDown, shiftDown)) return;
         if (debugSuite.capturingInput() && down) return;
 #endif
-        if (auto slot = sk::MapPcKeyToButtonSlot(vkCode)) {
-            keyHeld[static_cast<size_t>(*slot)] = down;
-            input.SetButton(*slot, down || padMapper.SlotHeld(*slot));
+        if (vkCode < 0 || vkCode >= static_cast<int>(keySlot.size())) return;
+        int& latched = keySlot[static_cast<size_t>(vkCode)];
+        if (down) {
+            if (latched >= 0) return;  // auto-repeat: already pressed
+            auto slot = sk::MapPcKeyToButtonSlot(vkCode);
+            if (!slot) return;
+            const sk::ButtonSlot pressed =
+                sk::MouseLookKeySlot(*slot, window.MouseLookActive(), input);
+            latched = static_cast<int>(pressed);
+            ++keyHeld[static_cast<size_t>(pressed)];
+            input.SetButton(pressed, true);
+        } else {
+            if (latched < 0) return;
+            const auto pressed = static_cast<sk::ButtonSlot>(latched);
+            latched = -1;
+            uint8_t& count = keyHeld[static_cast<size_t>(pressed)];
+            if (count > 0) --count;
+            input.SetButton(pressed, count > 0 || padMapper.SlotHeld(pressed));
         }
     });
     // M69: alt-tabbing away with a key held would otherwise leave that slot
@@ -3962,7 +3995,8 @@ int main(int argc, char** argv) {
     // M119: the pad lets go too. It is not read again until the window is
     // back in front, and a control still held then presses afresh.
     window.SetFocusLostCallback([&]() {
-        keyHeld.fill(false);
+        keyHeld.fill(0);
+        keySlot.fill(-1);
         padMapper.ReleaseAll([](sk::ButtonSlot, bool) {});
         input.ReleaseAll();
     });
@@ -4007,6 +4041,7 @@ int main(int argc, char** argv) {
 
     sk_bindings::MenuExecutable* lastMenu = nullptr;
     int creditsScroll = 0;
+    bool creditsBackHeldPrev = false;  // M127: GetButtonPrev(0x11)
 
     // M6: the 3D zone renderer, entered when a menu calls NewGame()/
     // LoadGame() (see MenuStack::RequestGameStart()). M7 added simple
@@ -4079,6 +4114,17 @@ int main(int argc, char** argv) {
     // decay toward the horizon. So a pan held after a fight stays held
     // until the player walks.
     bool gamePitchHeld = false;
+    // M125: mouse look. `gameMouseLookWanted` is set by every tick that
+    // reaches the free-movement branch -- the one place the turn and look
+    // keys are read -- and the loop captures the mouse only while it is.
+    // `gameMousePitchOwned`: the mouse moved the pitch last, so it keeps
+    // it -- no aim-assist, no drift back to level -- until a look key or
+    // the right stick takes it back. The two *LastTick values are what the
+    // mouse turned in the latest tick, for the frames drawn between ticks.
+    bool gameMouseLookWanted = false;
+    bool gameMousePitchOwned = false;
+    float gameMouseYawLastTick = 0.0f;
+    float gameMousePitchLastTick = 0.0f;
     // M73: `player+0xb30`, the movement fatigue accumulator `FUN_10045228`
     // owns. It is per-actor state on the player object in the real engine,
     // so it lives beside the camera here rather than inside the movement
@@ -4588,6 +4634,9 @@ int main(int argc, char** argv) {
     // original frame rate, the frame it produces. Everything below was the
     // message loop's own body until M119 split out the pacing around it.
     auto runTick = [&]() {
+        gameMouseLookWanted = false;  // M125: set again below if this tick is free movement
+        gameMouseYawLastTick = 0.0f;
+        gameMousePitchLastTick = 0.0f;
 #if SK_DEBUG_SUITE
         // SK_DEBUG_SUITE (M68): rolls the metrics frame and runs any command
         // queued by a keystroke since the last tick. Deliberately here, at
@@ -4792,10 +4841,6 @@ int main(int argc, char** argv) {
             // dies, or the next `Level.<field>` on the main menu reads
             // freed memory.
             stack.level().AttachZoneScript(nullptr);
-            // M101: the engine's quit teardown deletes the player object
-            // (FUN_1000e3c4 with keepPlayer 0), so the next session's player
-            // is born alive and mortal. This port keeps the object.
-            stack.player().ResetForNewSession();
             // Post-M120: and `current.sav` -- the next session is a New Game
             // (which clears it again) or a Load (which replaces it).
             stack.ClearLevelStates();
@@ -4815,6 +4860,16 @@ int main(int argc, char** argv) {
             gameZoneRegions.SetZone(nullptr);
             gameTileStamp.SetZone(nullptr);
             gameZone.reset();
+            // M101: the engine's quit teardown deletes the player object
+            // (FUN_1000e3c4 with keepPlayer 0), so the next session's player
+            // is born alive and mortal.
+            // M126: and empty-handed. This used to keep the object and clear
+            // only its death and quest fields, so a character who died (the
+            // death screen's back key is a QuitToMenu) handed their whole
+            // inventory to the next New Game. After the level's objects are
+            // gone, since a door and a creature hold a reference to the
+            // player; the hand-item pointers reset below are never read.
+            stack.ResetPlayerForNewSession();
             stack.SetCurrentLevelName(std::string());
             // M91: `engine + 0x6908` goes null with the level, and
             // GameActive() is exactly that pointer -- so mainmenu.s's
@@ -5904,6 +5959,38 @@ int main(int argc, char** argv) {
                 if (input.GetBoundButton(sk::Action::LookDown)) {
                     gameCamera.pitch += kPitchSpeed;
                     manualLook = true;
+                }
+                // M125: mouse look, the PC's version of the right stick --
+                // but analog, applied straight to the heading and the
+                // pitch instead of pressing TurnLeft/LookUp for a tick.
+                // A look key (or the stick, which presses the same ones)
+                // takes the pitch back from the mouse, so the aim-assist
+                // below works for whoever is not using it.
+                if (manualLook) gameMousePitchOwned = false;
+                {
+                    const sk::PcSettings& pc = pcSettings.settings();
+                    gameMouseLookWanted = pc.mouseLook();
+                    int mouseDx = 0, mouseDy = 0;
+                    window.TakeMouseDelta(&mouseDx, &mouseDy);
+                    if (!pc.mouseLook()) {
+                        gameMousePitchOwned = false;
+                    } else {
+                        const float k = pc.mouseLookRadiansPerCount();
+                        // Mouse right turns right (yaw decreases, see
+                        // above); mouse forward (dy < 0) looks up, as
+                        // LookUp does, by lowering the pitch.
+                        gameMouseYawLastTick = -static_cast<float>(mouseDx) * k;
+                        gameCamera.yaw += gameMouseYawLastTick;
+                        if (mouseDy != 0 && !manualLook) gameMousePitchOwned = true;
+                        if (gameMousePitchOwned) {
+                            const float before = gameCamera.pitch;
+                            gameCamera.pitch = std::clamp(
+                                gameCamera.pitch + static_cast<float>(mouseDy) * k,
+                                -sk::kMaxCameraPitch, sk::kMaxCameraPitch);
+                            gameMousePitchLastTick = gameCamera.pitch - before;
+                            manualLook = true;
+                        }
+                    }
                 }
                 // M72: the real actor tick tests the player's own velocity
                 // (`player+0x98`/`+0xa0` non-zero) to decide whether the
@@ -9233,16 +9320,30 @@ int main(int argc, char** argv) {
         }
 
         if (stack.creditsActive()) {
-            if (input.ConsumeJustPressedOrRepeat(sk::ButtonSlot::Up) && creditsScroll > 0) {
-                --creditsScroll;
+            // M127: `FUN_1006b3fc`, in its own order -- advance, draw, the
+            // end test, then the two skip keys. It rolls by itself; nothing
+            // scrolls it by hand.
+            creditsScroll = sk::CreditsAdvance(creditsScroll, sk_bindings::kAiFrameDeltaUnits);
+            RenderCredits(backbuffer, spriteArchive, stack.creditsLines(), creditsScroll);
+            bool close = false;
+            if (sk::CreditsEnded(creditsScroll,
+                                 static_cast<int>(stack.creditsLines().size()))) {
+                playPlayerSound(sk::kCreditsEndSound);  // past menu_sounds.txt: silent
+                close = true;
             }
-            if (input.ConsumeJustPressedOrRepeat(sk::ButtonSlot::Down)) ++creditsScroll;
-            if (input.ConsumeJustPressed(sk::ButtonSlot::LeftSelectionKey) ||
-                input.ConsumeJustPressed(sk::ButtonSlot::RightSelectionKey)) {
+            // Key 7 held, or the right softkey held across two frames.
+            const bool backHeld = input.GetButton(sk::ButtonSlot::RightSelectionKey);
+            if (input.GetButton(sk::ButtonSlot::Key7) || (backHeld && creditsBackHeldPrev)) {
+                playPlayerSound(sk::kCreditsSkipSound);
+                close = true;
+            }
+            creditsBackHeldPrev = backHeld;
+            if (close) {
                 stack.CloseCredits();
                 creditsScroll = 0;
+                creditsBackHeldPrev = false;
+                input.ClearPendingEdges();  // the held key is not also a press on the menu
             }
-            RenderCredits(backbuffer, stack.creditsLines(), creditsScroll);
             window.Present(backbuffer);
             return;
         }
@@ -9411,7 +9512,7 @@ int main(int argc, char** argv) {
 #endif
         padMapper.Update(pad, inGame && gameZone != nullptr, input,
                          [&](sk::ButtonSlot slot, bool held) {
-                             input.SetButton(slot, held || keyHeld[static_cast<size_t>(slot)]);
+                             input.SetButton(slot, held || keyHeld[static_cast<size_t>(slot)] > 0);
                          });
     };
 
@@ -9438,6 +9539,15 @@ int main(int argc, char** argv) {
     window.RunMessageLoop([&]() {
         if (window.ShouldClose()) return;
         pollGamepad();
+        // M125: the mouse is caught only while the last tick was free
+        // movement -- any menu, map, conversation or popup lets it go.
+        {
+            bool wantMouse = gameMouseLookWanted && inGame && gameZone != nullptr;
+#if SK_DEBUG_SUITE
+            if (debugSuite.capturingInput()) wantMouse = false;
+#endif
+            window.SetMouseLook(wantMouse);
+        }
         applyAspectToWindow();  // M120: only acts when Aspect Ratio or fullscreen changed
         const int fps = pcSettings.settings().frameRate();
         const bool originalRate = fps == sk::kFrameRateOriginal;
@@ -9461,6 +9571,28 @@ int main(int argc, char** argv) {
         const float alpha = std::chrono::duration<float>(now - lastTickAt).count() /
                             std::chrono::duration<float>(sk::GameClock::kTickInterval).count();
         gameplayFrames.Build(alpha, interpCamera, interpEntities, interpBillboards);
+        // M125: the mouse's share of the view is not interpolated. A frame
+        // between ticks is drawn up to a tick behind the latest one, which
+        // is invisible for walking and turning keys but makes a mouse feel
+        // like it drags the view through syrup. So the rotation the mouse
+        // put into the latest tick is applied in full (the lerp gave only
+        // `alpha` of it), and the motion since -- not yet seen by any tick
+        // -- is added on top. Skipped when the lerp snapped to the latest
+        // tick (a turn past its limit), which already has all of it.
+        if (window.MouseLookActive()) {
+            const sk::PcSettings& pc = pcSettings.settings();
+            const float k = pc.mouseLookRadiansPerCount();
+            const float rest = 1.0f - (std::min)(alpha, 1.0f);
+            int pendingDx = 0, pendingDy = 0;
+            window.PeekMouseDelta(&pendingDx, &pendingDy);
+            if (interpCamera.yaw != gameCamera.yaw) interpCamera.yaw += gameMouseYawLastTick * rest;
+            interpCamera.yaw -= static_cast<float>(pendingDx) * k;
+            if (gameMousePitchOwned) {
+                float pitch = interpCamera.pitch + static_cast<float>(pendingDy) * k;
+                if (interpCamera.pitch != gameCamera.pitch) pitch += gameMousePitchLastTick * rest;
+                interpCamera.pitch = std::clamp(pitch, -sk::kMaxCameraPitch, sk::kMaxCameraPitch);
+            }
+        }
         drawGameplayFrame(interpCamera, interpEntities, interpBillboards);
         if (fps == sk::kFrameRateVSync) window.WaitForCompositor();
     });

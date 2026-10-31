@@ -11634,7 +11634,317 @@ Three play reports, each traced to a function the port had approximated.
 - **Test**: m79 grows the cross-item swing check, m60 the stat line. Suite **105/105**.
 
 
+## M125 -- the plus that was a minus, the wall that vanished up close, and mouse look
+
+Three play reports and a feature request.
+
+- **The store's comparison column only ever showed a minus.** The two
+  sprite ids were the wrong way round. `FUN_100a0cec` picks `0x18` when
+  the shelf item's rating is *below* the equipped one's
+  (`rating < opponent ? 0x18 : 0x19`), and global.spr settles which is
+  which: slot 24 is a 6x6 **minus**, slot 25 a 6x6 **plus**. The port drew
+  24 for "better", so every upgrade showed a minus. Against starting gear
+  nearly everything in a shop is an upgrade, so a plus was never seen.
+  `kStoreBetterArrowSprite` is 25 and `kStoreWorseArrowSprite` 24 now, and
+  the store draw uses the constants instead of literals.
+- **Walking up to a wall cut part of it away and showed the level behind.**
+  `ClipNear` (M66) checked `n + 2 > capacity` before *every* input vertex,
+  reserving room for a kept vertex and a crossing even where only one gets
+  written. Every caller clips a triangle into 4 slots, so a triangle
+  ordered in / out / in reached its third vertex with `n == 3`, failed
+  `3 + 2 > 4` and dropped it: the clipped quad came back as a triangle and
+  half of it was never drawn. A wall face straddles the near plane whenever
+  it comes within about a tile of the eye at an angle, so this happened all
+  the time. Models close to the camera lost the same chunks. The guard is
+  now per write.
+  Measured with a scratch probe that stands the camera at the collision
+  limit (48.5 units) in front of every reachable wall edge, facing it head
+  on and turned +-0.6 rad, and counts pixels in the middle of the view
+  that nothing was drawn into: azra 380/1107 -> 0, crypt1 2988/9993 -> 0,
+  broken1 2308 -> 2. The few left in other zones are long dark corridors
+  that run out of draw distance, not holes beside the camera.
+  Raising `kNearPlane` (0.05 -> 0.15) had changed nothing, which is what
+  pointed away from precision and at the clipper.
+  **Two tracked dumps change**, and that is the fix showing up:
+  `door_closed.ppm` (a gap beside the door is filled) and
+  `entity_render_yaw270.ppm` (missing ceiling-beam triangles at the top
+  right are back). The other fifteen are byte-identical.
+- **Mouse look.** Only a controller could look around freely (the right
+  stick presses TurnLeft/Right and LookUp/Down). A fifth PC row, **Mouse
+  Look** (100%, 150%, 200%, 300%, Off, 50%, 75%; `mouselook=` in
+  `pc_settings.cfg`, labelled in all five languages), adds it for the mouse:
+  - **Input.** `Window` registers for raw mouse input (`WM_INPUT`, so no
+    pointer acceleration and no stop at the edge of the screen) and
+    accumulates relative counts while mouse look is active. 100% is
+    0.0022 rad a count. Clicks still arrive as `WM_LBUTTONDOWN`, so the
+    left button still attacks.
+  - **When it is active.** Only while the last tick reached the
+    free-movement branch, which is the one place the turn and look keys are
+    read. Any menu, the map, a conversation, a popup or the debug console
+    lets the mouse go. While it is active the pointer is hidden and
+    `ClipCursor`ed to the client area, and the clip follows a move, a
+    resize or fullscreen. Losing focus lets go at once.
+  - **Turning and looking.** Mouse x turns (`yaw -= dx * k`) and mouse y
+    tilts (`pitch += dy * k`, up looks up as LookUp does), applied in the
+    tick beside the keyboard turn and clamped to `kMaxCameraPitch`.
+  - **Who owns the pitch.** Vertical mouse motion gives the pitch to the
+    mouse (`gameMousePitchOwned`). It is then treated as manual look: no
+    aim-assist and no drift back to level, which is what a mouse player
+    expects. A look key, or the right stick (which presses the same
+    actions), takes it back, so keyboard and pad players keep the engine's
+    auto-aim exactly as before.
+  - **Between ticks.** Above the Original frame rate the interpolated
+    frame would show the mouse a tick late, which a mouse feels as lag. So
+    the rotation the mouse put into the latest tick is applied in full,
+    plus the counts no tick has consumed yet. This is skipped when the
+    lerp snapped (a turn past its limit).
+  - **Off** is the pre-M125 behaviour exactly: the pointer is free, and the
+    mouse is only the attack button.
+  - **Layout.** The row is appended after Fog. options.s starts its rows at
+    `SetStartCoord`'s 0x32 and steps 0xc, so the tenth row sits at y=158
+    and ends above the footer text at y=195. m119 checks this.
+- **Performance at high resolutions (question, no change).** See "Next
+  milestones" for the recommendation that came out of it.
+- **Test**: m119 grows the Mouse Look row (default, cycling and wrapping,
+  round trip, both rows after the script's own, the footer bound, every
+  label fitting at 136px). Suite **105/105**, soft-fail unchanged at 5.
+
+### Still open
+
+- No hands-on mouse-look playtest was possible from this session. It is
+  built, and the settings and row logic are tested, but the feel
+  (sensitivity, the between-tick extrapolation) needs a human.
+- No invert-Y option yet. It would be one more value on the row, or a
+  sixth row.
+
+
+## M126 -- A / D sidestep under mouse look, a new game's player is a new player, stamina checked, and the recording on the pool
+
+- **A / D sidestep while mouse look is on.** With the mouse turning, the
+  keyboard's turn keys move to sidestep, as in any mouse-look game
+  (`engine/mouse_look_keys.h`).
+  - **How it is applied.** At the key press: the slot a PC key would press
+    is swapped for the one SideStepLeft / SideStepRight is bound to, when it
+    is the slot TurnLeft / TurnRight is bound to. So Customize Controls
+    still decides both.
+  - **Keyboard only.** A controller's d-pad is untouched; it has a right
+    stick to turn with.
+  - **Only during mouse look.** Menus, the map and conversations still get
+    A / D as Left / Right.
+  - **Latching.** Each key now remembers the slot it pressed until it is
+    released, so a key held across a screen change cannot change meaning,
+    the way M119's pad mapper latches.
+  - **Counts.** `keyHeld` became a count, because A and the Left arrow now
+    press the same slot and releasing one must not release the other.
+  - m119 checks the swap, its absence without mouse look, and that it
+    follows a rebind.
+- **A dead character's items in the next New Game.** The death screen's
+  back key (`DeathMenuBack`) is `QuitToMenu()`, and the engine's quit
+  thread deletes the player object (`FUN_1000e3c4` with keepPlayer 0).
+  The port kept the object and cleared only its death and quest fields
+  (`ResetForNewSession`). So inventory, hands, gold, stats, level, XP,
+  spells and effects all walked into the next character.
+  - **The fix.** The teardown now does what the engine does:
+    `MenuStack::ResetPlayerForNewSession()` destroys the player, and every
+    item it owns, and builds a fresh one. The first session after launch
+    gets exactly such a player, and nothing at startup configures it.
+  - **Ordering.** It runs after the level's objects are destroyed, because
+    a door and a creature hold `PlayerExecutable&`.
+  - **Dangling references.** Everything in the port reaches the player
+    through `player()` on each use. The scripts' 19 `Player = GetPlayer();`
+    assignments are method locals, re-fetched per handler.
+  - **Not at `NewGame()`.** Character creation writes class, race and name
+    onto the player before `NewGame()` runs, so a reset there would erase
+    them.
+  - m101 Part 8 gives a character items, gold, a level and a story flag,
+    kills them, tears down, and checks that the new player matches a newly
+    built one.
+- **Stamina: checked against the binary, no change.** Every piece matches:
+  - **Moves.** The player vtable at 0x100fd044 has the four moves at
+    +0x1cc..+0x1d8, the drain `FUN_10045228` at +0x1dc, the step length at
+    +0x1e4, jump at +0x234 and attack at +0x288. The base moves end in the
+    +0x1dc call, so the drain fires once per direction held. The player's
+    second hook `FUN_1001f230` is the footstep timer, not a second drain.
+  - **The delta.** The frame delta (`FUN_1001afa4`, ScreenModeController
+    `+0xd4`) is **measured** time, not a constant: elapsed microseconds /
+    1000 (the `0x10624dd3` reciprocal), then `ms * 256 / 1000`, clamped to
+    4..64. A 40 ms frame is exactly 10 units, which is the port's
+    `kAiFrameDeltaUnits`. So per real second the device drained and
+    regenerated at the port's rates, even when it dropped frames.
+  - **Costs and regen.** Attack 4 after the cadence and swing gates, cast 3
+    only on a cast that happened, jump 5 only above 5, walking 2 per >0xc4
+    units per direction. Regen is `(Str+Wil)/15` per 0x200 units, plus the
+    Breton bonus, through the clamping setter `FUN_1004bb54`. All match
+    `FUN_10049b64` and the port line for line.
+  - **Rates.** With Str 40 / Wil 40, walking one way drains about 2.5 a
+    second and regen gives about 2.4, so it breaks even. Forward plus a
+    sidestep (more common now that A / D strafe) drains twice as fast, on
+    the device too. So does a controller stick held slightly off-axis,
+    which presses both a move and a strafe slot.
+- **Rendering: measured first.** A Release benchmark split `Render` into
+  recording (raycast, face build, transform, clip, project) and raster.
+  The time is now reported by `ZoneRenderer::lastTimings()`.
+  - **Before.** At 6x 16:9 (2218x1248, 12 threads) recording was only
+    **2.0-3.9 ms** of a 13.8-16.6 ms frame. M119's note that it was "most
+    of render3d" predates M123's raster work.
+  - **Parallel recording.** The faces and the entities are cut into
+    contiguous chunks recorded into separate sinks on `BandPool`, with the
+    sky and billboards as a last chunk. Every band replays the sinks in
+    chunk order, which is exactly the command list one sink would have
+    held. Each band also clears its own rows of the three per-pixel planes
+    (about 19 MB at 6x) instead of one thread clearing them all first.
+  - **Same pixels.** The image hash over the benchmark frames is unchanged
+    (`335f75d42aabd339`), and the native size keeps its direct, unchunked
+    path, so the tracked dumps are untouched.
+  - **Recording.** 0.6-1.9 ms at 6x.
+  - **Totals:**
+
+    | scene | 4x | 6x |
+    |---|---|---|
+    | azra start | 8.9 -> 7.2 ms | 16.6 -> 15.0 ms |
+    | snowline start | 7.8 -> 6.1 | 13.8 -> 12.4 |
+    | crypt1 start | 8.8 -> 6.2 | 14.9 -> 11.8 |
+
+  - **Front-to-back sort: tried, measured, dropped.** Sorting the opaque
+    triangles nearest first saved at most 0.5 ms of raster and cost about
+    as much to sort. In the towns (delfhide, dstar_e/w, twilite) it was
+    0.3-2.5 ms *slower*, because replaying in depth order jumps between
+    chunks and loses locality. It also changed tie pixels. There is little
+    overdraw to save: the engine's visibility raycast already emits tiles
+    roughly nearest first, and the depth test already runs before any
+    texture work.
+  - **What is left** is the raster itself, 10-14 ms at 6x: per-pixel
+    texture, palette and fog work over 2.8 M pixels. The next real step is
+    the GPU path in "Next milestones".
+- **Test**: m119 grows the key swap (86/86), m101 the new-session player
+  (57/57). Suite **105/105**, soft-fail unchanged at 5. Tracked dumps
+  unchanged since M125.
+
+### Still open
+
+- No hands-on playtest of the A / D swap or the death -> New Game path in
+  the running game; both are unit-tested.
+- The controller's left stick folds each axis to digital independently, so
+  a slightly diagonal push both walks and strafes, which doubles the
+  fatigue drain. A radial deadzone would fix the feel without touching the
+  simulation.
+
+
+## M127 -- the credits as the engine rolls them, and what multiplayer actually is
+
+- **The credits screen.** It was an M0-era placeholder: a navy fill,
+  left-aligned light text, Up/Down to scroll, Enter or Esc to leave. It is
+  now the engine's screen mode 0xb (`engine/credits_roll.h`).
+  - **The load.** `ShowCredits()` (case 0x15) is `FUN_1006b168`. It reads
+    `credits.txt` one `fgets(buf, 0x100)` at a time and turns every '\r'
+    and '\n' into a **space**, so a CRLF line keeps two trailing spaces,
+    and they count when the line is centred. It is re-read on every visit,
+    because the close frees the list. With no file the screen does not
+    open at all, where the port used to show "(credits.txt not found)".
+  - **The frame** is `FUN_1006b3fc`:
+    - **Backdrop.** global.spr **slot 20** (engine+0x44b0, a 176x208
+      parchment) at (0,0).
+    - **Scrolling.** The offset grows by `frameDelta >> 2` a frame: 2px a
+      tick, 50px a second, with no manual scrolling.
+    - **Lines.** 15px apart from `-scroll`, drawn only for 1 <= y <= 164
+      (`y - 1U < 0xa4`, which keeps them clear of the scroll's bottom
+      ornament).
+    - **Text.** `FUN_1008f97c(gc, line, y, 0x752, 1, 1, 0, 0)`. Read off
+      `FUN_1008f97c`/`FUN_10022d48`: the first 1 is the centred shadow (one
+      pixel below, in 0xb1/0x9c/0x65), and the last argument picks
+      LegendFont, so the second 1 (bold) is never applied. The colour is
+      the static-item **brown 0x752**.
+  - **End and skip.** The roll ends when the scroll passes `lineCount * 15`
+    and plays sound 0xb0. That slot is past the front end's 102-entry
+    `menu_sounds.txt`, so it is silent. **Key 7 held, or the right softkey
+    held across two frames**, skips it with sound 100 (menu1.wav). On PC
+    that is Q or Esc. Enter (the d-pad centre) does not skip, and never did
+    on the device.
+  - **Test**: new `m127_credits_smoke` (9 checks: the arithmetic, the
+    visible band, the end test, the CR/LF spaces, a real load, a re-read
+    rather than an append, no file -> no screen). A frame rendered with the
+    same calls was checked by eye: brown, centred, shadowed text on the
+    parchment, clear of its ornaments.
+- **Multiplayer: what the original is** (researched for a recommendation;
+  nothing implemented).
+  - **Co-op through the campaign, not deathmatch.** It is Bluetooth, up to
+    four handsets: host plus Reject1..4 slots in `hostgamemenu.s`, and
+    `JoinGame(0..3)` in `joingamemenu.s`. Each player brings a character
+    from their own save: Multiplayer is only enabled when
+    `GameAvailableForLoad()`, and the prompt is string 4022 "Use character
+    from saved game?". `ffarena` is a story zone (it has Azra's
+    conversation and loot), not a PvP map. Strings 0-19 (KILLCAM,
+    Brecourt, Pavlov) are leftovers from the engine's earlier WWII shooter.
+  - **Every handset runs the whole game; events are mirrored.** The
+    scripts are already written for that model: `IsMultiplayerClient()`
+    gates host-only spawns (crypt1.s's Umbra, glcrcrwl's control scripts,
+    dstar_e's monsters), and `MirrorMethod` (33 sites),
+    `DestroyObjectMirror`, `SetPositionMirror` and `DoorOpened` replicate
+    events. The wire protocol is the **48-entry handler table at
+    0x100fdf34**, all in the 0x10038000-0x1003c000 block, about 4,100
+    decompiled lines in all. Known entries include 0x12, the remote shot
+    replay (`FUN_1003c45c`); 0x1d, the attached weapon; and 0x28, the spawn
+    override with its level name. The transport is `GAMECOMMS`
+    (engine+0x5cc), gated by engine+0x5c0/+0x5d0.
+  - See "Next milestones" for the plan this suggests.
+
+
 ## Next milestones (not yet started)
+
+**Multiplayer (M127's question).** The cheapest *real* version is the
+original's own design, carried over a socket instead of Bluetooth:
+
+- **Each process runs its own full game**, with its own `GetPlayer()`, and
+  the 48 packet types are mirrored between them. Nothing in the port's
+  one-player-per-process structure has to change. The scripts' host gates
+  and mirror calls already exist; the natives they call are
+  already there as counted single-player no-ops.
+- **Transport.** UDP broadcast on the LAN for "Looking for hosts", plus
+  direct IP for internet play: no servers, no accounts, no running cost.
+  The Bluetooth name becomes the player name.
+- **Order of work:**
+  1. Transcribe the handler table into a message catalogue (a doc).
+  2. The transport and the session natives (`MPPreHost`, `MPBeginHost`,
+     `MPHostConnect`, `MPHostPlay`, `MPBeginJoin`, `JoinGame`,
+     `RejectClient`, `CloseMP*Menu`, `IsMultiplayer*`, `GetBluetooth*`)
+     behind the menus that already exist.
+  3. Remote players: position, heading, animation and weapon each tick,
+     drawn as actors and on the HUD.
+  4. The mirrors and the host-authoritative spawns, combat and level
+     transitions.
+- **Dearer alternatives.**
+  - A host-only simulation streaming to thin clients would mean giving one
+    process several player objects, menus and conversations. Every
+    `GetPlayer()` and the whole menu stack assume one.
+  - A "no code" stopgap (Parsec-style remote play) gives a second person
+    the *same* hero, not their own.
+
+
+**High-resolution performance (M125's question).** *M126 measured this and
+did items 1 and 2. Its numbers replace the reasoning below: recording was
+only 2-4 ms of a 12-17 ms 6x frame, parallel recording is in, and the
+front-to-back sort was tried and dropped as a net loss. See M126.* Where the
+time goes, from M119/M123's measurements:
+- **Culling is mostly there already.** The engine's own raycast visibility
+  is a tile-level occlusion cull, wall faces are culled by camera side, and
+  the near clip runs per triangle. What grows with Resolution is
+  **per-pixel** work, and 6x is 36x the pixels. More triangle culling would
+  barely move it.
+- **The rasterizer is already multi-threaded.** Rows are split into bands,
+  one per core (M119). What is still serial is the *recording* pass, which
+  is most of `render3d` at 6x.
+
+So, in order:
+1. Record entities in parallel chunks.
+2. Sort opaque surfaces front to back, so the depth test rejects
+   overdrawn pixels before the texture/palette/fog work.
+3. Only if 4K or more than 6x is wanted: a GPU path (D3D11). It would
+   upload `.ztx` as an index texture and `.zlu`/`.zfg` as lookup textures,
+   and do the rung, fog-nibble and chroma-key lookups in a pixel shader.
+   It would be large, and it would have to sit beside the software
+   rasterizer, which stays the Original path.
+
+Measure on `build_dist.bat` output, never Debug.
 
 Roughly in priority order for reaching "actually playable," not commitments:
 

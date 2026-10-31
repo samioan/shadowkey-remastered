@@ -2,6 +2,8 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
+#include <memory>
 #include <cmath>
 #include <vector>
 
@@ -454,6 +456,19 @@ struct ViewVertex {
 // `capacity` is not defensive dressing: it is the invariant the old code
 // stated in prose and got wrong, now stated somewhere the compiler and the
 // running program can both see it.
+//
+// M125 -- **the guard is per write, not per input vertex.** M66's version
+// checked `n + 2 > capacity` before every vertex, reserving room for a kept
+// vertex *and* a crossing even where only one of them is written. A
+// triangle clips to at most 4 vertices, and every caller passes exactly 4,
+// so the case "first vertex in, second out, third in" -- out, crossing,
+// crossing, then the third vertex -- reached the third vertex with n == 3,
+// failed `3 + 2 > 4` and dropped it. The polygon came back as a triangle
+// instead of a quad and half the clipped area was never drawn. That is the
+// wall that vanished as the player walked up to it (one of a face's two
+// triangles straddles the near plane whenever a wall comes within about a
+// tile of the eye at an angle), with the level showing through the gap,
+// and the same chunks missing from any model close to the camera.
 constexpr float kNearPlane = 0.05f;  // tile units
 
 int ClipNear(const ViewVertex* in, int count, ViewVertex* out, int capacity) {
@@ -463,9 +478,12 @@ int ClipNear(const ViewVertex* in, int count, ViewVertex* out, int capacity) {
         const ViewVertex& b = in[(i + 1) % count];
         bool aIn = a.forward >= kNearPlane;
         bool bIn = b.forward >= kNearPlane;
-        if (n + 2 > capacity) break;  // unreachable for a planar input; see above
-        if (aIn) out[n++] = a;
+        if (aIn) {
+            if (n >= capacity) break;  // unreachable for a planar input; see above
+            out[n++] = a;
+        }
         if (aIn != bIn) {
+            if (n >= capacity) break;
             float t = (kNearPlane - a.forward) / (b.forward - a.forward);
             ViewVertex m;
             m.right = a.right + (b.right - a.right) * t;
@@ -1387,7 +1405,23 @@ void ZoneRenderer::Render(Backbuffer& backbuffer, const Zone& zone, const Camera
     // in practice covers the frame -- the mesh is a closed dome around the
     // camera. (The colour is this port's own; `engine+0x630`'s value was
     // never traced.)
-    backbuffer.Fill(kBackgroundFill);
+    const auto frameStart = std::chrono::steady_clock::now();  // M126: lastTimings()
+    // M119: at the original 176x208 the frame is drawn in one pass on this
+    // thread, exactly as it always was. A higher Resolution multiplies the
+    // pixels by the square of its scale, so there the passes are recorded
+    // and the rows split into bands rasterized on the shared worker pool --
+    // same pixels, same arithmetic, a fraction of the time.
+    const int height = backbuffer.height();
+    int bands = 1;
+    if (backbuffer.width() > Backbuffer::kWidth) {
+        bands = std::max(1, std::min(height / 16, BandPool::Shared().threadCount() * 3));
+        if (bandLimit > 0) bands = std::min(bands, bandLimit);
+    }
+    // M126: and in bands, each band clears its own rows of all three planes
+    // just before it draws them (see the dispatch below), instead of this
+    // thread clearing ~19MB at 6x before anything else can start.
+    const bool clearInBands = bands > 1;
+    if (!clearInBands) backbuffer.Fill(kBackgroundFill);
     // M85: the object-ID buffer starts every frame empty, the way
     // `FUN_10015354`'s `memset(engine+0x5b8, 0, 0x8f00)` clears the real
     // one (0x8f00 == 176 * 208) before the scene is drawn.
@@ -1398,11 +1432,16 @@ void ZoneRenderer::Render(Backbuffer& backbuffer, const Zone& zone, const Camera
     // between frames instead of reallocated. Every entry of both is reset
     // here, so a frame never sees the previous one's values either way.
     const size_t pixelCount = static_cast<size_t>(backbuffer.width()) * backbuffer.height();
-    m_ObjectIds.assign(pixelCount, static_cast<uint8_t>(0));
     m_IdWidth = backbuffer.width();
     m_IdHeight = backbuffer.height();
     std::vector<float>& depthBuffer = m_DepthBuffer;
-    depthBuffer.assign(pixelCount, 0.0f);
+    if (clearInBands) {
+        m_ObjectIds.resize(pixelCount);
+        depthBuffer.resize(pixelCount);
+    } else {
+        m_ObjectIds.assign(pixelCount, static_cast<uint8_t>(0));
+        depthBuffer.assign(pixelCount, 0.0f);
+    }
 
     // M41: the real visible-tile set. `TileGrid_RaycastVisibility` runs
     // once per frame in the original, immediately before its face-drawing
@@ -1447,7 +1486,15 @@ void ZoneRenderer::Render(Backbuffer& backbuffer, const Zone& zone, const Camera
 
     // The frame's four passes -- sky, tile faces, models, billboards -- in
     // the engine's order, into `sink` (see TriangleSink).
-    auto submitAll = [&](TriangleSink& sink) {
+    //
+    // M126: over a range of the faces and of the entities, and the sky and
+    // billboards only when `tail` is set -- so the recording can be split
+    // into chunks and run on the worker pool. Replaying the chunks in the
+    // order they cover rebuilds exactly the command list one call over
+    // everything would have recorded, so the frame is the same pixel for
+    // pixel. See the dispatch at the bottom of Render().
+    auto submitAll = [&](TriangleSink& sink, size_t faceBegin, size_t faceEnd,
+                         size_t entityBegin, size_t entityEnd, bool tail) {
         // M70: the skybox (<zone>.zsk), first and underneath everything.
         //
         // In `Render3DScene` this draw and the flat background fill above are
@@ -1465,7 +1512,8 @@ void ZoneRenderer::Render(Backbuffer& backbuffer, const Zone& zone, const Camera
         // camera-relative, which is the same thing.
         // M123: submitted further down -- see "the sky, last".
 
-        for (const Face& face : faces) {
+        for (size_t faceIndex = faceBegin; faceIndex < faceEnd; ++faceIndex) {
+            const Face& face = faces[faceIndex];
             const SurfaceRecord& sur = zone.surface(face.surIndex);
 
             ViewVertex vv[4];
@@ -1580,7 +1628,7 @@ void ZoneRenderer::Render(Backbuffer& backbuffer, const Zone& zone, const Camera
         // header comment for what's simplified here (frame 0/skin 0 only,
         // no orientation, no distance culling).
         if (models) {
-            for (size_t entityIndex = 0; entityIndex < entities.size(); ++entityIndex) {
+            for (size_t entityIndex = entityBegin; entityIndex < entityEnd; ++entityIndex) {
                 const PlacedEntity& pe = entities[entityIndex];
                 const Model* model = entityModels[entityIndex];
                 if (!model) continue;
@@ -1626,6 +1674,8 @@ void ZoneRenderer::Render(Backbuffer& backbuffer, const Zone& zone, const Camera
             }
         }
 
+        if (!tail) return;
+
         // M123: **the sky, last of the opaque passes, and only where nothing
         // opaque landed.** The engine draws it first as the frame clear: it
         // writes no depth and everything else covers it. Every surface and
@@ -1653,27 +1703,70 @@ void ZoneRenderer::Render(Backbuffer& backbuffer, const Zone& zone, const Camera
                             cosPitch, sinPitch, focalX, focalY);
         }    };
 
-    // M119: at the original 176x208 the frame is drawn in one pass on this
-    // thread, exactly as it always was. A higher Resolution multiplies the
-    // pixels by the square of its scale, so there the passes are recorded
-    // once and the rows split into bands rasterized on the shared worker
-    // pool -- same pixels, same arithmetic, a fraction of the time.
-    const int height = backbuffer.height();
-    int bands = 1;
-    if (backbuffer.width() > Backbuffer::kWidth) {
-        bands = std::max(1, std::min(height / 16, BandPool::Shared().threadCount() * 3));
-        if (bandLimit > 0) bands = std::min(bands, bandLimit);
-    }
+    using Clock = std::chrono::steady_clock;
+    const auto msSince = [](Clock::time_point t) {
+        return std::chrono::duration<double, std::milli>(Clock::now() - t).count();
+    };
     if (bands == 1) {
         TriangleSink direct(backbuffer, depthBuffer, /*recording=*/false);
-        submitAll(direct);
+        submitAll(direct, 0, faces.size(), 0, entities.size(), /*tail=*/true);
+        m_Timings = Timings{msSince(frameStart), 0.0};
         return;
     }
-    TriangleSink recorded(backbuffer, depthBuffer, /*recording=*/true);
-    submitAll(recorded);
-    BandPool::Shared().Run(bands, [&](int band) {
-        recorded.Replay(RowSpan{height * band / bands, height * (band + 1) / bands});
+
+    // M126: the recording on the pool too. It was a single thread's work
+    // ahead of the bands -- the visibility raycast and face build are still
+    // (they are cheap, and the raycast is a serial march), but transforming,
+    // clipping and projecting every triangle is split into chunks: the
+    // faces in contiguous runs, the entities in contiguous runs, and the
+    // sky and billboards as one last chunk. Each chunk records into its own
+    // sink; every band then replays the sinks in chunk order, which is
+    // exactly the command sequence a single sink would have held. Nothing a
+    // chunk reads is written during recording: the zone and models are
+    // const (and resolved above), and the object-ID buffer is only written
+    // by the replay.
+    const int threads = std::max(1, BandPool::Shared().threadCount());
+    const size_t faceChunks =
+        std::min<size_t>(static_cast<size_t>(threads), std::max<size_t>(1, faces.size() / 64));
+    // Entities vary far more in cost (most are behind the camera and leave
+    // at the first test, a few are big models), so they get more, smaller
+    // chunks for the pool to balance.
+    const size_t entityChunks = models ? std::min<size_t>(static_cast<size_t>(threads) * 2,
+                                                          std::max<size_t>(1, entities.size() / 8))
+                                       : 0;
+    const size_t chunkCount = faceChunks + entityChunks + 1;
+    std::vector<std::unique_ptr<TriangleSink>> chunks(chunkCount);
+    for (auto& chunk : chunks) {
+        chunk = std::make_unique<TriangleSink>(backbuffer, depthBuffer, /*recording=*/true);
+    }
+    BandPool::Shared().Run(static_cast<int>(chunkCount), [&](int c) {
+        const size_t i = static_cast<size_t>(c);
+        TriangleSink& sink = *chunks[i];
+        if (i < faceChunks) {
+            submitAll(sink, faces.size() * i / faceChunks, faces.size() * (i + 1) / faceChunks, 0, 0,
+                      /*tail=*/false);
+        } else if (i < faceChunks + entityChunks) {
+            const size_t e = i - faceChunks;
+            submitAll(sink, 0, 0, entities.size() * e / entityChunks,
+                      entities.size() * (e + 1) / entityChunks, /*tail=*/false);
+        } else {
+            submitAll(sink, 0, 0, 0, 0, /*tail=*/true);
+        }
     });
+    m_Timings.recordMs = msSince(frameStart);
+    const Clock::time_point rasterStart = Clock::now();
+    BandPool::Shared().Run(bands, [&](int band) {
+        const RowSpan rows{height * band / bands, height * (band + 1) / bands};
+        const size_t width = static_cast<size_t>(backbuffer.width());
+        const size_t first = static_cast<size_t>(rows.begin) * width;
+        const size_t count = static_cast<size_t>(rows.end - rows.begin) * width;
+        std::fill_n(backbuffer.Row(rows.begin), count, kBackgroundFill);
+        std::fill_n(depthBuffer.begin() + static_cast<std::ptrdiff_t>(first), count, 0.0f);
+        std::fill_n(m_ObjectIds.begin() + static_cast<std::ptrdiff_t>(first), count,
+                    static_cast<uint8_t>(0));
+        for (const auto& chunk : chunks) chunk->Replay(rows);
+    });
+    m_Timings.rasterMs = msSince(rasterStart);
 
 }
 

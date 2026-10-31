@@ -191,8 +191,14 @@ constexpr int kStoreQuantityLabelStringId = 3040;
 // `buysell.s` assigns to image_item_active/image_item_dormant at the top
 // of OnDisplay and then never uses itself, because the native renderer
 // (FUN_100a0cec) is what picks between them.
-constexpr int kStoreBetterArrowSprite = 24;
-constexpr int kStoreWorseArrowSprite = 25;
+//
+// CORRECTED: these were swapped. FUN_100a0cec picks 0x18 when the shelf
+// rating is *below* the equipped one and 0x19 otherwise, and the sprites
+// themselves settle it: slot 24 is a 6x6 minus, slot 25 a 6x6 plus. With
+// the two reversed every upgrade drew a minus -- and against starting
+// gear nearly everything in a shop is an upgrade, so a plus was never seen.
+constexpr int kStoreBetterArrowSprite = 25;  // plus
+constexpr int kStoreWorseArrowSprite = 24;   // minus
 
 // M64: the sound FUN_10044618 plays when a level is gained -- a literal
 // 0x57 in the engine, and slot 87 of every zone's `<zone>_sounds.txt` is

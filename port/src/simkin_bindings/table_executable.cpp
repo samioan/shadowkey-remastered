@@ -355,8 +355,9 @@ TableExecutable::CellCompare TableExecutable::CompareCell(int row, int col) cons
     //     subject's own products.dat armour slot;
     //   * an empty hand, a Consumable in it, or an item of a different
     //     category means no arrow at all;
-    //   * equal ratings draw a mark of their own, and otherwise sprite 24
-    //     when the shelf is better and 25 when it is worse.
+    //   * equal ratings draw a mark of their own, and otherwise sprite 25
+    //     (plus) when the shelf is better and 24 (minus) when it is worse
+    //     -- the engine's `rating < opponent ? 0x18 : 0x19`.
     const TableCell* cell = PeekCell(static_cast<size_t>(row), static_cast<size_t>(col));
     if (!cell || !cell->comparison) return CellCompare::None;
     const int category = CellItemType(*cell);

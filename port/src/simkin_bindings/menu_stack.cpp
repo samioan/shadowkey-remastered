@@ -1,3 +1,4 @@
+#include "engine/credits_roll.h"
 #include "simkin_bindings/menu_stack.h"
 
 #include <algorithm>
@@ -97,6 +98,11 @@ MenuStack::MenuStack(std::string scriptRoot, skInterpreter& interpreter,
 }
 
 MenuStack::~MenuStack() = default;
+
+void MenuStack::ResetPlayerForNewSession() {
+    m_Player.reset(new PlayerExecutable(m_Strings, m_Sounds, m_Audio));
+    m_Player->AttachStack(*this);
+}
 
 bool MenuStack::HasGlobalVariable(const skString& name) const {
     // `skInterpreter::getGlobalVariables()` is the same table
@@ -470,15 +476,23 @@ void MenuStack::RequestGameStart(std::string zoneName) {
 }
 
 void MenuStack::ShowCredits() {
-    if (m_CreditsLines.empty()) {
-        std::ifstream f(m_ScriptRoot + "/credits.txt");
-        std::string line;
-        while (std::getline(f, line)) {
-            if (!line.empty() && line.back() == '\r') line.pop_back();
-            m_CreditsLines.push_back(line);
+    // M127: `FUN_1006b168` (engine/credits_roll.h). Re-read on every visit
+    // -- the close frees the list -- one `fgets(buf, 0x100)` at a time, with
+    // '\r' and '\n' kept as spaces. No file, no screen: the engine waits
+    // 10ms and leaves the screen mode alone.
+    m_CreditsLines.clear();
+    std::ifstream f(m_ScriptRoot + "/credits.txt", std::ios::binary);
+    if (!f) return;
+    std::string raw;
+    char ch = 0;
+    while (f.get(ch)) {
+        raw.push_back(ch);
+        if (ch == '\n' || raw.size() == 0xff) {
+            m_CreditsLines.push_back(sk::CreditsLineFromRaw(std::move(raw)));
+            raw.clear();
         }
-        if (m_CreditsLines.empty()) m_CreditsLines.push_back("(credits.txt not found)");
     }
+    if (!raw.empty()) m_CreditsLines.push_back(sk::CreditsLineFromRaw(std::move(raw)));
     m_CreditsActive = true;
 }
 

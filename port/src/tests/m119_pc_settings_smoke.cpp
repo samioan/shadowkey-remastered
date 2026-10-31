@@ -34,6 +34,7 @@
 #include "engine/frame_interpolation.h"
 #include "engine/gamepad_map.h"
 #include "engine/input_state.h"
+#include "engine/mouse_look_keys.h"
 #include "engine/pc_settings.h"
 #include "graphics/backbuffer.h"
 #include "graphics/bitmap_font.h"
@@ -149,6 +150,49 @@ int main(int argc, char** argv) {
         sk::PcSettingsStore missing("port/build/m119_no_such_file.cfg");
         Check(!missing.Load() && missing.settings().originalFrameRate(),
               "a missing file is a first run");
+
+        // M125: Mouse Look -- on at 100% by default, Off restores the old
+        // behaviour, and it round-trips by value.
+        {
+            sk::PcSettingsStore m;
+            Check(m.settings().mouseLook() && m.settings().mouseLookPercent() == 100 &&
+                      m.RowText(4, 0) == "Mouse Look: 100%",
+                  "Mouse Look defaults to on, 100%");
+            m.Cycle(4, 4);
+            Check(!m.settings().mouseLook() && m.RowText(4, 0) == "Mouse Look: Off" &&
+                      m.RowText(4, 2) == "Mausblick: Aus",
+                  "-> 150% -> 200% -> 300% -> Off");
+            m.Cycle(4, -5);
+            Check(m.settings().mouseLookPercent() == 75 &&
+                      std::fabs(m.settings().mouseLookRadiansPerCount() -
+                                sk::kMouseLookRadiansPerCount * 0.75f) < 1e-7f,
+                  "and wraps backwards to 75%, scaling the sensitivity");
+            sk::PcSettingsStore mw(path);
+            mw.Cycle(4, 4);  // Off
+            sk::PcSettingsStore mr(path);
+            Check(mr.Load() && !mr.settings().mouseLook(), "Off is written and reads back");
+            std::remove(path.c_str());
+        }
+
+        // M126: with mouse look on, the turn keys sidestep -- through the
+        // binding table, and only then.
+        {
+            sk::InputState keys;
+            using S = sk::ButtonSlot;
+            Check(sk::MouseLookKeySlot(S::Left, true, keys) == S::Key4 &&
+                      sk::MouseLookKeySlot(S::Right, true, keys) == S::Key6,
+                  "mouse look: A / D (Left / Right) press the sidestep slots");
+            Check(sk::MouseLookKeySlot(S::Left, false, keys) == S::Left &&
+                      sk::MouseLookKeySlot(S::Up, true, keys) == S::Up &&
+                      sk::MouseLookKeySlot(S::Key4, true, keys) == S::Key4,
+                  "without it they turn, and every other key is untouched");
+            keys.Rebind(sk::Action::SideStepLeft, S::Key7);
+            keys.Rebind(sk::Action::TurnRight, S::Key9);
+            Check(sk::MouseLookKeySlot(S::Left, true, keys) == S::Key7 &&
+                      sk::MouseLookKeySlot(S::Key9, true, keys) == S::Key6 &&
+                      sk::MouseLookKeySlot(S::Right, true, keys) == S::Right,
+                  "and it follows Customize Controls");
+        }
         std::remove(path.c_str());
 
         sk::PcSettings autoRes;
@@ -252,9 +296,22 @@ int main(int argc, char** argv) {
         for (size_t i = 0; i < rows.size(); ++i) {
             if (rows[i].pcSetting == 4) fogRow = static_cast<int>(i);
         }
-        Check(rows.size() == plain.size() + 1 && fogRow == static_cast<int>(rows.size()) - 1,
-              "one row is added, Fog, after the script's last: " + std::to_string(rows.size()) +
-                  " rows");
+        // M125: and Mouse Look, the fifth, after it.
+        int mouseRow = -1;
+        for (size_t i = 0; i < rows.size(); ++i) {
+            if (rows[i].pcSetting == 5) mouseRow = static_cast<int>(i);
+        }
+        Check(rows.size() == plain.size() + 2 && fogRow == static_cast<int>(rows.size()) - 2 &&
+                  mouseRow == static_cast<int>(rows.size()) - 1,
+              "two rows are added, Fog then Mouse Look, after the script's last: " +
+                  std::to_string(rows.size()) + " rows");
+        Check(RowLabel(rows[mouseRow], strings) == "Mouse Look: 100%",
+              "Mouse Look reads its default, 100%");
+        // options.s's rows start at SetStartCoord's 0x32 and step 0xc; the
+        // last must end above its footer text at y=195.
+        Check(0x32 + mouseRow * 0xc + 12 < 195,
+              "the last row still ends above the footer (y " +
+                  std::to_string(0x32 + mouseRow * 0xc) + ")");
         Check(resRow >= 1 && aspectRow == resRow + 1 && rateRow == resRow + 2 &&
                   rows[resRow - 1].kind == Menu::RowKind::Slider,
               "the three rows sit straight after the Music slider");
@@ -309,9 +366,11 @@ int main(int argc, char** argv) {
         // options.s's own handlers rebuild the screen with ClearMenu(); Init();.
         call(options, "SetGerman");
         options->EnsurePcSettingRows();
-        Check(options->rows().size() == plain.size() + 1 &&  // M123: + Fog
+        Check(options->rows().size() == plain.size() + 2 &&  // M123: + Fog, M125: + Mouse Look
                   options->rows()[resRow].pcSetting == 1 &&
-                  RowLabel(options->rows().back(), strings) == "Nebel: Original" &&
+                  RowLabel(options->rows()[options->rows().size() - 2], strings) ==
+                      "Nebel: Original" &&
+                  RowLabel(options->rows().back(), strings) == "Mausblick: 100%" &&
                   RowLabel(options->rows()[resRow], strings) == "Aufl\xF6sung: Original" &&
                   RowLabel(options->rows()[aspectRow], strings) == "Format: 16:9" &&
                   RowLabel(options->rows()[rateRow], strings) == "Bildrate: 60",
@@ -356,6 +415,18 @@ int main(int argc, char** argv) {
                     sk::PcSettingsStore probe;
                     probe.Set(s);
                     const std::string t = probe.RowText(1, lang);
+                    if (sk::BitmapFont::TextWidth(t) > widest) {
+                        widest = sk::BitmapFont::TextWidth(t);
+                        widestText = t;
+                    }
+                }
+                for (int i = 0; i < sk::kFogOptionCount + sk::kMouseLookOptionCount; ++i) {
+                    sk::PcSettings s;
+                    const bool fog = i < sk::kFogOptionCount;  // M123 / M125 rows
+                    if (fog) s.fogIndex = i; else s.mouseLookIndex = i - sk::kFogOptionCount;
+                    sk::PcSettingsStore probe;
+                    probe.Set(s);
+                    const std::string t = probe.RowText(fog ? 3 : 4, lang);
                     if (sk::BitmapFont::TextWidth(t) > widest) {
                         widest = sk::BitmapFont::TextWidth(t);
                         widestText = t;

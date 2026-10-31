@@ -44,6 +44,8 @@ CONTROLS
   Doing things
 
     E                use - doors, people, chests, anything you can pick up
+    Mouse            turn and look around (Options -> Mouse Look). While
+                     it is on, A / D sidestep instead of turning.
     Left mouse       attack with your right hand
     Q                attack with your left hand
     G                cycle what is in your right hand
@@ -102,6 +104,13 @@ N-Gage drew it. Enter or Right steps a row forward, Left steps it back.
   Frame Rate     Original (25), V-Sync, 30 to 240, or Unlimited. The game
                  still runs at its original 25 steps a second, so nothing
                  plays differently; the frames in between are interpolated.
+  Fog            Original, thicker (150%, 200%), thinner (75%, 50%, 25%)
+                 or Off. Thinner fog also draws further.
+  Mouse Look     100% (the default), 150%, 200%, 300%, 50%, 75% or Off.
+                 The mouse turns you and tilts the view while you play; the
+                 pointer is hidden and held in the window until a menu, the
+                 map or a conversation opens. Off leaves the mouse as just
+                 the attack button.
 
 They are kept in user\pc_settings.cfg.
 
