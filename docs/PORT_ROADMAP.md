@@ -13099,3 +13099,57 @@ into that file too, unchanged, with zero per-call-site changes anywhere
 else in the codebase. Meant for reviewing what a real play session hit
 that isn't implemented yet without copying console text by hand --
 gitignored, overwritten fresh each run.
+
+## M134 -- consumable stacks, Rat's Eye, and the Delfran's Hideout gates
+
+Reported from the same `delfhide` playtest.
+
+### Using one of a stack used all of it
+
+Every consumable's OnUse ends in `DestroyObject(self)`, which for a carried
+item is the player's `+0x174`, `FUN_100451ac`:
+
+    if (FUN_1006d508(item) == 4 && item->+0x1c4 - 1 > 0)
+        FUN_1002ecd8(item, item->+0x1c4 - 1);    // SetQuantity: one fewer
+    else
+        ...unlink from the inventory, the hands and the queues...
+
+`PlayerExecutable::RemoveItem` marked the whole object for removal, so a
+stack of five healing potions -- drunk from the left hand or from the
+inventory's Use row -- went in one swallow. The script's `RemoveItem`
+(case 0x4a) and selling one of a stack reach the same slot and now take
+one too. The inventory row still disappears on Use until the list is
+redrawn: `inventory.s`'s UseItem removes it itself (M103).
+
+### "Mystic Might" from a healing potion
+
+Not a bug. `items/ratseye.s` is the only item that arms periodic kind 1
+(the HUD's "Mystic Might:" line), and it draws the same icon, 210, as
+every potion. The rats at the start drop them, and the first consumable
+picked up goes to the empty left hand.
+
+### Gates A and B
+
+`delfhide/Gate_Open_A.s`'s OpenGate is `ClearMenu();
+Level.GetEntity("GTA").DestroyObjectMirror(...)`. GTA and GTB are
+`!portcullis` placements: door class (category 11) with no script, so the
+port drew them as scenery and never registered their `.ent` names --
+GetEntity answered null, the script stopped after ClearMenu, and the menu
+sat empty over a shut gate. The engine builds every placement as an object
+under its name. A named, script-less category-11 placement is now a
+`DoorExecutable` with an empty script tree (unusable, solid, saved and
+restored with no script path); the editor placeholders "noname"/"none" stay
+scenery. This also reaches broken1's `!ironcage` cage1..cage12 (the
+`cage_door*.s` scripts), crypt2's star teeth and ffarena's `ice`.
+
+Caveat: a `current.sav` holding one of those levels from before this
+change has no record of them, so they come back already gone.
+
+### Room34's door: left as the data has it
+
+`tr_door` is `door.s`, usable like any door; DH_Menu9's "tiny keyhole"
+puzzle opens the same door with the TRkey, but nothing in the corpus locks
+it. Kept as shipped.
+
+Tests: `m134_consumable_stack_smoke` (stacks, Rat's Eye, the GTA gate
+through the real Gate_Open_A).

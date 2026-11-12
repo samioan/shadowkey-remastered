@@ -6727,8 +6727,24 @@ int main(int argc, char** argv) {
                                                : "unreadable, loading from the .ent",
                                 savedLevel.entities.size());
                 }
-                auto becomesLiveObject = [](const sk::EntityTypeDescriptor& desc,
-                                            const std::string& scriptPath) {
+                // M134: a door-class placement the level author *named* but
+                // gave no script (`!portcullis` GTA/GTB in delfhide,
+                // `!ironcage` cage1..cage12 in broken1, crypt2's star
+                // teeth). The engine files every placement under its name,
+                // and those scripts reach them with `Level.GetEntity(...)` --
+                // as scenery they came back null, and `Gate_Open_A.s`'s
+                // OpenGate stopped dead on `DestroyObjectMirror`. "noname"
+                // and "none" are the editor's placeholders, not names.
+                auto scriptlessNamedDoor = [](const sk::EntityTypeDescriptor& desc,
+                                              const std::string& scriptPath,
+                                              const std::string& name) {
+                    return desc.category == 11 && scriptPath.empty() && !name.empty() &&
+                           name != "noname" && name != "none";
+                };
+                auto becomesLiveObject = [&](const sk::EntityTypeDescriptor& desc,
+                                             const std::string& scriptPath,
+                                             const std::string& name) {
+                    if (scriptlessNamedDoor(desc, scriptPath, name)) return true;
                     return !scriptPath.empty() &&
                            (desc.category == 11 || IsPickupCategory(desc.category) ||
                             desc.category == 2 || desc.category == 7);
@@ -6736,7 +6752,7 @@ int main(int argc, char** argv) {
                 std::vector<std::pair<sk::Zone::EntPlacement, const sk::SavedEntity*>> placements;
                 for (const sk::Zone::EntPlacement& e : gameZone->entities()) {
                     const sk::EntityTypeDescriptor* desc = entityTypes.Lookup(e.typeId);
-                    if (restoringLevel && desc && becomesLiveObject(*desc, placementScript(e, desc))) {
+                    if (restoringLevel && desc && becomesLiveObject(*desc, placementScript(e, desc), e.name)) {
                         // M38's trigger candidates are the placements, not
                         // the live objects -- crypt1.s's trapped doors are
                         // matched by .ent name -- so they are still taken.
@@ -6828,12 +6844,19 @@ int main(int argc, char** argv) {
                         cand.name = e.name;
                         gameTrapCandidates.push_back(std::move(cand));
                     }
-                    if (desc->category == 11 && !placementScriptPath.empty()) {
-                        const std::string& fullPath = placementScriptPath;
+                    const bool scriptlessDoor =
+                        scriptlessNamedDoor(*desc, placementScriptPath, e.name);
+                    if (desc->category == 11 && (!placementScriptPath.empty() || scriptlessDoor)) {
+                        const std::string fullPath =
+                            scriptlessDoor ? "(no script) " + e.name : placementScriptPath;
                         skExecutableContext loadCtxt(&interpreter);
                         try {
-                            auto door = std::make_unique<sk_bindings::DoorExecutable>(
-                                skString(fullPath.c_str()), loadCtxt, stack.player());
+                            auto door = scriptlessDoor
+                                            ? std::make_unique<sk_bindings::DoorExecutable>(
+                                                  &interpreter, stack.player())
+                                            : std::make_unique<sk_bindings::DoorExecutable>(
+                                                  skString(fullPath.c_str()), loadCtxt,
+                                                  stack.player());
                             // M62: the engine sets a placement's position
                             // (vtable +0x18) *before* calling its Init()
                             // (vtable +0x10) -- see ZONE_FORMAT.md's step
@@ -6876,8 +6899,11 @@ int main(int argc, char** argv) {
                                     callRestoreNative(*door, "ShowEntity", skRValue(false));
                                 }
                             }
-                            skExecutableContext callCtxt(&interpreter);
-                            sk_bindings::RunEntityInit(*door, scriptRoot, callCtxt);
+                            // No script, no Init to run.
+                            if (!scriptlessDoor) {
+                                skExecutableContext callCtxt(&interpreter);
+                                sk_bindings::RunEntityInit(*door, scriptRoot, callCtxt);
+                            }
                             DoorInstance inst;
                             inst.placementYaw = PlacementYawRadians(e.yawRaw);
                             inst.rotA = PlacementRotRadians(e.rotARaw);

@@ -92,7 +92,25 @@ void PlayerExecutable::LoadItemScripts(MenuStack& stack,
 }
 
 void PlayerExecutable::RemoveItem(ItemExecutable* item) {
-    if (item) item->MarkForRemoval();
+    // M134: player vtable +0x174, `FUN_100451ac` -- the slot DestroyObject
+    // on a carried item, the script's RemoveItem (case 0x4a) and DropRow's
+    // last-one arm all reach:
+    //
+    //     if (FUN_1006d508(item) == 4 && item->+0x1c4 - 1 > 0)
+    //         SetQuantity(item, item->+0x1c4 - 1);       // FUN_1002ecd8
+    //     else { ...unlink from the inventory, both hands, the queues... }
+    //
+    // **A consumable stack loses one.** This used to remove the object
+    // outright, so drinking one of five healing potions -- every
+    // consumable's OnUse ends in `DestroyObject(self)` -- threw away all
+    // five. Only consumables (type 4) stack (AddItem below), so only they
+    // take the first arm.
+    if (!item) return;
+    if (item->itemType() == kItemTypeConsumable && item->quantity() - 1 > 0) {
+        item->SetQuantity(item->quantity() - 1);
+        return;
+    }
+    item->MarkForRemoval();
 }
 
 bool PlayerExecutable::CarriesItem(const ItemExecutable* item) const {

@@ -944,3 +944,8 @@ target_link_libraries(credits_smoke PRIVATE sk_bindings sk_world)
 # ClearMenu. See src/tests/m133_delfhide_smoke.cpp.
 add_executable(delfhide_smoke src/tests/m133_delfhide_smoke.cpp)
 target_link_libraries(delfhide_smoke PRIVATE sk_bindings sk_world)
+
+# M134: a consumable stack loses one per use -- player vtable +0x174
+# (FUN_100451ac). See src/tests/m134_consumable_stack_smoke.cpp.
+add_executable(consumable_stack_smoke src/tests/m134_consumable_stack_smoke.cpp)
+target_link_libraries(consumable_stack_smoke PRIVATE sk_bindings sk_world)

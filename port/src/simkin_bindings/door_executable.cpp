@@ -24,6 +24,14 @@ DoorExecutable::DoorExecutable(const skString& filename, skExecutableContext& ct
     AttachEntityScript(this);
 }
 
+DoorExecutable::DoorExecutable(skInterpreter* interpreter, PlayerExecutable& player)
+    : m_Player(player), m_Interpreter(interpreter) {
+    // An empty location: the save writer records it as "no script", and a
+    // restore takes this same constructor again (main.cpp).
+    setNode(skString(""), new skTreeNode(), true);
+    AttachEntityScript(this);
+}
+
 MenuStack* DoorExecutable::trapStack() const { return m_Player.stack(); }
 
 sk::SoundArchive* DoorExecutable::entitySounds() const {

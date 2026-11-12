@@ -115,6 +115,16 @@ public:
 
     DoorExecutable(const skString& filename, skExecutableContext& ctxt, PlayerExecutable& player);
 
+    // M134: a door-class placement with **no script** -- entities.txt's
+    // `!portcullis` / `!ironcage` -- that the level author still named
+    // (`GTA`/`GTB` in delfhide, `cage1`..`cage12` in broken1). The engine
+    // builds every placement as an object and files it under its `.ent`
+    // name, so `Level.GetEntity("GTA").DestroyObjectMirror(...)` finds it;
+    // this port used to draw such a placement as inert scenery, and the
+    // lookup came back null. An empty script tree: no Init, no OnUse,
+    // unusable, solid -- everything a script does to it is a native.
+    DoorExecutable(skInterpreter* interpreter, PlayerExecutable& player);
+
     bool method(const skString& methodName, skRValueArray& args, skRValue& returnValue,
                 skExecutableContext& context) override;
 
