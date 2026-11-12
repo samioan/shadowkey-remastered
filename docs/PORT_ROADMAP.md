@@ -13196,14 +13196,31 @@ player's eye field (`+0x224`). The player's cast passed the camera height,
 so the fireball started a full eye height up and rose from there; it now
 starts at the feet, as a creature's cast always has.
 
-### Twilight Temple's invincible zombies at 1:1 (a port choice)
+### Twilight Temple's invincible zombies: kept as authored
 
-`twilite/inv_zombie_dawn.s` and `inv_zombie_dusk.s` are authored at
-`SetScale(352)`, 1.375x -- nearly twice the height of the 192-scale NPCs
-around them -- and `twilite/loot1.s` carries the designers' own
-commented-out `SetScale(256)` for the pair. At the playtester's request the
-SetScale handler draws exactly those two scripts' 352 at 256. A deliberate
-departure from the shipped data, limited to those two files.
+`twilite/inv_zombie_dawn.s` and `inv_zombie_dusk.s` are `SetScale(352)`,
+1.375x, nearly twice the height of the 192-scale NPCs around them, and
+`twilite/loot1.s`'s `SetScale(256)` for the pair is commented out in the
+shipped script. v0.136.0 briefly drew them at 1:1; that is reverted -- they
+are tall, as in the original.
+
+### The "now in hand" caption
+
+`FUN_10042e44` (player vtable +0x274) takes a third argument. The hand-use
+path passes 0; SetLeftItem/SetRightItem (`FUN_1004476c` / `FUN_100446c4`,
+the stats vtable's +0x2c/+0x30 -- reached from a queue cycle, an Equip into
+an empty hand, a pickup's auto-equip and a script's EquipItem) pass 1, and
+with an item that posts its name to the HUD text manager (`engine+0x28`):
+
+    remove the existing tag-0 entry (FUN_1006bbcc / FUN_1006bcb8)
+    FUN_1006bab0(text = stringTable[item+0xe0], life 0x200, x -1 (centred),
+                 y 0x8c, colour 0xfff, tag 0, font)
+
+`+0xe0` is SetName's id (the base constructor's default is 14). The draw
+(`FUN_1006b6a8`) centres a literal string with a 0xb96 outline one pixel
+below and above, and the tick (`FUN_1006b9ac`) counts the life down by the
+frame delta -- about two seconds. The port had none of it, so cycling the
+hands gave no feedback beyond the viewmodel.
 
 ### One attribute point per level
 
@@ -13211,5 +13228,5 @@ As shipped: `FUN_10044618` adds exactly 1 to `+0xf44`, and each of
 `levelup.s`'s eight choices spends it for +5 to one attribute.
 
 Tests: `m134_consumable_stack_smoke` (stacks, Rat's Eye, the GTA gate
-through the real Gate_Open_A, the armour rating and slots, the AR_Light default, the zombie scale);
+through the real Gate_Open_A, the armour rating and slots, the AR_Light default, the hand caption);
 `m10_inventory_smoke` now expects the fractional rating.

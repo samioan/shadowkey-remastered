@@ -20,8 +20,8 @@
 //         slot's value, one piece per slot -- not the sum of every piece
 // Part 6  an armour script with no SetArmorConstraint is AR_Light (the
 //         constructors' default), not unwearable
-// Part 7  Twilight Temple's invincible zombies draw at 1:1, not their
-//         authored 1.375x (a deliberate port choice)
+// Part 7  a hand that changes (pickup, Equip, a queue cycle) posts the
+//         item's name -- FUN_10042e44 with its third argument 1
 #include <cstdio>
 #include <memory>
 #include <string>
@@ -35,12 +35,10 @@
 #include "simkin_bindings/item_executable.h"
 #include "simkin_bindings/level_executable.h"
 #include "simkin_bindings/menu_stack.h"
-#include "simkin_bindings/monster_executable.h"
 #include "simkin_bindings/menu_executable.h"
 #include "simkin_bindings/player_executable.h"
 #include "skExecutableContext.h"
 #include "skInterpreter.h"
-#include "skParseException.h"
 #include "skRValue.h"
 #include "skRValueArray.h"
 #include "skRuntimeException.h"
@@ -237,32 +235,28 @@ int main(int argc, char** argv) {
     }
 
     // ---------------------------------------------------------------
-    std::printf("\n== Part 7: the Twilight Temple zombies at 1:1 ==\n");
+    std::printf("\n== Part 7: the hand caption (FUN_10042e44, third argument 1) ==\n");
     {
-        auto loadMonster = [&](const char* rel) {
-            std::unique_ptr<sk_b::MonsterExecutable> m;
-            try {
-                skExecutableContext ctxt(&interpreter);
-                const std::string path = root + "/" + rel;
-                m = std::make_unique<sk_b::MonsterExecutable>(skString(path.c_str()), ctxt,
-                                                               &strings, player, stack);
-                skRValueArray args;
-                args.append(skRValue(0));
-                skRValue ret;
-                m->method(skString("Init"), args, ret, ctxt);
-            } catch (skParseException& e) {
-                std::printf("   (PARSE ERROR: %s)\n", e.toString().ptr());
-            } catch (skRuntimeException& e) {
-                std::printf("   (RUNTIME ERROR: %s)\n", e.toString().ptr());
-            }
-            return m;
-        };
-        auto dawn = loadMonster("twilite/inv_zombie_dawn.s");
-        auto dusk = loadMonster("twilite/inv_zombie_dusk.s");
-        Check(dawn && dusk && dawn->scale() == 1.0f && dusk->scale() == 1.0f,
-              "inv_zombie_dawn/dusk's SetScale(352) draws at 1:1 (port choice)");
-        auto rat = loadMonster("monsters/azra_rat.s");
-        Check(rat && rat->scale() != 1.375f, "  and nothing else's scale is touched");
+        player.TakeHandAnnouncement();
+        player.queue(sk_b::kEquipSlotRight).Clear();
+        if (player.rightItem()) player.UpdateEquipStatus(player.rightItem(), false);
+        player.TakeHandAnnouncement();
+        std::unique_ptr<Item> a = stack.level().CreateItem(510, false);
+        std::unique_ptr<Item> b = stack.level().CreateItem(511, false);
+        Item* wa = a.get();
+        Item* wb = b.get();
+        if (a) player.AddItem(std::move(a));
+        const int first = player.TakeHandAnnouncement();
+        Check(wa && player.rightItem() == wa && first == wa->entityNameId() && first >= 0,
+              "a pickup into the empty right hand announces its SetName id");
+        Check(player.TakeHandAnnouncement() == -1, "  once");
+        if (b) player.AddItem(std::move(b));
+        Check(player.TakeHandAnnouncement() == -1, "a pickup the full hand does not take: nothing");
+        if (wb) player.UpdateEquipStatus(wb, true);  // queued behind the first
+        player.TakeHandAnnouncement();
+        player.CycleQueue(sk_b::kEquipSlotRight);
+        Check(wb && player.rightItem() == wb && player.TakeHandAnnouncement() == wb->entityNameId(),
+              "Cycle Right Queue announces the weapon it wields");
     }
 
     std::printf("\nm134_consumable_stack_smoke: %d/%d checks passed\n", g_checks - g_failures,

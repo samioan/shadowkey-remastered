@@ -1032,10 +1032,6 @@ private:
     int m_AttachedWeaponModel = kNoAttachedWeapon;
     int m_Skin = 0;
     int m_Scale = 256;  // 8.8 fixed point, 256 == 1:1
-    // M134: the Twilight Temple invincible zombies' authored scale, drawn
-    // at 256 instead -- see the SetScale handler.
-    static constexpr int kInvulnerableZombieScale = 352;
-    bool IsInvulnerableZombieScript();
     int m_IdleAnim = -1;
     int m_WalkAnim = -1;
     int m_SwingAnim = -1;

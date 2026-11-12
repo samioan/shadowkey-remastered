@@ -234,6 +234,7 @@ void PlayerExecutable::AddItem(std::unique_ptr<ItemExecutable> item) {
         default: return;
     }
     added->SetEquipped(true);
+    AnnounceHandItem(added);  // M134: SetLeft/RightItem's caption
     // M105: and the line this function's own M74 comment has quoted as
     // `appendToHandQueue(...)` ever since -- the real tail of
     // `FUN_1003d8e0`, which this port stopped one call short of because it
@@ -295,7 +296,28 @@ ItemExecutable* PlayerExecutable::CycleQueue(int hand) {
     if (held && held != head) held->SetEquipped(false);
     held = head;
     head->SetEquipped(true);
+    AnnounceHandItem(head);  // M134
     return head;
+}
+
+// M134: `FUN_10042e44`'s third argument. SetLeftItem/SetRightItem
+// (`FUN_1004476c` / `FUN_100446c4`, the stats vtable's +0x2c/+0x30) pass 1,
+// and with an item in hand that posts the item's name -- `stringTable[
+// item+0xe0]`, SetName's id, 14 when the script set none -- as a centred
+// caption at y=0x8c that lives 0x200 time units, replacing the one before
+// it (the manager's tag-0 entry). The hand-use path passes 0. The host
+// (main.cpp) takes the announcement and draws it.
+void PlayerExecutable::AnnounceHandItem(const ItemExecutable* item) {
+    if (!item) return;
+    constexpr int kDefaultEntityNameId = 14;  // the base constructor's +0xe0
+    const int id = item->entityNameId();
+    m_HandAnnouncement = id >= 0 ? id : kDefaultEntityNameId;
+}
+
+int PlayerExecutable::TakeHandAnnouncement() {
+    const int id = m_HandAnnouncement;
+    m_HandAnnouncement = -1;
+    return id;
 }
 
 void PlayerExecutable::QueueDrop(std::unique_ptr<ItemExecutable> item) {
@@ -994,6 +1016,7 @@ int PlayerExecutable::UpdateEquipStatus(ItemExecutable* item, bool equipping) {
     if (equipping && *slot == nullptr) {
         *slot = item;
         item->SetEquipped(true);
+        AnnounceHandItem(item);  // M134
     }
     // M105: and then the queue, which this port had no model for until now
     // -- the header's "2 = the hand queue is full (unreachable here)" was
@@ -2040,12 +2063,14 @@ bool PlayerExecutable::method(const skString& methodName, skRValueArray& args,
                     if (!m_RightItem) {
                         m_RightItem = item;
                         item->SetEquipped(true);
+                        AnnounceHandItem(item);  // M134
                     }
                     break;
                 case kEquipSlotLeft:
                     if (!m_LeftItem) {
                         m_LeftItem = item;
                         item->SetEquipped(true);
+                        AnnounceHandItem(item);  // M134
                     }
                     break;
                 default: break;

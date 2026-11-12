@@ -4609,6 +4609,13 @@ int main(int argc, char** argv) {
     // lasts ("Waiting for host", "<name>: Connection lost").
     std::string mpNotice;
     int mpNoticeTicks = 0;
+    // M134: the "now in hand" caption -- `FUN_10042e44` posts the item's
+    // name to the HUD text manager (engine+0x28's list, tag 0) whenever
+    // SetLeftItem/SetRightItem changes a hand: centred at y=0x8c, white over
+    // a 0xb96 outline, for 0x200 time units (FUN_1006b9ac counts it down by
+    // the frame delta). A new one replaces the old.
+    std::string gameHandCaption;
+    int gameHandCaptionUnits = 0;
     // M119: the last two gameplay ticks' render lists (engine/
     // frame_interpolation.h), and whether the tick that just ran ended in
     // the 3D view -- only then is there anything to draw between ticks.
@@ -4907,8 +4914,10 @@ int main(int argc, char** argv) {
                 y += 0xf;
             }
         }
+        const bool handCaption = !gameMapOpen && !gameHandCaption.empty();  // M134
         const bool column = sceneLayout.wide() && (gameMapOpen || stack.player().coordsEnabled() ||
-                                                   levelUpCaption || !gameplayLabel.empty() ||
+                                                   levelUpCaption || handCaption ||
+                                                   !gameplayLabel.empty() ||
                                                    mpNoticeTicks > 0 || !statusLines.empty());
         if (column) sk::CopyColumnOut(wideLayer, sceneLayout.centreX(), backbuffer);
         // M57: last, over everything -- the map is an overlay, and
@@ -4924,6 +4933,19 @@ int main(int argc, char** argv) {
         // shadow, in the legend face. It stays up for as long as a point
         // is unspent, and it is the only thing that tells the player the
         // character key (action 12) now opens levelup.s.
+        if (handCaption) {
+            // M134: FUN_1006b6a8's centred arm for a literal string --
+            // the outline colour 0xb96 one pixel below and above, then the
+            // text in its own colour, all centred on the screen.
+            constexpr int kHandCaptionY = 0x8c;
+            const int x = (sk::Backbuffer::kWidth - sk::BitmapFont::TextWidth(gameHandCaption)) / 2;
+            sk::BitmapFont::DrawString(backbuffer, x, kHandCaptionY + 1, gameHandCaption,
+                                        MenuColor444(0xb96));
+            sk::BitmapFont::DrawString(backbuffer, x, kHandCaptionY - 1, gameHandCaption,
+                                        MenuColor444(0xb96));
+            sk::BitmapFont::DrawString(backbuffer, x, kHandCaptionY, gameHandCaption,
+                                        MenuColor444(0xfff));
+        }
         if (levelUpCaption) {
             constexpr int kLevelUpStringId = 3842;
             constexpr int kLevelUpCaptionY = 0xbe;
@@ -8556,6 +8578,15 @@ int main(int argc, char** argv) {
                 // M48: the engine's own 1/256s clock (`level+0x460`), which
                 // the cast cooldown is compared against.
                 gameClockUnits += sk_bindings::kAiFrameDeltaUnits;
+                // M134: the hand caption -- take a fresh one, then age it.
+                if (const int captionId = stack.player().TakeHandAnnouncement();
+                    captionId >= 0) {
+                    gameHandCaption = strings.Get(captionId);
+                    gameHandCaptionUnits = 0x200;
+                } else if (gameHandCaptionUnits > 0) {
+                    gameHandCaptionUnits -= sk_bindings::kAiFrameDeltaUnits;
+                    if (gameHandCaptionUnits < 0) gameHandCaption.clear();
+                }
                 // M48: a Sanctuary channel expiring is what stamps its own
                 // re-cast cooldown -- the real write is at the tail of
                 // FUN_10049780, guarded on the owner being the player and

@@ -379,6 +379,11 @@ public:
     // the right). Rotate that hand's queue forward and, if it was not
     // empty, put the new head in the hand. Returns the new head.
     ItemExecutable* CycleQueue(int hand);
+    // M134: the "now in hand" caption SetLeftItem/SetRightItem post
+    // (`FUN_10042e44` with its third argument 1). TakeHandAnnouncement()
+    // returns the name string id once, or -1 when nothing is pending.
+    void AnnounceHandItem(const ItemExecutable* item);
+    int TakeHandAnnouncement();
 
     int health() const { return m_Health; }
     int maxHealth() const { return m_MaxHealth; }
@@ -872,6 +877,7 @@ private:
     // reset) writes `fb0 = 1; fb4 = 1;` next to `f44 = 0`, so a fresh
     // character already holds rank 1 of both abilities.
     int m_LevelUpPoints = 0;    // +0xf44
+    int m_HandAnnouncement = -1;  // M134: pending caption string id
     int m_SpecialAbility = 1;   // +0xfb0, the class ability rank
     int m_RaceAbility = 1;      // +0xfb4, the race ability rank
     int m_MagickaBonusRace = 0;   // +0xfb8, the High Elf's +5 a level
