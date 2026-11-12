@@ -58,9 +58,9 @@ struct Camera {
     float fovY = kEngineFovY;
 };
 
-// Clamp for Camera::pitch. No original limit was recovered; this keeps the
-// horizon in frame rather than allowing a full somersault.
-constexpr float kMaxCameraPitch = 0.85f;  // radians, ~49 degrees
+// Clamp for Camera::pitch. M130: the engine's own -- the actor move
+// (`FUN_10000c64`) stops `+0xa8` at +-0x2000 and zeroes the look rate.
+constexpr float kMaxCameraPitch = 0.78539816f;  // 0x2000 heading units, 45 degrees
 
 // How far above a .ent placement's raw Z (e.g. playerStartZ) the camera's
 // eye sits, in the same raw world units as everything else. NOT the real

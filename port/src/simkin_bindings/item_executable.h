@@ -475,6 +475,18 @@ public:
     // M50: restoring a saved stack (SavedStackable/SavedWeapon's +0x1c4).
     void SetQuantity(int quantity) { m_Quantity = quantity; }
     const std::vector<std::unique_ptr<ItemExecutable>>& contents() const { return m_Contents; }
+    // M130: multiplayer tag 0x31, "taken from a container" -- the other
+    // player took the first contained item of this template; it goes here
+    // too. Returns false when there was none.
+    bool DiscardContentByTemplate(int templateId) {
+        for (auto it = m_Contents.begin(); it != m_Contents.end(); ++it) {
+            if ((*it)->templateId() != templateId) continue;
+            m_Contents.erase(it);
+            m_ContentsIter = 0;
+            return true;
+        }
+        return false;
+    }
     // M93: the host-side way in. `AddObject(Item)` above is the
     // script's -- a loot-bag script filling itself in its own Init()
     // -- but a *dropped* bag has no script that knows what is in it:

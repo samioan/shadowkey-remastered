@@ -1,3 +1,5 @@
+#include "skTreeNode.h"
+#include "simkin_bindings/mp_hooks.h"
 #include "simkin_bindings/player_executable.h"
 
 #include <algorithm>
@@ -79,6 +81,9 @@ void PlayerExecutable::LoadItemScripts(MenuStack& stack,
         } catch (skParseException& e) {
             std::printf("PlayerExecutable: PARSE ERROR loading %s: %s\n", fullPath.c_str(),
                         e.toString().ptr());
+        } catch (skTreeNodeReaderException& e) {
+            std::printf("PlayerExecutable: SCRIPT FILE ERROR loading %s: %s\n", fullPath.c_str(),
+                        e.toString().ptr());
         } catch (skRuntimeException& e) {
             std::printf("PlayerExecutable: RUNTIME ERROR loading %s: %s\n", fullPath.c_str(),
                         e.toString().ptr());
@@ -106,6 +111,13 @@ void PlayerExecutable::AddItem(std::unique_ptr<ItemExecutable> item) {
     // loot bag all funnel through this one vtable slot.
     if (!item) return;
     m_KeyItemFlags.OnItemAcquired(item->templateId());
+    // M132: and, in a session, tells the other player (`FUN_1003c8ac`,
+    // tag 0x38) -- the amulets and the frozen key open doors for both.
+    if (Mp().sending() && Mp().registryFlag) {
+        for (const KeyItemFlag& f : kKeyItemFlags) {
+            if (f.templateId == item->templateId()) Mp().registryFlag(static_cast<int>(f.bit), true);
+        }
+    }
 
     // M82: **gold is not an inventory item.** The whole of `FUN_1003d8e0`
     // after those four flag tests is wrapped in one `if (item->+0xc8 !=
@@ -980,7 +992,14 @@ bool PlayerExecutable::method(const skString& methodName, skRValueArray& args,
         // mirror the move to the other handset. Single player never takes
         // it. crypt2.s's two calls place the player on arrival at Port11 and
         // Port6a.
-        return HandleEntityBaseNative(skString("SetPosition"), args, returnValue);
+        const bool handled = HandleEntityBaseNative(skString("SetPosition"), args, returnValue);
+        // M129: the extra step -- tag 0x33 with "everyone": the other
+        // player is moved here too (a group teleport).
+        if (handled && Mp().sending() && Mp().setPosition) {
+            Mp().setPosition(true, 0, args[0].intValue(), args[1].intValue(),
+                             args.entries() >= 3 ? args[2].intValue() : 0);
+        }
+        return handled;
     }
     if (methodName == skString("EnableCoords") && args.entries() == 0) {
         // Case 0x18: `+0xfc0 ^= 1`. A toggle, not a set -- cheatmenu.s's
@@ -1229,6 +1248,11 @@ bool PlayerExecutable::method(const skString& methodName, skRValueArray& args,
         return true;
     }
     if (methodName == skString("StatModXP") && args.entries() == 1) {
+        // M129: tag 0x28, kind 0 -- a quest's experience is shared: the
+        // other player's stats take the same AddExperience. (A kill's is
+        // not sent this way: the kill itself is mirrored, tag 0x19, and
+        // each copy of the creature pays its own player.)
+        if (Mp().sending() && Mp().shareXp) Mp().shareXp(0, args[0].intValue());
         // M96: case 0x3a, the quest-reward spelling (7 live sites -- the
         // conversations that pay out experience, and ratherb.s's kill).
         // It is AddExperience (0x3b) instruction for instruction: the same
@@ -1345,7 +1369,12 @@ bool PlayerExecutable::method(const skString& methodName, skRValueArray& args,
             target = dynamic_cast<ItemExecutable*>(args[0].obj());
         } else {
             int templateId = args[0].intValue();
-            if (templateId == kTemplateFrozenKey) m_KeyItemFlags.OnFrozenKeyRemoved();
+            if (templateId == kTemplateFrozenKey) {
+                m_KeyItemFlags.OnFrozenKeyRemoved();
+                if (Mp().sending() && Mp().registryFlag) {
+                    Mp().registryFlag(static_cast<int>(kFlagFrozenKey), false);  // M132, 0x38
+                }
+            }
             for (const std::unique_ptr<ItemExecutable>& item : m_Inventory) {
                 if (item && !item->markedForRemoval() && item->templateId() == templateId) {
                     target = item.get();
@@ -1409,7 +1438,38 @@ bool PlayerExecutable::method(const skString& methodName, skRValueArray& args,
         // std::unique_ptr in gamePickups, mid-call here), see
         // TakePendingPickupItem()'s comment for why ownership transfer
         // itself has to happen back on the host side, not in here.
+        // M133: unless the object is the one `Level.CreateEntity` just made
+        // -- then nobody else will ever own it (no world list holds it, no
+        // bag's RemoveObject follows), and the host-side pickup path only
+        // knows placed items. The engine's case 0x55 adds it to the
+        // inventory through the same +0x164 path either way; do that here,
+        // synchronously, before the script's next CreateEntity overwrites
+        // the pending slot. This is what `raiders/loot6.s` (the helmet and
+        // shield in Delfran's Hideout) and `delfhide/chef_convo.s` (the cell
+        // key) were losing.
+        if (m_Stack && args[0].obj() != nullptr &&
+            static_cast<skiExecutable*>(m_Stack->level().PeekPendingCreatedEntity()) ==
+                args[0].obj()) {
+            std::unique_ptr<ItemExecutable> created = m_Stack->level().TakePendingCreatedEntity();
+            ItemExecutable* raw = created.get();
+            if (Mp().sending() && Mp().client && Mp().handOver && !raw->canDrop()) {
+                Mp().handOver(raw->templateId(), raw->netId());
+            }
+            AddItem(std::move(created));
+            return true;
+        }
         m_PendingPickupItem = args[0].obj();
+        // M132: tag 0x32. Dispatcher case 0x55, in a session and not the
+        // host: an item that cannot be dropped -- a key, a quest piece --
+        // is *handed over* as it is taken, and the host's game gives its
+        // own player one too. (The real test is `vtable+0x164() ||
+        // !+0x1c9`; the first predicate is not identified, the second is
+        // SetCanDrop's byte.)
+        if (Mp().sending() && Mp().client && Mp().handOver) {
+            if (auto* taken = dynamic_cast<ItemExecutable*>(args[0].obj())) {
+                if (!taken->canDrop()) Mp().handOver(taken->templateId(), taken->netId());
+            }
+        }
         return true;
     }
 
@@ -1432,6 +1492,9 @@ bool PlayerExecutable::method(const skString& methodName, skRValueArray& args,
         } else {
             m_QuestAssigned.erase(id);
         }
+        // M129: tag 0x21 -- the other player's quest array takes the same
+        // byte (kind 0).
+        if (Mp().sending() && Mp().questFlag) Mp().questFlag(0, id, value ? 1 : 0);
         return true;
     }
     if (methodName == skString("QuestSolved") && args.entries() == 1) {
@@ -1446,6 +1509,9 @@ bool PlayerExecutable::method(const skString& methodName, skRValueArray& args,
         } else {
             m_QuestSolved.erase(id);
         }
+        // M129: tag 0x21 -- the other player's quest array takes the same
+        // byte (kind 1).
+        if (Mp().sending() && Mp().questFlag) Mp().questFlag(1, id, value ? 1 : 0);
         return true;
     }
     if (methodName == skString("QuestCompleted") && args.entries() == 1) {
@@ -1461,6 +1527,9 @@ bool PlayerExecutable::method(const skString& methodName, skRValueArray& args,
         } else {
             m_QuestCompleted.erase(id);
         }
+        // M129: tag 0x21 -- the other player's quest array takes the same
+        // byte (kind 2).
+        if (Mp().sending() && Mp().questFlag) Mp().questFlag(2, id, value ? 1 : 0);
         return true;
     }
     if (methodName == skString("AllQuests") && args.entries() == 0) {

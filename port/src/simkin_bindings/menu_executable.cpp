@@ -1,3 +1,4 @@
+#include "simkin_bindings/mp_hooks.h"
 #include "simkin_bindings/menu_executable.h"
 
 #include <algorithm>
@@ -721,6 +722,11 @@ bool MenuExecutable::NavigateDirectional(int dx, int dy) {
     return true;
 }
 
+// M133: options.s's one-space spacer and the softkey caption's "Back" --
+// the port settings page is built from the screen's own strings.
+constexpr int kPortPageSpacerTextId = 714;
+constexpr int kPortPageBackTextId = 4078;
+
 void MenuExecutable::EnsurePcSettingRows() {
     sk::PcSettingsControl* pc = m_Stack.pcSettings();
     if (!pc) return;
@@ -728,98 +734,119 @@ void MenuExecutable::EnsurePcSettingRows() {
     // both the front end and the in-game menu open with `MenuOptions`.
     if (_stricmp(m_ScriptName.c_str(), "Options") != 0) return;
     const int language = m_Stack.language();
-    bool present = false;
-    for (MenuRow& row : m_Rows) {
-        if (row.pcSetting <= 0) continue;
-        row.literalText = pc->RowText(row.pcSetting - 1, language);
-        present = true;
-    }
-    if (present) return;
 
-    // Where they go: options.s leaves a two-row gap between the Music slider
-    // and Select Language -- `AddStaticItem(714)` twice, the one-space
-    // spacer (the second is the `else` of the God Mode test, which M99
-    // showed never passes in the shipped game). The rows take those
-    // spacers' places, in place: every row from Select Language down stays
-    // at exactly the y it always had, the list gains nothing at the bottom
-    // (where the parchment's border and the Back caption are), and every
-    // row index the script holds still names the same row.
-    //
-    // M120: there are three rows now and the gap is two. options.s opens
-    // with a third spacer, above Sound Volume, so that one is moved down
-    // into the gap: the two sliders go up a row, and everything else is
-    // where it was. The script holds no handle on either slider (it keeps
-    // only `langButton` and `muteButton`, both below), so no index it uses
-    // changes.
+    // M133: the PC rows live on their own page now (see portSettingsOpen()).
+    // M119-M129 put them on Options itself -- first in options.s's spacer
+    // rows, then, as the list grew to six, appended under Mute -- and the
+    // screen ran off the bottom of the parchment into the Back caption.
+    if (m_PortPageOpen) {
+        for (MenuRow& row : m_Rows) {
+            if (row.pcSetting > 0) row.literalText = pc->RowText(row.pcSetting - 1, language);
+            if (row.portRole == 3) row.literalText = pc->PageTitle(language);
+        }
+        return;
+    }
+    for (MenuRow& row : m_Rows) {
+        if (row.portRole != 1) continue;
+        row.literalText = pc->PageTitle(language);  // a language change relabels it
+        return;
+    }
+
+    // Where the link goes: the first of options.s's one-space spacer rows
+    // (`AddStaticItem(714)`) under the Music slider, replaced in place -- so
+    // it reads as the next row after the volumes, every row from Select
+    // Language down keeps exactly the y it always had, and every index the
+    // script holds (`langButton`, `muteButton`) still names the same row.
+    // options.s rebuilds itself with `ClearMenu(); Init();` from half its
+    // handlers, which drops the link; this puts it back on the next tick.
     constexpr int kSpacerTextId = 714;
-    auto isSpacer = [&](size_t i) {
-        return i < m_Rows.size() && m_Rows[i].kind == RowKind::StaticItem &&
-               m_Rows[i].textId == kSpacerTextId && m_Rows[i].pcSetting == 0;
-    };
-    const int needed = pc->RowCount();
-    size_t firstSlider = 0, lastSlider = 0;
-    bool haveSlider = false;
+    size_t target = m_Rows.size();
+    bool afterSlider = false;
     for (size_t i = 0; i < m_Rows.size(); ++i) {
-        if (m_Rows[i].kind == RowKind::Slider) {
-            if (!haveSlider) firstSlider = i;
-            lastSlider = i;
-            haveSlider = true;
+        const MenuRow& row = m_Rows[i];
+        if (row.kind == RowKind::Slider) {
+            afterSlider = true;
+            continue;
+        }
+        if (afterSlider && row.kind == RowKind::StaticItem && row.textId == kSpacerTextId &&
+            row.portRole == 0) {
+            target = i;
+            break;
         }
     }
-    if (haveSlider) {
-        size_t first = lastSlider + 1;
-        int after = 0;
-        while (after < needed && isSpacer(first + static_cast<size_t>(after))) ++after;
-        int before = 0;
-        while (before < needed - after && firstSlider >= static_cast<size_t>(before) + 1 &&
-               isSpacer(firstSlider - static_cast<size_t>(before) - 1)) {
-            ++before;
-        }
-        // M123: four rows now, and options.s has only three spacers. The
-        // gap takes as many as fit (Resolution, Aspect Ratio, Frame Rate --
-        // M120's layout, unchanged) and the rest go after the script's last
-        // row (Fog, under Mute). Appending is the one place a row can go
-        // without moving any row the script holds a handle to: AddMenuItem's
-        // handles are row indices, and options.s keeps two of them.
-        constexpr int kSpacersInOptions = 3;  // options.s's own, all of them
-        const int inGap = (std::min)(needed, after + before);
-        if (inGap >= (std::min)(needed, kSpacersInOptions)) {
-            if (before > 0) {
-                // [spacers][sliders...] -> [sliders...][spacers]
-                const size_t from = firstSlider - static_cast<size_t>(before);
-                std::rotate(m_Rows.begin() + static_cast<std::ptrdiff_t>(from),
-                            m_Rows.begin() + static_cast<std::ptrdiff_t>(firstSlider),
-                            m_Rows.begin() + static_cast<std::ptrdiff_t>(first));
-                // A selection already on a slider follows it up.
-                const int sel = m_SelectedItem - 1;
-                if (sel >= static_cast<int>(firstSlider) && sel < static_cast<int>(first)) {
-                    m_SelectedItem -= before;
-                }
-                first -= static_cast<size_t>(before);
-            }
-            for (int k = 0; k < inGap; ++k) {
-                MenuRow& row = m_Rows[first + static_cast<size_t>(k)];
-                row.kind = RowKind::MenuItem;
-                row.textId = -1;
-                row.selectable = true;
-                row.centered = true;
-                row.literalText = pc->RowText(k, language);
-                row.pcSetting = k + 1;
-            }
-            for (int k = inGap; k < needed; ++k) {
-                MenuRow& row = AddRow(RowKind::MenuItem, -1, "", true);
-                row.literalText = pc->RowText(k, language);
-                row.pcSetting = k + 1;
-            }
-            return;
-        }
+    MenuRow* link = nullptr;
+    if (target < m_Rows.size()) {
+        link = &m_Rows[target];
+        link->kind = RowKind::MenuItem;
+        link->textId = -1;
+        link->callback.clear();
+        link->selectable = true;
+    } else {
+        // A layout this code does not recognise: after the script's rows.
+        link = &AddRow(RowKind::MenuItem, -1, "", true);
     }
-    // A layout this code does not recognise: after the script's rows.
-    for (int i = 0; i < needed; ++i) {
-        MenuRow& row = AddRow(RowKind::MenuItem, -1, "", true);
+    link->centered = true;
+    link->literalText = pc->PageTitle(language);
+    link->portRole = 1;
+}
+
+void MenuExecutable::OpenPortSettings() {
+    sk::PcSettingsControl* pc = m_Stack.pcSettings();
+    if (!pc || m_PortPageOpen) return;
+    const int language = m_Stack.language();
+    m_ParkedRows = std::move(m_Rows);
+    m_Rows.clear();
+    m_ParkedSelectedItem = m_SelectedItem;
+    m_PortPageOpen = true;
+
+    auto addRow = [&](RowKind kind, bool selectable) -> MenuRow& {
+        MenuRow row;
+        row.kind = kind;
+        row.selectable = selectable;
+        row.centered = true;
+        m_Rows.push_back(std::move(row));
+        return m_Rows.back();
+    };
+    // The page in options.s's own vocabulary: a centred heading in the
+    // static-item colour, a one-space spacer, the rows, a spacer, Back.
+    MenuRow& title = addRow(RowKind::StaticItem, false);
+    title.literalText = pc->PageTitle(language);
+    title.portRole = 3;
+    addRow(RowKind::StaticItem, false).textId = kPortPageSpacerTextId;
+    for (int i = 0; i < pc->RowCount(); ++i) {
+        MenuRow& row = addRow(RowKind::MenuItem, true);
         row.literalText = pc->RowText(i, language);
         row.pcSetting = i + 1;
     }
+    addRow(RowKind::StaticItem, false).textId = kPortPageSpacerTextId;
+    MenuRow& back = addRow(RowKind::MenuItem, true);
+    back.textId = kPortPageBackTextId;  // the softkey caption's own "Back", every language
+    back.portRole = 2;
+    m_SelectedItem = 3;  // the first setting
+}
+
+void MenuExecutable::ClosePortSettings() {
+    if (!m_PortPageOpen) return;
+    m_Rows = std::move(m_ParkedRows);
+    m_ParkedRows.clear();
+    m_PortPageOpen = false;
+    m_SelectedItem = m_ParkedSelectedItem;
+    for (size_t i = 0; i < m_Rows.size(); ++i) {
+        if (m_Rows[i].portRole == 1) m_SelectedItem = static_cast<int>(i) + 1;
+    }
+}
+
+
+bool MenuExecutable::SetLobbyRow(const std::string& callback, const std::string& text,
+                                 bool selectable) {
+    for (MenuRow& row : m_Rows) {
+        if (row.kind != RowKind::MenuItem || row.callback != callback) continue;
+        row.textId = -1;
+        row.literalText = text;
+        row.selectable = selectable;
+        return true;
+    }
+    return false;
 }
 
 void MenuExecutable::EnsureValidSelection() {
@@ -838,15 +865,15 @@ void MenuExecutable::EnsureValidSelection() {
     m_SelectedItem = 0;  // nothing selectable on this screen at all
 }
 
-void MenuExecutable::CycleSelectedCombo(int delta) {
-    if (m_SelectedItem < 1 || static_cast<size_t>(m_SelectedItem) > m_Rows.size()) return;
+bool MenuExecutable::CycleSelectedCombo(int delta) {
+    if (m_SelectedItem < 1 || static_cast<size_t>(m_SelectedItem) > m_Rows.size()) return false;
     MenuRow& row = m_Rows[static_cast<size_t>(m_SelectedItem - 1)];
     if (row.pcSetting > 0) {  // M119: see EnsurePcSettingRows()
         if (sk::PcSettingsControl* pc = m_Stack.pcSettings()) {
             pc->Cycle(row.pcSetting - 1, delta);
             row.literalText = pc->RowText(row.pcSetting - 1, m_Stack.language());
         }
-        return;
+        return true;  // a PC row is this port's combo
     }
     if (row.kind == RowKind::Slider) {
         // M28: the real Options screen's SoundFXSlider/MusicSlider rows.
@@ -854,12 +881,14 @@ void MenuExecutable::CycleSelectedCombo(int delta) {
         slider->Adjust(delta);
         ApplySliderValue(*slider);
         TryInvoke(slider->callback());
-        return;
+        return false;
     }
-    if (row.kind != RowKind::ComboBox) return;
+    if (row.kind != RowKind::ComboBox) return false;
     auto* combo = static_cast<ComboBoxExecutable*>(row.widget.get());
     // M118: only when it actually moved (see CycleSelection).
-    if (combo->CycleSelection(delta)) TryInvoke(combo->onChangeCallback());
+    if (!combo->CycleSelection(delta)) return false;
+    TryInvoke(combo->onChangeCallback());
+    return true;
 }
 
 void MenuExecutable::ApplySliderValue(const SliderExecutable& slider) {
@@ -894,6 +923,15 @@ void MenuExecutable::ActivateSelected() {
             // it forward, the way Right does. See EnsurePcSettingRows().
             if (row.pcSetting > 0) {
                 CycleSelectedCombo(1);
+                break;
+            }
+            // M133: the Port Settings link and the page's Back row.
+            if (row.portRole == 1) {
+                OpenPortSettings();
+                break;
+            }
+            if (row.portRole == 2) {
+                ClosePortSettings();
                 break;
             }
             InvokeCallback(row.callback);
@@ -1021,6 +1059,13 @@ bool MenuExecutable::GoBack() {
     // SetPrevMenu and had no fallback, so pressing back on any of them did
     // nothing whatsoever and the player was stranded on that screen with
     // no way out.
+    // M133: on the port settings page, back means back to Options -- the
+    // script's own chain (`OptionsBack` -> MainMenu) belongs to the main
+    // page and must not run from here.
+    if (m_PortPageOpen) {
+        ClosePortSettings();
+        return true;
+    }
     MenuExecutable* before = m_Stack.currentMenu();
     // Step 0 keeps the same "did it actually do something" guard the rest
     // of this function uses, rather than winning outright on the strength
@@ -1377,6 +1422,9 @@ bool MenuExecutable::method(const skString& methodName, skRValueArray& args,
         return true;
     }
     if (methodName == skString("ClearMenu") && args.entries() == 0) {
+        // M133: a rebuild drops the port settings page with everything else.
+        m_PortPageOpen = false;
+        m_ParkedRows.clear();
         m_Rows.clear();
         m_SelectedItem = 0;
         m_TitleTextId = -1;
@@ -1601,7 +1649,9 @@ bool MenuExecutable::method(const skString& methodName, skRValueArray& args,
         return true;
     }
     if (methodName == skString("NewGameHook") && args.entries() == 0) {
-        returnValue = skRValue(0);  // no host process to hand off to -- always single-player
+        // M129: what `ClearNewGameHook(n)` armed -- newgamemenu.s's StartGame
+        // branches on it: 0 NewGame(), 1 the host menu, 2 the join menu.
+        returnValue = skRValue(Mp().newGameHook);
         return true;
     }
     if (methodName == skString("QuitGame") && args.entries() <= 1) {
@@ -1690,6 +1740,66 @@ bool MenuExecutable::method(const skString& methodName, skRValueArray& args,
         returnValue = skRValue(true);
         return true;
     }
+    // ---- M129: the multiplayer lobby (GameEngine-root bindings) ----------
+    //
+    // The menus are the shipped ones (multiplayermenu.s, hostgamemenu.s,
+    // joingamemenu.s, bluetooth.s); these are the natives they call. The
+    // session lives outside this library (net/mp_session.h) and arrives as
+    // the callbacks in simkin_bindings/mp_hooks.h -- with none installed,
+    // each answers the way a handset with no radio would.
+    //
+    // Bluetooth itself has no counterpart: the "radio" is the network, it
+    // is always on, and the Bluetooth name is the player's own.
+    if (methodName == skString("MPPreHost") || methodName == skString("MPPreJoin")) {
+        // With a slot: "Use character from saved game?" (string 4022) -- that
+        // save's character plays. With none: is there a character to play?
+        const int slot = args.entries() >= 1 ? args[0].intValue() : -1;
+        returnValue = skRValue(Mp().preHost ? Mp().preHost(slot) : false);
+        return true;
+    }
+    if (methodName == skString("MPBeginHost") && args.entries() == 0) {
+        returnValue = skRValue(Mp().beginHost ? Mp().beginHost() : false);
+        return true;
+    }
+    if (methodName == skString("MPHostConnect") && args.entries() == 0) {
+        if (Mp().hostConnect) Mp().hostConnect();
+        return true;
+    }
+    if (methodName == skString("MPHostPlay") && args.entries() == 0) {
+        returnValue = skRValue(Mp().hostPlay ? Mp().hostPlay() : false);
+        return true;
+    }
+    if (methodName == skString("MPBeginJoin") && args.entries() == 0) {
+        returnValue = skRValue(Mp().beginJoin ? Mp().beginJoin() : false);
+        return true;
+    }
+    if (methodName == skString("JoinGame") && args.entries() == 1) {
+        returnValue = skRValue(Mp().joinGame ? Mp().joinGame(args[0].intValue()) : false);
+        return true;
+    }
+    if (methodName == skString("RejectClient") && args.entries() <= 1) {
+        if (Mp().rejectClient) Mp().rejectClient(args.entries() == 1 ? args[0].intValue() : 0);
+        return true;
+    }
+    if (methodName == skString("CloseMPHostMenu") || methodName == skString("CloseMPJoinMenu")) {
+        if (Mp().closeLobby) Mp().closeLobby();
+        return true;
+    }
+    if (methodName == skString("GetBluetoothName") && args.entries() == 0) {
+        const std::string name = Mp().localName ? Mp().localName() : std::string("Player");
+        returnValue = skRValue(skString(name.c_str()));
+        return true;
+    }
+    if (methodName == skString("GetBluetoothStatus") && args.entries() == 0) {
+        returnValue = skRValue(true);  // the network is the radio, and it is on
+        return true;
+    }
+    if (methodName == skString("MPBluetoothInUse") && args.entries() == 0) {
+        returnValue = skRValue(false);
+        return true;
+    }
+    if (methodName == skString("SetBluetooth")) return true;
+
     if (methodName == skString("CheatsActivated") || methodName == skString("ArenaActive")) {
         // No cheat or arena state exists yet -- a fixed "off" answer is the
         // correct behavior, not a soft-fail placeholder.
@@ -1699,8 +1809,11 @@ bool MenuExecutable::method(const skString& methodName, skRValueArray& args,
     // M104: the multiplayer pair moved to the shared helper, which every
     // other class now chains too -- same answer, one place.
     if (TryHandleMultiplayerQuery(methodName, args, returnValue)) return true;
-    if (methodName == skString("UnFadeMusic") || methodName == skString("FadeMusic") ||
-        methodName == skString("ClearNewGameHook")) {
+    if (methodName == skString("ClearNewGameHook")) {
+        Mp().newGameHook = args.entries() >= 1 ? args[0].intValue() : 0;  // M129
+        return true;
+    }
+    if (methodName == skString("UnFadeMusic") || methodName == skString("FadeMusic")) {
         return true;
     }
 

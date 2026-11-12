@@ -94,6 +94,17 @@ bool PopupMenuExecutable::method(const skString& methodName, skRValueArray& args
         m_SelectedItem = index + 1;  // internal 1-based, see selectedItem()
         return true;
     }
+    if (methodName == skString("ClearMenu") && args.entries() == 0) {
+        // M133: popup binding 2 (`FUN_10087a60` case 2) -- walk the item
+        // list at `popup+0xac`, destroy each item, empty the list. Nothing
+        // else: the selection word `+0xa0`, the box and the back callback
+        // are untouched. This soft-failed, so `multiplayermenu.s`'s
+        // ProcessSavedGames() -- `askPopup.ClearMenu()` and a re-fill --
+        // stacked "Use character from which game?" and the save slots
+        // under the creation-time "saved game?" prompt and its Back row.
+        m_Items.clear();
+        return true;
+    }
     if (methodName == skString("SetBack") && args.entries() == 1) {
         m_BackCallback = ToStdString(args[0].str());
         return true;

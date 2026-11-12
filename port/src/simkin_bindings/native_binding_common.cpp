@@ -1,3 +1,4 @@
+#include "simkin_bindings/mp_hooks.h"
 #include "simkin_bindings/native_binding_common.h"
 
 #include "skTreeNodeObject.h"
@@ -82,10 +83,18 @@ bool TryHandleMultiplayerQuery(const skString& methodName, skRValueArray& args,
         methodName != skString("IsMultiplayerClient")) {
         return false;
     }
-    // See the declaration: `engine+0x5c0` is zero in this port and there is
-    // nothing that could set it, so both answer false.
-    returnValue = skRValue(false);
+    // M129: `engine+0x5c0`, and the comms wrapper's role. Both false in
+    // single player -- which is every session until a multiplayer game
+    // actually starts (simkin_bindings/mp_hooks.h).
+    const MpHooks& mp = Mp();
+    returnValue = skRValue(methodName == skString("IsMultiplayer") ? mp.active
+                                                                    : (mp.active && mp.client));
     return true;
+}
+
+MpHooks& Mp() {
+    static MpHooks hooks;
+    return hooks;
 }
 
 }  // namespace sk_bindings

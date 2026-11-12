@@ -49,11 +49,6 @@ constexpr int kSwingDeltaPerFrame = kViewmodelFrameDeltaUnits * 4;  // 40
 // makes 0x800 last about a second.
 constexpr int kSwapDeltaPerFrame = 0x800 / 25;
 
-// Bob-phase units per world unit moved. A port constant -- see
-// TickWeaponViewmodel(). 40 units/tick (this port's walk speed) times 6 is
-// 240, so kSwayCycle (0x1400) takes ~21 ticks, a little under a second.
-constexpr int kSwayUnitsPerWorldUnit = 6;
-
 }  // namespace
 
 int SwaySine(int index2048) {
@@ -183,21 +178,17 @@ void TickWeaponViewmodel(WeaponViewmodel& vm, int speed) {
         vm.swayPhase = 0;
         return;
     }
-    // `FUN_1001f230(player, speed)`: the bob phase runs down at a rate
-    // proportional to how fast the player is moving and wraps by adding a
-    // whole cycle, so standing still freezes it wherever it stopped.
+    // `FUN_1001f230(player, step)`: the bob phase runs down by `(frameDelta
+    // * step) >> 8` for each move slot that ran this frame and wraps by
+    // adding a whole cycle, so standing still freezes it where it stopped.
     //
-    // The real decrement is `(frameDelta * (speed & 0xffff)) >> 8`. Its
-    // `speed` argument's units are **not** recovered -- the call site was
-    // not identified, and this port's own 40-world-units-per-tick walk fed
-    // through that expression gives one bob every 5120 ticks (three and a
-    // half minutes), while the constructor's plausible-looking speed field
-    // (0x5a00) gives one every six. Neither is a walk cycle, so the rate
-    // here is a port constant chosen to put a full cycle at a bit under a
-    // second at 40 units/tick. Everything else about the bob -- the 0x1400
-    // cycle, the wrap, the reset on swing and swap, the triangle x and the
-    // sine y -- is decompiled.
-    vm.swayPhase -= speed * kSwayUnitsPerWorldUnit;
+    // M130: `step` is the move step itself -- `FUN_1001f338` and its three
+    // siblings (the player's vtable +0x1cc..+0x1d8) each call the base move
+    // and then this with the same argument, `FUN_100445d4`'s `Speed << 8
+    // >> 1`. At Speed 35 that is 175 a held direction a tick, a bob every
+    // 29 ticks. The caller passes the sum; nothing here is a port constant
+    // any more.
+    vm.swayPhase -= speed;
     if (vm.swayPhase <= 0) vm.swayPhase += kSwayCycle;
 }
 

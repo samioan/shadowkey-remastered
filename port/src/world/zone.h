@@ -489,6 +489,13 @@ public:
     // out of range.
     uint8_t TexelAt(int surfaceTextureIndex, int x, int y) const;
 
+    // M129: what a GPU backend needs to copy this zone's art onto a card
+    // once -- how many 128x128 `.ztx` slots there are, and a number that is
+    // different for every zone ever loaded, so a cache keyed on it can tell
+    // a new zone from the old one even when it lands at the same address.
+    int textureSlotCount() const;
+    unsigned long long resourceSerial() const { return resourceSerial_; }
+
     // Resolves a palettized texel to a real 16bpp-ish color.
     //
     // CORRECTED twice this session -- see git history. First pass: was
@@ -921,6 +928,7 @@ private:
     std::vector<TileChange> tileChanges_;  // M44: see tileChanges()
     Model skyMesh_;          // parsed <zone>.zsk, see SkyMesh() above
     bool skyMeshValid_ = false;
+    unsigned long long resourceSerial_ = 0;  // M129: see resourceSerial()
 
     // M44: the shared tail of LockRegion/UnlockRegion -- write the cell's
     // second byte and record the change in the journal.

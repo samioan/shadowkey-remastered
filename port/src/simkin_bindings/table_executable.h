@@ -223,11 +223,9 @@ public:
     //     palette's standard colour when it may.
     //
     // "May not use" is `(no item || !FUN_100450a0(player, item)) &&
-    // !product.classFlags[class]`. `FUN_100450a0` walks a per-class
-    // proficiency table this port does not have; the port already answers
-    // IsItemEnabledFor with "yes" for any owned item for the same reason,
-    // so here an owned item is never barred and only the Buy page can
-    // show 0xc33.
+    // !product.classFlags[class]`. `FUN_100450a0` is the class test M74
+    // ported as PlayerExecutable::IsItemEnabledFor (M131: and this arm
+    // now calls it -- an owned item is barred when both refuse it).
     //
     // A cell outside that arm (a plain grid cell, a stat line, a
     // comparison column) is `Plain`: drawn in the standard colour by

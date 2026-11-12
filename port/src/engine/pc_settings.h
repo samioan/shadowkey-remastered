@@ -89,12 +89,33 @@ constexpr int kMouseLookOptionCount =
 // (a ~18cm sweep on an 800dpi mouse) -- the usual default of PC shooters.
 constexpr float kMouseLookRadiansPerCount = 0.0022f;
 
+// M129: **Renderer** -- who draws the 3D view.
+//
+//   * Original     the software rasterizer, the pre-M129 path exactly.
+//   * Direct3D     the same triangles drawn by the graphics card, with the
+//                  engine's own per-pixel arithmetic (palette rung, cut-out
+//                  key, fog level) in a pixel shader. The frame costs the
+//                  same at any Resolution, and Resolution Auto is the
+//                  window's exact size instead of a whole multiple.
+//   * D3D Smooth   as Direct3D, with texels blended bilinearly and the
+//                  light rungs and fog levels interpolated rather than
+//                  stepped -- the one setting that goes past the device.
+//
+// Stored by value (`renderer=0/1/2`). A machine without Direct3D 11 draws in
+// software whatever the file says; the row then reads "Original".
+constexpr int kRendererSoftware = 0;
+constexpr int kRendererGpu = 1;
+constexpr int kRendererGpuSmooth = 2;
+constexpr int kRenderers[] = {kRendererSoftware, kRendererGpu, kRendererGpuSmooth};
+constexpr int kRendererOptionCount = static_cast<int>(sizeof(kRenderers) / sizeof(kRenderers[0]));
+
 struct PcSettings {
     int resolutionIndex = 0;  // into kResolutionScales; 0 = Original
     int frameRateIndex = 0;   // into kFrameRates; 0 = Original
     int aspectIndex = 0;      // into kAspectRatios; 0 = Original (M120)
     int fogIndex = 0;         // into kFogDensities; 0 = Original (M123)
     int mouseLookIndex = 0;   // into kMouseLookSensitivities; 0 = 100% (M125)
+    int rendererIndex = 0;    // into kRenderers; 0 = Original, software (M129)
 
     int resolutionScale() const { return kResolutionScales[resolutionIndex]; }
     int frameRate() const { return kFrameRates[frameRateIndex]; }
@@ -105,6 +126,9 @@ struct PcSettings {
     float mouseLookRadiansPerCount() const {
         return kMouseLookRadiansPerCount * static_cast<float>(mouseLookPercent()) / 100.0f;
     }
+    int renderer() const { return kRenderers[rendererIndex]; }
+    bool gpuRenderer() const { return renderer() != kRendererSoftware; }
+    bool smoothTextures() const { return renderer() == kRendererGpuSmooth; }
     bool originalResolution() const { return resolutionScale() == 1; }
     bool originalFrameRate() const { return frameRate() == kFrameRateOriginal; }
     bool originalAspect() const { return aspect() == kAspectOriginal; }
@@ -122,6 +146,16 @@ int ViewWidthFor(const PcSettings& settings, int clientWidth, int clientHeight);
 // smallest whole multiple of 208 that reaches it, within 1..kMaxRenderScale.
 int RenderScaleFor(const PcSettings& settings, int viewHeight);
 
+// M129: the size the graphics card draws the 3D view at, for a view
+// `viewWidth` native pixels across shown in a `viewportWidth` x
+// `viewportHeight` rectangle of the window. Original is the device's own
+// size (the card then draws what the device drew, scaled up unfiltered), a
+// fixed multiple is that multiple, and Auto is the rectangle itself --
+// every pixel of the window, with no 6x ceiling, because on a card the
+// pixels are nearly free.
+void GpuSceneSizeFor(const PcSettings& settings, int viewWidth, int viewportWidth,
+                     int viewportHeight, int* width, int* height);
+
 // The Options screen's view of the settings: rows of "Name: value" text in
 // the game's current language, and a way to step one. MenuExecutable only
 // sees this interface (simkin_bindings/menu_executable.h), so a smoke test
@@ -136,6 +170,9 @@ public:
     virtual std::string RowText(int row, int language) const = 0;
     // Steps row `row` by `delta` (+1 = next option), wrapping at either end.
     virtual void Cycle(int row, int delta) = 0;
+    // M133: the Options row that opens these, and the title of the page
+    // they sit on. Latin-1 like RowText.
+    virtual std::string PageTitle(int /*language*/) const { return "Port Settings"; }
 };
 
 // The real one: owns the settings, and writes kFileName after every change.
@@ -160,15 +197,23 @@ public:
         kRowFrameRate = 2,
         kRowFog = 3,        // M123
         kRowMouseLook = 4,  // M125
-        kRowCount = 5
+        kRowRenderer = 5,   // M129
+        kRowCount = 6
     };
     int RowCount() const override { return kRowCount; }
+
+    // M129: main.cpp reports here when Direct3D 11 could not be started, so
+    // the row shows what is actually drawing. The stored choice is kept.
+    void SetGpuUnavailable(bool unavailable) { gpuUnavailable_ = unavailable; }
+    bool gpuUnavailable() const { return gpuUnavailable_; }
     std::string RowText(int row, int language) const override;
     void Cycle(int row, int delta) override;
+    std::string PageTitle(int language) const override;
 
 private:
     std::string path_;
     PcSettings settings_;
+    bool gpuUnavailable_ = false;  // M129
 };
 
 // The value half of a row, in `language` -- exposed for the smoke test.
@@ -177,5 +222,6 @@ std::string FrameRateValueText(int fps, int language);
 std::string AspectValueText(int aspect, int language);
 std::string FogValueText(int percent, int language);
 std::string MouseLookValueText(int percent, int language);
+std::string RendererValueText(int renderer, int language);  // M129
 
 }  // namespace sk

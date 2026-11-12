@@ -284,69 +284,65 @@ int main(int argc, char** argv) {
         options->EnsureValidSelection();
         const auto& rows = options->rows();
 
-        int resRow = -1, aspectRow = -1, rateRow = -1;
+        // M133: Options itself gains exactly one row, "Port Settings", in
+        // the place of the first spacer under the Music slider; every other
+        // row keeps its index, kind and text, and no PC row is on it.
+        int linkRow = -1;
+        bool anyPcOnMain = false;
         for (size_t i = 0; i < rows.size(); ++i) {
-            if (rows[i].pcSetting == 1) resRow = static_cast<int>(i);
-            if (rows[i].pcSetting == 2) aspectRow = static_cast<int>(i);
-            if (rows[i].pcSetting == 3) rateRow = static_cast<int>(i);
+            if (rows[i].portRole == 1) linkRow = static_cast<int>(i);
+            anyPcOnMain = anyPcOnMain || rows[i].pcSetting != 0;
         }
-        // M123: the fourth row (Fog) is the only one added, and it is the
-        // last row -- every row the script built keeps its index.
-        int fogRow = -1;
-        for (size_t i = 0; i < rows.size(); ++i) {
-            if (rows[i].pcSetting == 4) fogRow = static_cast<int>(i);
-        }
-        // M125: and Mouse Look, the fifth, after it.
-        int mouseRow = -1;
-        for (size_t i = 0; i < rows.size(); ++i) {
-            if (rows[i].pcSetting == 5) mouseRow = static_cast<int>(i);
-        }
-        Check(rows.size() == plain.size() + 2 && fogRow == static_cast<int>(rows.size()) - 2 &&
-                  mouseRow == static_cast<int>(rows.size()) - 1,
-              "two rows are added, Fog then Mouse Look, after the script's last: " +
+        Check(rows.size() == plain.size() && !anyPcOnMain,
+              "Options keeps options.s's row count and carries no PC row: " +
                   std::to_string(rows.size()) + " rows");
-        Check(RowLabel(rows[mouseRow], strings) == "Mouse Look: 100%",
-              "Mouse Look reads its default, 100%");
-        // options.s's rows start at SetStartCoord's 0x32 and step 0xc; the
-        // last must end above its footer text at y=195.
-        Check(0x32 + mouseRow * 0xc + 12 < 195,
-              "the last row still ends above the footer (y " +
-                  std::to_string(0x32 + mouseRow * 0xc) + ")");
-        Check(resRow >= 1 && aspectRow == resRow + 1 && rateRow == resRow + 2 &&
-                  rows[resRow - 1].kind == Menu::RowKind::Slider,
-              "the three rows sit straight after the Music slider");
-        // options.s: [spacer][Sound][Music][spacer][spacer][Language]... --
-        // the leading spacer moves down, the sliders go up one.
-        Check(resRow == 2 && plain[0] == " " && plainKinds[1] == Menu::RowKind::Slider &&
-                  plainKinds[2] == Menu::RowKind::Slider && plain[3] == " " && plain[4] == " " &&
-                  rows[0].kind == Menu::RowKind::Slider && rows[1].kind == Menu::RowKind::Slider &&
-                  RowLabel(rows[0], strings) == plain[1] && RowLabel(rows[1], strings) == plain[2],
-              "in the places of options.s's three spacers: the sliders up one, the gap under them");
+        // options.s: [spacer][Sound][Music][spacer][spacer][Language]...
+        Check(linkRow == 3 && plain[3] == " " && plainKinds[2] == Menu::RowKind::Slider &&
+                  rows[linkRow].selectable && rows[linkRow].kind == Menu::RowKind::MenuItem &&
+                  RowLabel(rows[linkRow], strings) == "Port Settings",
+              "one selectable \"Port Settings\" row, in the spacer under the Music slider");
         bool othersUnchanged = true;
-        for (size_t i = static_cast<size_t>(rateRow) + 1; i < plain.size(); ++i) {  // M123: not Fog
+        for (size_t i = 0; i < plain.size(); ++i) {
+            if (static_cast<int>(i) == linkRow) continue;
             if (RowLabel(rows[i], strings) != plain[i] || rows[i].kind != plainKinds[i]) {
                 othersUnchanged = false;
             }
         }
-        Check(othersUnchanged, "every row from Select Language down keeps its index, kind and text");
-        Check(rows[resRow].selectable && rows[resRow].kind == Menu::RowKind::MenuItem &&
-                  RowLabel(rows[resRow], strings) == "Resolution: Original" &&
-                  RowLabel(rows[aspectRow], strings) == "Aspect Ratio: Original" &&
-                  RowLabel(rows[rateRow], strings) == "Frame Rate: Original",
-              "all three are ordinary selectable menu items reading their values");
+        Check(othersUnchanged, "every other row keeps its index, kind and text");
 
-        // Navigation reaches them and the keys step them.
+        // Navigation reaches the link and Enter opens the page.
         call(options, "ClearMenu");  // start from a known selection below
         call(options, "Init");
         options->EnsurePcSettingRows();
         options->EnsureValidSelection();
         int guard = 0;
-        while (options->selectedItem() != resRow + 1 && guard++ < 20) options->MoveSelection(1);
-        Check(options->selectedItem() == resRow + 1, "Down reaches Resolution");
+        while (options->selectedItem() != linkRow + 1 && guard++ < 20) options->MoveSelection(1);
+        Check(options->selectedItem() == linkRow + 1, "Down reaches Port Settings");
+        options->ActivateSelected();
+        options->EnsureValidSelection();
+        const auto& page = options->rows();
+        Check(options->portSettingsOpen() && page.size() == 10 && page[0].portRole == 3 &&
+                  RowLabel(page[0], strings) == "Port Settings" && page[9].portRole == 2 &&
+                  RowLabel(page[9], strings) == "Back" && options->selectedItem() == 3,
+              "Enter opens the page: title, spacer, six settings, spacer, Back; cursor on the first");
+        const int resRow = 2, aspectRow = 3, rateRow = 4, fogRow = 5, mouseRow = 6,
+                  rendererRow = 7;
+        Check(RowLabel(page[resRow], strings) == "Resolution: Original" &&
+                  RowLabel(page[aspectRow], strings) == "Aspect Ratio: Original" &&
+                  RowLabel(page[rateRow], strings) == "Frame Rate: Original" &&
+                  RowLabel(page[fogRow], strings) == "Fog: Original" &&
+                  RowLabel(page[mouseRow], strings) == "Mouse Look: 100%" &&
+                  RowLabel(page[rendererRow], strings) == "Renderer: Original",
+              "the six rows read their defaults");
+        // options.s's rows start at SetStartCoord's 0x32 and step 0xc; the
+        // last must end above its footer text at y=195.
+        Check(0x32 + 9 * 0xc + 12 < 195, "the page's last row ends above the footer (y " +
+                                              std::to_string(0x32 + 9 * 0xc) + ")");
+
         options->ActivateSelected();
         Check(store.settings().resolutionScale() == sk::kResolutionAuto &&
                   RowLabel(options->rows()[resRow], strings) == "Resolution: Auto",
-              "Enter steps it forward, and the row shows the new value");
+              "Enter steps Resolution forward, and the row shows the new value");
         options->CycleSelectedCombo(-1);
         Check(store.settings().originalResolution(), "Left steps it back");
         options->MoveSelection(1);
@@ -363,22 +359,52 @@ int main(int argc, char** argv) {
                   RowLabel(options->rows()[rateRow], strings) == "Frame Rate: 60",
               "Down then Right x3: Frame Rate 60");
 
+        // Back -- the softkey -- returns to Options, on the link, without
+        // running options.s's own back chain (which goes to MainMenu).
+        Check(options->GoBack() && !options->portSettingsOpen() &&
+                  stack.currentMenu() == options && options->rows().size() == plain.size() &&
+                  options->selectedItem() == linkRow + 1,
+              "the back key closes the page onto Options, cursor on Port Settings");
+        // The page's own Back row does the same.
+        options->ActivateSelected();
+        guard = 0;
+        while (options->selectedItem() != 10 && guard++ < 20) options->MoveSelection(1);
+        options->ActivateSelected();
+        Check(!options->portSettingsOpen() && options->selectedItem() == linkRow + 1,
+              "so does the page's Back row");
+        // And a fresh visit always starts on the main page.
+        options->ActivateSelected();
+        stack.OpenMenu("MainMenu");
+        stack.OpenMenu("Options");
+        Check(stack.currentMenu() == options && !options->portSettingsOpen() &&
+                  options->rows().size() == plain.size(),
+              "leaving with the page open and coming back lands on Options itself");
+
         // options.s's own handlers rebuild the screen with ClearMenu(); Init();.
         call(options, "SetGerman");
         options->EnsurePcSettingRows();
-        Check(options->rows().size() == plain.size() + 2 &&  // M123: + Fog, M125: + Mouse Look
-                  options->rows()[resRow].pcSetting == 1 &&
-                  RowLabel(options->rows()[options->rows().size() - 2], strings) ==
-                      "Nebel: Original" &&
-                  RowLabel(options->rows().back(), strings) == "Mausblick: 100%" &&
+        int germanLink = -1;
+        for (size_t i = 0; i < options->rows().size(); ++i) {
+            if (options->rows()[i].portRole == 1) germanLink = static_cast<int>(i);
+        }
+        Check(germanLink == linkRow &&
+                  RowLabel(options->rows()[germanLink], strings) == "PC-Einstellungen",
+              "SetGerman (ClearMenu; Init) brings the link back, relabelled in German");
+        guard = 0;
+        while (options->selectedItem() != germanLink + 1 && guard++ < 20) options->MoveSelection(1);
+        options->ActivateSelected();
+        Check(options->portSettingsOpen() &&
                   RowLabel(options->rows()[resRow], strings) == "Aufl\xF6sung: Original" &&
                   RowLabel(options->rows()[aspectRow], strings) == "Format: 16:9" &&
-                  RowLabel(options->rows()[rateRow], strings) == "Bildrate: 60",
-              "SetGerman (ClearMenu; Init) brings them back, relabelled in German");
+                  RowLabel(options->rows()[rateRow], strings) == "Bildrate: 60" &&
+                  RowLabel(options->rows()[fogRow], strings) == "Nebel: Original" &&
+                  RowLabel(options->rows()[mouseRow], strings) == "Mausblick: 100%",
+              "and the page reads in German, values kept");
+        options->ClosePortSettings();
         call(options, "SetEnglish");
         options->EnsurePcSettingRows();
-        Check(RowLabel(options->rows()[rateRow], strings) == "Frame Rate: 60",
-              "and SetEnglish puts them back in English, value kept");
+        Check(RowLabel(options->rows()[linkRow], strings) == "Port Settings",
+              "and SetEnglish puts it back in English");
 
         // The other screens are untouched.
         stack.OpenMenu("MainMenu");
@@ -427,6 +453,17 @@ int main(int argc, char** argv) {
                     sk::PcSettingsStore probe;
                     probe.Set(s);
                     const std::string t = probe.RowText(fog ? 3 : 4, lang);
+                    if (sk::BitmapFont::TextWidth(t) > widest) {
+                        widest = sk::BitmapFont::TextWidth(t);
+                        widestText = t;
+                    }
+                }
+                for (int i = 0; i < sk::kRendererOptionCount; ++i) {  // M129
+                    sk::PcSettings s;
+                    s.rendererIndex = i;
+                    sk::PcSettingsStore probe;
+                    probe.Set(s);
+                    const std::string t = probe.RowText(sk::PcSettingsStore::kRowRenderer, lang);
                     if (sk::BitmapFont::TextWidth(t) > widest) {
                         widest = sk::BitmapFont::TextWidth(t);
                         widestText = t;

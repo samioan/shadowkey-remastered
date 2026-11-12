@@ -1,3 +1,5 @@
+#include "skTreeNode.h"
+#include "simkin_bindings/mp_hooks.h"
 #include "simkin_bindings/monster_executable.h"
 
 #include <cctype>
@@ -205,6 +207,8 @@ void MonsterExecutable::InvokeScriptEvent(const char* name, const skRValueArray&
         skScriptedExecutable::method(skString(name), callArgs, ret, ctxt);
     } catch (skParseException& e) {
         std::printf("MonsterExecutable: PARSE ERROR in %s(): %s\n", name, e.toString().ptr());
+    } catch (skTreeNodeReaderException& e) {
+        std::printf("MonsterExecutable: SCRIPT FILE ERROR in %s(): %s\n", name, e.toString().ptr());
     } catch (skRuntimeException& e) {
         std::printf("MonsterExecutable: RUNTIME ERROR in %s(): %s\n", name, e.toString().ptr());
     }
@@ -272,6 +276,8 @@ void MonsterExecutable::InvokeOnUse() {
         skScriptedExecutable::method(skString("OnUse"), args, ret, ctxt);
     } catch (skParseException& e) {
         std::printf("MonsterExecutable: PARSE ERROR in OnUse(): %s\n", e.toString().ptr());
+    } catch (skTreeNodeReaderException& e) {
+        std::printf("MonsterExecutable: SCRIPT FILE ERROR in OnUse(): %s\n", e.toString().ptr());
     } catch (skRuntimeException& e) {
         std::printf("MonsterExecutable: RUNTIME ERROR in OnUse(): %s\n", e.toString().ptr());
     }
@@ -297,6 +303,8 @@ bool MonsterExecutable::InvokeOnDetect(skiExecutable* detected) {
         return skScriptedExecutable::method(skString("OnDetect"), args, ret, ctxt);
     } catch (skParseException& e) {
         std::printf("MonsterExecutable: PARSE ERROR in OnDetect(): %s\n", e.toString().ptr());
+    } catch (skTreeNodeReaderException& e) {
+        std::printf("MonsterExecutable: SCRIPT FILE ERROR in OnDetect(): %s\n", e.toString().ptr());
     } catch (skRuntimeException& e) {
         std::printf("MonsterExecutable: RUNTIME ERROR in OnDetect(): %s\n", e.toString().ptr());
     }
@@ -347,6 +355,8 @@ void MonsterExecutable::InvokeOnKilled() {
         skScriptedExecutable::method(skString("OnKilled"), args, ret, ctxt);
     } catch (skParseException& e) {
         std::printf("MonsterExecutable: PARSE ERROR in OnKilled(): %s\n", e.toString().ptr());
+    } catch (skTreeNodeReaderException& e) {
+        std::printf("MonsterExecutable: SCRIPT FILE ERROR in OnKilled(): %s\n", e.toString().ptr());
     } catch (skRuntimeException& e) {
         std::printf("MonsterExecutable: RUNTIME ERROR in OnKilled(): %s\n", e.toString().ptr());
     }
@@ -678,6 +688,10 @@ bool MonsterExecutable::method(const skString& methodName, skRValueArray& args,
         return true;
     }
     if (methodName == skString("ReplicateTeleport")) {
+        // M132: tag 0x37, `FUN_1003cbd0(session, self, self->+0x2ee)`. The
+        // gate `+0x2ad` is down only while the receiver below is running
+        // the script, which MpRemoteScope stands in for.
+        if (Mp().sending() && Mp().umbraBeat) Mp().umbraBeat(netId(), m_CanTeleport);
         return true;
     }
     // SetImmobile (3 scripts): dispatcher case 0xf writes the same byte

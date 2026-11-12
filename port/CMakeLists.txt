@@ -255,6 +255,21 @@ if(SK_DEBUG_SUITE)
   target_compile_definitions(sk_debug PUBLIC SK_DEBUG_SUITE=1)
 endif()
 
+# M129: multiplayer -- the wire format, the transport (TCP + UDP LAN
+# discovery) and the session state machine. See src/net/. Its own library:
+# it knows nothing about the game, which is what lets the test run a whole
+# join between two scripted worlds.
+add_library(sk_net STATIC
+  src/net/mp_protocol.cpp
+  src/net/mp_session.cpp
+  src/net/mp_transport.cpp
+)
+target_include_directories(sk_net PUBLIC src)
+if(WIN32)
+  target_link_libraries(sk_net PUBLIC ws2_32)
+  target_compile_definitions(sk_net PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
+endif()
+
 add_executable(shadowkey_port
   src/main.cpp
   src/assets/gdr_font.cpp
@@ -262,13 +277,14 @@ add_executable(shadowkey_port
   src/graphics/bitmap_font.cpp
   src/platform/win32/console_tee.cpp
   src/platform/win32/crash_report.cpp
+  src/platform/win32/d3d11_renderer.cpp
   src/platform/win32/exe_dir.cpp
   src/platform/win32/gamepad.cpp
   src/platform/win32/window.cpp
 )
 
 target_include_directories(shadowkey_port PRIVATE src)
-target_link_libraries(shadowkey_port PRIVATE sk_bindings sk_render3d)
+target_link_libraries(shadowkey_port PRIVATE sk_bindings sk_render3d sk_net)
 
 if(SK_DEBUG_SUITE)
   target_link_libraries(shadowkey_port PRIVATE sk_debug)
@@ -281,6 +297,11 @@ if(WIN32)
   # winmm is timeBeginPeriod: a Frame Rate above the original 25 needs the
   # 1ms scheduler tick to pace to (M119, engine/pc_settings.h).
   target_link_libraries(shadowkey_port PRIVATE user32 gdi32 msimg32 winmm)
+  # M129: the Direct3D 11 renderer (src/platform/win32/d3d11_renderer.h).
+  # d3d11 and dxgi are part of Windows; the shader compiler is loaded by
+  # name at run time, so a machine without it still starts and draws in
+  # software.
+  target_link_libraries(shadowkey_port PRIVATE d3d11 dxgi)
 endif()
 
 # --- M113: the launcher -----------------------------------------------
@@ -881,9 +902,45 @@ add_executable(pc_settings_smoke
 target_link_libraries(pc_settings_smoke PRIVATE sk_bindings sk_render3d sk_world)
 target_compile_definitions(pc_settings_smoke PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
 
+# M129: the Direct3D 11 renderer against the software rasterizer, on WARP
+# (Windows' software Direct3D device, so no GPU is needed) -- see
+# src/tests/m129_gpu_renderer_smoke.cpp.
+if(WIN32)
+  add_executable(gpu_renderer_smoke
+    src/tests/m129_gpu_renderer_smoke.cpp
+    src/platform/win32/d3d11_renderer.cpp
+    src/engine/pc_settings.cpp
+  )
+  target_link_libraries(gpu_renderer_smoke PRIVATE sk_render3d sk_world d3d11 dxgi)
+  target_compile_definitions(gpu_renderer_smoke PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
+endif()
+
+# M129: multiplayer -- the 43-tag wire format against the catalogue, a whole
+# join between two scripted worlds, and the socket transport on loopback.
+# See src/tests/m129_multiplayer_smoke.cpp.
+add_executable(multiplayer_smoke src/tests/m129_multiplayer_smoke.cpp)
+target_link_libraries(multiplayer_smoke PRIVATE sk_net sk_bindings)
+target_compile_definitions(multiplayer_smoke PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
+
+# M130: the player's walk, turn and look as the engine runs them.
+# See src/tests/m130_player_move_smoke.cpp.
+add_executable(player_move_smoke src/tests/m130_player_move_smoke.cpp)
+target_link_libraries(player_move_smoke PRIVATE sk_bindings)
+
+# M131: the engine's use-target search, its prompt and the text box.
+# See src/tests/m131_use_prompt_smoke.cpp.
+add_executable(use_prompt_smoke src/tests/m131_use_prompt_smoke.cpp)
+target_link_libraries(use_prompt_smoke PRIVATE sk_bindings)
+
 endif()  # NOT SK_DIST
 
 # M127: the credits screen -- FUN_1006b168's load and screen mode 0xb's
 # frame (FUN_1006b3fc). See src/tests/m127_credits_smoke.cpp.
 add_executable(credits_smoke src/tests/m127_credits_smoke.cpp)
 target_link_libraries(credits_smoke PRIVATE sk_bindings sk_world)
+
+# M133: Delfran's Hideout -- CreateEntity+PickupItem gives the item, a door
+# script's own OpenDoor runs, the door Use hands over its screen, and popup
+# ClearMenu. See src/tests/m133_delfhide_smoke.cpp.
+add_executable(delfhide_smoke src/tests/m133_delfhide_smoke.cpp)
+target_link_libraries(delfhide_smoke PRIVATE sk_bindings sk_world)

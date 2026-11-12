@@ -20,12 +20,23 @@ namespace {
 GdrFont& FontSlot(BitmapFont::Face face) {
     static GdrFont ui;
     static GdrFont small;
+    static GdrFont smallItalic;
+    if (face == BitmapFont::Face::SmallItalic) return smallItalic;
     return face == BitmapFont::Face::Small ? small : ui;
+}
+
+// M132: SmallItalic with no Alpi12 loaded is the Small face, slanted.
+bool SlantedFallback(BitmapFont::Face face) {
+    return face == BitmapFont::Face::SmallItalic && !FontSlot(face).IsLoaded();
 }
 
 GdrFont& RealFont(BitmapFont::Face face = BitmapFont::Face::Ui) {
     GdrFont& slot = FontSlot(face);
     if (slot.IsLoaded()) return slot;
+    if (face == BitmapFont::Face::SmallItalic) {
+        GdrFont& upright = FontSlot(BitmapFont::Face::Small);
+        if (upright.IsLoaded()) return upright;
+    }
     return FontSlot(BitmapFont::Face::Ui);
 }
 
@@ -345,6 +356,7 @@ void BitmapFont::DrawString(Backbuffer& bb, int x, int y, std::string_view text,
     }
 
     GdrFont& font = RealFont(face);
+    const bool slant = SlantedFallback(face);
     int cursorX = x;
     const int baselineY = y + font.Ascent();
 
@@ -355,9 +367,13 @@ void BitmapFont::DrawString(Backbuffer& bb, int x, int y, std::string_view text,
             int glyphX = cursorX + glyph->leftBearing;
             int glyphY = baselineY - glyph->ascentAboveBaseline;
             for (int row = 0; row < glyph->height; ++row) {
+                // Alpi12's slant: a row `d` pixels above the baseline
+                // (1 = the row sitting on it) is moved `d / 4` right.
+                const int above = glyph->ascentAboveBaseline - row;
+                const int shift = slant ? (above >= 0 ? above / 4 : -((3 - above) / 4)) : 0;
                 for (int col = 0; col < glyph->width; ++col) {
                     if (glyph->bits[static_cast<size_t>(row) * glyph->width + col])
-                        bb.SetPixel(glyphX + col, glyphY + row, color);
+                        bb.SetPixel(glyphX + col + shift, glyphY + row, color);
                 }
             }
             cursorX += glyph->advance;

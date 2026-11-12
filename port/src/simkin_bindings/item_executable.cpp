@@ -1,3 +1,5 @@
+#include "skTreeNode.h"
+#include "simkin_bindings/mp_hooks.h"
 #include "simkin_bindings/item_executable.h"
 
 #include <algorithm>
@@ -260,6 +262,8 @@ bool ItemExecutable::InvokeOnUse() {
         return skScriptedExecutable::method(skString("OnUse"), args, ret, ctxt);
     } catch (skParseException& e) {
         std::printf("ItemExecutable: PARSE ERROR in OnUse(): %s\n", e.toString().ptr());
+    } catch (skTreeNodeReaderException& e) {
+        std::printf("ItemExecutable: SCRIPT FILE ERROR in OnUse(): %s\n", e.toString().ptr());
     } catch (skRuntimeException& e) {
         std::printf("ItemExecutable: RUNTIME ERROR in OnUse(): %s\n", e.toString().ptr());
     }
@@ -276,6 +280,8 @@ void ItemExecutable::InvokeOnUsedBy(skiExecutable* user) {
         skScriptedExecutable::method(skString("OnUse"), noArgs, ret, ctxt);
     } catch (skParseException& e) {
         std::printf("ItemExecutable: PARSE ERROR in OnUse(): %s\n", e.toString().ptr());
+    } catch (skTreeNodeReaderException& e) {
+        std::printf("ItemExecutable: SCRIPT FILE ERROR in OnUse(): %s\n", e.toString().ptr());
     } catch (skRuntimeException& e) {
         std::printf("ItemExecutable: RUNTIME ERROR in OnUse(): %s\n", e.toString().ptr());
     }
@@ -291,6 +297,8 @@ void ItemExecutable::InvokeHitTarget(skiExecutable* target) {
         method(skString("HitTarget"), args, ret, ctxt);
     } catch (skParseException& e) {
         std::printf("ItemExecutable: PARSE ERROR in HitTarget(): %s\n", e.toString().ptr());
+    } catch (skTreeNodeReaderException& e) {
+        std::printf("ItemExecutable: SCRIPT FILE ERROR in HitTarget(): %s\n", e.toString().ptr());
     } catch (skRuntimeException& e) {
         std::printf("ItemExecutable: RUNTIME ERROR in HitTarget(): %s\n", e.toString().ptr());
     }
@@ -860,10 +868,11 @@ bool ItemExecutable::method(const skString& methodName, skRValueArray& args,
                     // sprite range 62..68, and gives it a lifetime of
                     // `magnitude * 2 << 8`, exactly the burn duration.
                     // That is an independent confirmation of the duration
-                    // reading, from a completely different write; the
-                    // visual itself has no emitter system here to attach
-                    // to and is not reproduced.
+                    // reading, from a completely different write.
+                    // M132: and the flame is drawn (main.cpp's
+                    // attachedEffect), and sent as tag 0x27 in a session.
                     targetStats.ApplyBurn(1, magnitude * 2);
+                    if (Mp().attachedEffect) Mp().attachedEffect(target, 0x3e, 0x44, magnitude * 2);
                     break;
                 }
                 // ---- M37: the four damage-only branches. Their whole

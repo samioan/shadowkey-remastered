@@ -357,12 +357,27 @@ public:
     // A no-op on every other screen, and when the stack has no settings
     // control (every pre-M119 smoke test).
     void EnsurePcSettingRows();
+
+    // M133: the PC rows moved off the Options screen onto a page of their
+    // own. Options gets one row, "Port Settings", in the spacer under the
+    // Music slider; activating it swaps the screen's rows for the page
+    // (a title, the PC rows, a Back row) and Back -- the row, the right
+    // softkey or Esc -- swaps them back with the selection on the link.
+    // The script's rows are parked, not destroyed, so every handle options.s
+    // holds is valid again when the page closes, and nothing the script can
+    // reach runs while it is open. Reopening Options always lands on the
+    // main page (MenuStack::OpenMenu closes it).
+    bool portSettingsOpen() const { return m_PortPageOpen; }
+    void OpenPortSettings();
+    void ClosePortSettings();
     // Cycles the currently selected row's value if it's a ComboBox (fires
     // its SetCallback() handler on change) or nudges it if it's a Slider
     // (M28, the real Options screen's two volume rows -- applies the new
     // value to the audio engine straight away); no-op for any other row
     // kind.
-    void CycleSelectedCombo(int delta);
+    // M131: true when a combo box selection actually moved -- the one
+    // case its step functions play the select sound for.
+    bool CycleSelectedCombo(int delta);
     // Pushes a slider row's current value into the audio engine (see
     // the .cpp) -- shared by the initial AddMenuSlider() and each
     // later Left/Right adjustment.
@@ -552,8 +567,20 @@ public:
         // Frame Rate), or 0 for every row a script built. See
         // EnsurePcSettingRows().
         int pcSetting = 0;
+        // M133: 1 = the Options screen's "Port Settings" link, 2 = the
+        // port page's Back row, 3 = the port page's title. 0 for every row
+        // a script built.
+        int portRole = 0;
     };
     const std::vector<MenuRow>& rows() const { return m_Rows; }
+
+    // M129: the multiplayer lobby screens show who is there. hostgamemenu.s
+    // builds four blank "Reject<n>" rows and joingamemenu.s four "JoinGame<n>"
+    // rows, and the engine fills them in natively as handsets appear. This
+    // is that fill: the row whose callback is `callback` reads `text`, and
+    // can be selected only while there is someone on it. False when the
+    // screen has no such row.
+    bool SetLobbyRow(const std::string& callback, const std::string& text, bool selectable);
     int backgroundId() const { return m_BackgroundId; }
     // M64: `SetStartCoord` (root-class binding 0x2c) -- the y the menu's
     // draw (FUN_10076b64) starts its row cursor at, menu+0x96. The menu
@@ -789,6 +816,10 @@ private:
     // (which every screen's OnDisplay runs), since the real call site is
     // Init(), which runs only once per screen.
     std::string m_PrevMenuPath;
+    // M133: see portSettingsOpen().
+    bool m_PortPageOpen = false;
+    std::vector<MenuRow> m_ParkedRows;
+    int m_ParkedSelectedItem = 0;
     // M90: see SetScriptName(). Set by MenuStack when the screen is built.
     std::string m_ScriptName;
     std::vector<MenuRow> m_Rows;

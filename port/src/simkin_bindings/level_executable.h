@@ -191,6 +191,13 @@ public:
     // (nothing calls CreateEntity() twice without an AddObject() between,
     // in the real corpus) returns nullptr rather than a stale object.
     std::unique_ptr<ItemExecutable> TakePendingCreatedEntity();
+    // M133: the other consumer of that slot. `Item = Level.CreateEntity(n);
+    // GetPlayer().PickupItem(Item);` is the corpus's give-an-item idiom (the
+    // chest menus' Take, the chef's cell key, Grell's letter...), and it
+    // calls CreateEntity twice in a row with a PickupItem in between, not an
+    // AddObject. PickupItem peeks here to tell "a fresh object the script
+    // just made" from "a placed world pickup" before taking it.
+    ItemExecutable* PeekPendingCreatedEntity() const { return m_PendingCreatedEntity.get(); }
 
     // ---- M44: the named-region natives ----
     //

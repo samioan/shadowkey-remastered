@@ -206,7 +206,11 @@ void MenuStack::OpenMenu(const std::string& simkinPath, skiExecutable* opener) {
     // opener on itself (Init() doesn't rerun there, but the caller's
     // opener should still apply to a subsequent GetOpener() call).
     if (opener) menu->SetOpener(opener);
+    // M133: Options always opens on its main page, whatever page the last
+    // visit was left on.
+    menu->ClosePortSettings();
     m_Current = menu;
+    ++m_OpenSerial;       // M133, see openSerial()
     m_MenuActive = true;  // M95: FUN_100779b8's `mgr+0x48 = 1`
     // M56: same containment as Init() above -- OnDisplay() is script too.
     // The screen is already current and already drew its rows in Init(),

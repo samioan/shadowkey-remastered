@@ -1,3 +1,5 @@
+#include "skTreeNode.h"
+#include "simkin_bindings/mp_hooks.h"
 #include "simkin_bindings/entity_base_ref.h"
 
 #include <cstdio>
@@ -37,6 +39,11 @@ bool EntityBaseRef::HandleEntityBaseNative(const skString& methodName, skRValueA
         m_Y = args[1].intValue();
         m_Z = args.entries() >= 3 ? args[2].intValue() : 0;
         m_PositionDirty = true;
+        // M129: 0x35 is 0x30 plus one line inside `engine+0x5c0`: tell the
+        // other player (tag 0x33, one entity).
+        if (methodName == skString("SetPositionMirror") && Mp().sending() && Mp().setPosition) {
+            Mp().setPosition(false, m_NetId, m_X, m_Y, m_Z);
+        }
         return true;
     }
     if (methodName == skString("GetPositionX") && args.entries() == 0) {
@@ -172,6 +179,11 @@ bool EntityBaseRef::HandleEntityBaseNative(const skString& methodName, skRValueA
     // the difference between that and never running. See the header.
     if (methodName == skString("MirrorMethod") && args.entries() == 1) {
         ++m_MirroredMethods;
+        // M129: tag 0x34 -- the other player's copy of this entity runs the
+        // named script method.
+        if (Mp().sending() && Mp().mirrorMethod) {
+            Mp().mirrorMethod(m_NetId, ToStdString(args[0].str()));
+        }
         return true;
     }
 
@@ -197,6 +209,11 @@ bool EntityBaseRef::HandleEntityBaseNative(const skString& methodName, skRValueA
             ++target->m_MirroredDestroys;
         } else {
             target->RemoveFromWorld();
+        }
+        // M129: 0x21 and 0x33 notify the other player (tag 0x2b); the plain
+        // 0x20 does not.
+        if (methodName != skString("DestroyObject") && Mp().sending() && Mp().destroyObject) {
+            Mp().destroyObject(target->m_NetId);
         }
         return true;
     }
@@ -245,6 +262,10 @@ void RunEntityInit(EntityBaseRef& entity, const std::string& scriptRoot,
                           skTreeNode::read(skString(path.c_str()), ctxt), true);
         } catch (skParseException& e) {
             std::printf("  [entity] RunScript(\"%s\") -- PARSE ERROR in %s: %s\n", next.c_str(),
+                        path.c_str(), e.toString().ptr());
+            return;
+        } catch (skTreeNodeReaderException& e) {
+            std::printf("  [entity] RunScript(\"%s\") -- SCRIPT FILE ERROR in %s: %s\n", next.c_str(),
                         path.c_str(), e.toString().ptr());
             return;
         } catch (skRuntimeException& e) {

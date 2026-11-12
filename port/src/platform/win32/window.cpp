@@ -6,6 +6,10 @@
 #include <vector>
 
 #include "graphics/viewport.h"
+#include "platform/win32/d3d11_renderer.h"
+
+#include <memory>
+#include <string>
 
 #include <windows.h>
 #include <timeapi.h>
@@ -147,6 +151,10 @@ struct Window::Impl {
     bool fullscreen = false;
     DWORD windowedStyle = 0;
     WINDOWPLACEMENT windowedPlacement{sizeof(WINDOWPLACEMENT)};
+    // M129: the Direct3D 11 renderer, while it owns the window's presents.
+    std::unique_ptr<D3D11Renderer> gpu;
+    bool gpuActive = false;
+    std::string gpuError;
 };
 
 namespace {
@@ -542,8 +550,96 @@ void Window::RunMessageLoop(const IdleCallback& onIdle) {
     shouldClose_ = true;
 }
 
+namespace {
+
+// SK_DEBUG_SUITE (M68): the debug overlay onto `target`, a device context
+// holding the finished frame at the window's own resolution. M129: shared
+// by the GDI present and the Direct3D one, whose swap chain hands out a
+// device context for its back buffer for exactly this.
+void DrawDebugOverlay(Window::Impl* impl, HDC target, int destW, int destH) {
+    if (!impl->overlayCallback) return;
+    if (!impl->overlayFont) {
+        impl->overlayFont = CreateFontW(
+            -13, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
+            OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
+            FIXED_PITCH | FF_MODERN, L"Consolas");
+        if (impl->overlayFont) {
+            HGDIOBJ old = SelectObject(target, impl->overlayFont);
+            TEXTMETRICW tm{};
+            GetTextMetricsW(target, &tm);
+            impl->overlayCharWidth = static_cast<int>(tm.tmAveCharWidth);
+            impl->overlayLineHeight = static_cast<int>(tm.tmHeight + tm.tmExternalLeading);
+            SelectObject(target, old);
+        }
+    }
+    if (impl->overlayFont && impl->overlayCharWidth > 0 && impl->overlayLineHeight > 0) {
+        GdiOverlaySurface surface(target, destW, destH, impl->overlayFont,
+                                   impl->overlayCharWidth, impl->overlayLineHeight);
+        impl->overlayCallback(surface);
+    }
+}
+
+D3D11Renderer::GdiOverlay GpuOverlayFor(Window::Impl* impl) {
+    if (!impl->overlayCallback) return {};
+    return [impl](void* hdc, int w, int h) {
+        DrawDebugOverlay(impl, static_cast<HDC>(hdc), w, h);
+    };
+}
+
+}  // namespace
+
+bool Window::SetGpuRenderer(bool on) {
+    if (!on) {
+        if (impl_->gpu) impl_->gpu->DetachWindow();
+        impl_->gpuActive = false;
+        return false;
+    }
+    if (impl_->gpuActive) return true;
+    if (!impl_->hwnd) return false;
+    if (!impl_->gpu) impl_->gpu = std::make_unique<D3D11Renderer>();
+    if (!impl_->gpu->Init() || !impl_->gpu->AttachWindow(impl_->hwnd)) {
+        impl_->gpuError = impl_->gpu->lastError();
+        impl_->gpu->DetachWindow();
+        return false;
+    }
+    impl_->gpuError.clear();
+    impl_->gpuActive = true;
+    return true;
+}
+
+bool Window::GpuRendererActive() const { return impl_->gpuActive; }
+
+D3D11Renderer* Window::gpu() { return impl_->gpuActive ? impl_->gpu.get() : nullptr; }
+
+const std::string& Window::gpuError() const { return impl_->gpuError; }
+
+bool Window::PresentGpuScene(const Backbuffer& layer, const Backbuffer& under) {
+    if (!impl_->gpuActive || !impl_->hwnd) return false;
+    if (IsIconic(impl_->hwnd)) return true;  // minimized: nothing to show
+    if (impl_->gpu->PresentScene(layer, under, GpuOverlayFor(impl_))) return true;
+    if (!impl_->gpu->ready()) {
+        // The device went away (a driver update, a remote session). Fall
+        // back to GDI for good rather than failing every frame.
+        impl_->gpuError = impl_->gpu->lastError();
+        impl_->gpu->DetachWindow();
+        impl_->gpuActive = false;
+    }
+    return false;
+}
+
 void Window::Present(const Backbuffer& backbuffer) {
     if (!impl_->hwnd) return;
+    // M129: with the Direct3D renderer active, every frame reaches the
+    // window through its swap chain -- a menu or a loading screen as much as
+    // the 3D view.
+    if (impl_->gpuActive) {
+        if (IsIconic(impl_->hwnd)) return;
+        if (impl_->gpu->PresentBackbuffer(backbuffer, GpuOverlayFor(impl_))) return;
+        if (impl_->gpu->ready()) return;  // a skipped frame, not a lost device
+        impl_->gpuError = impl_->gpu->lastError();
+        impl_->gpu->DetachWindow();
+        impl_->gpuActive = false;  // and draw this one with GDI, below
+    }
     HDC hdc = GetDC(impl_->hwnd);
     RECT client{};
     GetClientRect(impl_->hwnd, &client);
@@ -666,27 +762,7 @@ void Window::Present(const Backbuffer& backbuffer) {
     // SK_DEBUG_SUITE (M68): the debug overlay, drawn over the finished
     // frame at native resolution. Deliberately after the blit and outside
     // any game state -- see graphics/overlay_surface.h.
-    if (impl_->overlayCallback) {
-        if (!impl_->overlayFont) {
-            impl_->overlayFont = CreateFontW(
-                -13, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
-                OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
-                FIXED_PITCH | FF_MODERN, L"Consolas");
-            if (impl_->overlayFont) {
-                HGDIOBJ old = SelectObject(target, impl_->overlayFont);
-                TEXTMETRICW tm{};
-                GetTextMetricsW(target, &tm);
-                impl_->overlayCharWidth = static_cast<int>(tm.tmAveCharWidth);
-                impl_->overlayLineHeight = static_cast<int>(tm.tmHeight + tm.tmExternalLeading);
-                SelectObject(target, old);
-            }
-        }
-        if (impl_->overlayFont && impl_->overlayCharWidth > 0 && impl_->overlayLineHeight > 0) {
-            GdiOverlaySurface surface(target, destW, destH, impl_->overlayFont,
-                                       impl_->overlayCharWidth, impl_->overlayLineHeight);
-            impl_->overlayCallback(surface);
-        }
-    }
+    DrawDebugOverlay(impl_, target, destW, destH);
 
     // Post-M68 fix: the whole composed frame -- game and overlay together -- reaches
     // the window in one operation.

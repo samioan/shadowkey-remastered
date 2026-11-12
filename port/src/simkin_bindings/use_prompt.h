@@ -113,4 +113,114 @@ inline bool StartsUsable(int entityCategory) {
     return entityCategory == 4 || entityCategory == 9;
 }
 
+// ---------------------------------------------------------------------
+// M131: the search itself, `FUN_1001dd40`, transcribed.
+//
+// Twelve rays leave the player (its position clamped a tile inside the
+// map), at `heading + 0x600` down to `heading - 0x500` in steps of 0x100
+// -- a fan about eight degrees either side of dead ahead. A ray's step is
+// `sin >> 1`, half a tile, and it takes six of them: the tile the player
+// stands in, then out to two and a half tiles. Every round visits all
+// twelve rays, the `heading - 0x500` one first; each looks at the tile it
+// is in:
+//
+//   * a usable entity there, within the height window, **is the answer**
+//     -- the first one any ray meets, nearest round first;
+//   * a wall tile there (`.zmp` bit 2) **ends the whole search with
+//     nothing**, not just that ray. Entities are tested first, which is
+//     how a door standing in a wall tile is still found.
+//
+// `isWall(tx, ty)` and `usableAt(tx, ty)` are the caller's: the second
+// returns an id >= 0 for the tile's first usable entity (the `+0xd8` and
+// height tests are its business) or -1.
+int SwaySine(int index2048);  // weapon_viewmodel.h: the engine's sine table
+
+constexpr int kUseRayCount = 12;
+constexpr int kUseRaySteps = 6;
+constexpr int kUseHeightWindow = 0x300;      // |player+0x224 - entity+0xa4|
+constexpr int kUseHeightWindowDead = 0xc0;   // ... when `player+0x1e1 == 3`
+
+template <class WallFn, class UsableFn>
+int FindUseTarget(int playerX, int playerY, int headingUnits, int mapWidth, int mapHeight,
+                  WallFn isWall, UsableFn usableAt) {
+    auto clampInside = [](int v, int tiles) {
+        const int hi = (tiles - 2) * 0x100;
+        if (v < 0x100) v = 0x100;
+        return v <= hi ? v : hi;
+    };
+    struct Ray {
+        int x, y, dx, dy, steps;
+        bool live;
+    };
+    Ray rays[kUseRayCount];
+    const int startX = clampInside(playerX, mapWidth);
+    const int startY = clampInside(playerY, mapHeight);
+    for (int i = 0; i < kUseRayCount; ++i) {
+        // Slot 0 is the last one the engine fills: heading - 0x500.
+        const int angle = headingUnits - 0x500 + i * 0x100;
+        rays[i] = Ray{startX, startY, SwaySine((angle >> 5) & 0x7ff) >> 1,
+                      SwaySine(((angle + 0x4000) >> 5) & 0x7ff) >> 1, 0, true};
+    }
+    int live = kUseRayCount;
+    while (live > 0) {
+        for (Ray& ray : rays) {
+            if (!ray.live) continue;
+            const int tx = ray.x >> 8, ty = ray.y >> 8;
+            if (tx <= 0 || ty <= 0 || tx >= mapWidth - 1 || ty >= mapHeight - 1) {
+                ray.live = false;
+                --live;
+                continue;
+            }
+            const int found = usableAt(tx, ty);
+            if (found >= 0) return found;
+            if (isWall(tx, ty)) return -1;
+            ray.x += ray.dx;
+            ray.y += ray.dy;
+            if (++ray.steps >= kUseRaySteps) {
+                ray.live = false;
+                --live;
+            }
+        }
+    }
+    return -1;
+}
+
+// ---------------------------------------------------------------------
+// M131: the prompt, `FUN_1002acd4` -- drawn every frame for whatever the
+// search parked in `engine+0x61c`, between the viewmodel and the HUD.
+//
+//     text = entity->useText()                      // vtable slot, above
+//     if (!entity->isMonster())           text += " ";            white
+//     else {
+//         if (entity->+0x2f0 && entity->isDead())   text = "Examine:  " + text;
+//         else                                      text += " ";
+//         if (!entity->+0x1e2)            colour = (0xed, 0xf9, 0x00);
+//     }
+//     FUN_100231b4(text, 10, 0x1e, 0xa6, ..., italic, centred, wrap 25)
+//
+// `+0x2f0` is the creature's loot typeId and `+0x1e2` its invulnerable
+// flag: a creature you could fight is named in yellow, one you cannot --
+// every townsperson -- in white, and a lootable corpse says "Examine:".
+// There is no health readout; this port's "name  12/30" line was its own.
+constexpr int kUsePromptX = 10;
+constexpr int kUsePromptY = 0x1e;
+constexpr int kUsePromptRight = 0xa6;
+constexpr int kUsePromptWrapChars = 0x19;
+constexpr int kUsePromptHostileR = 0xed, kUsePromptHostileG = 0xf9, kUsePromptHostileB = 0x00;
+
+}  // namespace sk_bindings
+
+#include <string>
+
+namespace sk_bindings {
+
+inline std::string UsePromptText(const std::string& useText, bool isMonster, bool hasLoot,
+                                 bool isDead) {
+    if (isMonster && hasLoot && isDead) return "Examine:  " + useText;
+    return useText + " ";
+}
+inline bool UsePromptIsHostileColour(bool isMonster, bool invulnerable) {
+    return isMonster && !invulnerable;
+}
+
 }  // namespace sk_bindings

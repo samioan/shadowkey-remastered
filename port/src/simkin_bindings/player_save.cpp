@@ -16,6 +16,7 @@
 
 #include <cstdio>
 
+#include "skTreeNode.h"
 #include "simkin_bindings/entity_base_ref.h"
 #include "simkin_bindings/item_executable.h"
 #include "simkin_bindings/level_executable.h"
@@ -324,6 +325,9 @@ void PlayerExecutable::ApplySaveRecord(const sk::SavedEntity& record, MenuStack&
             m_Inventory.push_back(std::move(item));
         } catch (skParseException& e) {
             std::printf("PlayerExecutable: PARSE ERROR restoring %s: %s\n", path.c_str(),
+                        e.toString().ptr());
+        } catch (skTreeNodeReaderException& e) {
+            std::printf("PlayerExecutable: SCRIPT FILE ERROR restoring %s: %s\n", path.c_str(),
                         e.toString().ptr());
         } catch (skRuntimeException& e) {
             std::printf("PlayerExecutable: RUNTIME ERROR restoring %s: %s\n", path.c_str(),

@@ -1,5 +1,7 @@
 #include "render3d/zone_renderer.h"
 
+#include "render3d/gpu_frame.h"
+
 #include <algorithm>
 #include <array>
 #include <chrono>
@@ -1074,15 +1076,35 @@ void FillBillboard(Backbuffer& backbuffer, std::vector<float>& depthBuffer, cons
 class TriangleSink {
 public:
     TriangleSink(Backbuffer& backbuffer, std::vector<float>& depthBuffer, bool recording)
-        : backbuffer_(backbuffer), depthBuffer_(depthBuffer), recording_(recording) {}
+        : backbuffer_(&backbuffer), depthBuffer_(&depthBuffer), recording_(recording),
+          width_(backbuffer.width()), height_(backbuffer.height()) {}
 
-    int width() const { return backbuffer_.width(); }
-    int height() const { return backbuffer_.height(); }
+    // M129: a sink that fills a GpuFrame (render3d/gpu_frame.h) -- the same
+    // projected triangles, for a graphics card to rasterize. There is no
+    // backbuffer and no depth plane on this side at all.
+    TriangleSink(GpuFrame& gpu, int width, int height)
+        : backbuffer_(nullptr), depthBuffer_(nullptr), recording_(true), gpu_(&gpu),
+          width_(width), height_(height) {}
+
+    int width() const { return width_; }
+    int height() const { return height_; }
 
     void Surface(const ProjectedVertex& a, const ProjectedVertex& b, const ProjectedVertex& c,
                  const Zone& zone, int textureIndex, uint8_t hueGroup) {
+        if (gpu_) {
+            const uint32_t params =
+                (static_cast<uint32_t>(textureIndex) & 0xffu) |
+                (static_cast<uint32_t>(hueGroup & 0x3) << 8) |
+                (static_cast<uint32_t>(SurfaceDetailMask(a.depthWorld, b.depthWorld, c.depthWorld))
+                 << 16);
+            GpuBatch& batch = GpuBatchFor(GpuBatch::Kind::Surface, nullptr, 0, -1);
+            GpuEmit(batch, a, params);
+            GpuEmit(batch, b, params);
+            GpuEmit(batch, c, params);
+            return;
+        }
         if (!recording_) {
-            RasterizeTriangle(backbuffer_, depthBuffer_, FullFrame(), a, b, c, zone, textureIndex,
+            RasterizeTriangle(*backbuffer_, *depthBuffer_, FullFrame(), a, b, c, zone, textureIndex,
                               hueGroup);
             return;
         }
@@ -1093,8 +1115,16 @@ public:
     void ModelTriangle(const ProjectedVertex& a, const ProjectedVertex& b,
                        const ProjectedVertex& c, const Model& model, int skinIndex, bool asSkybox,
                        uint8_t* objectIds, uint8_t objectId, int flashLevel, const Zone* zone) {
+        if (gpu_) {
+            GpuBatch& batch = GpuBatchFor(asSkybox ? GpuBatch::Kind::Sky : GpuBatch::Kind::Model,
+                                          &model, skinIndex, asSkybox ? -1 : flashLevel);
+            GpuEmit(batch, a, 0);
+            GpuEmit(batch, b, 0);
+            GpuEmit(batch, c, 0);
+            return;
+        }
         if (!recording_) {
-            RasterizeModelTriangle(backbuffer_, depthBuffer_, FullFrame(), a, b, c, model,
+            RasterizeModelTriangle(*backbuffer_, *depthBuffer_, FullFrame(), a, b, c, model,
                                    skinIndex, asSkybox, objectIds, objectId, flashLevel, zone);
             return;
         }
@@ -1104,8 +1134,32 @@ public:
     }
 
     void Billboard(const BillboardQuad& q) {
+        if (gpu_) {
+            // Two triangles over the quad. `u`/`v` run 0..1 across the sprite
+            // and the depth is the one value the software blit tests with.
+            GpuBatch batch;
+            batch.kind = GpuBatch::Kind::Billboard;
+            batch.firstVertex = static_cast<uint32_t>(gpu_->vertices.size());
+            batch.sprite = q.sprite;
+            batch.blendMode = q.blendMode;
+            batch.blendLevel = q.level;
+            const float xs[2] = {q.x0, q.x1}, ys[2] = {q.y0, q.y1};
+            constexpr int kCorners[6][2] = {{0, 0}, {1, 0}, {1, 1}, {0, 0}, {1, 1}, {0, 1}};
+            for (const auto& corner : kCorners) {
+                GpuVertex v;
+                v.x = xs[corner[0]];
+                v.y = ys[corner[1]];
+                v.invW = q.invW;
+                v.uOverW = static_cast<float>(corner[0]) * q.invW;
+                v.vOverW = static_cast<float>(corner[1]) * q.invW;
+                gpu_->vertices.push_back(v);
+            }
+            batch.vertexCount = 6;
+            gpu_->batches.push_back(batch);
+            return;
+        }
         if (!recording_) {
-            FillBillboard(backbuffer_, depthBuffer_, FullFrame(), q);
+            FillBillboard(*backbuffer_, *depthBuffer_, FullFrame(), q);
             return;
         }
         quads_.push_back(q);
@@ -1121,19 +1175,19 @@ public:
             switch (cmd.kind) {
                 case Kind::Surface: {
                     const SurfaceTri& t = surfaces_[cmd.index];
-                    RasterizeTriangle(backbuffer_, depthBuffer_, rows, t.a, t.b, t.c, *t.zone,
+                    RasterizeTriangle(*backbuffer_, *depthBuffer_, rows, t.a, t.b, t.c, *t.zone,
                                       t.textureIndex, t.hueGroup);
                     break;
                 }
                 case Kind::Model: {
                     const ModelTri& t = models_[cmd.index];
-                    RasterizeModelTriangle(backbuffer_, depthBuffer_, rows, t.a, t.b, t.c,
+                    RasterizeModelTriangle(*backbuffer_, *depthBuffer_, rows, t.a, t.b, t.c,
                                            *t.model, t.skinIndex, t.asSkybox, t.objectIds,
                                            t.objectId, t.flashLevel, t.zone);
                     break;
                 }
                 case Kind::Billboard:
-                    FillBillboard(backbuffer_, depthBuffer_, rows, quads_[cmd.index]);
+                    FillBillboard(*backbuffer_, *depthBuffer_, rows, quads_[cmd.index]);
                     break;
             }
         }
@@ -1163,7 +1217,43 @@ private:
         const Zone* zone;
     };
 
-    RowSpan FullFrame() const { return RowSpan{0, backbuffer_.height()}; }
+    RowSpan FullFrame() const { return RowSpan{0, height_}; }
+
+    // M129: the batch a GPU triangle of this kind joins -- the last one when
+    // it draws with the same state, else a new one. Surfaces carry their
+    // texture, hue and detail mask per vertex, so every run of them is one
+    // batch whatever they are textured with.
+    GpuBatch& GpuBatchFor(GpuBatch::Kind kind, const Model* model, int skinIndex, int flashLevel) {
+        if (!gpu_->batches.empty()) {
+            GpuBatch& last = gpu_->batches.back();
+            if (last.kind == kind && last.model == model && last.skinIndex == skinIndex &&
+                last.flashLevel == flashLevel && kind != GpuBatch::Kind::Billboard) {
+                return last;
+            }
+        }
+        GpuBatch batch;
+        batch.kind = kind;
+        batch.firstVertex = static_cast<uint32_t>(gpu_->vertices.size());
+        batch.model = model;
+        batch.skinIndex = skinIndex;
+        batch.flashLevel = flashLevel;
+        gpu_->batches.push_back(batch);
+        return gpu_->batches.back();
+    }
+
+    void GpuEmit(GpuBatch& batch, const ProjectedVertex& p, uint32_t params) {
+        GpuVertex v;
+        v.x = p.sx;
+        v.y = p.sy;
+        v.invW = p.invW;
+        v.uOverW = p.u;
+        v.vOverW = p.v;
+        v.light = p.light;
+        v.fog = p.fog;
+        v.params = params;
+        gpu_->vertices.push_back(v);
+        ++batch.vertexCount;
+    }
 
     void Record(Kind kind, size_t index, const ProjectedVertex& a, const ProjectedVertex& b,
                 const ProjectedVertex& c) {
@@ -1172,9 +1262,11 @@ private:
                                     static_cast<int>(std::ceil(std::max({a.sy, b.sy, c.sy})))});
     }
 
-    Backbuffer& backbuffer_;
-    std::vector<float>& depthBuffer_;
+    Backbuffer* backbuffer_;
+    std::vector<float>* depthBuffer_;
     bool recording_;
+    GpuFrame* gpu_ = nullptr;  // M129
+    int width_ = 0, height_ = 0;
     std::vector<Command> commands_;
     std::vector<SurfaceTri> surfaces_;
     std::vector<ModelTri> models_;
@@ -1399,6 +1491,60 @@ void SubmitBillboard(TriangleSink& sink,
 void ZoneRenderer::Render(Backbuffer& backbuffer, const Zone& zone, const Camera& camera,
                            const std::vector<PlacedEntity>& entities, ModelArchive* models,
                            const std::vector<SpriteBillboard>& billboards) const {
+    RenderInternal(&backbuffer, nullptr, backbuffer.width(), backbuffer.height(), zone, camera,
+                   entities, models, billboards);
+}
+
+// M129: the same frame, recorded for a graphics card instead of rasterized
+// here. Everything up to the rasterizer is the code Render() runs -- the
+// raycast, the faces, the transform, clip and projection -- so the two paths
+// cannot drift apart; see render3d/gpu_frame.h.
+int ZoneRenderer::SceneLightBonus(int tx, int ty, uint32_t salt, bool* pinned) const {
+    int bonus = 0;
+    if (lights.playerGlow) {
+        const int dx = tx > lights.playerTileX ? tx - lights.playerTileX : lights.playerTileX - tx;
+        const int dy = ty > lights.playerTileY ? ty - lights.playerTileY : lights.playerTileY - ty;
+        const int d = dx > dy ? dx : dy;
+        if (d <= 3) bonus += (3 - d) * 0x400;
+    }
+    uint32_t n = 0;
+    for (const std::pair<int, int>& e : lights.emitterTiles) {
+        ++n;
+        if (e.first != tx || e.second != ty) continue;
+        // One draw of the engine's generator per emitter per vertex.
+        uint32_t h = lights.seed * 2654435761u ^ (static_cast<uint32_t>(tx) * 73856093u) ^
+                     (static_cast<uint32_t>(ty) * 19349663u) ^ (salt * 83492791u) ^ (n * 2246822519u);
+        h ^= h >> 15;
+        h *= 2246822519u;
+        h ^= h >> 13;
+        bonus += 2 + static_cast<int>(h & 3u) * 0x100;
+    }
+    for (const std::pair<int, int>& e : lights.fullTiles) {
+        if (e.first == tx && e.second == ty) {
+            if (pinned) *pinned = true;
+            break;
+        }
+    }
+    return bonus;
+}
+
+void ZoneRenderer::RenderGpu(GpuFrame& frame, int width, int height, const Zone& zone,
+                              const Camera& camera, const std::vector<PlacedEntity>& entities,
+                              ModelArchive* models,
+                              const std::vector<SpriteBillboard>& billboards) const {
+    frame.Clear();
+    frame.width = width;
+    frame.height = height;
+    frame.zone = &zone;
+    frame.background565 = kBackgroundFill;
+    if (width <= 0 || height <= 0) return;
+    RenderInternal(nullptr, &frame, width, height, zone, camera, entities, models, billboards);
+}
+
+void ZoneRenderer::RenderInternal(Backbuffer* backbufferPtr, GpuFrame* gpuFrame, int targetWidth,
+                                   int targetHeight, const Zone& zone, const Camera& camera,
+                                   const std::vector<PlacedEntity>& entities, ModelArchive* models,
+                                   const std::vector<SpriteBillboard>& billboards) const {
     // The engine's flat background fill: `Render3DScene` writes
     // `engine+0x630 | 0x7fff0000` into all 176*208 scene words when there
     // is no skybox to draw. Here it also backstops the skybox itself, which
@@ -1411,9 +1557,9 @@ void ZoneRenderer::Render(Backbuffer& backbuffer, const Zone& zone, const Camera
     // pixels by the square of its scale, so there the passes are recorded
     // and the rows split into bands rasterized on the shared worker pool --
     // same pixels, same arithmetic, a fraction of the time.
-    const int height = backbuffer.height();
+    const int height = targetHeight;
     int bands = 1;
-    if (backbuffer.width() > Backbuffer::kWidth) {
+    if (backbufferPtr && targetWidth > Backbuffer::kWidth) {
         bands = std::max(1, std::min(height / 16, BandPool::Shared().threadCount() * 3));
         if (bandLimit > 0) bands = std::min(bands, bandLimit);
     }
@@ -1421,7 +1567,7 @@ void ZoneRenderer::Render(Backbuffer& backbuffer, const Zone& zone, const Camera
     // just before it draws them (see the dispatch below), instead of this
     // thread clearing ~19MB at 6x before anything else can start.
     const bool clearInBands = bands > 1;
-    if (!clearInBands) backbuffer.Fill(kBackgroundFill);
+    if (backbufferPtr && !clearInBands) backbufferPtr->Fill(kBackgroundFill);
     // M85: the object-ID buffer starts every frame empty, the way
     // `FUN_10015354`'s `memset(engine+0x5b8, 0, 0x8f00)` clears the real
     // one (0x8f00 == 176 * 208) before the scene is drawn.
@@ -1431,16 +1577,23 @@ void ZoneRenderer::Render(Backbuffer& backbuffer, const Zone& zone, const Camera
     // player picked a higher Resolution -- and the depth plane is kept
     // between frames instead of reallocated. Every entry of both is reset
     // here, so a frame never sees the previous one's values either way.
-    const size_t pixelCount = static_cast<size_t>(backbuffer.width()) * backbuffer.height();
-    m_IdWidth = backbuffer.width();
-    m_IdHeight = backbuffer.height();
+    //
+    // M129: a GPU frame touches none of them. The object-ID buffer in
+    // particular keeps describing the last frame the *software* path drew,
+    // which is what the melee probes read (main.cpp draws one at the native
+    // size on every gameplay tick for exactly that).
+    const size_t pixelCount = static_cast<size_t>(targetWidth) * targetHeight;
     std::vector<float>& depthBuffer = m_DepthBuffer;
-    if (clearInBands) {
-        m_ObjectIds.resize(pixelCount);
-        depthBuffer.resize(pixelCount);
-    } else {
-        m_ObjectIds.assign(pixelCount, static_cast<uint8_t>(0));
-        depthBuffer.assign(pixelCount, 0.0f);
+    if (backbufferPtr) {
+        m_IdWidth = targetWidth;
+        m_IdHeight = targetHeight;
+        if (clearInBands) {
+            m_ObjectIds.resize(pixelCount);
+            depthBuffer.resize(pixelCount);
+        } else {
+            m_ObjectIds.assign(pixelCount, static_cast<uint8_t>(0));
+            depthBuffer.assign(pixelCount, 0.0f);
+        }
     }
 
     // M41: the real visible-tile set. `TileGrid_RaycastVisibility` runs
@@ -1471,7 +1624,7 @@ void ZoneRenderer::Render(Backbuffer& backbuffer, const Zone& zone, const Camera
     // 208/176, which makes the horizontal focal length 88 * 208/176 = 104
     // as well. At the real `fovY` (kEngineFovY, pi/2) the expression below
     // evaluates to exactly 104, i.e. `0x6800 >> 8`. See camera.h.
-    float focalY = (backbuffer.height() * 0.5f) / std::tan(camera.fovY * 0.5f);
+    float focalY = (targetHeight * 0.5f) / std::tan(camera.fovY * 0.5f);
     float focalX = focalY;
 
     // M119: every model the entities name, resolved here and not in the
@@ -1555,9 +1708,18 @@ void ZoneRenderer::Render(Backbuffer& backbuffer, const Zone& zone, const Camera
                 int cellTy = static_cast<int>(std::floor(worldY / kTileScale));
                 float cellLight = static_cast<float>(zone.CellAt(cellTx, cellTy).lightLevel);
                 float depthWorld = vv[i].forward * kTileScale;
-                vv[i].light = std::clamp(cellLight - depthWorld * 0.5f,
-                                          static_cast<float>(kMinLightLevel),
-                                          static_cast<float>(kMaxLightLevel));
+                // M130: plus the player's glow and the tile's emitters.
+                bool pinned = false;
+                const int bonus = SceneLightBonus(
+                    cellTx, cellTy,
+                    static_cast<uint32_t>(i) + static_cast<uint32_t>(face.orient) * 4u, &pinned);
+                // M131: the Blind status quarters the base term.
+                const float baseLight = lights.blind ? (cellLight - depthWorld * 0.5f) * 0.25f
+                                                     : cellLight - depthWorld * 0.5f;
+                vv[i].light = pinned ? static_cast<float>(kMaxLightLevel)
+                                     : std::clamp(baseLight + static_cast<float>(bonus),
+                                                  static_cast<float>(kMinLightLevel),
+                                                  static_cast<float>(kMaxLightLevel));
             }
 
             // M66: clip and draw the quad as the two triangles it has always
@@ -1609,8 +1771,8 @@ void ZoneRenderer::Render(Backbuffer& backbuffer, const Zone& zone, const Camera
                 ProjectedVertex pv[4];
                 for (int i = 0; i < clippedCount; ++i) {
                     pv[i].invW = 1.0f / clipped[i].forward;
-                    pv[i].sx = backbuffer.width() * 0.5f + clipped[i].right * focalX * pv[i].invW;
-                    pv[i].sy = backbuffer.height() * 0.5f - clipped[i].up * focalY * pv[i].invW;
+                    pv[i].sx = targetWidth * 0.5f + clipped[i].right * focalX * pv[i].invW;
+                    pv[i].sy = targetHeight * 0.5f - clipped[i].up * focalY * pv[i].invW;
                     pv[i].depthWorld = clipped[i].forward * kTileScale;
                     pv[i].u = clipped[i].u * pv[i].invW;
                     pv[i].v = clipped[i].v * pv[i].invW;
@@ -1669,7 +1831,8 @@ void ZoneRenderer::Render(Backbuffer& backbuffer, const Zone& zone, const Camera
                 SubmitModel(sink, zone, *model, skin, baseTileX,
                             baseTileY, baseZ, camX, camY, camZ, cosYaw, sinYaw, cosPitch, sinPitch, focalX, focalY,
                             pe.yaw, pe.scale, pe.frameIndex, /*asSkybox=*/false, pe.rotA, pe.rotB,
-                            m_ObjectIds.data(), static_cast<uint8_t>(pe.objectId & 0xFF),
+                            backbufferPtr ? m_ObjectIds.data() : nullptr,
+                            static_cast<uint8_t>(pe.objectId & 0xFF),
                             pe.flashLevel, fogPercent);
             }
         }
@@ -1707,6 +1870,64 @@ void ZoneRenderer::Render(Backbuffer& backbuffer, const Zone& zone, const Camera
     const auto msSince = [](Clock::time_point t) {
         return std::chrono::duration<double, std::milli>(Clock::now() - t).count();
     };
+    if (gpuFrame) {
+        // M129: recorded in the same chunks as a banded frame, on the pool,
+        // then stitched in chunk order -- sky first, because on a card the
+        // sky really is drawn first (no depth, under everything), where the
+        // software path draws it last into whatever is still empty (M123).
+        const int threads = std::max(1, BandPool::Shared().threadCount());
+        const size_t faceChunks =
+            std::min<size_t>(static_cast<size_t>(threads), std::max<size_t>(1, faces.size() / 64));
+        const size_t entityChunks =
+            models ? std::min<size_t>(static_cast<size_t>(threads) * 2,
+                                      std::max<size_t>(1, entities.size() / 8))
+                   : 0;
+        const size_t chunkCount = faceChunks + entityChunks + 1;
+        std::vector<GpuFrame> parts(chunkCount);
+        BandPool::Shared().Run(static_cast<int>(chunkCount), [&](int c) {
+            const size_t i = static_cast<size_t>(c);
+            TriangleSink sink(parts[i], targetWidth, targetHeight);
+            if (i < faceChunks) {
+                submitAll(sink, faces.size() * i / faceChunks, faces.size() * (i + 1) / faceChunks,
+                          0, 0, /*tail=*/false);
+            } else if (i < faceChunks + entityChunks) {
+                const size_t e = i - faceChunks;
+                submitAll(sink, 0, 0, entities.size() * e / entityChunks,
+                          entities.size() * (e + 1) / entityChunks, /*tail=*/false);
+            } else {
+                submitAll(sink, 0, 0, 0, 0, /*tail=*/true);
+            }
+        });
+        size_t total = 0;
+        for (const GpuFrame& part : parts) total += part.vertices.size();
+        gpuFrame->vertices.reserve(total);
+        for (int pass = 0; pass < 2; ++pass) {
+            for (const GpuFrame& part : parts) {
+                for (const GpuBatch& batch : part.batches) {
+                    if ((batch.kind == GpuBatch::Kind::Sky) != (pass == 0)) continue;
+                    GpuBatch merged = batch;
+                    merged.firstVertex = static_cast<uint32_t>(gpuFrame->vertices.size());
+                    gpuFrame->vertices.insert(
+                        gpuFrame->vertices.end(),
+                        part.vertices.begin() + static_cast<std::ptrdiff_t>(batch.firstVertex),
+                        part.vertices.begin() +
+                            static_cast<std::ptrdiff_t>(batch.firstVertex + batch.vertexCount));
+                    GpuBatch* last = gpuFrame->batches.empty() ? nullptr : &gpuFrame->batches.back();
+                    if (last && last->kind == merged.kind && last->model == merged.model &&
+                        last->skinIndex == merged.skinIndex &&
+                        last->flashLevel == merged.flashLevel &&
+                        merged.kind != GpuBatch::Kind::Billboard) {
+                        last->vertexCount += merged.vertexCount;
+                    } else {
+                        gpuFrame->batches.push_back(merged);
+                    }
+                }
+            }
+        }
+        m_Timings = Timings{msSince(frameStart), 0.0};
+        return;
+    }
+    Backbuffer& backbuffer = *backbufferPtr;
     if (bands == 1) {
         TriangleSink direct(backbuffer, depthBuffer, /*recording=*/false);
         submitAll(direct, 0, faces.size(), 0, entities.size(), /*tail=*/true);

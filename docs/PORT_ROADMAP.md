@@ -11867,9 +11867,10 @@ Three play reports and a feature request.
     parchment, clear of its ornaments.
 - **Multiplayer: what the original is** (researched for a recommendation;
   nothing implemented).
-  - **Co-op through the campaign, not deathmatch.** It is Bluetooth, up to
-    four handsets: host plus Reject1..4 slots in `hostgamemenu.s`, and
-    `JoinGame(0..3)` in `joingamemenu.s`. Each player brings a character
+  - **Co-op through the campaign, not deathmatch.** It is Bluetooth.
+    *M128 corrected the player count: the netcode supports exactly two,
+    host and client.* The menus' four Reject / JoinGame rows are layout
+    only. Each player brings a character
     from their own save: Multiplayer is only enabled when
     `GameAvailableForLoad()`, and the prompt is string 4022 "Use character
     from saved game?". `ffarena` is a story zone (it has Azra's
@@ -11880,19 +11881,705 @@ Three play reports and a feature request.
     gates host-only spawns (crypt1.s's Umbra, glcrcrwl's control scripts,
     dstar_e's monsters), and `MirrorMethod` (33 sites),
     `DestroyObjectMirror`, `SetPositionMirror` and `DoorOpened` replicate
-    events. The wire protocol is the **48-entry handler table at
-    0x100fdf34**, all in the 0x10038000-0x1003c000 block, about 4,100
-    decompiled lines in all. Known entries include 0x12, the remote shot
-    replay (`FUN_1003c45c`); 0x1d, the attached weapon; and 0x28, the spawn
-    override with its level name. The transport is `GAMECOMMS`
-    (engine+0x5cc), gated by engine+0x5c0/+0x5d0.
+    events. The wire protocol: *M128 decoded it fully; see
+    `docs/MULTIPLAYER_PROTOCOL.md`.* The "48 handlers" are the tail of a
+    116-slot session vtable, and the protocol is 43 tags. The transport is
+    `GAMECOMMS` (engine+0x5cc), gated by engine+0x5c0/+0x5d0.
   - See "Next milestones" for the plan this suggests.
+
+
+## M128 -- the multiplayer protocol, decoded
+
+All of it is in **`docs/MULTIPLAYER_PROTOCOL.md`**: every tag's sender,
+wire layout, receiver and effect, the objects behind them, and the join
+sequence. Nothing is implemented yet. What it changed:
+
+- **What the table is.** The "48 handlers at 0x100fdf34" are the last 48
+  slots of the session object's 116-slot vtable (`0x100fde1c`, ctor
+  `FUN_1003d5e0`, `engine+0x5d0`): 17 senders, then 31 receivers. The
+  receive dispatcher `FUN_10036b1c` maps 43 tags (0x00-0x3d) onto slots
+  across the whole class. Receiver for tag t in 0x17..0x35 is vtable
+  +0x15c + 4(t - 0x17); 0x24 and 0x37-0x3d are dispatched inline. 0x20
+  is unused.
+- **Two players.** The comms wrapper has two peer slots and loops over
+  exactly one remote. 0x01 rejects index >= 2, and 0x00 carries two names.
+  M127's "up to four handsets" read the menus; the menus over-promise.
+- **Movement is dead reckoning.** 0x01 (position, velocity, heading,
+  pitch) goes out at most every 0.75 s and only when something changed;
+  the avatar coasts on the velocity in between. Everything else is an
+  event, applied by the other handset's own engine.
+- **Joining adopts the host's story.** 0x29 carries the host's level
+  record, all three quest arrays and the 18 `saved_*` ints into the
+  client's player. Entities arrive as 0x1d, each one tag + typeId + id +
+  that class's **save chain**, the same serialization as `current.sav`
+  (M121).
+- **Corrections to earlier notes.** `FUN_1003c45c` (M49's "multiplayer
+  mirror replaying a remote player's shot") is tag 0x18's receiver, the
+  attack *animation and sound* only. Tag 0x2e (`FUN_1003b038`, M61's
+  "applies an incoming spawn override") is the client's request to travel,
+  applied on the host, which then loads and announces the level.
+- **Method.** The tags came from the dispatcher's `switch`, each sender
+  from the 44 call sites of the send primitive `FUN_1000dc08` (one sender
+  per tag, contiguous at 0x1003c6b4..0x1003d504), and each trigger from
+  the game functions that call a sender's vtable slot. Every field in the
+  doc was read off the sender/receiver pair, not inferred from names.
+
+### Still open
+
+- A few senders' callers were not traced (0x17, 0x25, 0x26, 0x2c, 0x34),
+  and three fields are named only by behaviour (creature `+0x309`, stats
+  `+0x38` in 0x28, the 0x1c room event's world vt+0x14).
+
+
+## The 2026-11-11 audit -- what is still not the engine's
+
+Asked for directly: go through the decompile and the port and list what is
+missing or ported wrong. Three measures, none of them the coverage tools
+(those ask about natives, and the native list has been empty since M118).
+
+### 1. A gap in the decompile itself: 639 functions nobody had dumped
+
+`decomp_all.c` holds 2006 functions and M110 called the dump complete
+("every called address defined"). That is true of *called* addresses. A
+virtual function nothing calls directly has no `bl` pointing at it, so
+Ghidra's auto-analysis never made it a function and it is not in the file.
+Scanning the data section for words that point into the code and are not a
+decompiled function start finds **640** (one a mid-function pointer, 114
+bare `bx lr` stubs, about 10 KB of real code in the rest).
+
+- **Now dumped**: `shadowkey/ghidra/scripts/pyghidra_dump_vtable_only.py`
+  creates and decompiles all of them into
+  `shadowkey/extracted/decomp_vtable_only.c` (639 decompiled, 0 failed),
+  each with the vtable addresses that reference it. Earlier milestones had
+  disassembled a handful of these one at a time with capstone (the creature
+  `Height()`, `SetUseText`, `ShowEntity`); this is the rest.
+- **What is in there that matters**: the player's turn and look slots
+  (vtable `0x100fd044` +0x1b4..+0x1c8 = `0x1001f530`, `0x1001f4b4`,
+  `0x1001f43c`, `0x1001f3e0`, `0x1001f3a0`, `0x1001f364`), the standing
+  `Height()` (`0x10006230`), three more move slots after `FUN_100065b4`
+  (`0x1000668c`, `0x10006704`, `0x10006760`), a 600-byte player function at
+  `0x1001efd8`, and the table widget's row code at `0x1008d898`.
+- The Ghidra install moved: it is `C:\Users\Admin\Desktop\tools\
+  ghidra_12.0.4_PUBLIC` now (the script takes `GHIDRA_INSTALL_DIR`); the
+  older scripts still name the `rac-decomp` path.
+
+### 2. Behaviour the engine has and the port replaces with its own number
+
+Ranked by how much a player would notice. None is fixed here -- this pass
+was to find them; each names the function to transcribe.
+
+**Status after M131**: 1, 2, 3, 5, 6, 8, 10, 12 and 13 are ported (M130,
+M131). 4, 7, 9 and 11 cannot be settled from the binary and say why.
+
+1. **The player's walk is a fixed 40 units a tick; the engine's is a force
+   and a friction, scaled by the Speed attribute.** `main.cpp`'s
+   `kMoveSpeed = 40`. The whole chain is decompiled and M95 already wrote
+   it down for the ghost ratio (`simkin_bindings/ghost_mode.h`'s
+   `WalkTick`): `step = Speed << 8 >> 1` capped at 0x4000 (`FUN_100445d4`),
+   each held direction adds `step * sin >> 3 >> 8` to `+0x98/+0xa0`
+   (`FUN_100065b4` and its three siblings), the actor tick decays it by
+   `0x50/0x100`, and `FUN_10000c64` quarters it, moves five times, and
+   restores it. Run in the engine's integers that is **50 / 55 / 65 / 85
+   units a tick at Speed 30 / 35 / 40 / 50** (half that exhausted), reached
+   over a few ticks rather than instantly. So the port's player is slower
+   than the engine's at any Speed above about 28, has no acceleration or
+   coast, and -- the part that is plainly wrong rather than tuned -- **the
+   Speed attribute, its level-up points and every `SetSpeed` do nothing to
+   how fast the player moves.** The held item's `+0x198` scales the step
+   too (`FUN_1001c9c0`); not ported.
+2. **The turn is a fixed 0.06 rad a tick (86 degrees a second); the
+   engine's ramps.** `kTurnSpeed`. The slots above (now decompiled): the
+   target rate is `2 * actor+0x18c` at the normal zoom or `actor+0x194`
+   while zoomed (`engine+0x608 != 0x100`), scaled by the held item's
+   `+0x198`; slot `+0x1b4` eases the rate towards it by x1.5 a frame from
+   0x400 and halves it back to zero on release; the tick turns by `rate *
+   delta >> 8`. With `+0x18c = 0x3c00` (`FUN_10006938`) that is **165
+   degrees a second after a nine-tick ramp**, 41 zoomed. Which of the three
+   writers of `+0x18c` is live for the player (`0x9600` in the actor
+   constructor, `0x3c00` in `FUN_10006938`, `0x2ee00` in the player
+   constructor, which does not fit the s16 rate) still needs tracing. The
+   look keys are the same shape through `+0x190`/`+0x198`/`+0x1a8`.
+3. **The player's collision radius is 48; the engine's is 0x80.** The
+   player constructor writes `+0x8e = 0x80` (decomp line 20119) and
+   `FUN_100016e0` clamps the position to the map by it. `kPlayerRadius`
+   also stands in for the trap-proximity half-extent. `kMonsterRadius = 40`
+   is the same kind of number.
+4. **Gravity and the three stance heights: the search is over, and the
+   answer is that their loader is dead code.** The reads of `CMap+0x14`
+   (gravity), `+0x16` (the jump charge rate) and `+0x18/+0x1a/+0x1c` (the
+   crouching / standing / third stance height) are all *byte-wise* -- the
+   block is a packed struct -- and M122 searched halfword and word stores.
+   The byte stores exist: `FUN_1000e6cc` reads `+0x16..+0x23` out of a
+   stream and `FUN_1001baf8` copies `+0x18`, `+0x1a/+0x1b`, `+0x1c/+0x1d`
+   from another packed record. **Neither has a caller** -- no `bl`, no
+   vtable word -- so the map-properties block has a loader the shipped game
+   never runs, and M122's conclusion stands for a better reason: the device
+   read whatever the heap held. `kGravity = 4`, the 0x200 standing height
+   (derived, M84) and `kEyeHeightOffset` stay the port's; only a device or
+   an emulator can settle them. The crouch stance (`+0x1e1` = 2/3, with its
+   own height) is not ported at all.
+5. **The auto-aim's gate 5** (`main.cpp` ~7748) is still skipped "because
+   the renderer keeps no object-ID buffer" -- it has kept one since M85.
+6. **The player torch glow and the entity light emitters** (M89, traced in
+   `RENDERER_3D.md`, both in `SurfaceFace_BuildAndProject`'s per-vertex
+   light): still not drawn. Dungeons are darker around the player than on
+   the device, and lanterns (template ids 3 / 0x47 / 0x1787) light nothing.
+7. **`FUN_100008f0`'s slow-down** when a creature faces away from its goal
+   (gated on `+0x1b8`, which the actor constructor zeroes and whose writer
+   is untraced).
+8. **Casting range** `kSpellRange = 300` and the bow's missing
+   line-of-sight test are the port's own (`main.cpp` ~6796, ~8163).
+9. **A model's animation rate**: the clip record's third field is read as
+   frames a second times 1.5; its unit was never confirmed
+   (`AdvanceMonsterAnimation`).
+10. **Menus**: the inventory table's row pitch (0xf in `FUN_1008cca8`, 0xc
+    here) and per-cell widths; the combo box's move sound (slot 100); the
+    per-class proficiency table at `engine+0x28 + 0x148`; the title colour
+    word `engine->+0x28 + 8` (0x733 is derived; the pointer has no static
+    writer); the loading banner and vignette caption are one centred line in
+    the old blue, where the engine wraps at a fixed width.
+11. **The second HUD** (`ScreenModeController+0x44`, one bar): trigger
+    never found, not drawn.
+12. **`skTreeNodeReaderException`** still escapes `main` from three
+    unplaced scripts (M76); about 25 catch sites.
+13. **The engine's own background colour** `engine+0x630` (the fill under
+    a zone with no sky) was never traced; `kBackgroundFill` is the port's.
+
+### 3. What is *not* on the list
+
+Checked and found faithful, so nobody re-audits them: the vitals economy
+(M73/M126), the creature walk (M122), the fog/light model (M89), the
+attack gate (M78/M79), the save format and level record (M50/M121).
+
+
+## M129 -- the Direct3D 11 renderer, and multiplayer
+
+Two features, both built the way the roadmap said they should be: beside
+the original code path, never instead of it.
+
+### The Direct3D 11 renderer
+
+A sixth PC row on the Options screen, **Renderer**: Original (the software
+rasterizer, the pre-M129 path exactly, and the default), Direct3D, and D3D
+Smooth. Stored as `renderer=0/1/2` in `pc_settings.cfg`.
+
+- **It draws the software renderer's own triangles.** The zone renderer
+  already recorded a frame instead of rasterizing it (M119's bands). A
+  third sink records the same projected triangles into a `GpuFrame`
+  (`render3d/gpu_frame.h`, backend-neutral): position in target pixels,
+  `1/depth`, `u/w` and `v/w`, the per-vertex light and fog scalars, and per
+  surface vertex its texture slot, hue and detail mask. Everything up to
+  the rasterizer -- the visibility raycast, the face build, the transform,
+  the near clip, the projection -- is the one code path, so the two cannot
+  drift. `ZoneRenderer::RenderGpu` takes any target size, not only whole
+  multiples of 176x208.
+- **The pixel shader is the engine's arithmetic.** `.ztx` goes onto the
+  card as an 8-bit index array, `.zlu` as a `[rung][texel]` RGB444 lookup,
+  `.zfg` as a `[level][rgb444]` lookup, model skins as RGB444 arrays, the
+  hit-flash ramps as a 16x14 lookup. Per pixel: texel index (wrapped by the
+  detail mask), palette at `clamp(light >> 8, 4, 63) + hue`, the 0xf0f
+  cut-out, fog by `fog >> 12`. Light and fog interpolate in screen space
+  (`noperspective`), as the engine steps them; `u`/`v` are perspective
+  correct. The sky is drawn first with no depth, models take the flash ramp
+  or the fog, billboards keep their quarter/half/three-quarter blend.
+  `platform/win32/d3d11_renderer.{h,cpp}`.
+- **Measured against the software frame, on WARP** (Windows' software
+  Direct3D device, so the test needs no GPU and runs on CI):
+  `m129_gpu_renderer_smoke`, 32 checks. Compared as RGB565, the same scene
+  is **99.6% identical pixels at 176x208** (worst of four headings; the
+  difference is the top-left fill rule on triangle edges), **100.0% at 4x
+  and outdoors under snowline's sky**, 99.8% in a pitched 16:9 view, 98.2%
+  with a hit-flashed creature and two billboards.
+- **D3D Smooth** is the one setting that goes past the device: texels are
+  blended bilinearly *after* the palette (between colours, never between
+  indices; a keyed neighbour takes the nearest texel's colour so cut-outs
+  keep their edge), the light rungs and fog levels are interpolated instead
+  of stepped, and the far-surface detail mask is dropped.
+- **Resolution means more on the card.** Original is 176x208 drawn by the
+  GPU and scaled up unfiltered; a fixed multiple is that multiple; **Auto is
+  the window's exact rectangle**, with no 6x ceiling -- a 4K window is drawn
+  at 4K.
+- **The 2D layer is untouched.** It still draws into the native Backbuffer,
+  over a native-size *software* frame that is redrawn once per gameplay
+  tick (it is also where the melee probes' object IDs come from, so combat
+  is identical) and reused for the frames the Frame Rate setting draws in
+  between. The present shows the card's scene and, over it, every native
+  pixel the 2D code changed -- `scene_upscale.h`'s Compose rule, on the
+  card.
+- **The window.** `Window::SetGpuRenderer`: a copy-model, GDI-compatible
+  swap chain, so the debug overlay draws through a device context for the
+  back buffer exactly as it does over GDI, and switching the row back to
+  Original hands the window back to GDI. With the row on, every frame (menus
+  and loading screens too) presents through the swap chain. No Direct3D 11,
+  no `d3dcompiler_47.dll`, or a lost device: the game says so once in the
+  log, the row reads Original, and it draws in software.
+- **Live** (RTX 3050 Ti): azra at 704x832 and snowline in 16:9 with Smooth,
+  HUD, weapon and the debug mini bar composited correctly.
+- **Regression**: at Original nothing changed -- the 14 tracked `.ppm`
+  dumps are byte-identical. m119 grows the sixth row (87/87).
+
+### Multiplayer
+
+The original's own design (`docs/MULTIPLAYER_PROTOCOL.md`), carried over a
+socket: two players, each process running the whole game, events mirrored.
+
+- **`net/mp_protocol`** -- the wire format as code: all 43 tags at the
+  catalogue's sizes, fields at the catalogue's offsets, names as UTF-16.
+- **`net/mp_transport`** -- one reliable packet link (TCP 28510, length
+  prefixed) and the lobby: the client broadcasts a UDP probe (28511) and
+  every hosting game answers with its name, which is what "Looking for
+  hosts" becomes on a LAN. For the internet, the host's address goes in
+  `mp_host.txt` beside the saves (or `SK_MP_HOST`). No server, no account.
+- **`net/mp_session`** -- the session object's job: the lobby, the join
+  sequence in the catalogue's order (0x17, 0x00, 0x07, 0x29, the 0x1d
+  stream at 50 a frame, 0x07, 0x06, 0x30), 0x01 at most every 0xc0 units
+  and only on change, 0x3c every 0xa00, the pause lock, and the dispatch of
+  every tag to the game. It never touches game state, so the test runs a
+  whole join between two scripted worlds.
+- **The menus are the shipped ones.** `multiplayermenu.s`, `hostgamemenu.s`
+  and `joingamemenu.s` now land on real natives: `MPPreHost` / `MPPreJoin`
+  (the save whose character plays), `MPBeginHost`, `MPHostConnect`,
+  `MPHostPlay`, `MPBeginJoin`, `JoinGame`, `RejectClient`,
+  `CloseMPHostMenu` / `CloseMPJoinMenu`, `GetBluetoothName` (the player's
+  name), `GetBluetoothStatus` (the network is the radio; it is on),
+  `ClearNewGameHook` / `NewGameHook`. The four `Reject<n>` and `JoinGame<n>`
+  rows fill in with who joined and which hosts were found.
+- **`IsMultiplayer()` / `IsMultiplayerClient()` answer the truth**, which is
+  what switches on every host-only gate the scripts already have.
+- **Joining reuses M121.** The host's 0x29 carries its level record and
+  story; its 0x1d stream is one `SavedEntity` record per live object. On the
+  client they are assembled into exactly a `<level>.dat`, stored as that
+  level's member of `current.sav`, and the level loads the way a saved level
+  always does -- dead creatures dead, doors as they stand, chests as looted.
+  The client arrives where the host stands (0x06).
+- **Entity ids.** Every live object gets a net id (`EntityBaseRef::netId`,
+  the protocol's `entity+0xc4`). The host's ids travel with the stream, and
+  the stream ends with the host's next free id, so objects either game
+  creates afterwards are numbered alike.
+- **What is mirrored in play**: each player's movement, dead-reckoned (the
+  other player is drawn as the engine's avatar -- entities.txt type 90's
+  body, male or female by sex, skinned `raceSkin[race] + (sex ? 11 : 8)`,
+  walking / standing / attacking / dead); a kill (0x19) and a hit (0x1a); a
+  door (0x1f, from `DoorOpened`, applied natively on the other side); any
+  object leaving the world (0x2b, by a per-tick sweep, so a taken pickup,
+  an emptied bag and a script's `DestroyObject` are all covered);
+  `MirrorMethod` (0x34); `SetPositionMirror` / `SetPositionMirrorAll`
+  (0x33); quest flags (0x21); quest experience (0x28, `StatModXP`);
+  invulnerability (0x35); level travel (a client's door is a 0x2e request,
+  the host loads and announces with 0x00, and the join sequence runs
+  again); the pause lock (0x15 -- the other game shows the engine's own
+  "Waiting for players."); the attack visual (0x18), death (0x2a + 0x24);
+  the other player leaving or the link dying (the game goes on alone, with
+  "<name>: Connection lost").
+- **Test**: `m129_multiplayer_smoke`, 57 checks -- the format against the
+  catalogue, the whole session over an in-memory link, the socket transport
+  on loopback (discovery, a 200 KB packet, a refused second host), and the
+  script-side answers. Needs no game data.
+- **Live**: two copies on one machine. The client found the host by
+  broadcast, joined, received 43 entities, loaded azra from them and stood
+  beside the host; the host's screen shows the client's character walking;
+  quitting the host put "eee: Connection lost" on the client.
+- Suite **108/108**, soft-fail unchanged at 5.
+
+### Still open
+
+- **Not applied yet** (decoded, counted, logged when they arrive): 0x1c
+  room event, 0x25 spell projectile, 0x26 / 0x27 effects, 0x32 hand-over,
+  0x37 Umbra's beat, 0x39 area spell, 0x38 registry flag, 0x3a set on fire,
+  0x31 taken-from-container (a looted bag's *contents* can differ between
+  the two games until it is emptied). 0x2c / 0x2d are applied but never
+  sent -- the native that sends them was not identified.
+- **Creatures fight the player in front of them.** 0x1e is received, but a
+  creature that has picked the *other* player does not chase the avatar
+  here; creature positions and health are not on the wire in the shipped
+  protocol either, so the two games agree on events, not on where a rat is
+  standing. The avatar cannot be hit (no PvP, no 0x3d sender).
+- The level index in 0x00 / 0x2e is the port's own order (the zones by
+  name); `FUN_10039ca4`'s table was not transcribed. Port to port only.
+- The death text ("<name> has fallen.") is the port's wording; the
+  engine's string for 0x24 was not identified.
+- No hands-on session between two people, and none over the internet: the
+  live run was two processes on one machine, driven from the console.
+- The lobby has no address entry screen; a non-LAN host is a text file.
+- D3D: no anti-aliasing option, and the frame-rate cost on a real GPU was
+  not benchmarked in a Release build this session.
+
+
+## M130 -- the audit's list, ported; multiplayer's loose ends; wide menus
+
+Asked for directly: make the port behave as the engine does on everything
+the audit found, finish what M129 left unapplied, and fill the screen in
+widescreen menus.
+
+### The player moves as the engine moves it
+
+`simkin_bindings/player_move.h`, a transcription of the input poll
+(`FUN_1001c9c0`), the move slots, the friction (`FUN_10000498`) and the
+actor move (`FUN_10000c64`, `FUN_100016e0`, `FUN_100017c8`).
+
+- **Walk.** `step = Speed << 8 >> 1` (one more bit exhausted, cap 0x4000);
+  each held direction adds it along the heading; friction 0x50/0x100; the
+  velocity is quartered, the position stepped five times, the velocity
+  restored. 50 / 55 / 65 / 85 units a tick at Speed 30 / 35 / 40 / 50,
+  with acceleration and a coast. **The Speed attribute now matters.** The
+  held item's `+0x198` scale is `SetWielderMovement`, which no shipped
+  script calls, so it is always 1.
+- **Walls.** The push-out's four probes at `x +- 0x80`, `y +- 0x80`, each
+  asking the tile rule (`FUN_10000ab8`); a blocked probe zeroes that axis
+  and snaps the probe to the tile boundary. The centre tile rule then puts
+  a refused move back where the tick began. The player's half-extent is
+  the engine's 0x80, not 48.
+- **A solid entity closes its tile.** `FUN_10000ab8` ends by walking the
+  tile's entity list: any solid, non-passable entity refuses the tile. So
+  an NPC, a closed door or a barrel owns its whole tile; the box test only
+  ever resolves what shares the mover's own.
+- **One guard that is not the engine's**: a tile the player already stands
+  in while the rule refuses it is held to its wall flag alone. In the
+  engine nothing solid can come to share the player's tile; the port's
+  creature walk is not held to that, and the engine's answer would freeze
+  the player for good.
+- **Turn.** Target `2 * +0x18c`; `+0x18c` is 0x3c00 -- the init
+  (`FUN_1001d3e0` -> `FUN_10006938`) runs after the constructor that wrote
+  0x2ee00, and 0x7800 is what fits the s16 rate. x1.5 a frame from 0x400,
+  nine frames to full, 165 degrees a second; halves to zero on release.
+- **Look.** Rate eases an eighth of the way to 0x1e00 a frame (0x2d00 in
+  a multiplayer session, `engine+0x5c0`), halves on release. The pitch
+  stops at +-0x2000 (45 degrees): `kMaxCameraPitch` is now that, not 0.85.
+- **The weapon bob** takes the move step, as `FUN_1001f338` and its
+  siblings pass it: 175 a direction a tick at Speed 35, not a port constant.
+- **The jump** was already right: the impulse is `vz += 0x500` (the charge
+  `+0x1ec` is zeroed before it is read), 50 units a tick.
+- The engine's view zoom (`engine+0x608`, driven by `+0x610`) is not
+  ported, so the zoomed turn and look rates are never selected.
+- Creatures still stop 48 + 40 units from the player: the creature's own
+  side of the box test is not transcribed (`kCreatureContactRadius`).
+- `m130_player_move_smoke`, 30 checks, no game data. Live: azra, walked
+  the starting room at about 82 units a tick, stopped by wall and table.
+
+### The rest of the list
+
+- **5, auto-aim gate 5**: the centre-pixel read of the object-ID buffer
+  (88, 104). Dead on a creature, the assist lets go.
+- **6, lights**: `ZoneRenderer::SceneLights`. The player's glow is
+  `player+0x228`, and what sets it is `FUN_10002a38` -- the first attack
+  with an item in hand; nothing clears it. Within three tiles a vertex
+  gains `(3 - d) * 0x400`. Each `!lantern` (3), `!torch01` (0x47) and
+  0x1787 in a vertex's tile adds `2 + (rand & 3) * 0x100`. Both renderers
+  share it. Not done: the `+0x86` bit 4 pin (a creature in mid-attack
+  lights its tile fully), and the `stats+0x44 & 4` branch that quarters
+  the light.
+- **12**: all 29 script-parse catch sites also catch
+  `skTreeNodeReaderException`.
+- **13**: `engine+0x630` has one store, the constructor's zero. The fill
+  under a zone with no sky is black; `kBackgroundFill` is now that.
+- **4, gravity and stance heights**: unchanged, and now with a second
+  reason -- no input sets the crouch stance. Stance 2 is reachable only
+  through a generic command dispatcher; 3 is the dead stance. Needs a
+  device or an emulator.
+- **7**: `FUN_100008f0`'s slow-down reads byte `+0x1b8`, whose only
+  byte-wide store on an actor is the constructor's zero. Dead for actors
+  as far as the image shows.
+- **9, 11**: no new evidence.
+- **8, 10**: not done (casting range, bow line of sight; the combo sound,
+  proficiency table, title colour word, loading banner wrap). The
+  inventory table's 0xf row pitch was already M124's.
+
+### Multiplayer
+
+- **Creatures go for the other player** (0x1e, now sent as well as
+  received): a creature whose target is the other player runs its tick
+  against that player's avatar; its blows do nothing here.
+- **Taken from a container** (0x31) and **set on fire** (0x3a) are sent
+  and applied.
+- **An address line on the join screen**: type an address (optionally
+  `:port`) and press Enter; it becomes a host row. `mp_host.txt` still
+  works.
+- Still logged, not applied: 0x1c, 0x25, 0x26, 0x27, 0x32, 0x37, 0x38,
+  0x39. Not tested between two machines.
+
+### Direct3D, measured
+
+Release build, snowline, a 1056x1248 window, frame rate unlimited: the 3D
+scene costs **4.63 ms a frame in software, 0.47 ms on Direct3D, 0.56 ms
+D3D Smooth** (RTX 3050 Ti). Still no anti-aliasing option.
+
+### Menus in widescreen
+
+The engine's screens stay 176 columns, unstretched. The bars beside them
+are no longer black (`presentMenu`): over a live game they are the 3D
+view that was already there, dimmed; otherwise they continue the screen's
+own backdrop -- the `MenuBackground` sprite without its rows, reflected
+outward, softened so baked-in lettering does not read backwards -- from
+half brightness beside the panel to a quarter at the window's edge.
+
+Suite **109/109**, soft-fail 5, tracked frame dumps unchanged.
+
+
+## M131 -- the rest of the audit's list
+
+What M130 left: items 8 and 10, the view zoom, and two terms of the light.
+
+### 8: the prompt and the use target are the engine's
+
+`kSpellRange` had one reader left -- how far away a spell in hand could
+read a creature's "name  12/30" line. That line was the port's own, and so
+was the search behind the Use key. Both are replaced by what the binary
+does (`simkin_bindings/use_prompt.h`).
+
+- **`FUN_1001dd40`, the use target.** Twelve rays from the player, `heading
+  - 0x500` to `heading + 0x600` in steps of 0x100 (about eight degrees
+  either side), half a tile a step, six samples: 640 units. The first
+  usable entity any ray meets is the target; a wall tile ends the whole
+  search, entities in it tested first. It replaces three nearest-first
+  searches in a 384-unit, 72-degree cone with no wall test.
+- **`FUN_1002acd4`, the prompt.** The target's use text plus a space,
+  centred between x=10 and x=166 at y=30, wrapped at 25 characters. A
+  creature that is not invulnerable is named in (0xed, 0xf9, 0x00) yellow;
+  a dead one with a loot typeId reads "Examine:  name". **There is no
+  health readout in the game**; the port's is gone.
+- **`FUN_100231b4`, the text box** (`graphics/text_box.h`): 13-pixel
+  lines, broken on spaces by character count. Its italic posture is not
+  reproduced -- `Ceurope.gdr` has no italic face.
+- The bow needed nothing: since M49 the shot is a projectile the world
+  stops. The stale "no line of sight" paragraph is removed.
+
+### 10: menus
+
+- **Menus make their two sounds.** Slot 99 (`menuNEWxbx.wav`) and 100
+  (`menu1.wav`) are in every sound table. Left/right play 99 first thing
+  (`FUN_100322a8`, `FUN_100323f0`); up/down play it when the focus moves or
+  inside a table (`FUN_10032530`, `FUN_100326cc`); select plays 100
+  (`FUN_10032868`); a combo box that actually steps plays 100 on top
+  (`FUN_1008eeb4`); a popup's select and back play 100. The function long
+  labelled `SecretSequence_OnComplete` is the play-at-listener sound call.
+  The port's menus were silent.
+- **The proficiency table** was already here: `FUN_100450a0` is M74's
+  `IsItemEnabledFor`. What was missing was the inventory's name tint
+  calling it -- an owned item is now 0xc33 when the class test and the
+  product record both refuse it.
+- **The title colour word** has a static writer after all: the
+  screen-mode controller's constructor stores 0x733 at `+8`.
+- **The loading banner** is `FUN_1008f97c(text, y = 0, ramp[i])`: centred
+  on the top row, its colour stepping through `i * 0x111`, black to white,
+  one step a frame. It pulses. **The vignette caption** is the text box:
+  white, left at x=14, y=0x73, wrapped at 25.
+
+### The light
+
+- `+0x86` bit 4 has three writers. The actor tick copies `+0x1b0`, which
+  only the weapon-fire function sets, which only the player runs, and the
+  tick skips the player -- so no creature ever lights its tile. What does
+  is **a spell in flight**: the cast's projectile is spawned with the bit
+  set, and its tile is drawn at full light. (An effect can carry it too,
+  but only a multiplayer mirror packet passes that argument.)
+- `stats+0x44 & 4` is **Blind**: the base term becomes `(cellLight -
+  depth / 2) >> 2`.
+
+### The status column
+
+Found on the way: `FUN_1002c0e4` draws a column of white text at x=15 --
+what the periodic channel is running at y=0x23 ("Sanctuary", "+Health",
+"Snowray Powder", ...), then "Blind", "Poison", "Disease", "Paralyze" and
+every timed effect with its sign, 15 pixels a line from y=0x32. Not while
+the map is up. The port tracked all of that state and drew none of it.
+
+### The view zoom is dead code
+
+`engine+0x608` moves only while `engine+0x610 >= 1`; `+0x610` starts at -1
+and its one writer is the toggle `FUN_1001eed4`, player vtable `+0x258`.
+Nothing calls that slot -- no `bl`, no indexed load -- and "Toggle Zoom"
+is one of the logical actions the shipped scheme never binds. Every item
+is constructed able to zoom (`+0x178 = 1`); the game cannot ask. Nothing
+to port.
+
+### Still open
+
+- Creatures stop 48 + 40 units from the player (their side of the box
+  test).
+- Multiplayer tags 0x1c, 0x25, 0x26, 0x27, 0x32, 0x37, 0x38, 0x39 are
+  logged, not applied; the engine's "Waiting for players..." screen (the
+  splash, string 3817 pulsing at y=180) is not what the port shows.
+- (M132 looked at the prompt, status column and Blind in a running game.) `m131_use_prompt_smoke`
+  (25 checks) covers the search, the prompt text and the line break.
+
+Suite **110/110**, soft-fail 5, tracked frame dumps unchanged.
+
+
+## M132 -- M131's open list: the italic face, the creature's box, the last multiplayer tags
+
+### The italic face
+
+M131 drew the prompt and the vignette caption upright for want of an
+italic font. The device's dump has three font stores, not one, and
+`Browsereur.gdr` opens with **`Alpi12`** -- which is `LatinPlain12`
+slanted: the same strokes, a row `d` pixels above the baseline moved
+`d / 4` to the right, each advance a pixel wider. That is
+`BitmapFont::Face::SmallItalic`.
+
+- Loaded from `Browsereur.gdr` when it sits beside the legend font's file
+  (`port/assets/fonts/`, an install's `data/`; the launcher's font picker
+  copies it along). Absent, the Small face is drawn with the same slant,
+  so the text is italic either way.
+- Every font-bitmap header in all three stores says "upright, normal
+  weight" -- LatinBold included. The style is in the drawing and the name
+  only, which is why a missing typeface lists each face's header now
+  (`GdrFont`), and why M111's "the only non-bold face" argument for
+  LatinPlain12 does not hold as stated. Its conclusion is kept: a 12-pixel
+  plain face is what both this pair and the layout agree on.
+
+### The creature's side of the box
+
+`FUN_10000c64` is one function for every actor. For anything but the
+player it is: one step, the map clamp by the radius, then -- unless the
+actor is passable, a ghost, or has no box -- the push-out
+(`FUN_100017c8`) and the centre tile rule (`FUN_10000ab8`), which puts a
+refused move back where the tick began. The radius is the actor's own
+`+0x8e`, its model's half extent.
+
+`stepCreature` is that now, through the same `PushOut` the player uses.
+The rule's last clause closes a tile holding any other solid, non-passable
+entity -- and the player is one. So:
+
+- a creature stops with its box against the edge of the player's tile;
+- two creatures never share a tile.
+
+Gone: the 48 + 40 contact distance, the 70-unit crowd push, the 40-unit
+wall probe. Kept, and not the engine's: the same "already standing in a
+refused tile" guard the player has, and the other-floor allowance.
+Live: three spawned rats chase to their attack range and attack.
+
+### Multiplayer: the eight tags
+
+| Tag | |
+|---|---|
+| 0x25 spell projectile | Sent from the cast, straight after the spawn. Received as a projectile with no spell behind it, flying from the caster down the caster's heading. |
+| 0x27 attached effect | `FUN_10067f84` -- the flame a magic hit leaves, sprites 62..68 -- is drawn now, in single player too (IgniteFoe, and two seconds on each creature an area spell reaches), sent and received. |
+| 0x32 hand over | A client taking an item that cannot be dropped hands it over; the host's player is given one. The engine's test is `vtable+0x164() \|\| !canDrop`; the first predicate is not identified. |
+| 0x37 Umbra's beat | `ReplicateTeleport` sends it. The receiver gives the entity named "Umbra" the flag and, on a false, runs `DelayReached(1)` -- as the binary does. |
+| 0x38 registry flag | The three amulets and the frozen key, set and cleared in both games, counter included. |
+| 0x39 area spell | Sent nowhere new and applied nowhere: the receiver calls the area function with a damage of zero and its body is under `0 < damage`. A no-op in the engine. |
+| 0x1c room event, 0x26 effect entity | **Cannot arrive.** Each has a receiver and a sender function, but the session slots that would call the senders (`+0xe8`, `+0x118`) have no caller. |
+
+**The waiting screen** is the engine's: the loading splash with "Waiting
+for players..." (or "Receiving game data" on a client mid-stream), centred
+at y = 180 in the banner's pulsing grey, while the host is in its level
+before the client has loaded and while a client waits for the host's world.
+
+None of the multiplayer work in M130 or M132 has been run between two
+games. `m129_multiplayer_smoke` checks the new encoders' layouts;
+`m131_use_prompt_smoke` the flag receiver.
+
+Suite **110/110**, soft-fail 5, tracked frame dumps unchanged. Live in
+azra: the prompt ("Examine", white, italic, under the compass), the status
+column ("Blind", "Poison") and the Blind quarter-light.
+
+### Still open
+
+- Hand-over's first predicate (`vtable+0x164`).
+- The pause case still shows the port's own "Waiting for players." over
+  the frozen frame; the engine's notice for it (`engine+0x14a81`) is not
+  traced.
+- A two-game multiplayer run.
+
+
+## M133 -- Delfran's Hideout: the chest, the cell key, the cell doors; the multiplayer popup; Port Settings
+
+Reported from a playtest of `delfhide`. Every item below was reproduced in
+the live game first, then fixed, then re-checked live.
+
+### The chest that gives nothing, and the chef's key
+
+The chest is `raiders\Chest06.s` (placed in delfhide by that path); its
+menu `raiders\Loot6` says "The chest contains an Iron Shield and a
+Dragonstar Watch Helm" (string 0x89d) and its Take is
+
+    Item = Level.CreateEntity( 646 ); GetPlayer().PickupItem( Item );
+    Item = Level.CreateEntity( 630 ); GetPlayer().PickupItem( Item );
+
+`PickupItem` only recorded a pointer for main.cpp's *world*-pickup path,
+and `CreateEntity` parks its object in Level's one-slot pending holder --
+so nothing took the item, and the second `CreateEntity` freed the first.
+`delfhide/chef_convo.s`'s GiveKey (the cell key, 804) is the same idiom,
+and so are Grell's letter and a long tail of quest rewards across the
+corpus. The engine's case 0x55 adds through the player's `+0x164` either
+way; `PickupItem` now takes the object out of the pending slot and adds it
+on the spot when it is the one CreateEntity just made
+(`LevelExecutable::PeekPendingCreatedEntity`). World pickups and loot bags
+are untouched -- neither passes a pending object.
+
+### The cell doors: two bugs, both on every locked door in the game
+
+1. **The door branch of Use never handed a screen over.** The pickup and
+   NPC branches compare the menu before and after OnUse and pause into a
+   new one; the door branch did not, so `Cell_lockeddoor.s`'s
+   `OpenMenu("delfhide\Use_Cellkey")` -- and every `lockeddoor.s`'s
+   UsePicks -- built its screen and the 3D view drew over it. The test is
+   now `MenuStack::openSerial()` (bumped by every OpenMenu/ReopenMenu) in
+   all three branches: the pointer comparison also missed a ReopenMenu of
+   the screen already current, whose rebuilt instance can come back at the
+   freed one's address.
+2. **`OpenDoor` was a native no-op ahead of the script.** M38 accepted the
+   name so crypt1.s's trigger callback would not throw -- and that ran
+   before the 21 door scripts that *define* `OpenDoor`, so neither the cell
+   key's `GetOpener().OpenDoor(" ")` nor a successful pick's `LockPicked`
+   opened anything. `OpenDoor` is not in the door class's trie (it is the
+   trigger class's, 0x14ccc); the script's own method now runs, and the
+   no-op is only the fallback for a door script without one. Every one of
+   those bodies is guarded by its `saved_Open`, so M38's double swing does
+   not arise.
+
+Live: the key from the chef opens cell g44, and the rescued prisoner's
+conversation follows.
+
+### The opening vignette's colour
+
+`FUN_1002bdf4` clears nothing: it draws the slide (sprite at 0xe,5) and
+the caption over the buffer, and every way into a vignette mode goes
+through `FUN_1001b788`'s fade, whose last step (`FUN_1004fc50`, 15 off
+every RGB444 nibble, in place) leaves the frame at 0x000. The port filled
+it with its placeholder navy (16,16,32); it is black now. The slide art
+itself (sepia, slots 224..227 for delfhide's Vignette(0)) was already
+right. Still not done: the fade itself between slides.
+
+### The multiplayer popup
+
+`multiplayermenu.s` builds `askPopup` with "Use character from saved
+game?" and Back, and `ProcessSavedGames()` re-fills it with
+`askPopup.ClearMenu()` first. The popup class had no `ClearMenu`
+(soft-fail), so the screen stacked both sets and ran off the 90-pixel box.
+Case 2 of `FUN_10087a60` is that clear: destroy every item in the list at
+`popup+0xac` and nothing else -- the selection word `+0xa0` is untouched.
+
+### Port Settings
+
+The six PC rows (M119-M129) had outgrown options.s's spacers and ran off
+the parchment into the Back caption. Options now carries one row, "Port
+Settings" (translated like the rows), in the first spacer under the Music
+slider; every other row keeps its index. Activating it swaps the screen's
+rows for a page -- title, the six rows, Back -- with the script's rows
+parked, not destroyed. Back (the row, the right softkey, Esc -- including
+Esc over a paused game, which otherwise resumes play) returns to Options
+with the cursor on the link; `OptionsBack` does not run from the page.
+MenuStack::OpenMenu closes the page, so Options always opens on its main
+page; a script `ClearMenu` drops it.
+
+- **Test**: `m133_delfhide_smoke` (17 checks: the chest, the chef, the
+  cell door through its menu, lockeddoor.s's LockPicked, door.s's no-op
+  fallback, the reopen serial, the multiplayer popup);
+  `pc_settings_smoke`'s Options part rewritten for the page.
+- Suite **111/111**, soft-fail 5.
+
+### Testing gotcha
+
+Posted `WM_KEYDOWN` arrow keys do not move a menu cursor in a driven
+session; `S`/`W` do.
 
 
 ## Next milestones (not yet started)
 
-**Multiplayer (M127's question).** The cheapest *real* version is the
-original's own design, carried over a socket instead of Bluetooth:
+**Multiplayer (M127's question).** *Done in M129, as planned below.* The
+cheapest *real* version is the original's own design, carried over a socket
+instead of Bluetooth:
 
 - **Each process runs its own full game**, with its own `GetPlayer()`, and
   the 48 packet types are mirrored between them. Nothing in the port's
@@ -11938,7 +12625,7 @@ So, in order:
 1. Record entities in parallel chunks.
 2. Sort opaque surfaces front to back, so the depth test rejects
    overdrawn pixels before the texture/palette/fog work.
-3. Only if 4K or more than 6x is wanted: a GPU path (D3D11). It would
+3. *Done in M129.* Only if 4K or more than 6x is wanted: a GPU path (D3D11). It would
    upload `.ztx` as an index texture and `.zlu`/`.zfg` as lookup textures,
    and do the rung, fog-nibble and chroma-key lookups in a pixel shader.
    It would be large, and it would have to sit beside the software

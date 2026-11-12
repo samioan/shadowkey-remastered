@@ -1,3 +1,4 @@
+#include "skTreeNode.h"
 #include "simkin_bindings/level_executable.h"
 
 #include <algorithm>
@@ -74,6 +75,9 @@ std::unique_ptr<MonsterExecutable> LevelExecutable::CreateCreature(int typeId) {
     } catch (skParseException& e) {
         std::printf("Level: CreateCreature(%d) -- PARSE ERROR loading %s: %s\n", typeId,
                     fullPath.c_str(), e.toString().ptr());
+    } catch (skTreeNodeReaderException& e) {
+        std::printf("Level: CreateCreature(%d) -- SCRIPT FILE ERROR loading %s: %s\n", typeId,
+                    fullPath.c_str(), e.toString().ptr());
     } catch (skRuntimeException& e) {
         std::printf("Level: CreateCreature(%d) -- RUNTIME ERROR loading %s: %s\n", typeId,
                     fullPath.c_str(), e.toString().ptr());
@@ -134,6 +138,9 @@ std::unique_ptr<ItemExecutable> LevelExecutable::LoadItemScript(int typeId, int 
         return item;
     } catch (skParseException& e) {
         std::printf("Level: %s(%d) -- PARSE ERROR loading %s: %s\n", what, typeId,
+                    fullPath.c_str(), e.toString().ptr());
+    } catch (skTreeNodeReaderException& e) {
+        std::printf("Level: %s(%d) -- SCRIPT FILE ERROR loading %s: %s\n", what, typeId,
                     fullPath.c_str(), e.toString().ptr());
     } catch (skRuntimeException& e) {
         std::printf("Level: %s(%d) -- RUNTIME ERROR loading %s: %s\n", what, typeId,

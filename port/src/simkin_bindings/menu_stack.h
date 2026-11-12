@@ -212,6 +212,13 @@ public:
     MenuExecutable* CreateRootMenu(const std::string& key, const std::string& filePath);
 
     MenuExecutable* currentMenu() const { return m_Current; }
+    // M133: bumped by every OpenMenu/ReopenMenu that lands. The host's
+    // "did that script handler open a screen?" test used to compare
+    // currentMenu() before and after, which misses a ReopenMenu of the
+    // screen that was already current (the cached instance is freed and the
+    // rebuilt one can come back at the same address) -- using a cell door a
+    // second time did exactly that. Compare this instead.
+    unsigned openSerial() const { return m_OpenSerial; }
     PlayerExecutable& player() const { return *m_Player; }
     // M126: the session teardown's player. The engine's quit thread deletes
     // the player object (`FUN_1000e3c4` with keepPlayer 0) and the next
@@ -621,6 +628,7 @@ private:
     std::unique_ptr<PlayerExecutable> m_Player;
     std::unique_ptr<LevelExecutable> m_Level;
     MenuExecutable* m_Current = nullptr;
+    unsigned m_OpenSerial = 0;
     std::array<SaveSlot, kSaveSlotCount> m_SaveSlots;
     std::string m_SaveDir = ".";
     std::string m_CurrentLevel;

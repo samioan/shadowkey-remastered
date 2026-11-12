@@ -65,7 +65,19 @@ public:
     // exactly one of them -- LatinPlain12 -- is not bold. Its 12px cell
     // is also the only candidate that fits the captions' own y=195 on a
     // 208px screen (LatinBold19 would overrun by six).
-    enum class Face { Ui, Small };
+    //
+    // M132: **and the italic one.** The free-standing text box
+    // (`FUN_100231b4`) asks for the same "Swiss" spec with
+    // `SetPosture(EPostureItalic)` at every site but one. The device's
+    // other text font store, `Browsereur.gdr`, opens with `Alpi12`, and
+    // Alpi12 *is* LatinPlain12 slanted: the same strokes, the rows more
+    // than three above the baseline moved a pixel right and those more
+    // than seven moved two, each advance a pixel wider. So SmallItalic is
+    // Alpi12 when `Browsereur.gdr` sits beside the legend font's file, and
+    // otherwise the Small face drawn with that same slant -- every font
+    // header in all three stores says "upright, normal weight", so an
+    // italic request on this device was algorithmic either way.
+    enum class Face { Ui, Small, SmallItalic };
 
     static bool LoadRealFont(const std::string& path, const std::string& typefaceName,
                              Face face = Face::Ui);

@@ -298,6 +298,13 @@ public:
     void SetEntityId(std::string id) { m_Id = std::move(id); }
     const std::string& entityId() const { return m_Id; }
 
+    // M129: the entity id the multiplayer protocol names this object by
+    // (`entity+0xc4`, a u16). Both players number a level's objects the
+    // same way -- the host's numbers travel with the entity stream -- so an
+    // id means the same object on both machines. 0 = not numbered.
+    void SetNetId(int id) { m_NetId = id; }
+    int netId() const { return m_NetId; }
+
     // `SetName`'s `stringtable.*` id, or -1 if the script never set one.
     int entityNameId() const { return m_NameId; }
 
@@ -415,6 +422,7 @@ private:
     int m_PendingSurfaceLift = kSetPositionSurfaceLift;  // M100
 
     std::string m_Id;
+    int m_NetId = 0;  // M129
     int m_NameId = -1;
     bool m_Hidden = false;
     bool m_Removed = false;    // M101

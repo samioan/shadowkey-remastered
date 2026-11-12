@@ -7,6 +7,8 @@
 
 namespace sk {
 
+class D3D11Renderer;
+
 // Minimal Win32 window + message pump, presenting a Backbuffer via GDI
 // (StretchDIBits) each frame. No SDL2/OpenGL -- the original engine is a
 // CPU-side software rasterizer into a flat 176x208 buffer, so a plain GDI
@@ -68,6 +70,24 @@ public:
     // Presents the backbuffer, nearest-neighbor scaled to the client area.
     // M119: any size -- see the Resolution setting (graphics/scene_upscale.h).
     void Present(const Backbuffer& backbuffer);
+
+    // M129: the Direct3D 11 renderer (platform/win32/d3d11_renderer.h).
+    //
+    // SetGpuRenderer(true) creates the device and gives it this window; from
+    // then on every Present goes through it, 2D frames included, because a
+    // window a swap chain presents to cannot also be drawn with GDI. It
+    // returns whether the GPU path is now active: false means Direct3D 11
+    // is not available here (gpuError() says why) and the window is still
+    // presenting through GDI, exactly as before. SetGpuRenderer(false) goes
+    // back to GDI.
+    bool SetGpuRenderer(bool on);
+    bool GpuRendererActive() const;
+    D3D11Renderer* gpu();
+    const std::string& gpuError() const;
+    // Presents the scene the GPU renderer last drew, under the game's 2D
+    // layer -- see D3D11Renderer::PresentScene. False when the GPU path is
+    // not active or the present failed; the caller then draws in software.
+    bool PresentGpuScene(const Backbuffer& layer, const Backbuffer& under);
 
     // M119: whether this window is the one the user is using. A gamepad is
     // read whatever window has focus, so the game ignores it while it is

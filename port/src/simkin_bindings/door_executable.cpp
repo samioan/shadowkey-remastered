@@ -1,3 +1,5 @@
+#include "skTreeNode.h"
+#include "simkin_bindings/mp_hooks.h"
 #include "simkin_bindings/door_executable.h"
 
 #include <cstdio>
@@ -100,6 +102,8 @@ void DoorExecutable::InvokeOnUse() {
         skScriptedExecutable::method(skString("OnUse"), args, ret, ctxt);
     } catch (skParseException& e) {
         std::printf("DoorExecutable: PARSE ERROR in OnUse(): %s\n", e.toString().ptr());
+    } catch (skTreeNodeReaderException& e) {
+        std::printf("DoorExecutable: SCRIPT FILE ERROR in OnUse(): %s\n", e.toString().ptr());
     } catch (skRuntimeException& e) {
         std::printf("DoorExecutable: RUNTIME ERROR in OnUse(): %s\n", e.toString().ptr());
     }
@@ -186,6 +190,18 @@ bool DoorExecutable::method(const skString& methodName, skRValueArray& args, skR
         // it again here would swing the door twice. Accepted as a no-op so
         // the real callback runs to completion instead of throwing
         // "Method OpenDoor not found" and skipping everything after it.
+        //
+        // M133: but only when the door's script has no OpenDoor of its
+        // own. `OpenDoor` is not in the door class's native trie (it is the
+        // trigger class's, 0x14ccc), so on the device a script-defined
+        // `OpenDoor[ (s) ... ]` is simply what runs -- and 21 shipped door
+        // scripts define one: `lockeddoor.s` and its variants (reached from
+        // a successful pick's LockPicked), `delfhide/Cell_lockeddoor.s` (the
+        // cell key's Use_CellKey), `dstar_e/cell_door.s`... This no-op ran
+        // ahead of all of them, so no picked lock and no key ever opened
+        // anything. Every one of those bodies is guarded by its own
+        // `saved_Open`, so the M38 double-swing concern does not arise.
+        if (skScriptedExecutable::method(methodName, args, returnValue, context)) return true;
         return true;
     }
     if (methodName == skString("DoorOpened")) {
@@ -194,6 +210,12 @@ bool DoorExecutable::method(const skString& methodName, skRValueArray& args, skR
         // this port has no multiplayer). The visible open/close state is
         // already fully captured by AddRotationTurn()/SetUseText() above,
         // so there's nothing left for this call to do here.
+        //
+        // M129: in a multiplayer game it is tag 0x1f -- the other player's
+        // copy of this door turns the same way.
+        if (Mp().sending() && Mp().door && args.entries() >= 2) {
+            Mp().door(netId(), args[1].intValue() != 0);
+        }
         return true;
     }
     if (methodName == skString("GetPlayer") && args.entries() == 0) {

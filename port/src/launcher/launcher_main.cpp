@@ -562,6 +562,19 @@ void ChooseFont(Impl& impl) {
         SetStatus(impl, Widen(error), kBad);
         return;
     }
+    // M132: the device's second text font store, if it is in the same
+    // folder -- it holds the italic face the prompts are drawn in. Optional:
+    // without it the game slants the plain face itself.
+    {
+        const fs::path italicSource = fs::path(source).parent_path() / "Browsereur.gdr";
+        std::error_code ignored;
+        if (fs::is_regular_file(italicSource, ignored)) {
+            std::string italicError;
+            sk::launcher::CopyOneFile(
+                italicSource.string(),
+                (fs::path(impl.installRoot) / "data" / "Browsereur.gdr").string(), italicError);
+        }
+    }
     impl.config.font = sk::launcher::RelativeToIfInside(impl.installRoot, destination);
     Save(impl);
     Refresh(impl);

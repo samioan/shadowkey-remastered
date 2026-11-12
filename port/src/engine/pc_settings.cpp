@@ -23,14 +23,16 @@ struct Labels {
     const char* fog;     // M123
     const char* off;     // M123
     const char* mouseLook;  // M125
+    const char* renderer;   // M129
+    const char* page;       // M133: the Options row and the page title
 };
 constexpr Labels kLabels[] = {
-    {"Resolution", "Frame Rate", "Original", "Unlimited", "Aspect Ratio", "Fog", "Off", "Mouse Look"},
-    {"Resoluci\xf3n", "Fotogramas", "Original", "Ilimitado", "Formato", "Niebla", "No", "Vista rat\xf3n"},
-    {"Aufl\xf6sung", "Bildrate", "Original", "Unbegrenzt", "Format", "Nebel", "Aus", "Mausblick"},
-    {"R\xe9solution", "Images/s", "Originale", "Illimit\xe9", "Format", "Brouillard", "Non", "Vue souris"},
-    {"Risoluzione", "Fotogrammi", "Originale", "Illimitati", "Formato", "Nebbia", "No", "Visuale mouse"},
-    {"Resolution", "Frame Rate", "Original", "Unlimited", "Aspect Ratio", "Fog", "Off", "Mouse Look"},
+    {"Resolution", "Frame Rate", "Original", "Unlimited", "Aspect Ratio", "Fog", "Off", "Mouse Look", "Renderer", "Port Settings"},
+    {"Resoluci\xf3n", "Fotogramas", "Original", "Ilimitado", "Formato", "Niebla", "No", "Vista rat\xf3n", "Render", "Ajustes de PC"},
+    {"Aufl\xf6sung", "Bildrate", "Original", "Unbegrenzt", "Format", "Nebel", "Aus", "Mausblick", "Renderer", "PC-Einstellungen"},
+    {"R\xe9solution", "Images/s", "Originale", "Illimit\xe9", "Format", "Brouillard", "Non", "Vue souris", "Rendu", "Options PC"},
+    {"Risoluzione", "Fotogrammi", "Originale", "Illimitati", "Formato", "Nebbia", "No", "Visuale mouse", "Rendering", "Opzioni PC"},
+    {"Resolution", "Frame Rate", "Original", "Unlimited", "Aspect Ratio", "Fog", "Off", "Mouse Look", "Renderer", "Port Settings"},
 };
 
 const Labels& LabelsFor(int language) {
@@ -48,6 +50,23 @@ int RenderScaleFor(const PcSettings& settings, int viewHeight) {
     if (viewHeight <= 0) return 1;
     const int fit = (viewHeight + Backbuffer::kHeight - 1) / Backbuffer::kHeight;
     return fit < 1 ? 1 : (fit > kMaxRenderScale ? kMaxRenderScale : fit);
+}
+
+void GpuSceneSizeFor(const PcSettings& settings, int viewWidth, int viewportWidth,
+                     int viewportHeight, int* width, int* height) {
+    const int scale = settings.resolutionScale();
+    int w = viewWidth, h = Backbuffer::kHeight;
+    if (scale == kResolutionAuto) {
+        if (viewportWidth > 0 && viewportHeight > 0) {
+            w = viewportWidth;
+            h = viewportHeight;
+        }
+    } else {
+        w = viewWidth * scale;
+        h = Backbuffer::kHeight * scale;
+    }
+    if (width) *width = w;
+    if (height) *height = h;
 }
 
 int ViewWidthFor(const PcSettings& settings, int clientWidth, int clientHeight) {
@@ -100,6 +119,14 @@ std::string MouseLookValueText(int percent, int language) {
     return std::to_string(percent) + "%";
 }
 
+std::string RendererValueText(int renderer, int language) {
+    if (renderer == kRendererGpu) return "Direct3D";
+    if (renderer == kRendererGpuSmooth) return "D3D Smooth";
+    return LabelsFor(language).original;
+}
+
+std::string PcSettingsStore::PageTitle(int language) const { return LabelsFor(language).page; }
+
 PcSettingsStore::PcSettingsStore(std::string path) : path_(std::move(path)) {}
 
 void PcSettingsStore::Set(const PcSettings& settings) {
@@ -109,6 +136,7 @@ void PcSettingsStore::Set(const PcSettings& settings) {
     settings_.aspectIndex = Wrap(settings_.aspectIndex, kAspectOptionCount);
     settings_.fogIndex = Wrap(settings_.fogIndex, kFogOptionCount);
     settings_.mouseLookIndex = Wrap(settings_.mouseLookIndex, kMouseLookOptionCount);
+    settings_.rendererIndex = Wrap(settings_.rendererIndex, kRendererOptionCount);
 }
 
 bool PcSettingsStore::Load() {
@@ -145,6 +173,10 @@ bool PcSettingsStore::Load() {
             for (int i = 0; i < kMouseLookOptionCount; ++i) {
                 if (kMouseLookSensitivities[i] == value) settings_.mouseLookIndex = i;
             }
+        } else if (std::strcmp(key, "renderer") == 0) {  // M129
+            for (int i = 0; i < kRendererOptionCount; ++i) {
+                if (kRenderers[i] == value) settings_.rendererIndex = i;
+            }
         }
     }
     std::fclose(f);
@@ -167,9 +199,11 @@ bool PcSettingsStore::Save() const {
                  "(1609 = 16:9)\n"
                  "# fog: density in percent of the original, 100 = original, 0 = off\n"
                  "# mouselook: mouse sensitivity in percent, 0 = off (the mouse only attacks)\n"
-                 "resolution=%d\nframerate=%d\naspect=%d\nfog=%d\nmouselook=%d\n",
+                 "# renderer: 0 = original (software), 1 = Direct3D 11, 2 = Direct3D 11 with "
+                 "smooth textures\n"
+                 "resolution=%d\nframerate=%d\naspect=%d\nfog=%d\nmouselook=%d\nrenderer=%d\n",
                  settings_.resolutionScale(), settings_.frameRate(), settings_.aspect(),
-                 settings_.fogPercent(), settings_.mouseLookPercent());
+                 settings_.fogPercent(), settings_.mouseLookPercent(), settings_.renderer());
     std::fclose(f);
     return true;
 }
@@ -194,6 +228,12 @@ std::string PcSettingsStore::RowText(int row, int language) const {
         return std::string(labels.mouseLook) + ": " +
                MouseLookValueText(settings_.mouseLookPercent(), language);
     }
+    if (row == kRowRenderer) {
+        // What is drawing, not only what was asked for: without Direct3D 11
+        // the choice is kept in the file and the row says Original.
+        const int shown = gpuUnavailable_ ? kRendererSoftware : settings_.renderer();
+        return std::string(labels.renderer) + ": " + RendererValueText(shown, language);
+    }
     return std::string();
 }
 
@@ -208,6 +248,9 @@ void PcSettingsStore::Cycle(int row, int delta) {
         settings_.fogIndex = Wrap(settings_.fogIndex + delta, kFogOptionCount);
     } else if (row == kRowMouseLook) {
         settings_.mouseLookIndex = Wrap(settings_.mouseLookIndex + delta, kMouseLookOptionCount);
+    } else if (row == kRowRenderer) {
+        settings_.rendererIndex = Wrap(settings_.rendererIndex + delta, kRendererOptionCount);
+        gpuUnavailable_ = false;  // asked again: let the game try again
     } else {
         return;
     }

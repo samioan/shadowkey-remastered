@@ -1,3 +1,4 @@
+#include "skTreeNode.h"
 #include "simkin_bindings/zone_script_executable.h"
 
 #include <algorithm>
@@ -389,6 +390,9 @@ void ZoneScriptExecutable::RunCallback(const std::string& callback, TriggerExecu
     } catch (skParseException& e) {
         std::printf("ZoneScript: PARSE ERROR in trigger callback \"%s\": %s\n", callback.c_str(),
                     e.toString().ptr());
+    } catch (skTreeNodeReaderException& e) {
+        std::printf("ZoneScript: SCRIPT FILE ERROR in trigger callback \"%s\": %s\n", callback.c_str(),
+                    e.toString().ptr());
     } catch (skRuntimeException& e) {
         std::printf("ZoneScript: RUNTIME ERROR in trigger callback \"%s\": %s\n", callback.c_str(),
                     e.toString().ptr());
@@ -443,6 +447,9 @@ void ZoneScriptExecutable::InvokeEnterZone(const std::string& regionName) {
         skScriptedExecutable::method(skString("EnterZone"), args, ret, ctxt);
     } catch (skParseException& e) {
         std::printf("ZoneScript: PARSE ERROR in EnterZone(\"%s\"): %s\n", regionName.c_str(),
+                    e.toString().ptr());
+    } catch (skTreeNodeReaderException& e) {
+        std::printf("ZoneScript: SCRIPT FILE ERROR in EnterZone(\"%s\"): %s\n", regionName.c_str(),
                     e.toString().ptr());
     } catch (skRuntimeException& e) {
         std::printf("ZoneScript: RUNTIME ERROR in EnterZone(\"%s\"): %s\n", regionName.c_str(),

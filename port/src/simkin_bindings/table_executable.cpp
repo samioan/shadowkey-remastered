@@ -400,7 +400,16 @@ TableExecutable::NameTint TableExecutable::CellTint(int row, int col) const {
         const bool heldOrWorn =
             item == player.leftItem() || item == player.rightItem() || item->equipped();
         if (heldOrWorn || player.QueueHoldingItem(item) >= 0) return NameTint::Equipped;
-        return NameTint::Standard;  // FUN_100450a0: see the header
+        // M131: `(item == 0 || !FUN_100450a0(player, item)) &&
+        // !product->enabled[class]` -- an owned item is barred when the
+        // class test (IsItemEnabledFor, M74) *and* the product record both
+        // refuse it. This arm answered Standard for every owned item while
+        // the class test was believed to be a table this port lacked.
+        if (!player.IsItemEnabledFor(*item) &&
+            !product->enabledForClass(m_Owner.PlayerCharacterClass())) {
+            return NameTint::ClassBarred;
+        }
+        return NameTint::Standard;
     }
     if (player.HasEquippedTemplate(product->templateId)) return NameTint::Equipped;
     return product->enabledForClass(m_Owner.PlayerCharacterClass()) ? NameTint::Standard

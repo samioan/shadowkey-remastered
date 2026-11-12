@@ -542,7 +542,19 @@ bool GdrFont::Load(const std::string& path, const std::string& typefaceName) {
             for (char32_t ch : th.name) {
                 ascii.push_back(ch < 0x80 ? static_cast<char>(ch) : '?');
             }
-            std::printf("  '%s' (%zu bitmap(s))\n", ascii.c_str(), th.bitmaps.size());
+            std::printf("  '%s' flags 0x%02x (%zu bitmap(s))", ascii.c_str(), th.flags,
+                        th.bitmaps.size());
+            // M132: and each one's style -- what Symbian's nearest-font
+            // match has to go on when the name asked for is not there.
+            for (const auto& ref : th.bitmaps) {
+                auto it = headerByUid.find(ref.uid);
+                if (it == headerByUid.end()) continue;
+                const FontBitmapHeader& fh = *it->second;
+                std::printf(" [%s%s%s cell %d ascent %d x%d/%d]", fh.posture ? "italic" : "upright",
+                            fh.strokeWeight ? " bold" : "", fh.isProportional ? "" : " mono",
+                            fh.cellHeight, fh.ascent, ref.widthFactor, ref.heightFactor);
+            }
+            std::printf("\n");
         }
         return false;
     }

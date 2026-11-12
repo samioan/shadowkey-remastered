@@ -24,6 +24,7 @@
 // milestone needed it.
 #include <filesystem>
 #include <fstream>
+#include <functional>
 #include <map>
 #include <memory>
 #include <set>
@@ -31,6 +32,7 @@
 #include <string>
 #include <vector>
 
+#include "skTreeNode.h"
 #include "assets/game_config.h"
 #include "assets/sound_archive.h"
 #include "assets/sprite_archive.h"
@@ -47,6 +49,12 @@
 #include "graphics/backbuffer.h"
 #include "graphics/bitmap_font.h"
 #include "graphics/scene_upscale.h"
+#include "graphics/text_box.h"
+#include "platform/win32/d3d11_renderer.h"
+#include "net/mp_session.h"
+#include "net/mp_world_fns.h"
+#include "simkin_bindings/mp_hooks.h"
+#include "render3d/gpu_frame.h"
 #include "graphics/viewport.h"
 #include "platform/win32/console_tee.h"
 #include "platform/win32/crash_report.h"
@@ -64,6 +72,9 @@
 #include "simkin_bindings/floating_sprite_executable.h"
 #include "simkin_bindings/game_constants.h"
 #include "simkin_bindings/ghost_mode.h"
+#include "simkin_bindings/player_move.h"
+#include "simkin_bindings/effects.h"
+#include "simkin_bindings/use_prompt.h"
 #include "simkin_bindings/button_executable.h"
 #include "simkin_bindings/item_button_executable.h"
 #include "simkin_bindings/item_executable.h"
@@ -548,6 +559,12 @@ struct MonsterInstance {
     // and reachable state -- it is what the look arm leaves behind on the
     // tick before it acquires -- so this cannot be folded into the package.
     bool hasTarget = false;
+    // M130 (multiplayer): tag 0x1e named the *other* player as this
+    // creature's target, so here it goes for that player's avatar; and
+    // whether this game has announced its own acquisition / burn yet.
+    bool mpTargetsPeer = false;
+    bool mpTargetSent = false;
+    bool mpBurnSent = false;
     // M28: vertex-animation playback state. `animClip` is the clip index
     // the creature's own script named (idle/walk/swing/death); `animTime`
     // counts seconds into it, and the death clip latches (plays once and
@@ -1871,6 +1888,9 @@ bool LiveDebugHost::Spawn(const std::string& what, int count, float distance,
         } catch (skParseException& e) {
             message = std::string("parse error in ") + path + ": " + e.toString().ptr();
             return false;
+        } catch (skTreeNodeReaderException& e) {
+            message = std::string("parse error in ") + path + ": " + e.toString().ptr();
+            return false;
         } catch (skRuntimeException& e) {
             message = std::string("runtime error in ") + path + ": " + e.toString().ptr();
             return false;
@@ -1916,6 +1936,9 @@ bool LiveDebugHost::Give(const std::string& what, int count, std::string& messag
                 skExecutableContext callContext(m_Refs.interpreter);
                 sk_bindings::RunEntityInit(*item, m_Refs.stack->scriptRoot(), callContext);
             } catch (skParseException& e) {
+                message = std::string("parse error in ") + path + ": " + e.toString().ptr();
+                return false;
+            } catch (skTreeNodeReaderException& e) {
                 message = std::string("parse error in ") + path + ": " + e.toString().ptr();
                 return false;
             } catch (skRuntimeException& e) {
@@ -2106,6 +2129,9 @@ bool LiveDebugHost::CallNative(const std::string& receiver, const std::string& m
     } catch (skParseException& e) {
         message = std::string("parse error: ") + e.toString().ptr();
         return false;
+    } catch (skTreeNodeReaderException& e) {
+        message = std::string("parse error: ") + e.toString().ptr();
+        return false;
     } catch (skRuntimeException& e) {
         message = std::string("runtime error: ") + e.toString().ptr();
         return false;
@@ -2138,6 +2164,9 @@ bool LiveDebugHost::ScriptEval(const std::string& receiver, const std::string& c
                                            skString(body.c_str()), arguments, result, nullptr,
                                            context);
     } catch (skParseException& e) {
+        message = std::string("parse error: ") + e.toString().ptr();
+        return false;
+    } catch (skTreeNodeReaderException& e) {
         message = std::string("parse error: ") + e.toString().ptr();
         return false;
     } catch (skRuntimeException& e) {
@@ -3521,12 +3550,28 @@ std::string ZoneDisplayName(const sk::StringTable& strings, const std::string& z
 // tick, not on a real background thread), so there's no live progress to
 // sample -- `percent` here steps through the real documented stage list
 // on a fixed per-tick schedule purely for visual continuity with the real
-// screen, not a measurement of actual work done. The exact screen
-// position of the "Travel to" text is likewise undetermined; this port
-// shows the banner for every zone change after the first (the first uses
+// screen, not a measurement of actual work done. This port shows the
+// banner for every zone change after the first (the first uses
 // "Loading..." instead, string 3820) as the best-evidenced substitute.
+//
+// M131: **where the banner goes and what colour it is** (`FUN_10029cb0`,
+// the `mode == 10 || mode == 3` arm):
+//
+//     FUN_1008f97c(gc, text, 0, controller->+0x198[controller->+0x194], 0, 1, 0, 0);
+//     if (++controller->+0x194 > 0xf) controller->+0x194 = 0;
+//
+// -- centred on the top row, y = 0, no shadow, in a colour that steps
+// through a sixteen-entry table the constructor fills with `i * 0x111`:
+// black up to white, one step a frame, and round again. The banner
+// pulses. It was a still line at y = 4 in the title's 0x733.
+constexpr int kLoadingBannerY = 0;
+constexpr int kLoadingBannerPulseSteps = 0x10;
+constexpr uint16_t LoadingBannerColor(int pulse) {
+    return MenuColor444(static_cast<uint16_t>((pulse & 0xf) * 0x111));
+}
+
 void RenderLoadingScreen(sk::Backbuffer& backbuffer, sk::SpriteArchive& sprites,
-                          const std::string& text, int percent) {
+                          const std::string& text, int percent, int pulse) {
     const sk::Sprite* splash = sprites.GetSprite(174);
     if (splash) {
         backbuffer.Blit(0, 0, *splash);
@@ -3534,7 +3579,8 @@ void RenderLoadingScreen(sk::Backbuffer& backbuffer, sk::SpriteArchive& sprites,
         backbuffer.Fill(kBackgroundColor);
     }
     int textX = (sk::Backbuffer::kWidth - sk::BitmapFont::TextWidth(text)) / 2;
-    sk::BitmapFont::DrawString(backbuffer, (std::max)(0, textX), 4, text, kTitleColor);
+    sk::BitmapFont::DrawString(backbuffer, (std::max)(0, textX), kLoadingBannerY, text,
+                                LoadingBannerColor(pulse));
     const sk::Sprite* frame = sprites.GetSprite(206);
     const sk::Sprite* fill = sprites.GetSprite(205);
     if (fill) {
@@ -3561,16 +3607,27 @@ constexpr int kVignetteSpriteY = 5;
 void RenderVignette(sk::Backbuffer& backbuffer, sk::SpriteArchive& sprites,
                      const sk::StringTable& strings,
                      const sk_bindings::LevelExecutable::VignetteDefinition& def, int slide) {
-    backbuffer.Fill(kBackgroundColor);
+    // M133: black, not the port's placeholder navy. `FUN_1002bdf4` clears
+    // nothing -- it draws the picture and the caption over whatever the
+    // buffer holds, and every way into a vignette mode is through
+    // `FUN_1001b788`'s fade, whose last step (`FUN_1004fc50`, 15 off every
+    // RGB444 nibble, in place) leaves the whole frame at 0x000. The fade in
+    // that follows subtracts from that same buffer, so the margin stays
+    // black for the whole slideshow.
+    backbuffer.Fill(sk::PackRGB565(0, 0, 0));
     const sk::Sprite* art = sprites.GetSprite(def.firstSprite + slide);
     if (art) backbuffer.Blit(kVignetteSpriteX, kVignetteSpriteY, *art);
-    // The real draw puts the caption at y=0x73 with a fixed wrap width;
-    // this port's font helper has no wrapper, so the string is drawn
-    // centred on one line -- the same simplification the loading screen's
-    // own banner already makes.
-    std::string caption = strings.Get(def.firstTextId + slide);
-    int textX = (sk::Backbuffer::kWidth - sk::BitmapFont::TextWidth(caption)) / 2;
-    sk::BitmapFont::DrawString(backbuffer, (std::max)(0, textX), 0x73, caption, kTitleColor);
+    // M131: the caption is the engine's text box (`FUN_1002bdf4`):
+    //
+    //     FUN_100231b4(ctx, text, 0xe, 0x73, 0xab, _, 0xff, 0xff, 0xff,
+    //                  bold 0, italic 1, legend 0, align 0, wrap 0x19)
+    //
+    // -- white, left-aligned under the picture's own left edge, broken
+    // every 25 characters, 13 pixels a line. It was one centred line in
+    // the title colour, which ran a long caption off both sides.
+    sk::DrawTextBox(backbuffer, strings.Get(def.firstTextId + slide), kVignetteSpriteX, 0x73, 0xab,
+                    sk::PackRGB565(255, 255, 255), sk::TextBoxAlign::Left, 0x19,
+                    sk::BitmapFont::Face::SmallItalic);
 }
 
 // M113: where this run's *writable* files go -- saves, `dragonstar.set`
@@ -3700,6 +3757,8 @@ int main(int argc, char** argv) {
     // the player's x/y as the source, so the distance term is always zero
     // and the sound is heard at full volume. Every UI and player-action
     // sound goes through it.
+    constexpr int kMenuMoveSound = 99;     // M131: menuNEWxbx.wav, every table
+    constexpr int kMenuSelectSound = 100;  //       menu1.wav
     auto playPlayerSound = [&](int slot, int volume = sk::kDefaultSoundVolume) {
         const sk::Sound* sfx = soundArchive.GetSound(slot);
         if (sfx) audioEngine.PlaySfx(*sfx, volume);
@@ -3738,6 +3797,18 @@ int main(int argc, char** argv) {
     // legend font, so it costs one extra parse and nothing else; if it
     // fails to load, drawing silently falls back to the Ui face.
     sk::BitmapFont::LoadRealFont(fontPath, "LatinPlain12", sk::BitmapFont::Face::Small);
+    // M132: the italic face, from the device's second text font store if
+    // it is beside the first (bitmap_font.h). Absent, the Small face is
+    // slanted the same way, so nothing is printed about a missing file.
+    {
+        const std::filesystem::path italicStore =
+            std::filesystem::path(fontPath).parent_path() / "Browsereur.gdr";
+        std::error_code ignored;
+        if (std::filesystem::is_regular_file(italicStore, ignored)) {
+            sk::BitmapFont::LoadRealFont(italicStore.string(), "Alpi12",
+                                          sk::BitmapFont::Face::SmallItalic);
+        }
+    }
 
     skInterpreter interpreter;
     sk_bindings::MenuStack stack(scriptRoot, interpreter, &strings, &soundArchive, &audioEngine);
@@ -3791,6 +3862,9 @@ int main(int argc, char** argv) {
     } catch (skParseException& e) {
         std::printf("shadowkey-port: PARSE ERROR loading mainmenu.s: %s\n", e.toString().ptr());
         return 2;
+    } catch (skTreeNodeReaderException& e) {
+        std::printf("shadowkey-port: SCRIPT FILE ERROR loading mainmenu.s: %s\n", e.toString().ptr());
+        return 2;
     } catch (skRuntimeException& e) {
         std::printf("shadowkey-port: RUNTIME ERROR running mainmenu.s: %s\n", e.toString().ptr());
         return 2;
@@ -3838,6 +3912,9 @@ int main(int argc, char** argv) {
                 WriteBackbufferPpm(shot, std::string(dumpDir) + "/" + flat + ".ppm");
                 ++written;
             } catch (skParseException& e) {
+                ++failed;
+                std::printf("  FAIL %-40s parse: %s\n", name.c_str(), e.toString().ptr());
+            } catch (skTreeNodeReaderException& e) {
                 ++failed;
                 std::printf("  FAIL %-40s parse: %s\n", name.c_str(), e.toString().ptr());
             } catch (skRuntimeException& e) {
@@ -3958,6 +4035,22 @@ int main(int argc, char** argv) {
     sk::GamepadMapper padMapper;
     sk::Gamepad gamepad;
 
+    // M130: the join lobby's address line. The engine found its hosts by
+    // Bluetooth inquiry and had nothing to type; over a network a host that
+    // is not on the LAN has to be named, and until now that was a text file
+    // (mp_host.txt). While "Looking for hosts" is up, typing writes an
+    // address under the list and Enter adds it as a host row. The keys that
+    // type are kept from the menu while it is open; the arrows, Enter on an
+    // empty line and Esc are still the menu's.
+    bool mpAddressOpen = false;
+    std::string mpAddressEntry;
+    std::string mpAddressSubmitted;  // taken by the tick, which owns the lobby
+    auto mpAddressKey = [](int vk) {
+        return (vk >= '0' && vk <= '9') || (vk >= 'A' && vk <= 'Z') ||
+               (vk >= VK_NUMPAD0 && vk <= VK_NUMPAD9) || vk == VK_DECIMAL ||
+               vk == VK_OEM_PERIOD || vk == VK_OEM_MINUS || vk == VK_OEM_1 || vk == VK_BACK;
+    };
+
     window.SetKeyCallback([&](int vkCode, bool down) {
 #if SK_DEBUG_SUITE
         // SK_DEBUG_SUITE (M68): first refusal on every key. When the console
@@ -3974,6 +4067,11 @@ int main(int argc, char** argv) {
         int& latched = keySlot[static_cast<size_t>(vkCode)];
         if (down) {
             if (latched >= 0) return;  // auto-repeat: already pressed
+            // M130: typing an address (see mpAddressOpen).
+            if (mpAddressOpen &&
+                (mpAddressKey(vkCode) || (vkCode == VK_RETURN && !mpAddressEntry.empty()))) {
+                return;
+            }
             auto slot = sk::MapPcKeyToButtonSlot(vkCode);
             if (!slot) return;
             const sk::ButtonSlot pressed =
@@ -4006,6 +4104,21 @@ int main(int argc, char** argv) {
         // command does not also type into a character name.
         if (ch < 0x80 && debugSuite.HandleChar(static_cast<char>(ch))) return;
 #endif
+        if (mpAddressOpen) {
+            if (ch == 0x08) {
+                if (!mpAddressEntry.empty()) mpAddressEntry.pop_back();
+            } else if (ch == 0x0D) {
+                if (!mpAddressEntry.empty()) {
+                    mpAddressSubmitted = mpAddressEntry;
+                    mpAddressEntry.clear();
+                }
+            } else if (mpAddressEntry.size() < 40 &&
+                       ((ch >= '0' && ch <= '9') || (ch >= 'a' && ch <= 'z') ||
+                        (ch >= 'A' && ch <= 'Z') || ch == '.' || ch == '-' || ch == ':')) {
+                mpAddressEntry.push_back(static_cast<char>(ch));
+            }
+            return;
+        }
         sk_bindings::MenuExecutable* menu = stack.currentMenu();
         if (!menu || !menu->textEntryActive()) return;
         if (ch == 0x08) {
@@ -4131,6 +4244,16 @@ int main(int argc, char** argv) {
     // block -- it has to survive across frames for a period to elapse at
     // all. See simkin_bindings/vitals.h.
     int gameMoveFatigueAccum = 0;
+    // M130: the player's velocity and its turn / look rates (`player+0x98`,
+    // `+0xa0`, `+0xb8`, `+0xaa`) -- simkin_bindings/player_move.h -- and the
+    // walk bob's decrement for this tick (`FUN_1001f230`).
+    sk_bindings::PlayerMotion gameMotion;
+    // M130: `player+0x228` (see ZoneRenderer::SceneLights) and the flicker
+    // counter. The byte lives on the player object, so a new player has it
+    // clear again.
+    bool gamePlayerGlow = false;
+    uint32_t gameLightSeed = 0;
+    int gameSwayThisTick = 0;
     // M51: the other way -- `FUN_1001b198` takes a real world position and
     // attenuates by distance from the listener before playing. The curve
     // is linear in *squared* distance, so its 512 hardcodes an audible
@@ -4248,6 +4371,10 @@ int main(int argc, char** argv) {
     // travel prompt's LoadLevel has already overwritten it with the
     // destination, exactly as the engine's `app+0x28` is.
     std::string gameLoadedZoneName;
+    // M129: when set, every record the snapshot writes also reports the
+    // net id of the object it came from, in record order -- which is how
+    // the multiplayer entity stream (tag 0x1d) names each one.
+    std::vector<int>* snapshotNetIdSink = nullptr;
     auto savedKindForType = [&entityTypes](int32_t typeId) {
         const sk::EntityTypeDescriptor* d = entityTypes.Lookup(typeId);
         return sk::SavedKindForCategory(d ? d->category : -1);
@@ -4273,6 +4400,7 @@ int main(int argc, char** argv) {
                                 int rollRaw, int scaleRaw) {
         rec.typeId = typeId;
         rec.kind = savedKindForType(typeId);
+        if (snapshotNetIdSink) snapshotNetIdSink->push_back(ent.netId());  // M129
         rec.entity.x = ent.positionX();
         rec.entity.y = ent.positionY();
         rec.entity.z = static_cast<int16_t>(ent.positionZ());
@@ -4416,6 +4544,7 @@ int main(int argc, char** argv) {
         return z <= gameZone->CollisionFloorHeightAt(x, y, z + 384.0f);
     };
 
+    std::function<void(MonsterInstance&)> mpStrikeHook;  // M129: tag 0x1a, set below
     auto onCreatureStruck = [&](MonsterInstance& victim) {
         if (!victim.script || !victim.script->alive() || victim.script->invulnerable()) return;
         if (victim.typeId != sk_bindings::kBloodImmuneTypeId) {
@@ -4425,6 +4554,7 @@ int main(int argc, char** argv) {
                 static_cast<int>(gameCamera.y), [] { return std::rand(); }));
         }
         victim.flash.Arm(sk::kFlashPeriodUnits, sk::kFlashRedMin, sk::kFlashRedMax);
+        if (mpStrikeHook) mpStrikeHook(victim);
     };
 
 #if SK_DEBUG_SUITE
@@ -4472,7 +4602,13 @@ int main(int argc, char** argv) {
     // Present -- the pre-M119 frame exactly. Above it the scene is drawn at
     // a whole multiple and the 2D layer composited over it
     // (graphics/scene_upscale.h).
+    int loadingBannerPulse = 0;  // M131: `controller+0x194`, never reset
     std::string gameplayLabel;  // the prompt line the tick chose, "" for none
+    uint16_t gameplayLabelColor = sk::PackRGB565(255, 255, 255);  // M131, FUN_1002acd4
+    // M129: a multiplayer notice shown in the prompt line's place while it
+    // lasts ("Waiting for host", "<name>: Connection lost").
+    std::string mpNotice;
+    int mpNoticeTicks = 0;
     // M119: the last two gameplay ticks' render lists (engine/
     // frame_interpolation.h), and whether the tick that just ran ended in
     // the 3D view -- only then is there anything to draw between ticks.
@@ -4486,13 +4622,46 @@ int main(int argc, char** argv) {
     // the 2D layer is the Backbuffer itself.
     sk::ViewLayout sceneLayout;
     sk::Backbuffer wideLayer;
+    bool wideSceneValid = false;  // M130: wideLayer holds the last wide 3D frame
     auto currentViewWidth = [&]() {
         if (pcSettings.settings().originalAspect()) return sk::Backbuffer::kWidth;
         int clientW = 0, clientH = 0;
         window.ClientSize(&clientW, &clientH);
         return sk::ViewWidthFor(pcSettings.settings(), clientW, clientH);
     };
+    // M129: the Direct3D renderer's side of the frame (platform/win32/
+    // d3d11_renderer.h). `gpuFrame` is the triangle list the zone renderer
+    // records for the card; `gpuUnder` is the native-size software frame the
+    // 2D layer is drawn over, kept so the present can tell which pixels the
+    // 2D code touched. That software frame is drawn once per gameplay tick
+    // -- it is also where the melee probes' object IDs come from -- and
+    // reused for the frames the Frame Rate setting draws in between.
+    sk::GpuFrame gpuFrame;
+    sk::Backbuffer gpuUnder;
+    bool gpuUnderStale = true;
+    auto syncGpuRenderer = [&]() {
+        const bool want = pcSettings.settings().gpuRenderer() && !pcSettings.gpuUnavailable();
+        if (want == window.GpuRendererActive()) return;
+        if (!want) {
+            window.SetGpuRenderer(false);
+            std::printf("renderer: software\n");
+            return;
+        }
+        if (window.SetGpuRenderer(true)) {
+            std::printf("renderer: Direct3D 11 on %s\n", window.gpu()->adapterName().c_str());
+            gpuUnderStale = true;
+        } else {
+            // Not available here: say so once, show Original on the row, and
+            // keep drawing in software. The stored choice is left alone.
+            std::printf("renderer: Direct3D 11 unavailable (%s) -- using the software renderer\n",
+                        window.gpuError().c_str());
+            pcSettings.SetGpuUnavailable(true);
+        }
+    };
     auto currentRenderScale = [&](int viewWidth) {
+        // M129: with the card drawing the 3D view, the software scene is
+        // only ever the native-size one under the 2D layer.
+        if (window.GpuRendererActive()) return 1;
         if (pcSettings.settings().originalResolution()) return 1;
         int clientW = 0, clientH = 0;
         window.ClientSize(&clientW, &clientH);
@@ -4516,6 +4685,7 @@ int main(int argc, char** argv) {
         // M120: a wide frame leaves its middle 176 columns in the Backbuffer
         // too, so anything that later draws over "the last frame" finds the
         // picture it would have found at the original shape.
+        wideSceneValid = sceneLayout.wide();  // M130: presentMenu's world bars
         if (sceneLayout.wide()) sk::CopyColumnOut(wideLayer, sceneLayout.centreX(), backbuffer);
 #if SK_DEBUG_SUITE
         // SK_DEBUG_SUITE (M68): what the Resolution setting costs outside
@@ -4530,6 +4700,121 @@ int main(int argc, char** argv) {
 #else
         window.Present(composited() ? hiResScene.Compose(sceneLayer()) : backbuffer);
 #endif
+    };
+    // M130: a full-screen 2D frame -- a menu, a loading screen, the credits
+    // -- at a wide Aspect Ratio. The engine's screens are 176 columns and
+    // stay exactly that: nothing is stretched, re-laid-out or redrawn. What
+    // changes is the two bars beside them, which were black. They are now
+    // filled from the screen's own picture:
+    //
+    //   * over a live game (a pause menu, a popup, "Waiting for players")
+    //     the bars are the 3D view that was already there, dimmed, so the
+    //     panel sits on the world instead of on a letterbox;
+    //   * a menu continues its own backdrop -- the `MenuBackground` sprite
+    //     alone, without the rows drawn over it -- reflected outward from
+    //     each edge and softened, so the parchment's colour and dark torn
+    //     border carry on while any lettering in the art becomes tone
+    //     instead of reading backwards. It falls from half brightness
+    //     beside the panel to a quarter at the window's edge, which keeps
+    //     the eye on the 176 columns the artists drew;
+    //   * a screen with no separate backdrop (a loading picture, the
+    //     credits) does the same with the frame itself.
+    //
+    // At the original shape this is window.Present, untouched.
+    sk::Backbuffer menuWide;
+    sk::Backbuffer menuBackdrop;  // a menu's MenuBackground sprite on its own
+    sk::Backbuffer menuSoft;      // the softened frame, when there is none
+    auto softenInto = [&](const sk::Backbuffer& src, sk::Backbuffer& dst) {
+        // A separable box average, 17 wide: enough that 8-pixel lettering
+        // becomes tone, cheap enough to run on every menu frame.
+        constexpr int kRadius = 8;
+        const int w = src.width(), h = src.height();
+        dst.Resize(w, h);
+        std::vector<uint16_t> pass(static_cast<size_t>(w) * h);
+        auto average = [&](auto read, auto write, int count, int lines) {
+            for (int line = 0; line < lines; ++line) {
+                for (int i = 0; i < count; ++i) {
+                    int r = 0, g = 0, b = 0, n = 0;
+                    for (int k = -kRadius; k <= kRadius; ++k) {
+                        const int j = i + k;
+                        if (j < 0 || j >= count) continue;
+                        const uint16_t c = read(line, j);
+                        r += (c >> 11) & 0x1f;
+                        g += (c >> 5) & 0x3f;
+                        b += c & 0x1f;
+                        ++n;
+                    }
+                    write(line, i, static_cast<uint16_t>(((r / n) << 11) | ((g / n) << 5) | (b / n)));
+                }
+            }
+        };
+        average([&](int y, int x) { return src.Row(y)[x]; },
+                [&](int y, int x, uint16_t c) { pass[static_cast<size_t>(y) * w + x] = c; }, w, h);
+        average([&](int x, int y) { return pass[static_cast<size_t>(y) * w + x]; },
+                [&](int x, int y, uint16_t c) { dst.Row(y)[x] = c; }, h, w);
+    };
+    auto dim565 = [](uint16_t c, int k256) -> uint16_t {
+        const int r = ((c >> 11) & 0x1f) * k256 >> 8;
+        const int g = ((c >> 5) & 0x3f) * k256 >> 8;
+        const int b = (c & 0x1f) * k256 >> 8;
+        return static_cast<uint16_t>((r << 11) | (g << 5) | b);
+    };
+    auto presentMenu = [&](const sk::Backbuffer& native, bool overGame,
+                           const sk::Backbuffer* backdrop = nullptr) {
+        const int width = currentViewWidth();
+        if (width <= sk::Backbuffer::kWidth || native.width() != sk::Backbuffer::kWidth) {
+            window.Present(native);
+            return;
+        }
+        constexpr int kNear = 128, kFar = 64;  // of 256: beside the panel, at the edge
+        menuWide.Resize(width, sk::Backbuffer::kHeight);
+        const int x0 = (width - sk::Backbuffer::kWidth) / 2;
+        const int rightStart = x0 + sk::Backbuffer::kWidth;
+        const bool scene = overGame && wideSceneValid && wideLayer.width() == width &&
+                           wideLayer.height() == sk::Backbuffer::kHeight;
+        // Softened either way: the main menu's logo is part of its
+        // backdrop sprite, and would otherwise read backwards.
+        const sk::Backbuffer* margin = nullptr;
+        if (!scene) {
+            softenInto(backdrop ? *backdrop : native, menuSoft);
+            margin = &menuSoft;
+        }
+        auto level = [&](int distance, int span) {
+            return span <= 1 ? kNear : kNear - (kNear - kFar) * distance / (span - 1);
+        };
+        auto mirrored = [](int distance) {
+            // Reflect at the panel's edge, and again a panel further out.
+            const int period = 2 * sk::Backbuffer::kWidth;
+            const int d = distance % period;
+            return d < sk::Backbuffer::kWidth ? d : period - 1 - d;
+        };
+        for (int y = 0; y < sk::Backbuffer::kHeight; ++y) {
+            const uint16_t* panel = native.Row(y);
+            const uint16_t* src = scene ? panel : margin->Row(y);
+            uint16_t* dst = menuWide.Row(y);
+            const uint16_t* world = scene ? wideLayer.Row(y) : nullptr;
+            for (int x = 0; x < x0; ++x) {
+                const int d = x0 - 1 - x;
+                dst[x] = dim565(world ? world[x] : src[mirrored(d)], level(d, x0));
+            }
+            std::copy_n(panel, sk::Backbuffer::kWidth, dst + x0);
+            for (int x = rightStart; x < width; ++x) {
+                const int d = x - rightStart;
+                dst[x] = dim565(world ? world[x]
+                                      : src[sk::Backbuffer::kWidth - 1 - mirrored(d)],
+                                level(d, width - rightStart));
+            }
+        }
+        window.Present(menuWide);
+    };
+    auto menuBackdropFor = [&](sk_bindings::MenuExecutable* menu) -> const sk::Backbuffer* {
+        if (!menu || menu->backgroundId() < 0) return nullptr;
+        const sk::Sprite* sprite = spriteArchive.GetSprite(menu->backgroundId());
+        if (!sprite) return nullptr;
+        menuBackdrop.Resize(sk::Backbuffer::kWidth, sk::Backbuffer::kHeight);
+        menuBackdrop.Fill(kBackgroundColor);
+        menuBackdrop.Blit(0, 0, *sprite);
+        return &menuBackdrop;
     };
     // The 2D layer over the scene. `overlays` adds what only the live 3D
     // view draws -- the map, the coordinate readout, the prompt line.
@@ -4567,8 +4852,64 @@ int main(int argc, char** argv) {
                   sceneLayout);
         if (!overlays) return;
         const bool levelUpCaption = stack.player().levelUpPoints() > 0;  // post-M120
+        // M131: **the status column**, `FUN_1002c0e4` (its body is the
+        // stats block's own draw at 0x10047a..). Nothing while the map is
+        // up. Otherwise, in white, 15 pixels a line:
+        //
+        //   y = 0x23   what the second periodic channel (`stats+0x7c`) is
+        //              running: "Mystic Might:" / "Precise Magic:" /
+        //              "Thief Lore:" / "Sanctuary" / "Lethal Strike:" /
+        //              "+Fatigue" / "+Health" / "-Health" (the burn) /
+        //              "Snowray Powder" -- kinds 1..9;
+        //   y = 0x32.. "Blind", "Poison", "Disease" for flag bits 4, 8,
+        //              0x10 of `stats+0x44`, then "Paralyze";
+        //   then       every timed effect but ItemUsed: "+" or "-" at x=7
+        //              by the sign of its stored value, and the stat's
+        //              name (string 3044 + stat) at x=15.
+        //
+        // The port tracked all of it and drew none of it: a poisoned or
+        // blinded player was never told.
+        struct StatusLine {
+            int y;
+            std::string sign, text;
+        };
+        std::vector<StatusLine> statusLines;
+        if (!gameMapOpen) {
+            const sk_bindings::ActorStats& stats = stack.player().actorStats();
+            std::string first;
+            switch (stats.periodicKind()) {
+                case 1: first = strings.Get(43); break;
+                case 2: first = strings.Get(47); break;
+                case 3: first = strings.Get(49); break;
+                case 4: first = strings.Get(2488); break;
+                case 5: first = strings.Get(41); break;
+                case 6: first = "+" + strings.Get(3065); break;
+                case 7: first = "+" + strings.Get(3064); break;
+                case 8: first = "-" + strings.Get(3064); break;
+                case 9: first = strings.Get(1731); break;
+                default: break;
+            }
+            if (!first.empty()) statusLines.push_back({0x23, std::string(), first});
+            int y = 0x32;
+            auto flagLine = [&](bool on, int stringId) {
+                if (!on) return;
+                statusLines.push_back({y, std::string(), strings.Get(stringId)});
+                y += 0xf;
+            };
+            flagLine(stats.blinded(), 2401);
+            flagLine(stats.poisoned(), 2473);
+            flagLine((stats.effectFlags() & sk_bindings::ActorStats::kEffectFlagDisease) != 0, 2432);
+            flagLine(stats.paralyzed(), 2469);
+            for (const sk_bindings::Effect& e : stats.timedEffects()) {
+                if (e.stat == sk_bindings::kEffectStatItemUsed) continue;
+                statusLines.push_back({y, static_cast<int16_t>(e.stored) < 0 ? "-" : "+",
+                                       strings.Get(3044 + e.stat)});
+                y += 0xf;
+            }
+        }
         const bool column = sceneLayout.wide() && (gameMapOpen || stack.player().coordsEnabled() ||
-                                                   levelUpCaption || !gameplayLabel.empty());
+                                                   levelUpCaption || !gameplayLabel.empty() ||
+                                                   mpNoticeTicks > 0 || !statusLines.empty());
         if (column) sk::CopyColumnOut(wideLayer, sceneLayout.centreX(), backbuffer);
         // M57: last, over everything -- the map is an overlay, and
         // the game underneath it keeps running.
@@ -4605,14 +4946,91 @@ int main(int argc, char** argv) {
             sk::BitmapFont::DrawString(backbuffer, 0x14, 0x14, coords,
                                         sk::PackRGB565(255, 255, 255));
         }
+        for (const StatusLine& line : statusLines) {
+            const uint16_t white = MenuColor444(0xfff);
+            if (!line.sign.empty()) {
+                sk::BitmapFont::DrawString(backbuffer, 7, line.y, line.sign, white);
+            }
+            sk::BitmapFont::DrawString(backbuffer, 0xf, line.y, line.text, white);
+        }
         if (!gameplayLabel.empty()) {
-            sk::BitmapFont::DrawString(backbuffer, 4, 34, gameplayLabel, kSelectedTextColor);
+            // M131: `FUN_1002acd4` -- the engine's text box, centred between
+            // x=10 and x=166 at y=30, wrapped at 25 characters. See
+            // simkin_bindings/use_prompt.h.
+            sk::DrawTextBox(backbuffer, gameplayLabel, sk_bindings::kUsePromptX,
+                            sk_bindings::kUsePromptY, sk_bindings::kUsePromptRight,
+                            gameplayLabelColor, sk::TextBoxAlign::Centre,
+                            sk_bindings::kUsePromptWrapChars, sk::BitmapFont::Face::SmallItalic);
+        } else if (mpNoticeTicks > 0 && !mpNotice.empty()) {
+            // M129: a multiplayer notice -- the other player left, or fell.
+            sk::BitmapFont::DrawString(backbuffer, 4, 34, mpNotice, MenuColor444(0xfff));
         }
         if (column) sk::CopyColumnIn(backbuffer, wideLayer, sceneLayout.centreX());
+    };
+    // M129: the gameplay frame on the graphics card. Returns false when the
+    // card could not draw or present it, and the caller draws in software.
+    //
+    //   1. The zone renderer records the frame's triangles at the size the
+    //      Resolution setting asks for -- any size, Auto being the window's
+    //      own -- and the card draws them into its scene target.
+    //   2. The 2D layer is drawn exactly as it always is, into the native
+    //      Backbuffer (or the wide layer), over a native-size *software*
+    //      frame: some of the 2D art blends with what is under it, and the
+    //      melee probes read that frame's object IDs. It is redrawn once per
+    //      gameplay tick and reused in between.
+    //   3. The present shows the card's scene, and over it every native
+    //      pixel the 2D code changed -- scene_upscale.h's Compose rule.
+    auto drawGameplayFrameGpu = [&](const sk::Camera& camera,
+                                    const std::vector<sk::PlacedEntity>& entities,
+                                    const std::vector<sk::SpriteBillboard>& billboards) {
+        sk::D3D11Renderer* gpu = window.gpu();
+        if (!gpu) return false;
+        const sk::PcSettings& pc = pcSettings.settings();
+        sceneLayout.width = currentViewWidth();
+        sceneScale = 1;
+        int clientW = 0, clientH = 0;
+        window.ClientSize(&clientW, &clientH);
+        if (clientW <= 0 || clientH <= 0) return true;  // minimized: nothing to draw
+        const sk::Viewport view = sk::FitPreservingAspect(clientW, clientH, sceneLayout.width,
+                                                          sk::Backbuffer::kHeight);
+        int sceneW = 0, sceneH = 0;
+        sk::GpuSceneSizeFor(pc, sceneLayout.width, view.width, view.height, &sceneW, &sceneH);
+        zoneRenderer.fogPercent = pc.fogPercent();
+        {
+#if SK_DEBUG_SUITE
+            sk_debug::Count("render.frames");
+            sk_debug::ScopedTimer renderTimer("render3d");
+#endif
+            zoneRenderer.RenderGpu(gpuFrame, sceneW, sceneH, *gameZone, camera, entities,
+                                   &modelArchive, billboards);
+            if (!gpu->DrawScene(gpuFrame, pc.smoothTextures() ? sk::D3D11Renderer::Filter::Smooth
+                                                              : sk::D3D11Renderer::Filter::Original)) {
+                return false;
+            }
+        }
+        sk::Backbuffer& layer = sceneLayer();
+        layer.Resize(sceneLayout.width, sk::Backbuffer::kHeight);
+        if (gpuUnderStale || gpuUnder.width() != layer.width() ||
+            gpuUnder.height() != layer.height()) {
+            zoneRenderer.Render(layer, *gameZone, camera, entities, &modelArchive, billboards);
+            gpuUnder = layer;
+            gpuUnderStale = false;
+        } else {
+            layer = gpuUnder;
+        }
+        drawHudLayer(camera, /*overlays=*/true);
+        if (sceneLayout.wide()) sk::CopyColumnOut(wideLayer, sceneLayout.centreX(), backbuffer);
+#if SK_DEBUG_SUITE
+        sk_debug::ScopedTimer presentTimer("present");
+#endif
+        return window.PresentGpuScene(layer, gpuUnder);
     };
     auto drawGameplayFrame = [&](const sk::Camera& camera,
                                  const std::vector<sk::PlacedEntity>& entities,
                                  const std::vector<sk::SpriteBillboard>& billboards) {
+        if (window.GpuRendererActive() && drawGameplayFrameGpu(camera, entities, billboards)) {
+            return;
+        }
         sk::Backbuffer& scene = beginScene();
         zoneRenderer.fogPercent = pcSettings.settings().fogPercent();  // M123
 #if SK_DEBUG_SUITE
@@ -4633,8 +5051,1035 @@ int main(int argc, char** argv) {
     // One 40ms engine tick: input, simulation, scripts -- and, at the
     // original frame rate, the frame it produces. Everything below was the
     // message loop's own body until M119 split out the pacing around it.
+
+    // =====================================================================
+    // M129: multiplayer.
+    //
+    // The original's own design (docs/MULTIPLAYER_PROTOCOL.md) carried over a
+    // socket: two players, each process running the whole game, the session
+    // (net/mp_session.h) mirroring events between them. Everything here is
+    // the game's side of that -- what the session asks about this game and
+    // what each arriving event does to it.
+    //
+    // What is synchronised is what the original synchronised: each player's
+    // own movement (dead-reckoned between packets), and events. Creature
+    // positions and health are not on the wire in the shipped protocol
+    // either; a kill, a hit, a door, an object leaving the world, a quest
+    // flag, shared experience, a mirrored script method and a level change
+    // are.
+    // =====================================================================
+    sk_net::MpWorldFns mpWorld;
+    sk_net::MpSession mpSession(mpWorld);
+    struct RemoteAvatar {
+        bool present = false;
+        float x = 0, y = 0, z = 0;
+        int vx = 0, vy = 0, vz = 0;  // engine units: position moves by v * delta >> 8
+        int heading = 0;             // engine heading, 0x10000 to the turn
+        int race = 0, sex = 0, classId = 0;
+        std::string name;
+        int weapon = 0;
+        int clip = 8;                // 5 moving, 8 still, 1/2 attacking, 6 dead
+        float animTime = 0.0f;
+        int attackTicks = 0;
+        bool dead = false;
+    } mpAvatar;
+    int mpSlot = -1;              // the save whose character plays (MPPreHost / MPPreJoin)
+    std::string mpNotifiedLevel;  // the level the session was last told is loaded
+    bool mpLoadFromHost = false;  // client: the pending zone change is the host's
+    bool mpAnnounced = false;     // host: the pending zone change has been announced
+    sk_net::MpStoryState mpIncomingStory;
+    bool mpHaveStory = false;
+    std::vector<sk_net::MpEntityRecord> mpIncoming;
+    std::string mpIncomingLevel;
+    int mpHostNextNetId = 0;
+    int gameNextNetId = 0;
+    std::vector<int> mpRestoreNetIds;  // client: the host's ids, in level-record order
+    std::set<int> mpKnownGone;         // ids both players already know have left the world
+    // M130: what each container held last tick, by net id (tag 0x31).
+    std::map<int, std::vector<int>> mpContainerContents;
+    std::set<int> mpLiveIds;           // last tick's live ids, for the "left the world" sweep
+    std::set<int> mpRemoteKills;
+    float mpPrevX = 0.0f, mpPrevY = 0.0f, mpPrevZ = 0.0f;
+    int mpVelX = 0, mpVelY = 0, mpVelZ = 0;
+    bool mpWasDead = false;
+    bool mpAttackVisualDue = false;
+
+    // The level index tag 0x00 / 0x2e carry. The engine's own table
+    // (FUN_10039ca4) was not transcribed; both ends of this port use the
+    // shipped zones in name order.
+    static const char* const kMpLevels[] = {
+        "azra",     "broken1",  "broken2", "crypt1",   "crypt2",       "crypt3", "delfhide",
+        "drgnfld",  "dstar_e",  "dstar_w", "erthcave", "fearfrst",     "ffarena", "ghstpass",
+        "glaciercrawl", "lakvan", "lothcav", "raiders", "snowline",    "stouttp", "twilite"};
+    constexpr int kMpLevelCount = static_cast<int>(sizeof(kMpLevels) / sizeof(kMpLevels[0]));
+
+    auto mpCall = [&](skiExecutable& target, const char* name,
+                      std::initializer_list<skRValue> list) -> skRValue {
+        skRValueArray args;
+        for (const skRValue& v : list) args.append(v);
+        skRValue ret;
+        skExecutableContext ctxt(&interpreter);
+        try {
+            target.method(skString(name), args, ret, ctxt);
+        } catch (skRuntimeException& ex) {
+            std::printf("multiplayer: %s(): %s\n", name, ex.toString().ptr());
+        } catch (skParseException& ex) {
+            std::printf("multiplayer: %s(): %s\n", name, ex.toString().ptr());
+        } catch (skTreeNodeReaderException& ex) {
+            std::printf("multiplayer: %s(): %s\n", name, ex.toString().ptr());
+        }
+        return ret;
+    };
+    auto mpLocalName = [&]() -> std::string {
+        const std::string name =
+            sk_bindings::ToStdString(mpCall(stack.player(), "GetPlayerName", {}).str());
+        return name.empty() ? sk_net::MpLocalMachineName() : name;
+    };
+    auto mpSay = [&](const std::string& text) {
+        mpNotice = text;
+        mpNoticeTicks = 25 * 5;
+        std::printf("multiplayer: %s\n", text.c_str());
+    };
+    auto mpAssignNetIds = [&]() {
+        for (DoorInstance& d : gameDoors) {
+            if (d.script && d.script->netId() == 0) d.script->SetNetId(++gameNextNetId);
+        }
+        for (PickupInstance& pk : gamePickups) {
+            if (pk.script && pk.script->netId() == 0) pk.script->SetNetId(++gameNextNetId);
+        }
+        for (MonsterInstance& m : gameMonsters) {
+            if (m.script && m.script->netId() == 0) m.script->SetNetId(++gameNextNetId);
+        }
+    };
+    auto mpFindMonster = [&](int id) -> MonsterInstance* {
+        for (MonsterInstance& m : gameMonsters) {
+            if (m.script && m.script->netId() == id) return &m;
+        }
+        return nullptr;
+    };
+    auto mpFindDoor = [&](int id) -> DoorInstance* {
+        for (DoorInstance& d : gameDoors) {
+            if (d.script && d.script->netId() == id) return &d;
+        }
+        return nullptr;
+    };
+    auto mpFindPickup = [&](int id) -> PickupInstance* {
+        for (PickupInstance& pk : gamePickups) {
+            if (pk.script && pk.script->netId() == id) return &pk;
+        }
+        return nullptr;
+    };
+    // Any object, as the two things an event needs of it.
+    struct MpObject {
+        skiExecutable* executable = nullptr;
+        sk_bindings::EntityBaseRef* base = nullptr;
+    };
+    auto mpFindObject = [&](int id) -> MpObject {
+        if (id <= 0) return MpObject{};
+        if (MonsterInstance* m = mpFindMonster(id)) return MpObject{m->script.get(), m->script.get()};
+        if (DoorInstance* d = mpFindDoor(id)) return MpObject{d->script.get(), d->script.get()};
+        if (PickupInstance* pk = mpFindPickup(id)) return MpObject{pk->script.get(), pk->script.get()};
+        return MpObject{};
+    };
+
+    // ---- what the session asks ----
+    mpWorld.levelIndex = [&](const std::string& name) {
+        for (int i = 0; i < kMpLevelCount; ++i) {
+            if (_stricmp(kMpLevels[i], name.c_str()) == 0) return i;
+        }
+        return 0;
+    };
+    mpWorld.levelName = [&](int index) {
+        return std::string(kMpLevels[index >= 0 && index < kMpLevelCount ? index : 0]);
+    };
+    mpWorld.localPlayerState = [&]() {
+        sk_net::MpPlayerState st;
+        st.x = static_cast<int32_t>(gameCamera.x);
+        st.y = static_cast<int32_t>(gameCamera.y);
+        // The player's own z is their feet; the camera is an eye height up.
+        st.z = static_cast<int16_t>(gameCamera.z - sk::kEyeHeightOffset);
+        st.vx = mpVelX;
+        st.vy = mpVelY;
+        st.vz = static_cast<int16_t>(mpVelZ);
+        st.heading = static_cast<int16_t>(CameraHeadingUnits(gameCamera.yaw) & 0xffff);
+        st.pitch = static_cast<int16_t>(gameCamera.pitch / 6.28318530718f * 65536.0f);
+        return st;
+    };
+    mpWorld.localPlayerInfo = [&]() {
+        sk_net::MpPlayerInfo info;
+        info.classId = stack.player().characterClass();
+        info.race = stack.player().race();
+        info.sex = stack.player().sex();
+        info.name = mpLocalName();
+        return info;
+    };
+    mpWorld.localHeldWeapon = [&]() {
+        const sk_bindings::ItemExecutable* held = stack.player().rightItem();
+        return held ? held->templateId() : 0;
+    };
+    mpWorld.buildStoryState = [&]() {
+        sk_net::MpStoryState story;
+        if (gameZone) {
+            sk::SavedLevelState state;
+            sk::SaveStream in;
+            in.Reset(snapshotLevelState());
+            state.Read(in, savedKindForType);
+            sk::SaveStream out;
+            state.level.Write(out);
+            story.levelRecord = out.bytes();
+        }
+        for (int i = 0; i < 256; ++i) {
+            story.assigned[i] = stack.player().questAssigned(i) ? 1 : 0;
+            story.completed[i] = stack.player().questCompleted(i) ? 1 : 0;
+            story.solved[i] = stack.player().questSolved(i) ? 1 : 0;
+        }
+        for (int i = 0; i < 18 && i < sk::SavedPlayer::kTrailingInts; ++i) {
+            skRValue v;
+            if (stack.player().getValue(skString(sk::SavedPlayer::kGlobalFlagNames[i]), skString(""),
+                                        v)) {
+                story.savedInts[i] = v.intValue();
+            }
+        }
+        return story;
+    };
+    mpWorld.buildEntityStream = [&]() {
+        std::vector<sk_net::MpEntityRecord> records;
+        if (!gameZone) return records;
+        mpAssignNetIds();
+        std::vector<int> ids;
+        snapshotNetIdSink = &ids;
+        const std::vector<uint8_t> bytes = snapshotLevelState();
+        snapshotNetIdSink = nullptr;
+        sk::SavedLevelState state;
+        sk::SaveStream in;
+        in.Reset(bytes);
+        state.Read(in, savedKindForType);
+        for (size_t i = 0; i < state.entities.size() && i < ids.size(); ++i) {
+            sk::SaveStream chain;
+            state.entities[i].Write(chain);
+            sk_net::MpEntityRecord rec;
+            rec.typeId = state.entities[i].typeId;
+            rec.entityId = ids[i];
+            rec.chain = chain.bytes();
+            records.push_back(std::move(rec));
+        }
+        // Last, the number the host's next new object will take, so
+        // anything either game creates from here on is numbered alike.
+        sk_net::MpEntityRecord counter;
+        counter.typeId = -1;
+        counter.entityId = gameNextNetId;
+        records.push_back(counter);
+        return records;
+    };
+
+    // ---- joining ----
+    mpWorld.onGameStart = [&](const std::string& level) {
+        mpIncomingLevel = level;
+        mpIncoming.clear();
+        mpHaveStory = false;
+        mpNotifiedLevel.clear();
+        mpAvatar = RemoteAvatar{};
+        mpSay(strings.Get(0x13));  // "Waiting for host"
+    };
+    mpWorld.onStoryState = [&](const sk_net::MpStoryState& story) {
+        // Tag 0x29: the host's story replaces the client's -- all three
+        // quest arrays and the eighteen saved_* ints.
+        mpIncomingStory = story;
+        mpHaveStory = true;
+        sk_bindings::MpRemoteScope remote;
+        for (int i = 0; i < 256; ++i) {
+            if ((story.assigned[i] != 0) != stack.player().questAssigned(i)) {
+                mpCall(stack.player(), "SetQuestAssigned", {skRValue(i), skRValue(story.assigned[i] != 0)});
+            }
+            if ((story.completed[i] != 0) != stack.player().questCompleted(i)) {
+                mpCall(stack.player(), "SetQuestCompleted", {skRValue(i), skRValue(story.completed[i] != 0)});
+            }
+            if ((story.solved[i] != 0) != stack.player().questSolved(i)) {
+                mpCall(stack.player(), "SetQuestSolved", {skRValue(i), skRValue(story.solved[i] != 0)});
+            }
+        }
+        for (int i = 0; i < 18 && i < sk::SavedPlayer::kTrailingInts; ++i) {
+            stack.player().setValue(skString(sk::SavedPlayer::kGlobalFlagNames[i]), skString(""),
+                                    skRValue(static_cast<int>(story.savedInts[i])));
+        }
+    };
+    mpWorld.onSpawnEntity = [&](const sk_net::MpEntityRecord& rec) { mpIncoming.push_back(rec); };
+    mpWorld.onPlaceAndStart = [&](const sk_net::MpPlaceAndStart& place) {
+        // The host's world has arrived: its level record (0x29) and one
+        // record per entity (0x1d). Together they are exactly a
+        // `<level>.dat` -- so they become this level's member of current.sav
+        // and the level is loaded the way a saved level always is (M121).
+        sk::SavedLevelState state;
+        state.renderEnabled = 1;
+        if (mpHaveStory && !mpIncomingStory.levelRecord.empty()) {
+            sk::SaveStream in;
+            in.Reset(mpIncomingStory.levelRecord);
+            state.level.Read(in);
+        }
+        mpRestoreNetIds.clear();
+        mpHostNextNetId = 0;
+        for (const sk_net::MpEntityRecord& rec : mpIncoming) {
+            if (rec.typeId < 0) {
+                mpHostNextNetId = rec.entityId;
+                continue;
+            }
+            sk::SavedEntity e;
+            e.typeId = rec.typeId;
+            e.kind = savedKindForType(rec.typeId);
+            sk::SaveStream in;
+            in.Reset(rec.chain);
+            e.Read(in, savedKindForType);
+            if (in.failed()) continue;
+            state.entities.push_back(std::move(e));
+            mpRestoreNetIds.push_back(rec.entityId);
+        }
+        mpIncoming.clear();
+        sk::SaveStream out;
+        state.Write(out);
+        stack.StoreLevelState(mpIncomingLevel, out.bytes());
+        // Beside the host: tag 0x06 is the host's own position.
+        stack.ArmCameraStart(place.x, place.y, place.z, 0, static_cast<uint16_t>(place.heading), 0);
+        mpLoadFromHost = true;
+        mpNotifiedLevel.clear();
+        stack.RequestZoneChange(mpIncomingLevel);
+        std::printf("multiplayer: joining %s (%zu entities from the host)\n",
+                    mpIncomingLevel.c_str(), mpRestoreNetIds.size());
+    };
+    mpWorld.onPlayerLeft = [&](int, const std::string& name) {
+        mpAvatar = RemoteAvatar{};
+        mpSay((name.empty() ? std::string() : name + ": ") + strings.Get(3811));  // "Connection lost"
+    };
+    mpWorld.onTravelRequest = [&](const sk_net::MpTravel& travel) {
+        // Tag 0x2e, host only: the client walked through a door. The host
+        // takes the same door, and announces the level (0x00).
+        if (travel.overrideArmed) {
+            stack.ArmCameraStart(travel.spawn[0], travel.spawn[1], travel.spawn[2],
+                                 travel.spawn[4], travel.spawn[3], travel.spawn[5]);
+        }
+        stack.RequestZoneChange(kMpLevels[travel.levelIndex >= 0 && travel.levelIndex < kMpLevelCount
+                                              ? travel.levelIndex
+                                              : 0]);
+    };
+
+    // ---- the other player ----
+    mpWorld.onPlayerState = [&](const sk_net::MpPlayerState& st) {
+        // Tag 0x01. The avatar is created on first sight and from then on
+        // coasts on the velocity between packets.
+        mpAvatar.present = true;
+        mpAvatar.x = static_cast<float>(st.x);
+        mpAvatar.y = static_cast<float>(st.y);
+        mpAvatar.z = static_cast<float>(st.z) + 128.0f;  // the receiver's own `z + 0x80`
+        mpAvatar.vx = st.vx;
+        mpAvatar.vy = st.vy;
+        mpAvatar.vz = st.vz;
+        mpAvatar.heading = static_cast<uint16_t>(st.heading);
+    };
+    mpWorld.onPlayerInfo = [&](const sk_net::MpPlayerInfo& info) {
+        mpAvatar.race = info.race;
+        mpAvatar.sex = info.sex;
+        mpAvatar.classId = info.classId;
+        mpAvatar.name = info.name;
+    };
+    mpWorld.onHeldWeapon = [&](int, int weapon) { mpAvatar.weapon = weapon; };
+    mpWorld.onAttackVisual = [&](int, int anim, int sound) {
+        // Tag 0x18: the swing and its noise. No damage -- that is 0x19/0x1a.
+        mpAvatar.clip = anim == 2 ? 2 : 1;
+        mpAvatar.animTime = 0.0f;
+        mpAvatar.attackTicks = 15;
+        if (sound == 1) playWorldSound(599, mpAvatar.x, mpAvatar.y);
+        if (sound == 2) playWorldSound(0x256, mpAvatar.x, mpAvatar.y);
+    };
+    mpWorld.onAnimation = [&](int anim, int) {
+        if (anim == 6) {  // death: held, nothing animates it after that
+            mpAvatar.dead = true;
+            mpAvatar.clip = 6;
+            mpAvatar.animTime = 0.0f;
+        }
+    };
+    mpWorld.onTextMessage = [&](int, const std::string& text) { mpSay(text); };
+    mpWorld.onDamageMe = [&](int amount) { stack.player().ApplyDamage(amount); };
+
+    // ---- creatures and objects ----
+    mpWorld.onKill = [&](int id) {
+        // Tag 0x19: `DoDamage(5000, localPlayer, 1, 0)` on this game's copy.
+        MonsterInstance* m = mpFindMonster(id);
+        if (!m || !m->script->alive()) return;
+        mpRemoteKills.insert(id);
+        sk_bindings::MpRemoteScope remote;
+        m->script->ApplyDamage(5000, &stack.player(), /*ranged=*/false);
+    };
+    mpWorld.onHitForZero = [&](int id) {
+        // Tag 0x1a: the hurt reaction without the damage.
+        MonsterInstance* m = mpFindMonster(id);
+        if (!m || !m->script->alive()) return;
+        m->flash.Arm(sk::kFlashPeriodUnits, sk::kFlashRedMin, sk::kFlashRedMax);
+        m->hasTarget = true;
+    };
+    auto mpRemove = [&](int id) {
+        const MpObject object = mpFindObject(id);
+        mpKnownGone.insert(id);
+        if (!object.base) return;
+        sk_bindings::MpRemoteScope remote;
+        object.base->RemoveFromWorld();
+    };
+    mpWorld.onTouched = mpRemove;
+    mpWorld.onDestroyObject = mpRemove;
+    mpWorld.onDoor = [&](int id, bool close) {
+        // Tag 0x1f: the receiver turns the door a quarter, plays sound 0x3f
+        // and flips the door script's state -- natively, not by running the
+        // script's OnUse (which could ask this player for a key).
+        DoorInstance* d = mpFindDoor(id);
+        if (!d) return;
+        const bool open = !close;
+        skRValue state;
+        const bool has = d->script->getValue(skString("saved_Open"), skString(""), state);
+        if (has && (state.intValue() != 0) == open) return;
+        sk_bindings::MpRemoteScope remote;
+        mpCall(*d->script, "SetPassable", {skRValue(true)});
+        mpCall(*d->script, "AddRotationTurn", {skRValue(open ? -0x4000 : 0x4000)});
+        mpCall(*d->script, "SetPassable", {skRValue(open)});
+        d->script->setValue(skString("saved_Open"), skString(""), skRValue(open ? 1 : 0));
+        mpCall(*d->script, "SetUseText", {skRValue(open ? 2989 : 941)});
+        playWorldSound(0x3f, d->x, d->y);
+    };
+    mpWorld.onSetPosition = [&](const sk_net::MpSetPosition& pos) {
+        sk_bindings::MpRemoteScope remote;
+        if (pos.everyone) {
+            // A group teleport: this player goes there, and so does the
+            // other one's avatar.
+            mpCall(stack.player(), "SetPosition", {skRValue(pos.x), skRValue(pos.y), skRValue(pos.z)});
+            mpAvatar.x = static_cast<float>(pos.x);
+            mpAvatar.y = static_cast<float>(pos.y);
+            mpAvatar.vx = mpAvatar.vy = mpAvatar.vz = 0;
+            return;
+        }
+        const MpObject object = mpFindObject(pos.entityId);
+        if (object.executable) {
+            mpCall(*object.executable, "SetPosition", {skRValue(pos.x), skRValue(pos.y), skRValue(pos.z)});
+        }
+    };
+    mpWorld.onMirrorMethod = [&](int id, const std::string& method) {
+        // Tag 0x34: run the named script method on this game's copy.
+        const MpObject object = mpFindObject(id);
+        if (!object.executable) return;
+        sk_bindings::MpRemoteScope remote;
+        mpCall(*object.executable, method.c_str(), {skRValue(0)});
+    };
+    mpWorld.onInvulnerable = [&](int id, bool flag) {
+        const MpObject object = mpFindObject(id);
+        if (!object.executable) return;
+        sk_bindings::MpRemoteScope remote;
+        mpCall(*object.executable, "SetInvulnerable", {skRValue(flag)});
+    };
+    mpWorld.onCreatureTarget = [&](int id, int playerIndex) {
+        // Tag 0x1e: `target(+0x20c)` = that player, package = pursue. A
+        // creature that picked *this* player is awake here too; one that
+        // picked the other goes for the other's avatar (M130), as the
+        // engine's copy does -- its blows land in the other game.
+        MonsterInstance* m = mpFindMonster(id);
+        if (!m) return;
+        m->hasTarget = true;
+        m->mpTargetsPeer = playerIndex != mpSession.myIndex();
+        m->mpTargetSent = true;
+    };
+    mpWorld.onAlerted = [&](int id) {
+        if (MonsterInstance* m = mpFindMonster(id)) m->hasTarget = true;
+    };
+    mpWorld.onNoticed = [&](int id) {
+        const MpObject object = mpFindObject(id);
+        if (!object.executable) return;
+        sk_bindings::MpRemoteScope remote;
+        mpCall(*object.executable, "OnDetect", {skRValue(0)});
+    };
+
+    // ---- world and story ----
+    mpWorld.onQuestFlag = [&](int kind, int quest, int value) {
+        sk_bindings::MpRemoteScope remote;
+        const char* setter = kind == 0 ? "SetQuestAssigned"
+                                       : kind == 1 ? "SetQuestSolved" : "SetQuestCompleted";
+        mpCall(stack.player(), setter, {skRValue(quest), skRValue(value != 0)});
+    };
+    mpWorld.onShareXp = [&](int kind, int value) {
+        if (kind != 0) return;
+        sk_bindings::MpRemoteScope remote;
+        stack.player().AddExperience(value);
+    };
+    mpWorld.onLevelVar = [&](const std::string& name, int value) {
+        if (gameZoneScript) {
+            gameZoneScript->setValue(skString(name.c_str()), skString(""), skRValue(value));
+        }
+    };
+    // FUN_10067f84: sprites first..last over the actor, for `seconds`.
+    auto spawnAttachedEffect = [&](float x, float y, float z, int first, int last, int seconds) {
+        sk_bindings::EffectEntity fx;
+        fx.firstSprite = first;
+        fx.lastSprite = last;
+        fx.sprite = first;
+        fx.animCursor = first * sk_bindings::kEffectFrameStep;
+        fx.animRate = 0xa00;
+        fx.life = seconds << 8;
+        fx.lifeMax = seconds << 8;
+        fx.x = static_cast<int>(x);
+        fx.y = static_cast<int>(y);
+        fx.z = static_cast<int16_t>(static_cast<int>(z) & 0xffff);
+        fx.sizeX = 4;
+        fx.sizeY = 4;
+        fx.drawFlags = 1;
+        stack.level().effects().push_back(fx);
+    };
+    mpWorld.onUnapplied = [&](uint8_t tag, const sk_net::MpBytes& packet) {
+        const sk_net::MpReader r(packet);
+        switch (tag) {
+            case sk_net::kTagSpellProjectile: {
+                // M132, `FUN_10039858`: a projectile with no spell behind
+                // it -- it flies from the caster down the caster's heading
+                // and hits nothing here; the hit is the other game's.
+                const bool avatar = r.U8(4) != 0;
+                float x = 0, y = 0, z = 0;
+                int heading = 0;
+                if (avatar) {
+                    if (!mpAvatar.present) return;
+                    x = mpAvatar.x;
+                    y = mpAvatar.y;
+                    z = mpAvatar.z;
+                    heading = mpAvatar.heading;
+                } else {
+                    const MonsterInstance* m = mpFindMonster(r.I32(8));
+                    if (!m) return;
+                    x = m->x;
+                    y = m->y;
+                    z = m->z + sk::kEyeHeightOffset;
+                    heading = sk_bindings::EngineYawFromPortYaw(m->facingYaw);
+                }
+                sk_bindings::SpellProjectile shot = sk_bindings::SpawnSpellProjectile(
+                    nullptr, nullptr, static_cast<int>(x), static_cast<int>(y), static_cast<int>(z),
+                    heading, r.I16(0x18), r.I16(0xc), 0);
+                shot.invokeHitTarget = false;
+                gameProjectiles.push_back(shot);
+                return;
+            }
+            case sk_net::kTagAttachedEffect: {
+                // `FUN_100399a8`: the flame, on this game's copy.
+                if (r.U8(4) != 0) {
+                    if (mpAvatar.present) {
+                        spawnAttachedEffect(mpAvatar.x, mpAvatar.y, mpAvatar.z, r.I32(0xc),
+                                            r.I32(0x10), r.I32(0x14));
+                    }
+                } else if (const MonsterInstance* m = mpFindMonster(r.I32(8))) {
+                    if (m->script->alive()) {
+                        spawnAttachedEffect(m->x, m->y, m->z, r.I32(0xc), r.I32(0x10), r.I32(0x14));
+                    }
+                }
+                return;
+            }
+            case sk_net::kTagUmbraBeat: {
+                // `FUN_10037954`: the entity *named* "Umbra" takes the
+                // sender's `+0x2ee`; on a false it is also run through
+                // `DelayReached(1)`, on a true through `DelayReached()`
+                // with no argument, which no branch of the script answers.
+                const skRValue found =
+                    mpCall(stack.level(), "GetEntity", {skRValue(skString("Umbra"))});
+                if (found.type() != skRValue::T_Object || !found.obj()) return;
+                for (MonsterInstance& m : gameMonsters) {
+                    if (static_cast<skiExecutable*>(m.script.get()) != found.obj()) continue;
+                    const bool flag = r.U8(8) != 0;
+                    sk_bindings::MpRemoteScope remote;
+                    mpCall(*m.script, "SetCanTeleport", {skRValue(flag)});
+                    if (!flag) mpCall(*m.script, "DelayReached", {skRValue(1)});
+                    return;
+                }
+                return;
+            }
+            case sk_net::kTagAreaSpell:
+                // `FUN_1003c550` calls the area function with a damage of
+                // zero, and its whole body is under `0 < damage`. The wave's
+                // effects arrive one creature at a time as 0x19 / 0x1a /
+                // 0x27. Nothing to do, as in the engine.
+                return;
+            default:
+                break;
+        }
+        // 0x1c (room event) and 0x26 (effect entity): the engine has a
+        // receiver for each and no sender -- their session slots (+0xe8,
+        // +0x118) are never called -- so nothing can put one on the wire.
+        std::printf("multiplayer: tag 0x%02x received, not applied by this port\n", tag);
+    };
+    mpWorld.onTakenFromContainer = [&](int containerId, int itemTemplate) {
+        // Tag 0x31 (M130): the item goes from this game's copy of the
+        // container; one that is emptied leaves through the usual sweep.
+        for (PickupInstance& pk : gamePickups) {
+            if (!pk.script || pk.script->netId() != containerId) continue;
+            pk.script->DiscardContentByTemplate(itemTemplate);
+            std::vector<int>& known = mpContainerContents[containerId];
+            auto it = std::find(known.begin(), known.end(), itemTemplate);
+            if (it != known.end()) known.erase(it);
+            return;
+        }
+    };
+    mpWorld.onSetOnFire = [&](int id, int level) {
+        // Tag 0x3a (M130): `+0x308 = 1`, `+0x296 = level << 8`. The wire
+        // carries the duration only; the flames tick for the engine's 1.
+        MonsterInstance* m = mpFindMonster(id);
+        if (!m || !m->script->alive()) return;
+        m->mpBurnSent = true;
+        m->script->ApplyBurn(1, level > 0 ? level : 1);
+    };
+    mpWorld.onHandOver = [&](const sk_net::MpEntityRecord& rec) {
+        // Tag 0x32 (M132), `FUN_1003b85c`: build the object, run its Init,
+        // and if it is an item give it to this game's player.
+        if (rec.typeId <= 0 || stack.player().HasItemOfTemplate(rec.typeId)) return;
+        sk_bindings::MpRemoteScope remote;
+        std::unique_ptr<sk_bindings::ItemExecutable> item =
+            stack.level().CreateItem(rec.typeId, false);
+        if (item) stack.player().AddItem(std::move(item));
+    };
+    mpWorld.onRegistryFlag = [&](int, int mask, bool set) {
+        // Tag 0x38 (M132), `FUN_10037880`.
+        stack.player().keyItemFlags().ApplyRemote(static_cast<unsigned>(mask), set);
+    };
+
+    // ---- what this game sends ----
+    {
+        sk_bindings::MpHooks& hooks = sk_bindings::Mp();
+        hooks.mirrorMethod = [&](int id, const std::string& method) {
+            if (!mpSession.inGame() || id <= 0) return;
+            sk_net::MpMirrorMethod m;
+            m.entityId = id;
+            m.method = method;
+            mpSession.Send(m.Encode());
+        };
+        hooks.destroyObject = [&](int id) {
+            if (!mpSession.inGame() || id <= 0 || !mpKnownGone.insert(id).second) return;
+            mpSession.Send(sk_net::EncodeEntityId(sk_net::kTagDestroyObject, id));
+        };
+        hooks.setPosition = [&](bool everyone, int id, int x, int y, int z) {
+            if (!mpSession.inGame() || (!everyone && id <= 0)) return;
+            sk_net::MpSetPosition pos;
+            pos.everyone = everyone;
+            pos.entityId = id;
+            pos.x = x;
+            pos.y = y;
+            pos.z = z;
+            mpSession.Send(pos.Encode());
+        };
+        hooks.questFlag = [&](int kind, int quest, int value) {
+            if (mpSession.inGame()) mpSession.Send(sk_net::EncodeQuestFlag(kind, quest, value));
+        };
+        hooks.shareXp = [&](int kind, int value) {
+            if (mpSession.inGame()) mpSession.Send(sk_net::EncodeShareXp(kind, value));
+        };
+        hooks.invulnerable = [&](int id, bool flag) {
+            if (mpSession.inGame() && id > 0) mpSession.Send(sk_net::EncodeInvulnerable(id, flag));
+        };
+        hooks.door = [&](int id, bool open) {
+            if (mpSession.inGame() && id > 0) mpSession.Send(sk_net::EncodeDoor(id, !open));
+        };
+        // M132.
+        hooks.registryFlag = [&](int mask, bool set) {
+            if (mpSession.inGame()) mpSession.Send(sk_net::EncodeRegistryFlag(0, mask, set));
+        };
+        hooks.umbraBeat = [&](int id, bool flag) {
+            if (mpSession.inGame() && id > 0) mpSession.Send(sk_net::EncodeUmbraBeat(id, flag));
+        };
+        hooks.handOver = [&](int typeId, int id) {
+            if (!mpSession.inGame()) return;
+            mpSession.Send(sk_net::EncodeEntityStream(sk_net::kTagHandOver, typeId, id, {}));
+        };
+        hooks.attachedEffect = [&](sk_bindings::SpellActor* target, int first, int last,
+                                   int seconds) {
+            if (!target) return;
+            if (target == static_cast<sk_bindings::SpellActor*>(&stack.player())) {
+                spawnAttachedEffect(gameCamera.x, gameCamera.y, gameCamera.z - sk::kEyeHeightOffset,
+                                    first, last, seconds);
+                if (mpSession.inGame() && !sk_bindings::Mp().applyingRemote) {
+                    mpSession.Send(sk_net::EncodeAttachedEffect(true, mpSession.myIndex(), first,
+                                                                last, seconds));
+                }
+                return;
+            }
+            for (const MonsterInstance& m : gameMonsters) {
+                if (static_cast<sk_bindings::SpellActor*>(m.script.get()) != target) continue;
+                spawnAttachedEffect(m.x, m.y, m.z, first, last, seconds);
+                if (mpSession.inGame() && !sk_bindings::Mp().applyingRemote &&
+                    m.script->netId() > 0) {
+                    mpSession.Send(sk_net::EncodeAttachedEffect(false, m.script->netId(), first,
+                                                                last, seconds));
+                }
+                return;
+            }
+        };
+
+        // The lobby natives -- multiplayermenu.s, hostgamemenu.s,
+        // joingamemenu.s.
+        hooks.preHost = [&](int slot) {
+            if (slot >= 0) mpSlot = slot;
+            return mpSlot >= 0;
+        };
+        hooks.beginHost = [&]() {
+            if (mpSession.state() == sk_net::MpSession::State::HostLobby) return true;
+            if (!mpSession.BeginHost(mpLocalName())) {
+                mpSay(mpSession.lastError());
+                return false;
+            }
+            return true;
+        };
+        hooks.hostConnect = [&]() {};  // the host is already listening
+        hooks.hostPlay = [&]() {
+            // "Use character from saved game?" -- the save chosen in the
+            // multiplayer menu, loaded now, in the level it was saved in.
+            std::string level = mpSlot >= 0 ? stack.LoadGameFromSlot(mpSlot) : std::string();
+            if (level.empty()) {
+                stack.ClearLevelStates();
+                level = "azra";
+            }
+            if (!mpSession.HostPlay(level)) return false;
+            mpAnnounced = true;
+            mpNotifiedLevel.clear();
+            stack.RequestZoneChange(level);
+            return true;
+        };
+        hooks.beginJoin = [&]() {
+            if (mpSession.state() == sk_net::MpSession::State::JoinLobby) return true;
+            // The joining player's own character; the story it walks into
+            // is the host's (tag 0x29).
+            if (mpSlot >= 0) stack.LoadGameFromSlot(mpSlot);
+            stack.ClearGameStartRequest();
+            // A host on another network: one address per line in mp_host.txt
+            // beside the saves, or SK_MP_HOST. LAN hosts are found without.
+            if (const char* direct = std::getenv("SK_MP_HOST")) {
+                if (direct[0] != 0) mpSession.lobby().AddDirectHost(direct);
+            }
+            {
+                std::ifstream file(saveDirectory + "/mp_host.txt");
+                std::string line;
+                while (std::getline(file, line)) {
+                    while (!line.empty() && (line.back() == '\r' || line.back() == ' ')) line.pop_back();
+                    if (!line.empty() && line[0] != '#') mpSession.lobby().AddDirectHost(line);
+                }
+            }
+            if (!mpSession.BeginJoin(mpLocalName())) {
+                mpSay(mpSession.lastError());
+                return false;
+            }
+            return true;
+        };
+        hooks.joinGame = [&](int host) {
+            if (mpSession.JoinHost(host)) return true;
+            if (!mpSession.lastError().empty()) mpSay(mpSession.lastError());
+            return false;
+        };
+        hooks.rejectClient = [&](int) { mpSession.RejectClient(); };
+        hooks.closeLobby = [&]() {
+            if (!mpSession.active()) mpSession.Close();
+        };
+        hooks.localName = [&]() { return mpLocalName(); };
+    }
+    mpStrikeHook = [&](MonsterInstance& victim) {
+        if (!mpSession.inGame() || sk_bindings::Mp().applyingRemote || !victim.script) return;
+        if (victim.script->netId() > 0) {
+            mpSession.Send(sk_net::EncodeHitForZero(victim.script->netId()));
+        }
+        mpAttackVisualDue = true;
+    };
+    auto mpOnLocalDeath = [&](MonsterInstance& dead) {
+        if (!mpSession.inGame() || !dead.script) return;
+        const int id = dead.script->netId();
+        if (id <= 0 || mpRemoteKills.erase(id) > 0) return;  // the other player's kill
+        mpSession.Send(sk_net::EncodeEntityId(sk_net::kTagKill, id));
+    };
+
+    // A client's own zone change becomes a request to the host (tag 0x2e);
+    // the host's is announced (tag 0x00) and then loads as usual.
+    auto mpInterceptZoneChange = [&]() -> bool {
+        if (!mpSession.inGame()) return false;
+        if (mpSession.isClient()) {
+            if (mpLoadFromHost) return false;
+            sk_net::MpTravel travel;
+            travel.levelIndex = mpWorld.levelIndex(stack.requestedZone());
+            const sk_bindings::MenuStack::CameraStart& start = stack.cameraStart();
+            travel.overrideArmed = start.armed;
+            travel.spawn[0] = start.x;
+            travel.spawn[1] = start.y;
+            travel.spawn[2] = start.z;
+            travel.spawn[3] = start.yaw;
+            travel.spawn[4] = start.pitch;
+            travel.spawn[5] = start.roll;
+            mpSession.RequestTravel(travel);
+            stack.ClearGameStartRequest();
+            stack.ClearCameraStart();
+            mpSay(strings.Get(0x13));  // "Waiting for host"
+            return true;
+        }
+        if (!mpAnnounced) {
+            mpAnnounced = true;
+            mpNotifiedLevel.clear();
+            mpSession.HostAnnounceLevel(stack.requestedZone());
+        }
+        return false;
+    };
+
+    // The other player, as one more entity in the frame. Tag 0x22's
+    // receiver picks the body by sex and the skin by race:
+    // `raceSkin[race] + (sex ? 11 : 8)`.
+    auto mpAppendAvatar = [&](std::vector<sk::PlacedEntity>& frame) {
+        if (!mpSession.inGame() || !mpAvatar.present) return;
+        static const int kRaceSkin[8] = {3, 2, 7, 5, 4, 1, 0, 6};
+        // entities.txt 90 is the type the engine creates for an avatar; its
+        // model is the female body, and the male one is two rows on.
+        const sk::EntityTypeDescriptor* desc = entityTypes.Lookup(90);
+        if (!desc) return;
+        const int modelIndex = desc->modelArchiveIndex + (mpAvatar.sex == 0 ? 2 : 0);
+        const sk::Model* model = modelArchive.GetModel(modelIndex);
+        if (!model) return;
+        sk::PlacedEntity pe;
+        pe.x = mpAvatar.x;
+        pe.y = mpAvatar.y;
+        pe.z = mpAvatar.z;
+        pe.modelArchiveIndex = modelIndex;
+        pe.yaw = sk_bindings::PortYawFromEngineYaw(mpAvatar.heading);
+        pe.skinIndex = kRaceSkin[mpAvatar.race & 7] + (mpAvatar.sex ? 11 : 8);
+        if (const sk::AnimationClip* clip = model->clip(mpAvatar.clip)) {
+            if (clip->frameCount() > 0) {
+                const float rate = clip->rate > 0 ? clip->fps() : 10.0f * sk::kRateToFps;
+                const int advanced = static_cast<int>(mpAvatar.animTime * rate);
+                const int inClip = mpAvatar.dead ? (std::min)(advanced, clip->frameCount() - 1)
+                                                 : advanced % clip->frameCount();
+                pe.frameIndex = clip->startFrame + inClip;
+            }
+        }
+        pe.interpKey = reinterpret_cast<uintptr_t>(&mpAvatar);
+        frame.push_back(pe);
+    };
+
+    // Once a tick, first thing. True while the other player holds the pause
+    // lock (tag 0x15): this game's frame waits, as `FUN_10029cb0` does.
+    auto mpTick = [&]() -> bool {
+        mpSession.Tick(sk_bindings::kAiFrameDeltaUnits);
+        sk_bindings::MpHooks& hooks = sk_bindings::Mp();
+        hooks.active = mpSession.active();
+        hooks.client = mpSession.isClient();
+        if (mpNoticeTicks > 0) --mpNoticeTicks;
+
+        mpAddressOpen = mpSession.state() == sk_net::MpSession::State::JoinLobby &&
+                        !mpSession.peerConnected();
+        if (!mpAddressOpen) {
+            mpAddressEntry.clear();
+            mpAddressSubmitted.clear();
+        }
+        // The lobby screens' rows: who has joined, which hosts were found.
+        if (sk_bindings::MenuExecutable* menu = stack.currentMenu()) {
+            if (mpSession.state() == sk_net::MpSession::State::HostLobby) {
+                const std::string& client = mpSession.playerName(1);
+                const bool joined = mpSession.peerConnected() && !client.empty();
+                menu->SetLobbyRow("Reject1", joined ? client : std::string(" "), joined);
+            } else if (mpSession.state() == sk_net::MpSession::State::JoinLobby) {
+                // M130: an address typed on the lobby screen becomes a host.
+                if (!mpAddressSubmitted.empty()) {
+                    std::string address = mpAddressSubmitted;
+                    mpAddressSubmitted.clear();
+                    int port = sk_net::kMpGamePort;
+                    const size_t colon = address.rfind(':');
+                    if (colon != std::string::npos) {
+                        const int typed = std::atoi(address.c_str() + colon + 1);
+                        if (typed > 0 && typed < 65536) port = typed;
+                        address.erase(colon);
+                    }
+                    if (!address.empty()) {
+                        mpSession.lobby().AddDirectHost(address, static_cast<uint16_t>(port));
+                    }
+                }
+                const std::vector<sk_net::MpHostEntry>& hosts = mpSession.lobby().hosts();
+                for (int i = 0; i < 4; ++i) {
+                    const bool found = static_cast<size_t>(i) < hosts.size();
+                    menu->SetLobbyRow("JoinGame" + std::to_string(i + 1),
+                                      found ? hosts[static_cast<size_t>(i)].name : strings.Get(3525),
+                                      found && !mpSession.peerConnected());
+                }
+            }
+        }
+        if (!mpSession.active()) {
+            mpAvatar.present = false;
+            return false;
+        }
+
+        // The level named in the last 0x00 is up: tell the session, once.
+        if (gameZone && !stack.gameStartRequested() && !loadingScreenActive &&
+            !gameLoadedZoneName.empty() && mpNotifiedLevel != gameLoadedZoneName) {
+            mpNotifiedLevel = gameLoadedZoneName;
+            if (mpHostNextNetId > gameNextNetId) gameNextNetId = mpHostNextNetId;
+            mpHostNextNetId = 0;
+            mpRestoreNetIds.clear();
+            mpAssignNetIds();
+            mpKnownGone.clear();
+            mpLiveIds.clear();
+            mpRemoteKills.clear();
+            mpLoadFromHost = false;
+            mpAnnounced = false;
+            mpPrevX = gameCamera.x;
+            mpPrevY = gameCamera.y;
+            mpPrevZ = gameCamera.z;
+            mpSession.NotifyLevelLoaded();
+        }
+        if (!mpSession.inGame() || !gameZone) return false;
+        // The game was quit to the menu underneath the session.
+        if (!stack.gameActive()) {
+            mpSession.Close();
+            return false;
+        }
+        mpAssignNetIds();
+
+        // This player's velocity, for 0x01: what moves the position by the
+        // last tick's step at the engine's `v * delta >> 8`.
+        mpVelX = static_cast<int>((gameCamera.x - mpPrevX) * 256.0f / sk_bindings::kAiFrameDeltaUnits);
+        mpVelY = static_cast<int>((gameCamera.y - mpPrevY) * 256.0f / sk_bindings::kAiFrameDeltaUnits);
+        mpVelZ = static_cast<int>((gameCamera.z - mpPrevZ) * 256.0f / sk_bindings::kAiFrameDeltaUnits);
+        mpPrevX = gameCamera.x;
+        mpPrevY = gameCamera.y;
+        mpPrevZ = gameCamera.z;
+
+        // Whatever left the world since the last tick -- a pickup taken, a
+        // bag emptied, a script's DestroyObject -- is told once (tag 0x2b).
+        {
+            std::set<int> live;
+            auto visit = [&](sk_bindings::EntityBaseRef* base) {
+                if (!base || base->netId() <= 0) return;
+                if (base->entityRemoved()) return;
+                live.insert(base->netId());
+            };
+            for (DoorInstance& d : gameDoors) visit(d.script.get());
+            for (PickupInstance& pk : gamePickups) visit(pk.script.get());
+            for (MonsterInstance& m : gameMonsters) visit(m.script.get());
+            for (int id : mpLiveIds) {
+                if (live.count(id) != 0 || !mpKnownGone.insert(id).second) continue;
+                mpSession.Send(sk_net::EncodeEntityId(sk_net::kTagDestroyObject, id));
+            }
+            mpLiveIds = std::move(live);
+        }
+        // M130: three more things the other game is told as they happen.
+        if (mpSession.inGame()) {
+            // 0x1e: a creature here has taken this player as its target.
+            // 0x3a: a creature here has been set on fire.
+            for (MonsterInstance& m : gameMonsters) {
+                if (!m.script || m.script->netId() <= 0 || !m.script->alive()) continue;
+                if (!m.hasTarget) {
+                    m.mpTargetSent = false;
+                    m.mpTargetsPeer = false;
+                } else if (!m.mpTargetSent) {
+                    m.mpTargetSent = true;
+                    mpSession.Send(sk_net::EncodeCreatureTarget(m.script->netId(),
+                                                               mpSession.myIndex()));
+                }
+                if (!m.script->burning()) {
+                    m.mpBurnSent = false;
+                } else if (!m.mpBurnSent) {
+                    m.mpBurnSent = true;
+                    mpSession.Send(sk_net::EncodeSetOnFire(m.script->netId(), 4));
+                }
+            }
+            // 0x31: something was taken out of a container.
+            std::map<int, std::vector<int>> now;
+            for (PickupInstance& pk : gamePickups) {
+                if (!pk.script || !pk.isContainer || pk.script->netId() <= 0) continue;
+                if (pk.script->entityRemoved()) continue;
+                std::vector<int>& held = now[pk.script->netId()];
+                for (const auto& item : pk.script->contents()) held.push_back(item->templateId());
+            }
+            for (const auto& before : mpContainerContents) {
+                auto it = now.find(before.first);
+                if (it == now.end()) continue;  // the container itself went: 0x2b covers it
+                std::vector<int> left = it->second;
+                for (int templateId : before.second) {
+                    auto found = std::find(left.begin(), left.end(), templateId);
+                    if (found != left.end()) {
+                        left.erase(found);
+                    } else {
+                        mpSession.Send(sk_net::EncodeTaken(before.first, templateId));
+                    }
+                }
+            }
+            mpContainerContents = std::move(now);
+        } else {
+            mpContainerContents.clear();
+        }
+
+        // The avatar coasts on its velocity and animates.
+        if (mpAvatar.present) {
+            const int delta = sk_bindings::kAiFrameDeltaUnits;
+            mpAvatar.x += static_cast<float>(mpAvatar.vx * delta) / 256.0f;
+            mpAvatar.y += static_cast<float>(mpAvatar.vy * delta) / 256.0f;
+            mpAvatar.animTime += 0.04f;
+            if (!mpAvatar.dead) {
+                if (mpAvatar.attackTicks > 0) {
+                    --mpAvatar.attackTicks;
+                } else {
+                    const int clip = (mpAvatar.vx != 0 || mpAvatar.vy != 0) ? 5 : 8;
+                    if (clip != mpAvatar.clip) {
+                        mpAvatar.clip = clip;
+                        mpAvatar.animTime = 0.0f;
+                    }
+                }
+            }
+        }
+
+        // This player's own attack, death and modal screens.
+        if (mpAttackVisualDue) {
+            mpAttackVisualDue = false;
+            const sk_bindings::ItemExecutable* held = stack.player().rightItem();
+            const bool ranged = held && held->usesRangedPath();
+            mpSession.Send(sk_net::EncodeAttackVisual(mpSession.myIndex(), ranged ? 2 : 1, ranged ? 2 : 1));
+        }
+        const bool dead = stack.player().health() <= 0;
+        if (dead && !mpWasDead) {
+            mpSession.Send(sk_net::EncodeAnimation(6, mpSession.myIndex()));
+            mpSession.Send(sk_net::EncodeText(mpSession.myIndex(), mpLocalName() + " has fallen."));
+        }
+        mpWasDead = dead;
+        mpSession.SetPauseLock(gamePausedForMenu || !inGame);
+        return mpSession.peerHoldsPause() && inGame;
+    };
+
     auto runTick = [&]() {
         gameMouseLookWanted = false;  // M125: set again below if this tick is free movement
+        // M129: the multiplayer session's tick. While the other player has
+        // a modal screen up, this game's frame does not run: the last one
+        // stays, under the engine's own "Waiting for players."
+        if (mpTick()) {
+            const std::string waiting = strings.Get(4);
+            sk::BitmapFont::DrawString(
+                backbuffer, (sk::Backbuffer::kWidth - sk::BitmapFont::TextWidth(waiting)) / 2, 100,
+                waiting, MenuColor444(0xfff));
+            presentMenu(backbuffer, true);
+            return;
+        }
+        // M132: **the engine's own waiting screen** -- `FUN_10029cb0`'s
+        // other arm, taken in a session while the two games are not yet in
+        // step: the host in its level before the client has loaded, the
+        // client before the host's world has finished arriving. The loading
+        // splash (slot 174), and on it, centred at y = 180 in the loading
+        // banner's pulsing grey,
+        //
+        //     session->+0x28 ? string 3816 "Receiving game data"
+        //                    : string 3817 "Waiting for players..."
+        //
+        // A level change that is pending or running is left alone: that is
+        // the loading screen's, and it is what ends the wait.
+        if (mpSession.state() == sk_net::MpSession::State::Starting && mpSession.peerConnected() &&
+            !stack.gameStartRequested() && !loadingScreenActive && !quitToMenuActive &&
+            (mpSession.isHost() ? (inGame && gameZone != nullptr) : true)) {
+            if (const sk::Sprite* splash = spriteArchive.GetSprite(174)) {
+                backbuffer.Blit(0, 0, *splash);
+            } else {
+                backbuffer.Fill(kBackgroundColor);
+            }
+            const std::string waiting =
+                strings.Get(!mpSession.isHost() && !mpIncoming.empty() ? 3816 : 3817);
+            sk::BitmapFont::DrawString(
+                backbuffer, (sk::Backbuffer::kWidth - sk::BitmapFont::TextWidth(waiting)) / 2, 0xb4,
+                waiting, LoadingBannerColor(loadingBannerPulse));
+            loadingBannerPulse = (loadingBannerPulse + 1) % kLoadingBannerPulseSteps;
+            presentMenu(backbuffer, false);
+            return;
+        }
         gameMouseYawLastTick = 0.0f;
         gameMousePitchLastTick = 0.0f;
 #if SK_DEBUG_SUITE
@@ -4826,8 +6271,9 @@ int main(int argc, char** argv) {
             RenderLoadingScreen(
                 backbuffer, spriteArchive, std::string(),
                 sk::kQuitProgressStages[(std::min)(quitToMenuTick,
-                                                    sk::kQuitProgressStageCount - 1)]);
-            window.Present(backbuffer);
+                                                    sk::kQuitProgressStageCount - 1)],
+                0);
+            presentMenu(backbuffer, false);
             ++quitToMenuTick;
             if (quitToMenuTick <= sk::kQuitProgressStageCount) return;
             quitToMenuActive = false;
@@ -4887,6 +6333,9 @@ int main(int argc, char** argv) {
             gameWeaponViewmodel = sk_bindings::WeaponViewmodel{};
             gameActiveHandItem = nullptr;
             gameVelZ = 0.0f;
+            gameMotion = sk_bindings::PlayerMotion{};
+            gamePlayerGlow = false;
+            zoneRenderer.lights = sk::ZoneRenderer::SceneLights{};
             onGround = true;
             inGame = false;
             gamePausedForMenu = false;
@@ -4932,7 +6381,7 @@ int main(int argc, char** argv) {
                 vignetteActive = false;
             } else {
                 RenderVignette(backbuffer, spriteArchive, strings, vignetteDef, vignetteSlide);
-                window.Present(backbuffer);
+                presentMenu(backbuffer, false);
                 return;
             }
         }
@@ -4943,6 +6392,9 @@ int main(int argc, char** argv) {
         // MenuStack::RequestZoneChange()) and renders a fixed run of
         // staged frames before the actual (synchronous, effectively
         // instant) zone-load work below ever runs.
+        if (stack.gameStartRequested() && !loadingScreenActive && mpInterceptZoneChange()) {
+            return;  // M129: a client asks the host to travel instead of loading
+        }
         if (stack.gameStartRequested() && !loadingScreenActive) {
             loadingScreenActive = true;
             loadingScreenTick = 0;
@@ -4958,8 +6410,10 @@ int main(int argc, char** argv) {
                 loadingScreenIsFirstZone
                     ? strings.Get(3820)  // "Loading..."
                     : strings.Get(3950) + ZoneDisplayName(strings, loadingScreenZoneName);  // "Travel to: <zone>"
-            RenderLoadingScreen(backbuffer, spriteArchive, bannerText, percent);
-            window.Present(backbuffer);
+            RenderLoadingScreen(backbuffer, spriteArchive, bannerText, percent,
+                                loadingBannerPulse);
+            loadingBannerPulse = (loadingBannerPulse + 1) % kLoadingBannerPulseSteps;
+            presentMenu(backbuffer, false);
             ++loadingScreenTick;
             if (loadingScreenTick <= kNumStages) {
                 return;
@@ -5179,6 +6633,9 @@ int main(int argc, char** argv) {
                     } catch (skParseException& ex) {
                         std::printf("shadowkey-port: PARSE ERROR loading zone script %s: %s\n",
                                     zoneScriptPath.c_str(), ex.toString().ptr());
+                    } catch (skTreeNodeReaderException& ex) {
+                        std::printf("shadowkey-port: SCRIPT FILE ERROR loading zone script %s: %s\n",
+                                    zoneScriptPath.c_str(), ex.toString().ptr());
                     } catch (skRuntimeException& ex) {
                         std::printf("shadowkey-port: RUNTIME ERROR loading zone script %s: %s\n",
                                     zoneScriptPath.c_str(), ex.toString().ptr());
@@ -5241,6 +6698,23 @@ int main(int argc, char** argv) {
                 // changes), so it still comes from the `.ent`.
                 sk::SavedLevelState savedLevel;
                 bool restoringLevel = false;
+                // M129: every live object gets the id the multiplayer
+                // protocol names it by. Placements are numbered in order; an
+                // object restored from a level record the *host* sent takes
+                // the id that came with its record, so both players' numbers
+                // agree.
+                gameNextNetId = 0;
+                auto netIdFor = [&](const sk::SavedEntity* saved) {
+                    if (saved && !mpRestoreNetIds.empty() && !savedLevel.entities.empty()) {
+                        const std::ptrdiff_t index = saved - savedLevel.entities.data();
+                        if (index >= 0 && static_cast<size_t>(index) < mpRestoreNetIds.size()) {
+                            const int id = mpRestoreNetIds[static_cast<size_t>(index)];
+                            if (id > gameNextNetId) gameNextNetId = id;
+                            return id;
+                        }
+                    }
+                    return ++gameNextNetId;
+                };
                 if (const std::vector<uint8_t>* savedBytes =
                         stack.FindLevelState(stack.requestedZone())) {
                     sk::SaveStream savedStream;
@@ -5386,6 +6860,7 @@ int main(int argc, char** argv) {
                             // `if (GetID() = "11s")` in a handler Init()
                             // can reach.
                             door->SetEntityId(e.name);
+                            door->SetNetId(netIdFor(saved));  // M129
                             // Post-M120: a restored door's variables and its
                             // passability, before Init -- which is what
                             // lets door.s's Init read the `saved_Open` it
@@ -5423,6 +6898,9 @@ int main(int argc, char** argv) {
                         } catch (skParseException& ex) {
                             std::printf("shadowkey-port: PARSE ERROR loading door %s: %s\n",
                                         fullPath.c_str(), ex.toString().ptr());
+                        } catch (skTreeNodeReaderException& ex) {
+                            std::printf("shadowkey-port: SCRIPT FILE ERROR loading door %s: %s\n",
+                                        fullPath.c_str(), ex.toString().ptr());
                         } catch (skRuntimeException& ex) {
                             std::printf("shadowkey-port: RUNTIME ERROR loading door %s: %s\n",
                                         fullPath.c_str(), ex.toString().ptr());
@@ -5458,6 +6936,7 @@ int main(int argc, char** argv) {
                             // M92: the placement name GetID() answers --
                             // see the door branch above.
                             item->SetEntityId(e.name);
+                            item->SetNetId(netIdFor(saved));  // M129
                             // Post-M120: a restored item's record. A
                             // container's `+0x160` Init guard is part of it
                             // (FUN_10028594 case 0 -- the guard applies to
@@ -5533,6 +7012,9 @@ int main(int argc, char** argv) {
                         } catch (skParseException& ex) {
                             std::printf("shadowkey-port: PARSE ERROR loading pickup %s: %s\n",
                                         fullPath.c_str(), ex.toString().ptr());
+                        } catch (skTreeNodeReaderException& ex) {
+                            std::printf("shadowkey-port: SCRIPT FILE ERROR loading pickup %s: %s\n",
+                                        fullPath.c_str(), ex.toString().ptr());
                         } catch (skRuntimeException& ex) {
                             std::printf("shadowkey-port: RUNTIME ERROR loading pickup %s: %s\n",
                                         fullPath.c_str(), ex.toString().ptr());
@@ -5563,6 +7045,7 @@ int main(int argc, char** argv) {
                             // M92: the placement name GetID() answers --
                             // see the door branch above.
                             monster->SetEntityId(e.name);
+                            monster->SetNetId(netIdFor(saved));  // M129
                             // Post-M120: a restored creature's record, then
                             // its Init -- the engine's order, so whatever
                             // Init sets (SetMaxHealth among it) wins as it
@@ -5615,6 +7098,9 @@ int main(int argc, char** argv) {
                             gameMonsters.push_back(std::move(inst));
                         } catch (skParseException& ex) {
                             std::printf("shadowkey-port: PARSE ERROR loading monster %s: %s\n",
+                                        fullPath.c_str(), ex.toString().ptr());
+                        } catch (skTreeNodeReaderException& ex) {
+                            std::printf("shadowkey-port: SCRIPT FILE ERROR loading monster %s: %s\n",
                                         fullPath.c_str(), ex.toString().ptr());
                         } catch (skRuntimeException& ex) {
                             std::printf("shadowkey-port: RUNTIME ERROR loading monster %s: %s\n",
@@ -5692,6 +7178,9 @@ int main(int argc, char** argv) {
                     } catch (skParseException& ex) {
                         std::printf("shadowkey-port: SK_DEBUG_SPAWN parse error: %s\n",
                                     ex.toString().ptr());
+                    } catch (skTreeNodeReaderException& ex) {
+                        std::printf("shadowkey-port: SK_DEBUG_SPAWN parse error: %s\n",
+                                    ex.toString().ptr());
                     } catch (skRuntimeException& ex) {
                         std::printf("shadowkey-port: SK_DEBUG_SPAWN runtime error: %s\n",
                                     ex.toString().ptr());
@@ -5761,6 +7250,9 @@ int main(int argc, char** argv) {
                 } catch (skParseException& ex) {
                     std::printf("shadowkey-port: PARSE ERROR in zone script Init(): %s\n",
                                 ex.toString().ptr());
+                } catch (skTreeNodeReaderException& ex) {
+                    std::printf("shadowkey-port: SCRIPT FILE ERROR in zone script Init(): %s\n",
+                                ex.toString().ptr());
                 } catch (skRuntimeException& ex) {
                     std::printf("shadowkey-port: RUNTIME ERROR in zone script Init(): %s\n",
                                 ex.toString().ptr());
@@ -5803,6 +7295,9 @@ int main(int argc, char** argv) {
                     } catch (skParseException& ex) {
                         std::printf("shadowkey-port: PARSE ERROR in %s DelayReached: %s\n",
                                     what, ex.toString().ptr());
+                    } catch (skTreeNodeReaderException& ex) {
+                        std::printf("shadowkey-port: SCRIPT FILE ERROR in %s DelayReached: %s\n",
+                                    what, ex.toString().ptr());
                     } catch (skRuntimeException& ex) {
                         std::printf("shadowkey-port: RUNTIME ERROR in %s DelayReached: %s\n",
                                     what, ex.toString().ptr());
@@ -5822,7 +7317,6 @@ int main(int argc, char** argv) {
             // stationary player freezes the phase). Measured rather than
             // inferred from the keys, so a move blocked by a wall correctly
             // counts as standing still.
-            float playerPrevX = gameCamera.x, playerPrevY = gameCamera.y;
             // M57: `FUN_1001c9c0`'s own map branch -- an edge-triggered
             // poll of action 9 calling the three-line toggle
             // `FUN_1001ee50`. It sits with the other movement-tick input,
@@ -5934,31 +7428,55 @@ int main(int argc, char** argv) {
                 gamePausedForMenu = true;
                 input.ClearPendingEdges();  // M90, see its comment
             } else {
-                constexpr float kMoveSpeed = 40.0f;    // world units/tick (256 units/tile)
-                constexpr float kTurnSpeed = 0.06f;    // radians/tick
-                constexpr float kPlayerRadius = 48.0f;  // world units, M7 collision
+                // M130: the walk, the turn and the look are the engine's own
+                // (simkin_bindings/player_move.h) -- a thrust and a friction
+                // off the Speed attribute, rates that ease in and out, and
+                // the actor move's own wall test with the player's real
+                // 0x80 half-extent. The fixed 40 units a tick, 0.06 and
+                // 0.05 radians a tick and the 48-unit circle are gone.
+                constexpr float kPlayerRadius =
+                    static_cast<float>(sk_bindings::kPlayerRadiusUnits);
+                constexpr float kUnitsToRadians = 6.28318530718f / 65536.0f;
+                constexpr int kDelta = sk_bindings::kAiFrameDeltaUnits;
                 // yaw's forward vector rotates toward -right as yaw increases
                 // (see render3d/zone_renderer.cpp's forward/right basis), so
-                // turning right means *decreasing* yaw.
+                // turning right means *decreasing* yaw -- and the engine's
+                // heading runs the other way (yaw = pi/2 - heading), so its
+                // negative rate (action 2, vtable +0x1b8) is a left turn.
                 // M99: through the binding table, as FUN_1001c9c0 polls them
                 // (actions 2/3), so the key-configuration screen's changes
-                // reach the game. The defaults are these same two slots.
-                if (input.GetBoundButton(sk::Action::TurnLeft)) gameCamera.yaw += kTurnSpeed;
-                if (input.GetBoundButton(sk::Action::TurnRight)) gameCamera.yaw -= kTurnSpeed;
-                // The real default control scheme's own LookUp/LookDown
-                // (Key2/Key8, docs/INPUT_HANDLING.md) -- decoded long ago
-                // but never wired to anything, because the renderer had no
-                // pitch at all until now (see render3d/camera.h). Holding
-                // either overrides the automatic aim-assist below.
-                constexpr float kPitchSpeed = 0.05f;  // radians/tick
-                bool manualLook = false;
-                if (input.GetBoundButton(sk::Action::LookUp)) {
-                    gameCamera.pitch -= kPitchSpeed;
-                    manualLook = true;
+                // reach the game.
+                {
+                    const int rate = sk_bindings::PlayerTurnTarget(/*zoomed=*/false);
+                    if (input.GetBoundButton(sk::Action::TurnLeft)) {
+                        gameMotion.turnTarget = -rate;
+                    } else if (input.GetBoundButton(sk::Action::TurnRight)) {
+                        gameMotion.turnTarget = rate;
+                    } else {
+                        gameMotion.turnTarget = 0;
+                    }
+                    gameMotion.turnRate =
+                        sk_bindings::RampTurnRate(gameMotion.turnRate, gameMotion.turnTarget);
                 }
-                if (input.GetBoundButton(sk::Action::LookDown)) {
-                    gameCamera.pitch += kPitchSpeed;
-                    manualLook = true;
+                // LookUp / LookDown (actions 4/5, vtable +0x1c4 / +0x1c8).
+                // Holding either overrides the automatic aim-assist below;
+                // the rate keeps easing out for a few ticks after release.
+                bool manualLook = false;
+                {
+                    const int rate = sk_bindings::Mp().active
+                                         ? sk_bindings::kPlayerLookRateSession
+                                         : sk_bindings::kPlayerLookRate;
+                    if (input.GetBoundButton(sk::Action::LookUp)) {
+                        gameMotion.lookTarget = -rate;
+                        manualLook = true;
+                    } else if (input.GetBoundButton(sk::Action::LookDown)) {
+                        gameMotion.lookTarget = rate;
+                        manualLook = true;
+                    } else {
+                        gameMotion.lookTarget = 0;
+                    }
+                    gameMotion.lookRate =
+                        sk_bindings::RampLookRate(gameMotion.lookRate, gameMotion.lookTarget);
                 }
                 // M125: mouse look, the PC's version of the right stick --
                 // but analog, applied straight to the heading and the
@@ -5994,243 +7512,173 @@ int main(int argc, char** argv) {
                 }
                 // M72: the real actor tick tests the player's own velocity
                 // (`player+0x98`/`+0xa0` non-zero) to decide whether the
-                // pitch may drift back to level. This port has no stored
-                // velocity, so it asks the equivalent question directly:
-                // did the player's position actually change this tick.
+                // pitch may drift back to level; the port asks whether the
+                // position changed, which is the same question one step on.
                 const float preMoveCamX = gameCamera.x;
                 const float preMoveCamY = gameCamera.y;
-                // M73: `FUN_100445d4`, the per-frame step every move slot
-                // is handed, shifts one extra bit right while the fatigue
-                // pool is empty -- exactly half speed. The engine's step is
-                // in a fixed-point unit this port's float movement does not
-                // share (see vitals.h), so only the ratio carries over.
-                // M95: and a ghost (`SetGhost(true)`, the cheat menu's
-                // "Make Ghost") walks at about half speed -- its move arm
-                // never restores the velocity it quarters. ghost_mode.h.
-                static const float kGhostSpeedScale = sk_bindings::GhostMoveSpeedScale();
-                const float moveSpeed =
-                    kMoveSpeed *
-                    sk_bindings::ExhaustedSpeedScale(stack.player().actorFatigue()) *
-                    (stack.player().ghost() ? kGhostSpeedScale : 1.0f);
-                float dx = std::cos(gameCamera.yaw) * moveSpeed;
-                float dy = std::sin(gameCamera.yaw) * moveSpeed;
-                // right = (sinYaw, -cosYaw), matching zone_renderer.cpp's
-                // own forward/right basis comment -- used for strafing.
-                float rx = std::sin(gameCamera.yaw) * moveSpeed;
-                float ry = -std::cos(gameCamera.yaw) * moveSpeed;
-                // Axis-separated collision (try X, then Y, independently)
-                // gives a simple wall-slide instead of a hard stop the
-                // instant either component would clip a wall.
-                // Live monsters are solid too -- the player used to walk
-                // straight through them, which (together with the aggro
-                // fixes below) is the other half of "enemies ignore
-                // collision". Vertical separation is honoured so a
-                // creature on a different floor of the same tile column
-                // doesn't block. No RE ground truth for the real actor-vs-
-                // actor radius (docs/WORLD_MODEL.md), so this reuses the
-                // same bounding-circle constants the rest of this port's
-                // collision already uses.
+                // `FUN_100445d4`: Speed << 8 >> 1, one more bit while the
+                // fatigue pool is empty (M73), capped at 0x4000.
+                const int moveStep = sk_bindings::PlayerMoveStep(stack.player().speed(),
+                                                                 stack.player().actorFatigue());
+                const int moveHeading = CameraHeadingUnits(gameCamera.yaw);
                 constexpr float kBlockHeightDelta = sk::kEyeHeightOffset * 2.0f;
-                // M55: real per-model collision boxes, replacing the two
-                // guessed body radii this block used to carry (a door was
-                // 90, a monster 40) and adding the case that was simply
-                // missing -- **static props**. Every barrel, table, rock,
-                // tree and fence in the game was walk-through here, and in
-                // the real engine they are the bulk of what blocks you:
-                // 499 of the 5192 manifest rows across the 21 zones are
-                // solid, and most of them are scenery.
-                //
-                // The box comes from `<zone>_models.txt` columns 2-4 via
-                // `Entity::Init`, and the test below is `FUN_100017c8`'s
-                // own: the mover gets one half-extent on both axes
-                // (`kActorHalfExtent`, the `0x80` the real stance code
-                // writes), the thing being tested against gets its
-                // separate X and Y, and a candidate must be solid with
-                // both extents non-zero and not `SetPassable(true)`.
-                //
-                // **M124: only the entities in the mover's own tile.**
-                // `FUN_100017c8` walks one list, `engine+0x6904[(y >> 8) *
-                // w + (x >> 8)]` at the mover's position, and an entity is
-                // linked into exactly one such list -- the tile its own
-                // position is in (`FUN_10016358`, through one `+0x40`
-                // next pointer). So the axis-aligned box below is only
-                // ever tested against what shares the mover's tile; what a
-                // wide prop does to its *neighbours* is the rotated tile
-                // stamp's job, already on disk. This port used to test
-                // every live object in the level, which is what blocked
-                // azra's bridge: its two rails (`rail.bin`, 64 x 512, yaw
-                // 0) are stamped along X on rows 17 and 19, but the
-                // unrotated box reached 512 along Y, across the deck.
-                auto boxOf = [&](float wx, float wy, int modelIndex) {
-                    const sk::ModelCollision& c = gameModelCollision.At(modelIndex);
-                    return sk::MakeBox(wx, wy, static_cast<float>(c.halfExtentX),
-                                        static_cast<float>(c.halfExtentY));
+                // M55: real per-model collision boxes from
+                // `<zone>_models.txt` columns 2-4. A candidate must be solid
+                // with both extents non-zero and not `SetPassable(true)`
+                // (`Entity+0xd5`) -- doors (closed until door.s opens them,
+                // M67), live creatures (M92's passable NPCs excepted) and
+                // the static props that are most of what blocks you. Loot
+                // and world items are `0 0 0` in every shipped manifest.
+                struct SolidEnt {
+                    int x, y, halfX, halfY;
                 };
-                auto solidAt = [&](int modelIndex) {
-                    return gameModelCollision.At(modelIndex).blocks();
-                };
-                auto blockedByEntity = [&](float wx, float wy) {
-                    sk::CollisionBox mover =
-                        sk::MakeBox(wx, wy, sk::kActorHalfExtent, sk::kActorHalfExtent);
-                    const int moverTx = static_cast<int>(std::floor(wx / 256.0f));
-                    const int moverTy = static_cast<int>(std::floor(wy / 256.0f));
-                    auto inMoverTile = [&](float ex, float ey) {
-                        return static_cast<int>(std::floor(ex / 256.0f)) == moverTx &&
-                               static_cast<int>(std::floor(ey / 256.0f)) == moverTy;
+                std::vector<SolidEnt> solids;
+                {
+                    auto add = [&](float ex, float ey, int modelIndex) {
+                        const sk::ModelCollision& c = gameModelCollision.At(modelIndex);
+                        if (!c.blocks()) return;
+                        solids.push_back({static_cast<int>(std::floor(ex)),
+                                          static_cast<int>(std::floor(ey)), c.halfExtentX,
+                                          c.halfExtentY});
                     };
-                    // A closed door is solid; door.s starts every door
-                    // closed (`saved_Open [0]`) and only calls
-                    // SetPassable(true) from OnUse(). That is the same
-                    // `Entity+0xd5` the real walk checks.
-                    //
-                    // M67: this is the *second* of the two things that
-                    // stop you at a door, and it was never the one that
-                    // mattered. A door is wider than half a tile, so the
-                    // real engine blocks it through the tile grid
-                    // (Zone::StampEntityBox) and this per-entity test is
-                    // belt and braces -- faithful belt and braces, since
-                    // `FUN_100017c8` walks the tile's entity list too and
-                    // its box is axis-aligned exactly like this one. The
-                    // grid was what kept opened doors shut.
                     for (const DoorInstance& d : gameDoors) {
-                        // M92 hidden, M101 removed.
-                        if (d.script->entityOutOfWorld()) continue;
-                        if (d.script->passable() || !solidAt(d.modelArchiveIndex)) continue;
-                        if (!inMoverTile(d.x, d.y)) continue;
-                        if (sk::BoxesOverlap(mover, boxOf(d.x, d.y, d.modelArchiveIndex))) {
-                            return true;
-                        }
+                        if (d.script->entityOutOfWorld()) continue;  // M92 hidden, M101 removed
+                        if (d.script->passable()) continue;
+                        add(d.x, d.y, d.modelArchiveIndex);
                     }
                     for (const MonsterInstance& m : gameMonsters) {
                         if (!m.script->alive() || m.script->outOfWorld()) continue;
-                        // M92: `entity+0xd5` on a creature, the same byte a
-                        // door has always used. `dstar_w.s` and
-                        // `fearfrst.s` hide an NPC and make it walk-through
-                        // in the same breath (`Porliss.ShowEntity(false);
-                        // Porliss.SetPassable(true);`) -- 12 of the suite's
-                        // soft-fail lines were this exact pairing losing
-                        // its second half.
                         if (m.script->entityPassable()) continue;
-                        if (!solidAt(m.modelArchiveIndex)) continue;
-                        if (!inMoverTile(m.x, m.y)) continue;
                         // Vertical separation, so a creature on another
-                        // floor of the same tile column doesn't block.
-                        // This port's own addition -- the real walk is
-                        // purely 2D, because its tile lists are.
+                        // floor of the same tile column doesn't block. The
+                        // port's own addition -- the real walk is purely
+                        // 2D, because its tile lists are.
                         if (std::fabs(gameCamera.z - (m.z + sk::kEyeHeightOffset)) >
                             kBlockHeightDelta) {
                             continue;
                         }
-                        if (sk::BoxesOverlap(mover, boxOf(m.x, m.y, m.modelArchiveIndex))) {
-                            return true;
-                        }
+                        add(m.x, m.y, m.modelArchiveIndex);
                     }
                     for (const sk::PlacedEntity& e : gameEntities) {
-                        if (!solidAt(e.modelArchiveIndex)) continue;
-                        if (!inMoverTile(e.x, e.y)) continue;
-                        if (sk::BoxesOverlap(mover, boxOf(e.x, e.y, e.modelArchiveIndex))) {
-                            return true;
-                        }
+                        add(e.x, e.y, e.modelArchiveIndex);
                     }
-                    // Pickups are deliberately not tested: every loot and
-                    // world-item model in the shipped manifests is
-                    // `0 0 0`, so `blocks()` is false for all of them
-                    // anyway, and walking over a dropped bag to collect it
-                    // is what the corpus expects.
+                }
+                // The player's Height() is `CMap+0x1a` (FUN_10006230,
+                // standing stance), the field the eye offset is read from;
+                // M84 pinned it at 0x200. Nothing in the image writes it
+                // (its loader is dead code -- the 2026-11-11 audit), so it
+                // is still the derived value.
+                constexpr float kPlayerCollisionHeight = sk::kEyeHeightOffset;
+                const float feetZ = gameCamera.z - sk::kEyeHeightOffset;
+                const int startX = static_cast<int>(std::floor(gameCamera.x));
+                const int startY = static_cast<int>(std::floor(gameCamera.y));
+                // `FUN_10000ab8`, the tile rule: the wall flag, the 0x180
+                // step limit and the headroom (Zone::ActorTileBlocked, with
+                // the floor sampled at the actor's own offsets inside the
+                // probed tile, as the engine passes them), and then the
+                // tile's entity list -- a solid, non-passable entity linked
+                // into a tile closes the whole tile.
+                auto tileRule = [&](int px, int py, int sx, int sy) {
+                    if (px < 0 || py < 0) return true;
+                    const int tx = px >> 8, ty = py >> 8;
+                    if (!gameZone->InBounds(tx, ty)) return true;
+                    if (gameZone->ActorTileBlocked(
+                            static_cast<float>(tx * 256 + (sx & 0xff)),
+                            static_cast<float>(ty * 256 + (sy & 0xff)), feetZ,
+                            kPlayerCollisionHeight, /*creature=*/false)) {
+                        return true;
+                    }
+                    for (const SolidEnt& e : solids) {
+                        if ((e.x >> 8) == tx && (e.y >> 8) == ty) return true;
+                    }
                     return false;
                 };
-                // Axis-separated, exactly as `FUN_100017c8` resolves an
-                // entity overlap: back the move out, re-apply X alone, and
-                // if that still collides drop X and try Y alone -- which
-                // is what lets you slide along a table instead of sticking
-                // to it.
-                auto tryMove = [&](float mx, float my) {
-                    // M73: the movement fatigue drain, `FUN_10045228`. The
-                    // real engine hangs it off player vtable slot +0x1dc,
-                    // which all four base move functions call at the end of
-                    // their own body -- so it fires once per direction
-                    // moved, and holding forward while strafing really does
-                    // drain twice as fast. It also fires whether or not the
-                    // step is then blocked, because the base move updates
-                    // the position unconditionally and collision resolves
-                    // afterwards (FUN_100017c8). Both reproduced by putting
-                    // it here, at the top, rather than behind the tests.
+                // The one guard that is not the engine's. There, nothing
+                // solid can come to share the player's tile, because the
+                // same rule keeps every other actor out of it. This port's
+                // creature walk and its scripted spawns are not held to
+                // that, and the engine's answer to a blocked centre tile is
+                // to put the player back where the tick began -- forever.
+                // So a tile the player is *already* standing in while the
+                // rule refuses it is held to its wall flag alone.
+                const bool startStuck = tileRule(startX, startY, startX, startY);
+                sk_bindings::PlayerMoveWorld moveWorld;
+                moveWorld.mapWidth = gameZone->width();
+                moveWorld.mapHeight = gameZone->height();
+                moveWorld.tileBlocked = [&](int px, int py, int sx, int sy) {
+                    if (startStuck && px >= 0 && py >= 0 && (px >> 8) == (startX >> 8) &&
+                        (py >> 8) == (startY >> 8)) {
+                        return gameZone->CellAt(px >> 8, py >> 8).IsWall();
+                    }
+                    return tileRule(px, py, sx, sy);
+                };
+                // FUN_100017c8's second half walks one list, the mover's
+                // own tile's (M124): what a wide prop does to its
+                // neighbours is the rotated tile stamp's job.
+                moveWorld.solidsInTile = [&](int tx, int ty,
+                                             std::vector<sk_bindings::MoveBox>& out) {
+                    for (const SolidEnt& e : solids) {
+                        if ((e.x >> 8) == tx && (e.y >> 8) == ty) {
+                            out.push_back({e.x, e.y, e.halfX, e.halfY});
+                        }
+                    }
+                };
+                auto thrust = [&](sk_bindings::MoveDir dir) {
+                    // M73: the movement fatigue drain, `FUN_10045228`, hangs
+                    // off vtable +0x1dc, which all four base move functions
+                    // call -- once per direction held, blocked or not.
                     const int drain = sk_bindings::MovementFatigueDrain(
                         gameMoveFatigueAccum, sk_bindings::kAiFrameDeltaUnits);
                     if (drain > 0) {
                         stack.player().SetActorFatigue(stack.player().actorFatigue() - drain);
                     }
-#if SK_DEBUG_SUITE
-                    // SK_DEBUG_SUITE (M68): noclip. The single most useful
-                    // toggle for a bug like M67's -- being able to walk
-                    // through the thing that is wrongly solid is how you
-                    // tell "the grid says blocked" from "the geometry is
-                    // wrong".
-                    if (debugRefs.noclip) {
-                        gameCamera.x += mx;
-                        gameCamera.y += my;
-                        return;
-                    }
-#endif
-                    // M95: the engine's own noclip. A ghost's move arm
-                    // (`FUN_10000c64`) tests no wall and its push-out slot
-                    // (`FUN_100455c8`) returns before testing any entity --
-                    // only the map edge holds, `[r + 0x100, (w-1)*0x100 - r]`
-                    // on each axis, the clamp every actor move applies
-                    // first. The floor and ceiling clamp is the vertical
-                    // block's below, which this port runs for everyone.
-                    if (stack.player().ghost()) {
-                        const float lo = kPlayerRadius + sk::kTileScale;
-                        const float hiX = (gameZone->width() - 1) * sk::kTileScale - kPlayerRadius;
-                        const float hiY = (gameZone->height() - 1) * sk::kTileScale - kPlayerRadius;
-                        gameCamera.x = (std::min)((std::max)(gameCamera.x + mx, lo), hiX);
-                        gameCamera.y = (std::min)((std::max)(gameCamera.y + my, lo), hiY);
-                        return;
-                    }
-                    // Post-M120: the engine's own tile rule (`FUN_10000ab8`,
-                    // Zone::ActorTileBlocked) rather than the wall flag
-                    // alone. What it adds is the **step limit**: a tile
-                    // whose floor is more than 0x180 above the player's
-                    // feet stops them, where this used to walk them up any
-                    // rise whose tile was not flagged as a wall -- the
-                    // "can scale vertical walls" report.
-                    //
-                    // The player's Height() is `CMap+0x1a` (FUN_10006230,
-                    // standing stance) -- the very field the eye offset is
-                    // read from (`FUN_1001f6f0`, player vtable +0x238:
-                    // `eye = z + CMap+0x1a`), which M84 pinned at 0x200 from
-                    // the creature height table and the melee probes. No
-                    // write to it exists anywhere in the image (M121 checked
-                    // every store, block copy and file read), so this is
-                    // the same derived value. Only 62 of 211,649 open tiles
-                    // have less headroom than that (m121).
-                    constexpr float kPlayerCollisionHeight = sk::kEyeHeightOffset;
-                    const float feetZ = gameCamera.z - sk::kEyeHeightOffset;
-                    float nx = gameCamera.x + mx;
-                    if (!gameZone->ActorCircleBlocked(nx, gameCamera.y, kPlayerRadius, feetZ,
-                                                      kPlayerCollisionHeight, /*creature=*/false,
-                                                      gameCamera.x, gameCamera.y) &&
-                        !blockedByEntity(nx, gameCamera.y)) {
-                        gameCamera.x = nx;
-                    }
-                    float ny = gameCamera.y + my;
-                    if (!gameZone->ActorCircleBlocked(gameCamera.x, ny, kPlayerRadius, feetZ,
-                                                      kPlayerCollisionHeight, /*creature=*/false,
-                                                      gameCamera.x, gameCamera.y) &&
-                        !blockedByEntity(gameCamera.x, ny)) {
-                        gameCamera.y = ny;
-                    }
+                    sk_bindings::PlayerThrust(gameMotion, moveHeading, moveStep, dir);
+                    // `FUN_1001f230`, the bob, takes the same step.
+                    gameSwayThisTick += (kDelta * (moveStep & 0xffff)) >> 8;
                 };
-                // M99: actions 0/1 through the bindings, likewise.
-                if (input.GetBoundButton(sk::Action::MoveForward)) tryMove(dx, dy);
-                if (input.GetBoundButton(sk::Action::MoveBackward)) tryMove(-dx, -dy);
-                // The real default scheme binds these to Key4/Key6
-                // (docs/INPUT_HANDLING.md) -- previously decoded but never
-                // wired up; Up/Down/Left/Right above stayed on the raw
-                // ButtonSlot layer since Left/Right double as turning, not
-                // an Action.
-                if (input.GetBoundButton(sk::Action::SideStepLeft)) tryMove(-rx, -ry);
-                if (input.GetBoundButton(sk::Action::SideStepRight)) tryMove(rx, ry);
+                // M99: actions 0/1/6/7 through the bindings, in the engine's
+                // order (vtable +0x1cc, +0x1d0, +0x1d4, +0x1d8).
+                if (input.GetBoundButton(sk::Action::MoveForward)) thrust(sk_bindings::MoveDir::Forward);
+                if (input.GetBoundButton(sk::Action::MoveBackward)) thrust(sk_bindings::MoveDir::Backward);
+                if (input.GetBoundButton(sk::Action::SideStepLeft)) thrust(sk_bindings::MoveDir::StrafeLeft);
+                if (input.GetBoundButton(sk::Action::SideStepRight)) thrust(sk_bindings::MoveDir::StrafeRight);
+                // FUN_10000498's friction, then FUN_10000c64.
+                gameMotion.vx = sk_bindings::PlayerFriction(gameMotion.vx);
+                gameMotion.vy = sk_bindings::PlayerFriction(gameMotion.vy);
+                gameMotion.x = startX;
+                gameMotion.y = startY;
+                bool freeMove = false;
+#if SK_DEBUG_SUITE
+                // SK_DEBUG_SUITE (M68): noclip -- the five steps with
+                // nothing tested at all.
+                freeMove = debugRefs.noclip;
+#endif
+                if (freeMove) {
+                    const int qx = sk_bindings::move_detail::Quarter(gameMotion.vx);
+                    const int qy = sk_bindings::move_detail::Quarter(gameMotion.vy);
+                    gameMotion.x += 5 * ((qx * kDelta) >> 8);
+                    gameMotion.y += 5 * ((qy * kDelta) >> 8);
+                } else {
+                    // M95: a ghost (`SetGhost(true)`) takes the move's other
+                    // arm -- no wall, no entity, seven quartered steps.
+                    sk_bindings::PlayerActorMove(gameMotion, moveWorld, kDelta,
+                                                 stack.player().ghost(), !onGround);
+                }
+                if (gameMotion.x != startX) gameCamera.x = static_cast<float>(gameMotion.x);
+                if (gameMotion.y != startY) gameCamera.y = static_cast<float>(gameMotion.y);
+                // The move also integrates the two rates: heading and pitch
+                // `+= rate * delta >> 8`, the pitch stopped at +-0x2000.
+                gameCamera.yaw -=
+                    static_cast<float>((gameMotion.turnRate * kDelta) >> 8) * kUnitsToRadians;
+                gameCamera.pitch +=
+                    static_cast<float>((gameMotion.lookRate * kDelta) >> 8) * kUnitsToRadians;
+                if (gameCamera.pitch > sk::kMaxCameraPitch) {
+                    gameCamera.pitch = sk::kMaxCameraPitch;
+                    gameMotion.lookRate = 0;
+                } else if (gameCamera.pitch < -sk::kMaxCameraPitch) {
+                    gameCamera.pitch = -sk::kMaxCameraPitch;
+                    gameMotion.lookRate = 0;
+                }
 
                 // M39: scripted teleports. azra.s's `Birg.SummonMe()` and
                 // friends are ordinary script handlers whose whole body is
@@ -6301,6 +7749,7 @@ int main(int argc, char** argv) {
                         gameCamera.y = py;
                         gameCamera.z = pz + sk::kEyeHeightOffset;
                         gameVelZ = 0.0f;
+                        gameMotion.vx = gameMotion.vy = 0;
                         onGround = true;
                     }
                     // M91: and the *other* direction. Every placed entity
@@ -6775,25 +8224,8 @@ int main(int argc, char** argv) {
                 //
                 // M78: bare-handed attacking is gone -- `FUN_10042394`
                 // does nothing at all for an empty hand, so there is no
-                // fist reach to define any more. kMeleeRange survives only
-                // as the floor of the on-screen "what am I facing" HP
-                // label's radius, so that an unarmed player still gets a
-                // name and a health bar off whatever is right in front of
-                // them. Monsters use their own real attackRange().
-                //
-                // M55 sized it: entity collision holds an actor off a
-                // creature by the sum of their boxes, and every creature
-                // model in the shipped manifests is 128, so anything
-                // shorter than `2 * kActorHalfExtent` could never be
-                // reached at all.
-                constexpr float kMeleeRange = sk::kActorHalfExtent * 2.0f;  // world units
-                // M22: no real spell script ever calls SetRange() (only
-                // weapon scripts do -- M20's own corpus-verified bimodal
-                // 384/16384 split), so there's no real value to read for
-                // casting range -- an invented, documented constant, same
-                // "no RE ground truth" footing as kEyeHeightOffset
-                // (render3d/camera.h) or this port's gravity constants.
-                constexpr float kSpellRange = 300.0f;      // world units
+                // fist reach to define. (M131: nor a label radius -- the
+                // health label `kMeleeRange` floored is gone too.)
                 // M122: a creature's walking speed is no longer a tuned
                 // constant here (it was 14 units/tick) -- it is the engine's
                 // force-and-friction walk off the creature's Speed stat, see
@@ -6809,9 +8241,6 @@ int main(int argc, char** argv) {
                 // nothing else. The real vertical limit exists but sits on
                 // the *attack* (0x200 raw units, and only for melee), which
                 // is where it now is. See simkin_bindings/monster_ai.h.
-                // Monsters push apart at this range so a pack doesn't
-                // collapse into one shared point on top of the player.
-                constexpr float kMonsterSeparation = 70.0f;
 
                 // Post-M120: **one creature step, the engine's way.** The
                 // original has no pathfinder for a chase: `FUN_100008f0`
@@ -6833,6 +8262,30 @@ int main(int argc, char** argv) {
                 // its heading, then `v * frameDelta >> 8` (monster_ai.h). A
                 // blocked axis loses its delta, as FUN_100017c8 zeroes it.
                 // `maxStep` is the stand-off clamp the chase uses.
+                //
+                // M132: **and the creature's side of the box.** A creature
+                // runs the same actor move the player does (`FUN_10000c64`),
+                // minus the quartering and the four extra steps:
+                //
+                //     pos += v * delta >> 8;  clamp to the map by the radius;
+                //     if (!ghost && radius != 0) {
+                //         FUN_100017c8();                    // the push-out
+                //         if (FUN_10000ab8(centre tile)) {   // the tile rule
+                //             pos = where the tick began;
+                //             a zeroed velocity axis restarts at half;
+                //         }
+                //     }
+                //
+                // with `radius` its own `+0x8e`, the model manifest's half
+                // extent, and the tile rule's last clause the one M130 gave
+                // the player: a tile with any other solid, non-passable
+                // entity linked into it is closed. The player is such an
+                // entity. So a creature stops with its box against the edge
+                // of the player's tile, and two creatures never share one.
+                //
+                // That is what this port's 48 + 40 contact distance and its
+                // 70-unit crowd push were standing in for; both are gone,
+                // with the 40-unit wall probe.
                 auto stepCreature = [&](MonsterInstance& m, float dirX, float dirY,
                                         float maxStep) {
                     m.vx = sk_bindings::DecayVelocity(m.vx, sk_bindings::kGroundFriction) +
@@ -6841,6 +8294,8 @@ int main(int argc, char** argv) {
                            sk_bindings::CreatureThrust(m.script->speed(), dirY);
                     float sx = static_cast<float>((m.vx * sk_bindings::kAiFrameDeltaUnits) >> 8);
                     float sy = static_cast<float>((m.vy * sk_bindings::kAiFrameDeltaUnits) >> 8);
+                    // `maxStep` survives for the script's WalkTo, which this
+                    // port stops on its goal.
                     const float len = std::sqrt(sx * sx + sy * sy);
                     if (len > maxStep && len > 0.0f) {
                         sx *= maxStep / len;
@@ -6848,40 +8303,108 @@ int main(int argc, char** argv) {
                     }
                     const float height =
                         static_cast<float>(sk::MonsterCollisionHeight(m.modelArchiveIndex));
-                    // FUN_100017c8 tests one probe per side, `x - r`, `x + r`,
-                    // `y - r`, `y + r`, and only the side the actor is moving
-                    // toward can stop the move -- so a creature already
-                    // touching a tile it may not enter can still walk away
-                    // from it. (Testing the whole circle froze one forever.)
-                    // The tile it stands in is held to the wall test only,
-                    // as ActorCircleBlocked does.
-                    const int fromTx = static_cast<int>(m.x) >> 8;
-                    const int fromTy = static_cast<int>(m.y) >> 8;
-                    auto probeBlocked = [&](float px, float py) {
-                        const int tx = static_cast<int>(std::floor(px / sk::kTileScale));
-                        const int ty = static_cast<int>(std::floor(py / sk::kTileScale));
-                        if (!gameZone->InBounds(tx, ty) || gameZone->CellAt(tx, ty).IsWall()) {
+                    const sk::ModelCollision& own = gameModelCollision.At(m.modelArchiveIndex);
+                    const int radius = own.halfExtentX;
+                    const int startX = static_cast<int>(std::floor(m.x));
+                    const int startY = static_cast<int>(std::floor(m.y));
+                    sk_bindings::PlayerMotion motion;
+                    motion.x = startX + static_cast<int>(sx);
+                    motion.y = startY + static_cast<int>(sy);
+                    motion.vx = static_cast<int>(sx);
+                    motion.vy = static_cast<int>(sy);
+                    auto commit = [&]() {
+                        if (motion.x != startX) m.x = static_cast<float>(motion.x);
+                        if (motion.y != startY) m.y = static_cast<float>(motion.y);
+                    };
+                    // `uVar9 != 0`: an actor with no box is not tested.
+                    if (radius == 0 || m.script->entityPassable()) {
+                        commit();
+                        return;
+                    }
+                    // Every other solid, non-passable entity, as the tile's
+                    // list would hold them.
+                    std::vector<sk_bindings::MoveBox> solids;
+                    {
+                        auto add = [&](float ex, float ey, int modelIndex) {
+                            const sk::ModelCollision& c = gameModelCollision.At(modelIndex);
+                            if (!c.blocks()) return;
+                            solids.push_back({static_cast<int>(std::floor(ex)),
+                                              static_cast<int>(std::floor(ey)), c.halfExtentX,
+                                              c.halfExtentY});
+                        };
+                        for (const DoorInstance& d : gameDoors) {
+                            if (d.script->entityOutOfWorld() || d.script->passable()) continue;
+                            add(d.x, d.y, d.modelArchiveIndex);
+                        }
+                        for (const MonsterInstance& other : gameMonsters) {
+                            if (&other == &m) continue;
+                            if (!other.script->alive() || other.script->outOfWorld()) continue;
+                            if (other.script->entityPassable()) continue;
+                            // Another floor of the same column: the port's
+                            // own allowance, as for the player.
+                            if (std::fabs(other.z - m.z) > sk::kEyeHeightOffset * 2.0f) continue;
+                            add(other.x, other.y, other.modelArchiveIndex);
+                        }
+                        for (const sk::PlacedEntity& e : gameEntities) {
+                            add(e.x, e.y, e.modelArchiveIndex);
+                        }
+                        if (!stack.player().ghost() &&
+                            std::fabs((gameCamera.z - sk::kEyeHeightOffset) - m.z) <=
+                                sk::kEyeHeightOffset * 2.0f) {
+                            solids.push_back({static_cast<int>(std::floor(gameCamera.x)),
+                                              static_cast<int>(std::floor(gameCamera.y)),
+                                              sk_bindings::kPlayerRadiusUnits,
+                                              sk_bindings::kPlayerRadiusUnits});
+                        }
+                    }
+                    auto tileRule = [&](int px, int py, int selfX, int selfY) {
+                        if (px < 0 || py < 0) return true;
+                        const int tx = px >> 8, ty = py >> 8;
+                        if (!gameZone->InBounds(tx, ty)) return true;
+                        if (gameZone->ActorTileBlocked(
+                                static_cast<float>(tx * 256 + (selfX & 0xff)),
+                                static_cast<float>(ty * 256 + (selfY & 0xff)), m.z, height,
+                                /*creature=*/true)) {
                             return true;
                         }
-                        if (tx == fromTx && ty == fromTy) return false;
-                        return gameZone->ActorTileBlocked(px, py, m.z, height, /*creature=*/true);
+                        for (const sk_bindings::MoveBox& e : solids) {
+                            if ((e.x >> 8) == tx && (e.y >> 8) == ty) return true;
+                        }
+                        return false;
                     };
-                    if (sx != 0.0f) {
-                        const float lead = sx > 0.0f ? kMonsterRadius : -kMonsterRadius;
-                        if (!probeBlocked(m.x + sx + lead, m.y)) {
-                            m.x += sx;
-                        } else {
-                            m.vx = 0;
+                    // The same guard the player has, for the same reason: a
+                    // creature that begins the tick in a tile the rule
+                    // refuses -- placed beside a prop, spawned onto another
+                    // -- would be put back there forever. Its own tile is
+                    // then held to the wall flag alone.
+                    const bool startStuck = tileRule(startX, startY, startX, startY);
+                    sk_bindings::PlayerMoveWorld world;
+                    world.mapWidth = gameZone->width();
+                    world.mapHeight = gameZone->height();
+                    world.tileBlocked = [&](int px, int py, int selfX, int selfY) {
+                        if (startStuck && px >= 0 && py >= 0 && (px >> 8) == (startX >> 8) &&
+                            (py >> 8) == (startY >> 8)) {
+                            return gameZone->CellAt(px >> 8, py >> 8).IsWall();
                         }
-                    }
-                    if (sy != 0.0f) {
-                        const float lead = sy > 0.0f ? kMonsterRadius : -kMonsterRadius;
-                        if (!probeBlocked(m.x, m.y + sy + lead)) {
-                            m.y += sy;
-                        } else {
-                            m.vy = 0;
+                        return tileRule(px, py, selfX, selfY);
+                    };
+                    world.solidsInTile = [&](int tx, int ty,
+                                             std::vector<sk_bindings::MoveBox>& out) {
+                        for (const sk_bindings::MoveBox& e : solids) {
+                            if ((e.x >> 8) == tx && (e.y >> 8) == ty) out.push_back(e);
                         }
+                    };
+                    sk_bindings::move_detail::ClampToMap(motion, world, radius);
+                    const int steppedVx = motion.vx, steppedVy = motion.vy;
+                    sk_bindings::move_detail::PushOut(motion, world, radius);
+                    // A blocked axis loses its velocity, as before.
+                    if (motion.vx == 0 && steppedVx != 0) m.vx = 0;
+                    if (motion.vy == 0 && steppedVy != 0) m.vy = 0;
+                    if (world.tileBlocked(motion.x, motion.y, motion.x, motion.y)) {
+                        motion.x = startX;
+                        motion.y = startY;
                     }
+                    commit();
                 };
                 // And where it then stands: the actor move's ground clamp,
                 // `floor(z + 0x180) + 0x80` for anything that is not the
@@ -7050,6 +8573,28 @@ int main(int argc, char** argv) {
                             sk_bindings::EngineYawFromPortYaw(castYaw),
                             sk_bindings::EngineAngleFromRadians(castPitch), cast.projectileSprite,
                             cast.impactDamage));
+                        // M132: tag 0x25 -- the other game draws the shot
+                        // (session vtable +0x114, straight after the spawn).
+                        if (mpSession.inGame() && sk_bindings::Mp().sending()) {
+                            const int pitch = sk_bindings::EngineAngleFromRadians(castPitch);
+                            if (caster->isPlayerActor()) {
+                                mpSession.Send(sk_net::EncodeSpellProjectile(
+                                    true, mpSession.myIndex(), cast.projectileSprite, 100,
+                                    spell->templateId(), pitch));
+                            } else {
+                                for (const MonsterInstance& m : gameMonsters) {
+                                    if (static_cast<sk_bindings::SpellActor*>(m.script.get()) !=
+                                            caster ||
+                                        m.script->netId() <= 0) {
+                                        continue;
+                                    }
+                                    mpSession.Send(sk_net::EncodeSpellProjectile(
+                                        false, m.script->netId(), cast.projectileSprite, 100,
+                                        spell->templateId(), pitch));
+                                    break;
+                                }
+                            }
+                        }
                     }
                     if (cast.areaDamage > 0) {
                         // FUN_1004720c: every creature in the level within
@@ -7071,6 +8616,12 @@ int main(int argc, char** argv) {
                             // M98: p5 = 1, and the caster's Strength term
                             // lands on every creature the wave reaches.
                             victim.script->ApplyDamage(cast.areaDamage, caster, /*ranged=*/true);
+                            // M132: `FUN_10067f84(victim, 0x3e, 0x44, 2)` --
+                            // each one it reaches burns for two seconds (and
+                            // a survivor's flame goes out as tag 0x27).
+                            if (sk_bindings::Mp().attachedEffect) {
+                                sk_bindings::Mp().attachedEffect(victim.script.get(), 0x3e, 0x44, 2);
+                            }
                         }
                     }
                     if (cast.conjureTypeId != 0) {
@@ -7140,6 +8691,28 @@ int main(int argc, char** argv) {
                 for (size_t monsterIndex = 0; monsterIndex < gameMonsters.size(); ++monsterIndex) {
 #endif
                     MonsterInstance& m = gameMonsters[monsterIndex];
+                    // M130 (multiplayer): a creature whose target is the
+                    // other player runs this same tick against that
+                    // player's avatar -- "the player" below is wherever the
+                    // camera is, so it is stood in for and put back. Its
+                    // blows do nothing here; the other game lands them.
+                    struct TargetSwap {
+                        sk::Camera& camera;
+                        float x, y, z;
+                        bool on;
+                        ~TargetSwap() {
+                            if (!on) return;
+                            camera.x = x;
+                            camera.y = y;
+                            camera.z = z;
+                        }
+                    } mpTargetSwap{gameCamera, gameCamera.x, gameCamera.y, gameCamera.z, false};
+                    if (m.mpTargetsPeer && mpAvatar.present && !mpAvatar.dead && mpSession.inGame()) {
+                        mpTargetSwap.on = true;
+                        gameCamera.x = mpAvatar.x;
+                        gameCamera.y = mpAvatar.y;
+                        gameCamera.z = mpAvatar.z + sk::kEyeHeightOffset;
+                    }
                     const bool wasAliveBeforeTick = m.script->alive();
                     // M32: the real per-frame AI timers -- the flee/Fear
                     // countdown (which restores the previous package when
@@ -7229,8 +8802,10 @@ int main(int argc, char** argv) {
                         float tdx = gameCamera.x - m.x, tdy = gameCamera.y - m.y;
                         float tdist = std::sqrt(tdx * tdx + tdy * tdy);
                         if (tdist > m.script->chaseRadius() && tdist > 1.0f) {
+                            // Two boxes' worth: as near as the tile rule
+                            // would ever let it walk.
                             float back = (std::max)(m.script->attackRange(),
-                                                     kPlayerRadius + kMonsterRadius);
+                                                     2.0f * sk::kActorHalfExtent);
                             float nx = gameCamera.x - (tdx / tdist) * back;
                             float ny = gameCamera.y - (tdy / tdist) * back;
                             if (!gameZone->CircleHitsWall(nx, ny, kMonsterRadius)) {
@@ -7431,6 +9006,7 @@ int main(int argc, char** argv) {
                                         // sample a connecting swing uses,
                                         // so an impact is one sound
                                         // whichever way it is going.
+                                        if (mpTargetSwap.on) dmg = 0;  // M130: the avatar's, not ours
                                         if (dmg > 0) playPlayerSound(sk::kSoundAttackHit);
 #if SK_DEBUG_SUITE
                                         // SK_DEBUG_SUITE (M68): god mode.
@@ -7485,40 +9061,19 @@ int main(int argc, char** argv) {
                             if (m.animThenClip < 0) {
                                 setAnimClip(m, m.script->walkAnimation(), false);
                             }
-                            float dirX = mdx / dist, dirY = mdy / dist;
-                            // Crowd separation: push away from any other
-                            // live monster that's too close, so a group
-                            // spreads out instead of stacking in one spot.
-                            for (const MonsterInstance& other : gameMonsters) {
-                                if (&other == &m) continue;
-                                if (!other.script->alive() || other.script->outOfWorld()) continue;
-                                float ox = m.x - other.x, oy = m.y - other.y;
-                                float od = std::sqrt(ox * ox + oy * oy);
-                                if (od > 0.001f && od < kMonsterSeparation) {
-                                    float push = (kMonsterSeparation - od) / kMonsterSeparation;
-                                    dirX += (ox / od) * push;
-                                    dirY += (oy / od) * push;
-                                }
-                            }
-                            float dirLen = std::sqrt(dirX * dirX + dirY * dirY);
-                            if (dirLen > 0.001f) {
-                                dirX /= dirLen;
-                                dirY /= dirLen;
-                            }
+                            const float dirX = mdx / dist, dirY = mdy / dist;
                             // Straight at the target and slide along
                             // whatever is in the way -- see stepCreature.
                             // M122: no stand-off clamp at the attack range.
                             // The engine walks until the AI tick finds the
                             // creature inside SetAttackRange and zeroes its
                             // delta (the in-range block above), so it steps
-                            // *into* range; clamping the step to land on
-                            // the range itself left a creature parked a
-                            // fraction outside it, never swinging. Only
-                            // bodily contact still stops it.
-                            const float room =
-                                (std::max)(0.0f, dist - (kPlayerRadius + kMonsterRadius));
-                            if (room > 0.01f) m.facingYaw = std::atan2(dirY, dirX);
-                            stepCreature(m, dirX, dirY, room);
+                            // *into* range.
+                            // M132: and no contact clamp or crowd push
+                            // either -- the player's tile, and every other
+                            // creature's, is closed to it by the tile rule.
+                            m.facingYaw = std::atan2(dirY, dirX);
+                            stepCreature(m, dirX, dirY, 1e9f);
                         }
                         groundCreature(m);
                         continue;
@@ -7744,16 +9299,27 @@ int main(int argc, char** argv) {
                     const float fwdX = std::cos(gameCamera.yaw);
                     const float fwdY = std::sin(gameCamera.yaw);
 
+                    // Gate 5 (M130): nothing alive already under the
+                    // crosshair -- `engine+0x620 = pick(engine, 88, 104)`,
+                    // the ID buffer at the centre pixel, stamped by the
+                    // previous frame's draw as it is for the melee probes.
+                    // Dead on a creature, the assist lets go.
+                    bool crosshairOnCreature = false;
+                    if (const uint8_t centreId = zoneRenderer.ObjectIdAt(88, 104)) {
+                        for (const MonsterInstance& m : gameMonsters) {
+                            if (m.objectId == static_cast<int>(centreId) && m.script->alive() &&
+                                !m.script->outOfWorld()) {
+                                crosshairOnCreature = true;
+                                break;
+                            }
+                        }
+                    }
                     // Gate 6: the first live creature the forward ray
-                    // walks into. (Gate 5 is not reproduced -- it reads a
-                    // per-pixel entity ID buffer this renderer does not
-                    // keep. Its effect is to switch the assist off while
-                    // the crosshair is already dead on a creature, so
-                    // leaving it out only means the assist stays engaged
-                    // in a case where the original would have let go.)
+                    // walks into.
                     const MonsterInstance* aimTarget = nullptr;
                     float rayX = gameCamera.x, rayY = gameCamera.y;
-                    for (int step = 0; step < kAutoAimRaySteps && !aimTarget; ++step) {
+                    for (int step = 0;
+                         step < kAutoAimRaySteps && !aimTarget && !crosshairOnCreature; ++step) {
                         const int tx = static_cast<int>(std::floor(rayX / sk::kTileScale));
                         const int ty = static_cast<int>(std::floor(rayY / sk::kTileScale));
                         // The real loop bails at the grid edge exactly
@@ -7926,6 +9492,7 @@ int main(int argc, char** argv) {
                     // own position -- before OnKilled runs and before the
                     // loot. See MonsterExecutable::PayKillExperience.
                     dead.script->PayKillExperience();
+                    mpOnLocalDeath(dead);  // M129: tag 0x19
                     // M104: and a death that opens a screen has to be handed
                     // the frame, the same way the Use path and the OnDetect
                     // arm already do it. Without this the menu is built and
@@ -8161,11 +9728,8 @@ int main(int argc, char** argv) {
                 // -- "Shoot"/"Reload" are real logical actions but were
                 // never bound), so reusing the same two attack keys with a
                 // longer real range is the evidenced design, not a guess.
-                // No line-of-sight/wall check (sk_bindings::InAttackRange's
-                // own comment) -- a ranged shot can theoretically clip
-                // through a thin wall corner at extreme range, a documented
-                // simplification, same footing as every other from-scratch
-                // combat constant in this port.
+                // (M49: the shot is a projectile that flies and is stopped by
+                // the world, so there is no line-of-sight question left.)
                 // `FUN_100425bc`. Only ever reached with a real weapon
                 // (`kItemTypeWeapon`) in `weapon`, because the type switch
                 // in useHandItem below is the only caller -- which is why
@@ -8211,6 +9775,11 @@ int main(int argc, char** argv) {
                     // swing, and the accumulator this seeds is what the
                     // gate above will refuse on for the next 1.75 seconds.
                     sk_bindings::StartWeaponSwing(gameWeaponViewmodel, weapon);
+                    // M130: `FUN_10002a38` -- the player attacking with an
+                    // item in hand (its `+0x18e`, the clip SetClipSize
+                    // fills, is 6 on every item) sets `player+0x228`, and
+                    // from then on the world within three tiles is lit.
+                    if (weapon) gamePlayerGlow = true;
                     // M49: a ranged weapon leaves here too, for the same
                     // reason a spell does -- `FUN_100425bc`'s ranged branch
                     // never aims at anything. It plays the bow sound, rolls
@@ -8610,15 +10179,36 @@ int main(int argc, char** argv) {
                     if (shown && shown->weaponSprite() < 0) shown = nullptr;
                     sk_bindings::NotifyWeaponChanged(gameWeaponViewmodel, shown);
                 }
-                // The bob's rate is the player's real movement speed this
-                // tick -- FUN_1001f230's own second argument. Standing
-                // still freezes the phase, which is what stops the weapon
-                // swaying while the player is stationary.
-                float movedX = gameCamera.x - playerPrevX;
-                float movedY = gameCamera.y - playerPrevY;
-                sk_bindings::TickWeaponViewmodel(
-                    gameWeaponViewmodel,
-                    static_cast<int>(std::sqrt(movedX * movedX + movedY * movedY)));
+                // The bob runs down by FUN_1001f230's own amount: the move
+                // step, once per direction held this tick (summed where
+                // the thrust is applied). Standing still freezes the phase.
+                sk_bindings::TickWeaponViewmodel(gameWeaponViewmodel, gameSwayThisTick);
+                gameSwayThisTick = 0;
+                // M130: the scene's light sources for the frames this tick
+                // draws (ZoneRenderer::SceneLights) -- the player's glow
+                // and the lanterns and torches the level placed.
+                {
+                    sk::ZoneRenderer::SceneLights& lights = zoneRenderer.lights;
+                    lights.playerGlow = gamePlayerGlow;
+                    lights.playerTileX = static_cast<int>(std::floor(gameCamera.x)) >> 8;
+                    lights.playerTileY = static_cast<int>(std::floor(gameCamera.y)) >> 8;
+                    lights.seed = ++gameLightSeed;
+                    lights.emitterTiles.clear();
+                    lights.fullTiles.clear();
+                    // M131: a spell in flight (`+0x86 |= 0x10` at its spawn)
+                    // pins its tile to full light; Blind quarters the rest.
+                    for (const sk_bindings::SpellProjectile& p : gameProjectiles) {
+                        if (p.alive) lights.fullTiles.push_back({p.x >> 8, p.y >> 8});
+                    }
+                    lights.blind = stack.player().blinded();
+                    if (gameZone) {
+                        for (const sk::Zone::EntPlacement& e : gameZone->entities()) {
+                            if (e.typeId != 3 && e.typeId != 0x47 && e.typeId != 0x1787) continue;
+                            lights.emitterTiles.push_back(
+                                {static_cast<int>(e.x) >> 8, static_cast<int>(e.y) >> 8});
+                        }
+                    }
+                }
 
                 // M15/M16/M19: Action::Use (Key3, docs/INPUT_HANDLING.md's
                 // default scheme) interact binding -- doors (M15), usable
@@ -8629,132 +10219,87 @@ int main(int argc, char** argv) {
                 // range-and-facing-cone targeting playerAttack uses above,
                 // reused here (and again below for the on-screen use-text
                 // prompt).
-                // Reach for the Use action. 384 raw world units is the
-                // game's own melee reach: **every** real melee weapon in the
-                // corpus calls SetRange(384) (64 of them; the other 16 are
-                // bows/thrown at 16384), so it is the one corpus-verified
-                // "arm's length" constant available rather than an invented
-                // number. The previous 140 was barely half a tile -- you had
-                // to stand almost exactly on an entity's placement point for
-                // its prompt to appear, which is why doors only responded to
-                // a very precise approach and chests/NPCs essentially never
-                // did.
-                constexpr float kInteractRange = 384.0f;
-                // ~72 degrees off-centre, up from the old ~60. Entities sit
-                // at a tile's centre while the player walks its edges, so a
-                // tight cone misses things plainly on screen.
-                constexpr float kInteractFacing = 0.30f;
-                // M75: all three lists are filtered by the same one byte
-                // the engine's own use-target search reads --
-                // `entity+0xd8`, see simkin_bindings/use_prompt.h. Only the
-                // NPC list used to be, and only for an explicit
-                // SetUsable(true); the other two offered a prompt for
-                // anything that existed. In the shipped data that costs
-                // nothing (every one of the 434 door placements and 393
-                // container placements that has a real script is usable)
-                // and gains one thing: `crypt2/controller.s`, the
-                // invisible seven-crystal logic object, stops asking to be
-                // picked up.
-                auto findNearbyDoor = [&]() -> DoorInstance* {
-                    DoorInstance* nearest = nullptr;
-                    float bestDist = kInteractRange + 1.0f;
-                    for (DoorInstance& d : gameDoors) {
-                        // M92: a hidden entity is not there to be used.
-                        // The engine reaches the same answer through the
-                        // actor list rather than a second test, but the
-                        // consequence is the one thing the census called
-                        // out: scripted set-pieces had props standing where
-                        // the script hid them, and they answered Use.
-                        if (d.script->entityOutOfWorld()) continue;  // M101: or removed
-                        if (!d.script->usable()) continue;
-                        if (!sk_bindings::InInteractRange(gameCamera.x, gameCamera.y,
-                                                           gameCamera.yaw, d.x, d.y,
-                                                           kInteractRange, kInteractFacing)) {
-                            continue;
-                        }
-                        float ddx = d.x - gameCamera.x, ddy = d.y - gameCamera.y;
-                        float dist = std::sqrt(ddx * ddx + ddy * ddy);
-                        if (dist < bestDist) {
-                            bestDist = dist;
-                            nearest = &d;
-                        }
-                    }
-                    return nearest;
-                };
-                // M16: usable() is the real script's own SetUsable(true)
-                // (monster_executable.h) -- an aggressive monster never
-                // sets it, so this naturally only ever finds NPCs, not
-                // hostile creatures the player is fighting.
+                // M131: **the use target is the engine's**, `FUN_1001dd40`
+                // -- twelve rays fanned eight degrees either side of the
+                // heading, half a tile a step, out to two and a half tiles,
+                // the first usable entity any of them meets; a wall tile
+                // ends the search. See simkin_bindings/use_prompt.h.
                 //
-                // M75: ...and, far more often, its `SetUseText(...)`,
-                // which the engine treats as the same thing. That was the
-                // missing half: 54 of the 152 talkable placements in the
-                // shipped game -- Gravel Trothgar, Acolyte Menlin,
-                // Priestess Almathea, Old Trinket, the villager prisoners,
-                // Heather, all four Dark Star West merchants -- name a use
-                // text and never call SetUsable at all, so none of them had
-                // a prompt or answered Use. It stays an NPC-only filter:
-                // a hostile creature names neither.
-                auto findNearbyUsableMonster = [&]() -> MonsterInstance* {
-                    MonsterInstance* nearest = nullptr;
-                    float bestDist = kInteractRange + 1.0f;
-                    for (MonsterInstance& m : gameMonsters) {
-                        if (!m.script->alive() || m.script->outOfWorld() || !m.script->usable()) {
-                            continue;
-                        }
-                        if (!sk_bindings::InInteractRange(gameCamera.x, gameCamera.y,
-                                                           gameCamera.yaw, m.x, m.y,
-                                                           kInteractRange, kInteractFacing)) {
-                            continue;
-                        }
-                        float ddx = m.x - gameCamera.x, ddy = m.y - gameCamera.y;
-                        float dist = std::sqrt(ddx * ddx + ddy * ddy);
-                        if (dist < bestDist) {
-                            bestDist = dist;
-                            nearest = &m;
-                        }
-                    }
-                    return nearest;
+                // What it replaces was this port's own: three nearest-first
+                // searches (doors, NPCs, pickups) inside a 384-unit, ~72
+                // degree cone, with no wall test at all -- so a chest
+                // answered Use through a wall, and nothing answered from
+                // further than a tile and a half.
+                //
+                // M75's one gate is unchanged: `entity+0xd8`, usable().
+                // Death clears it on a creature (monster_executable.cpp), so
+                // a corpse is only found if its script names it again.
+                // Within one tile the engine takes the head of the tile's
+                // entity list; this port keeps no such list, and takes a
+                // pickup before a creature before a door.
+                struct UseTarget {
+                    DoorInstance* door = nullptr;
+                    MonsterInstance* npc = nullptr;
+                    PickupInstance* pickup = nullptr;
                 };
-                // M19: same shape again for pickups.
-                auto findNearbyPickup = [&]() -> PickupInstance* {
-                    PickupInstance* nearest = nullptr;
-                    float bestDist = kInteractRange + 1.0f;
-                    for (PickupInstance& p : gamePickups) {
-                        if (p.script->entityOutOfWorld()) continue;  // M92/M101, see above
-                        if (!p.script->usable()) continue;
-                        if (!sk_bindings::InInteractRange(gameCamera.x, gameCamera.y,
-                                                           gameCamera.yaw, p.x, p.y,
-                                                           kInteractRange, kInteractFacing)) {
-                            continue;
-                        }
-                        float ddx = p.x - gameCamera.x, ddy = p.y - gameCamera.y;
-                        float dist = std::sqrt(ddx * ddx + ddy * ddy);
-                        if (dist < bestDist) {
-                            bestDist = dist;
-                            nearest = &p;
-                        }
+                auto findUseTarget = [&]() -> UseTarget {
+                    struct Candidate {
+                        int tx, ty, kind;
+                        size_t index;
+                    };
+                    std::vector<Candidate> candidates;
+                    const int eyeZ = static_cast<int>(gameCamera.z);
+                    const int heightWindow = stack.player().health() <= 0
+                                           ? sk_bindings::kUseHeightWindowDead
+                                           : sk_bindings::kUseHeightWindow;
+                    auto consider = [&](float x, float y, float z, int kind, size_t index) {
+                        if (std::abs(eyeZ - static_cast<int>(z)) > heightWindow) return;
+                        candidates.push_back({static_cast<int>(x) >> 8, static_cast<int>(y) >> 8,
+                                              kind, index});
+                    };
+                    for (size_t i = 0; i < gamePickups.size(); ++i) {
+                        const PickupInstance& p = gamePickups[i];
+                        if (p.script->entityOutOfWorld() || !p.script->usable()) continue;  // M92/M101
+                        consider(p.x, p.y, p.z, 0, i);
                     }
-                    return nearest;
-                };
-                // Doors, usable NPCs, and pickups are three separate lists
-                // -- pick whichever real placement is actually nearer when
-                // more than one is in range at once, same "nearest wins"
-                // rule each list already uses internally.
-                auto distanceTo = [&](float x, float y) {
-                    float dx = x - gameCamera.x, dy = y - gameCamera.y;
-                    return std::sqrt(dx * dx + dy * dy);
+                    for (size_t i = 0; i < gameMonsters.size(); ++i) {
+                        const MonsterInstance& m = gameMonsters[i];
+                        if (m.script->outOfWorld() || !m.script->usable()) continue;
+                        consider(m.x, m.y, m.z, 1, i);
+                    }
+                    for (size_t i = 0; i < gameDoors.size(); ++i) {
+                        const DoorInstance& d = gameDoors[i];
+                        if (d.script->entityOutOfWorld() || !d.script->usable()) continue;
+                        consider(d.x, d.y, d.z, 2, i);
+                    }
+                    UseTarget target;
+                    if (candidates.empty()) return target;
+                    const int found = sk_bindings::FindUseTarget(
+                        static_cast<int>(gameCamera.x), static_cast<int>(gameCamera.y),
+                        sk_bindings::EngineYawFromPortYaw(gameCamera.yaw), gameZone->width(),
+                        gameZone->height(),
+                        [&](int tx, int ty) { return gameZone->CellAt(tx, ty).IsWall(); },
+                        [&](int tx, int ty) {
+                            for (size_t i = 0; i < candidates.size(); ++i) {
+                                if (candidates[i].tx == tx && candidates[i].ty == ty) {
+                                    return static_cast<int>(i);
+                                }
+                            }
+                            return -1;
+                        });
+                    if (found < 0) return target;
+                    const Candidate& c = candidates[static_cast<size_t>(found)];
+                    if (c.kind == 0) target.pickup = &gamePickups[c.index];
+                    if (c.kind == 1) target.npc = &gameMonsters[c.index];
+                    if (c.kind == 2) target.door = &gameDoors[c.index];
+                    return target;
                 };
                 if (input.ConsumeBoundJustPressed(sk::Action::Use)) {
-                    DoorInstance* door = findNearbyDoor();
-                    MonsterInstance* npc = findNearbyUsableMonster();
-                    PickupInstance* pickup = findNearbyPickup();
-                    // Nearest of the (up to) three candidates wins.
-                    float doorDist = door ? distanceTo(door->x, door->y) : kInteractRange + 1.0f;
-                    float npcDist = npc ? distanceTo(npc->x, npc->y) : kInteractRange + 1.0f;
-                    float pickupDist =
-                        pickup ? distanceTo(pickup->x, pickup->y) : kInteractRange + 1.0f;
-                    if (pickup && pickupDist <= doorDist && pickupDist <= npcDist) {
+                    const UseTarget useTarget = findUseTarget();
+                    DoorInstance* door = useTarget.door;
+                    MonsterInstance* npc = useTarget.npc;
+                    PickupInstance* pickup = useTarget.pickup;
+                    if (pickup) {
                         // M19/M21: two different real OnUse() shapes share
                         // this one branch. A direct world item (snowline/
                         // foxglove.s) calls PickupItem(self)+
@@ -8771,7 +10316,7 @@ int main(int argc, char** argv) {
                         // below already does -- and stays in the world
                         // (still possibly non-empty), so the 3D view pauses
                         // into the real loot-selection menu instead.
-                        sk_bindings::MenuExecutable* beforeMenu = stack.currentMenu();
+                        const unsigned beforeMenu = stack.openSerial();  // M133
 #if SK_DEBUG_SUITE
                         // SK_DEBUG_SUITE (M68)
                         sk_debug::Count("pickup.used");
@@ -8836,12 +10381,12 @@ int main(int argc, char** argv) {
                                    pickup->script->entityRemoved()) {
                             // Gone without being taken: the top-of-tick
                             // sweep erases it, and unnames it first.
-                        } else if (stack.currentMenu() != beforeMenu) {
+                        } else if (stack.openSerial() != beforeMenu) {
                             inGame = false;
                             gamePausedForMenu = true;
                             input.ClearPendingEdges();  // M90, see its comment
                         }
-                    } else if (npc && npcDist <= doorDist) {
+                    } else if (npc) {
                         // A real NPC's OnUse() (e.g. tanyinconvo.s) calls
                         // OpenMenu(...) -- detect that by comparing
                         // currentMenu() before/after (robust to whatever
@@ -8854,14 +10399,15 @@ int main(int argc, char** argv) {
                         // returns straight to gameplay from there via
                         // gamePausedForMenu, bypassing tanyinconvo.s's own
                         // (soft-failed, native-only) Quit() handler.
-                        sk_bindings::MenuExecutable* before = stack.currentMenu();
+                        const unsigned before = stack.openSerial();  // M133
                         npc->script->InvokeOnUse();
-                        if (stack.currentMenu() != before) {
+                        if (stack.openSerial() != before) {
                             inGame = false;
                             gamePausedForMenu = true;
                             input.ClearPendingEdges();  // M90, see its comment
                         }
                     } else if (door) {
+                        const unsigned doorMenuSerial = stack.openSerial();  // M133
                         // M38: mode 1 -- the real engine notifies the
                         // trigger list *before* running the door's own
                         // open (FUN_1002e6cc calls FUN_1007307c(level, 1,
@@ -8892,6 +10438,18 @@ int main(int argc, char** argv) {
                                        std::string("  door \"") + door->name + "\" now passable " +
                                            (door->script->passable() ? "true" : "false"));
 #endif
+                        // M133: and a door's OnUse can open a screen too --
+                        // `lockeddoor.s`'s UsePicks, delfhide's
+                        // `Cell_lockeddoor.s` and its Use_Cellkey. This
+                        // branch never handed the frame over, so the menu
+                        // was built and drawn over by the 3D view: no
+                        // locked door in the game could be opened by key
+                        // or by pick. Same hand-off as the NPC branch.
+                        if (stack.openSerial() != doorMenuSerial) {
+                            inGame = false;
+                            gamePausedForMenu = true;
+                            input.ClearPendingEdges();  // M90, see its comment
+                        }
                     }
                 }
 
@@ -9116,6 +10674,7 @@ int main(int argc, char** argv) {
                 // per-entity half-extents come from that class's own doubled
                 // sprite-dimension multiply, which is why the sprite has to
                 // be resolved before the quad can be sized.
+                mpAppendAvatar(frameEntities);  // M129: the other player
                 std::vector<sk::SpriteBillboard> frameBillboards;
                 for (const sk_bindings::SpellProjectile& shot : gameProjectiles) {
                     const sk::Sprite* art = spriteArchive.GetSprite(shot.sprite);
@@ -9162,68 +10721,40 @@ int main(int argc, char** argv) {
                 // HUD draw, so this port does too -- one place, and it
                 // stops while a menu holds the world.
                 stack.player().TickHurtTimer(sk_bindings::kAiFrameDeltaUnits);
-                // Minimal combat/interact feedback -- name + HP of
-                // whatever *aggressive* monster is currently in the
-                // player's actual attack range/facing cone, else the
-                // nearer of a usable NPC's real SetUseText() prompt (M16)
-                // or a door's (M15) (combat takes priority when both are
-                // in range at once; aggressive()==false already keeps an
-                // NPC like Tanyin Aldwyr out of this first loop entirely --
-                // see monster_executable.h's class comment). Drawn at
-                // y=34, below the real compass banner (RenderHud now
-                // occupies y=0..31 across the top).
-                //
-                // M20/M22: "in range" now means whichever hand's real
-                // weapon reaches farthest (kMeleeRange as a floor for empty
-                // hands, kSpellRange for a non-weapon item -- a spell) --
-                // matches
-                // playerAttack's own per-item range above, so equipping a bow
-                // or a spell genuinely shows the HP label from farther
-                // away too, not just landing the hit.
-                auto handRange = [&](sk_bindings::ItemExecutable* item) -> float {
-                    if (!item) return 0.0f;
-                    return item->itemType() == sk_bindings::kItemTypeWeapon
-                               ? static_cast<float>(item->range())
-                               : kSpellRange;
-                };
-                float playerAttackRange = (std::max)(
-                    kMeleeRange,
-                    (std::max)(handRange(stack.player().leftItem()),
-                               handRange(stack.player().rightItem())));
-                const MonsterInstance* facingMonster = nullptr;
-                for (const MonsterInstance& m : gameMonsters) {
-                    if (!m.script->alive() || m.script->outOfWorld() || !m.script->aggressive()) {
-                        continue;
-                    }
-                    if (!sk_bindings::InAttackRange(gameCamera.x, gameCamera.y, gameCamera.yaw, m.x,
-                                                     m.y, playerAttackRange)) {
-                        continue;
-                    }
-                    facingMonster = &m;
-                    break;
-                }
+                // M131: **the prompt is the engine's**, `FUN_1002acd4`: the
+                // use text of whatever the use-target search found, and
+                // nothing else. A creature that can be fought is named in
+                // yellow, one that cannot in white, a lootable corpse gets
+                // "Examine:". The "name  12/30" health line this replaces
+                // (M12, with M22's invented 300-unit `kSpellRange` deciding
+                // how far a spell in hand could read it from) has no
+                // counterpart in the binary -- the game never shows a
+                // creature's health.
                 gameplayLabel.clear();
-                if (facingMonster) {
-                    gameplayLabel = facingMonster->script->name() + "  " +
-                                    std::to_string(facingMonster->script->currentHealth()) + "/" +
-                                    std::to_string(facingMonster->script->maxHealth());
-                } else {
-                    DoorInstance* door = findNearbyDoor();
-                    MonsterInstance* npc = findNearbyUsableMonster();
-                    PickupInstance* pickup = findNearbyPickup();
-                    float doorDist = door ? distanceTo(door->x, door->y) : kInteractRange + 1.0f;
-                    float npcDist = npc ? distanceTo(npc->x, npc->y) : kInteractRange + 1.0f;
-                    float pickupDist =
-                        pickup ? distanceTo(pickup->x, pickup->y) : kInteractRange + 1.0f;
-                    int useTextId = -1;
-                    if (pickup && pickupDist <= doorDist && pickupDist <= npcDist) {
-                        useTextId = pickup->script->useTextId();
-                    } else if (npc && npcDist <= doorDist) {
-                        useTextId = npc->script->useTextId();
-                    } else if (door) {
-                        useTextId = door->script->useTextId();
+                gameplayLabelColor = sk::PackRGB565(255, 255, 255);
+                {
+                    const UseTarget prompt = findUseTarget();
+                    auto useText = [&](int id) {
+                        // 0x1006842c: the entity's own text, else string 13.
+                        return strings.Get(id >= 0 ? id : sk_bindings::kDefaultUseTextId);
+                    };
+                    if (prompt.pickup) {
+                        gameplayLabel = sk_bindings::UsePromptText(
+                            useText(prompt.pickup->script->useTextId()), false, false, false);
+                    } else if (prompt.door) {
+                        gameplayLabel = sk_bindings::UsePromptText(
+                            useText(prompt.door->script->useTextId()), false, false, false);
+                    } else if (prompt.npc) {
+                        const sk_bindings::MonsterExecutable& m = *prompt.npc->script;
+                        gameplayLabel = sk_bindings::UsePromptText(
+                            useText(m.useTextId()), true, m.lootTypeId() != 0, !m.alive());
+                        if (sk_bindings::UsePromptIsHostileColour(true, m.invulnerable())) {
+                            gameplayLabelColor =
+                                sk::PackRGB565(sk_bindings::kUsePromptHostileR,
+                                               sk_bindings::kUsePromptHostileG,
+                                               sk_bindings::kUsePromptHostileB);
+                        }
                     }
-                    if (useTextId >= 0) gameplayLabel = strings.Get(useTextId);
                 }
                 // M119: what this tick draws, handed to the frame loop. At the
                 // original frame rate it is drawn right here, the same frame
@@ -9233,6 +10764,7 @@ int main(int argc, char** argv) {
                 // drawGameplayFrame is only drawing.
                 gameplayFrames.Push(gameCamera, frameEntities, frameBillboards);
                 tickWasGameplay = true;
+                gpuUnderStale = true;  // M129: a new tick, a new software frame under the HUD
                 if (!pcSettings.settings().originalFrameRate()) return;
                 drawGameplayFrame(gameCamera, frameEntities, frameBillboards);
                 return;
@@ -9278,6 +10810,15 @@ int main(int argc, char** argv) {
             // false on every screen that defines no handler, which is the
             // conversation/tutorial case this shortcut was written for,
             // and those still resume immediately.
+            if (sk_bindings::MenuExecutable* paused = stack.currentMenu();
+                paused && paused->portSettingsOpen()) {
+                // M133: Esc on the port settings page goes back one page, to
+                // Options, not all the way out into the game.
+                paused->ClosePortSettings();
+                RenderMenu(backbuffer, *paused, stack.player(), strings, spriteArchive);
+                presentMenu(backbuffer, stack.gameActive(), menuBackdropFor(paused));
+                return;
+            }
             if (sk_bindings::MenuExecutable* paused = stack.currentMenu()) {
                 sk_bindings::MenuExecutable* beforeBack = paused;
                 bool handled = false;
@@ -9291,7 +10832,8 @@ int main(int argc, char** argv) {
                     // The handler put another screen up. Leave it there.
                     RenderMenu(backbuffer, *stack.currentMenu(), stack.player(), strings,
                                 spriteArchive);
-                    window.Present(backbuffer);
+                    presentMenu(backbuffer, stack.gameActive(),
+                                menuBackdropFor(stack.currentMenu()));
                     return;
                 }
                 // Anything else -- a plain Quit(), or no handler at all --
@@ -9344,7 +10886,7 @@ int main(int argc, char** argv) {
                 creditsBackHeldPrev = false;
                 input.ClearPendingEdges();  // the held key is not also a press on the menu
             }
-            window.Present(backbuffer);
+            presentMenu(backbuffer, false);
             return;
         }
 
@@ -9373,10 +10915,14 @@ int main(int argc, char** argv) {
                     if (input.ConsumeJustPressedOrRepeat(sk::ButtonSlot::Down)) {
                         popup->MoveSelection(1);
                     }
+                    // M131: the popup's tick (0x100767a0) plays the select
+                    // sound on either key's press, before acting on it.
                     if (input.ConsumeJustPressed(sk::ButtonSlot::LeftSelectionKey)) {
+                        playPlayerSound(kMenuSelectSound);
                         popup->ActivateSelected();
                     }
                     if (input.ConsumeJustPressed(sk::ButtonSlot::RightSelectionKey)) {
+                        playPlayerSound(kMenuSelectSound);
                         popup->GoBack();
                     }
                 } else if (menu->textEntryActive()) {
@@ -9404,34 +10950,59 @@ int main(int argc, char** argv) {
                     // at its own first/last row instead of trapping it.
                     // It declines on the plain centred AddMenuItem lists,
                     // which then behave exactly as before.
-                    if (input.ConsumeJustPressedOrRepeat(sk::ButtonSlot::Up)) {
-                        if (!menu->NavigateDirectional(0, -1)) {
-                            if (!menu->TryMoveTableSelection(-1)) menu->MoveSelection(-1);
+                    //
+                    // M131: **the menu's two sounds.** Every sound table in
+                    // the game carries them in the same slots -- 99
+                    // `menuNEWxbx.wav`, 100 `menu1.wav` -- and the menu's
+                    // four direction handlers and its select handler play
+                    // them (`FUN_1001b204(engine, slot, 100, 0, 0, 1, 1)`,
+                    // long mislabelled SecretSequence_OnComplete here):
+                    //
+                    //   * left / right (`FUN_100322a8`, `FUN_100323f0`):
+                    //     99, first thing, whatever happens next;
+                    //   * up / down (`FUN_10032530`, `FUN_100326cc`): 99
+                    //     when the focus goes to another widget, and always
+                    //     inside a table;
+                    //   * a combo box stepping (`FUN_1008eeb4` and its
+                    //     twin): 100, only when the selection moved -- on
+                    //     top of the 99 the key itself played;
+                    //   * select (`FUN_10032868`): 100, once the enter
+                    //     delay has passed and something is focused.
+                    //
+                    // This port's menus were silent.
+                    auto verticalMove = [&](int dy) {
+                        const int was = menu->selectedItem();
+                        bool inTable = false;
+                        if (!menu->NavigateDirectional(0, dy)) {
+                            inTable = menu->TryMoveTableSelection(dy);
+                            if (!inTable) menu->MoveSelection(dy);
                         }
-                    }
-                    if (input.ConsumeJustPressedOrRepeat(sk::ButtonSlot::Down)) {
-                        if (!menu->NavigateDirectional(0, 1)) {
-                            if (!menu->TryMoveTableSelection(1)) menu->MoveSelection(1);
+                        if (inTable || menu->selectedItem() != was) {
+                            playPlayerSound(kMenuMoveSound);
                         }
-                    }
+                    };
+                    if (input.ConsumeJustPressedOrRepeat(sk::ButtonSlot::Up)) verticalMove(-1);
+                    if (input.ConsumeJustPressedOrRepeat(sk::ButtonSlot::Down)) verticalMove(1);
                     if (input.ConsumeJustPressedOrRepeat(sk::ButtonSlot::Left)) {
+                        playPlayerSound(kMenuMoveSound);
                         if (!menu->NavigateDirectional(-1, 0)) {
                             // Portrait/name-entry screens (useHoriz) walk
                             // rows; everything else adjusts the selected
                             // combo/slider, if it has one.
                             if (menu->useHoriz()) {
                                 menu->MoveSelection(-1);
-                            } else {
-                                menu->CycleSelectedCombo(-1);
+                            } else if (menu->CycleSelectedCombo(-1)) {
+                                playPlayerSound(kMenuSelectSound);
                             }
                         }
                     }
                     if (input.ConsumeJustPressedOrRepeat(sk::ButtonSlot::Right)) {
+                        playPlayerSound(kMenuMoveSound);
                         if (!menu->NavigateDirectional(1, 0)) {
                             if (menu->useHoriz()) {
                                 menu->MoveSelection(1);
-                            } else {
-                                menu->CycleSelectedCombo(1);
+                            } else if (menu->CycleSelectedCombo(1)) {
+                                playPlayerSound(kMenuSelectSound);
                             }
                         }
                     }
@@ -9441,6 +11012,9 @@ int main(int argc, char** argv) {
                         // SelectedInventoryItem, statsscreen.s's
                         // OnTableSel, ...) instead of the outer row's
                         // usual ActivateSelected() path.
+                        if (menu->selectedItem() >= 1 && !menu->enterDelayed(std::time(nullptr))) {
+                            playPlayerSound(kMenuSelectSound);
+                        }
                         if (!menu->TryActivateTable()) menu->ActivateSelected();
                     }
                     if (input.ConsumeJustPressed(sk::ButtonSlot::RightSelectionKey)) {
@@ -9492,10 +11066,17 @@ int main(int argc, char** argv) {
             // the frame is drawn, not after it.
             menu->EnsurePcSettingRows();
             RenderMenu(backbuffer, *menu, stack.player(), strings, spriteArchive);
+            if (mpAddressOpen) {
+                // M130: the address line, in the menu's own font and
+                // standard colour, above the softkey captions.
+                const std::string line = "IP: " + mpAddressEntry + "_";
+                sk::BitmapFont::DrawString(backbuffer, 8, sk::Backbuffer::kHeight - 34, line,
+                                           MenuColor444(0xfff));
+            }
         } else {
             backbuffer.Fill(kBackgroundColor);
         }
-        window.Present(backbuffer);
+        presentMenu(backbuffer, stack.gameActive(), menuBackdropFor(stack.currentMenu()));
     };
 
     // M119: the controller, read every time round the loop rather than once
@@ -9549,6 +11130,7 @@ int main(int argc, char** argv) {
             window.SetMouseLook(wantMouse);
         }
         applyAspectToWindow();  // M120: only acts when Aspect Ratio or fullscreen changed
+        syncGpuRenderer();      // M129: only acts when the Renderer row changed
         const int fps = pcSettings.settings().frameRate();
         const bool originalRate = fps == sk::kFrameRateOriginal;
         sk::Window::SetFineTimer(!originalRate);

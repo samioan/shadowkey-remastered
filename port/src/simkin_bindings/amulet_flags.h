@@ -123,6 +123,18 @@ public:
 
     int frozenKeyCount() const { return m_FrozenKeyCount; }
 
+    // M132: `FUN_10037880`, the receiver of multiplayer tag 0x38 -- the
+    // other player took (or used up) one of the four. The bit is set or
+    // cleared outright, and the frozen key's counter steps with it.
+    void ApplyRemote(unsigned mask, bool on) {
+        if (on) {
+            set(mask);
+        } else {
+            clear(mask);
+        }
+        if (mask == kFlagFrozenKey) m_FrozenKeyCount = static_cast<short>(m_FrozenKeyCount + (on ? 1 : -1));
+    }
+
 private:
     unsigned short m_Word = 0;
     short m_FrozenKeyCount = 0;

@@ -193,6 +193,7 @@
 // no world position, the mesh does not sit *anywhere* in the zone. It sits
 // on the camera.
 
+#include <utility>
 #include <vector>
 
 #include "graphics/backbuffer.h"
@@ -404,10 +405,13 @@ constexpr float kSkyboxYaw = -1.57079632679f;  // -pi/2, i.e. -0x4000
 
 // The flat background the frame starts as -- `Render3DScene`'s
 // `engine+0x630`, the colour it fills all 176*208 scene words with when
-// there is no skybox to draw. The engine's own value was never traced;
-// this is the port's, in the backbuffer's RGB565. Named so a test can ask
-// "is this pixel still bare background?" without hardcoding it twice.
-constexpr uint16_t kBackgroundFill = PackRGB565(8, 8, 16);
+// there is no skybox to draw. M130: traced -- the field has exactly one
+// store in the image, the engine constructor's `*(engine + 0x630) = 0`
+// (0x10009... `FUN_1001a848`'s caller), so the fill is black. (The other
+// `+0x630` in the decompile is the player's quest-solved array.) Named so
+// a test can ask "is this pixel still bare background?" without
+// hardcoding it twice.
+constexpr uint16_t kBackgroundFill = PackRGB565(0, 0, 0);
 
 
 // ---- M86: the hit flash, `engine+0x5060` ----
@@ -500,6 +504,8 @@ constexpr int kFlashGreenMin = 7, kFlashGreenMax = 0xc;
 // drawn both ways. It never changes a pixel; that comparison is the proof.
 void SetRasterSpanNarrowingForTest(bool enabled);
 
+struct GpuFrame;  // render3d/gpu_frame.h
+
 class ZoneRenderer {
 public:
     // Tile radius (in tiles) around the camera to scan for faces to
@@ -537,6 +543,46 @@ public:
     };
     Timings lastTimings() const { return m_Timings; }
 
+    // M130: the two terms of `SurfaceFace_BuildAndProject`'s per-vertex
+    // light that M89 traced and left out. Both are added before the
+    // [0x400, 0x3f00] clamp, to a vertex by the tile it belongs to:
+    //
+    //   * the player's glow -- `player+0x228`, a byte the weapon-fire
+    //     function (`FUN_10002a38`) sets the first time the player attacks
+    //     with an item in hand and nothing clears: `(3 - d) * 0x400` for a
+    //     tile within three of the player's, `d` the larger axis distance;
+    //   * each entity linked into the tile whose template id is 3
+    //     (`!lantern`), 0x47 (`!torch01`) or 0x1787 adds `2 + (rand & 3) *
+    //     0x100`, a flicker.
+    //
+    // An entity with `+0x86` bit 4 pins the vertex to 0x3f00; `fullTiles`
+    // carries those. M131 traced the bit's three writers: the cast's own
+    // projectile (0x10047044's spawn -- **a spell in flight lights the
+    // tile it is over**), an effect created with the engine-side "lit"
+    // argument (only a multiplayer mirror packet ever passes it), and the
+    // actor tick copying `+0x1b0`, which only the weapon-fire function
+    // sets and only the player runs -- and the tick skips the player. So
+    // in a single-player game it is the spell projectile and nothing else.
+    //
+    // `blind` is `stats+0x44 & 4` on the player -- the Blind status. The
+    // base term becomes `(cellLight - depth / 2) >> 2`: the world at a
+    // quarter of its light, before the glow and the emitters are added.
+    // The game fills this in
+    // once a tick; `seed` stands in for the engine's random stream so the
+    // software and Direct3D frames of one tick flicker alike.
+    struct SceneLights {
+        bool playerGlow = false;
+        int playerTileX = 0, playerTileY = 0;
+        std::vector<std::pair<int, int>> emitterTiles;  // one entry per emitter
+        std::vector<std::pair<int, int>> fullTiles;
+        bool blind = false;
+        uint32_t seed = 0;
+    };
+    SceneLights lights;
+    // The light a vertex of tile (tx, ty) gains from the above; `pinned`
+    // is set when it is forced to full. `salt` tells vertices apart.
+    int SceneLightBonus(int tx, int ty, uint32_t salt, bool* pinned) const;
+
     // `entities`/`models` are optional (default: none drawn) so M6/M7
     // call sites and smoke tests that only care about tile-grid geometry
     // don't need to change. `models` is non-const because Model parsing
@@ -544,6 +590,14 @@ public:
     void Render(Backbuffer& backbuffer, const Zone& zone, const Camera& camera,
                 const std::vector<PlacedEntity>& entities = {}, ModelArchive* models = nullptr,
                 const std::vector<SpriteBillboard>& billboards = {}) const;
+
+    // M129: the same frame as a triangle list for a graphics card to draw
+    // (render3d/gpu_frame.h), projected for a `width` x `height` target of
+    // any size -- not only whole multiples of 176x208. Leaves the object-ID
+    // buffer alone: that still describes the last frame Render() drew.
+    void RenderGpu(GpuFrame& frame, int width, int height, const Zone& zone, const Camera& camera,
+                   const std::vector<PlacedEntity>& entities = {}, ModelArchive* models = nullptr,
+                   const std::vector<SpriteBillboard>& billboards = {}) const;
 
     // M85: `engine+0x5b8` -- the second 176x208 buffer the stencil-family
     // rasterizers stamp an actor id into for every pixel they draw, which
@@ -572,6 +626,11 @@ public:
     }
 
 private:
+    void RenderInternal(Backbuffer* backbuffer, GpuFrame* gpuFrame, int targetWidth,
+                        int targetHeight, const Zone& zone, const Camera& camera,
+                        const std::vector<PlacedEntity>& entities, ModelArchive* models,
+                        const std::vector<SpriteBillboard>& billboards) const;
+
     mutable std::vector<uint8_t> m_ObjectIds =
         std::vector<uint8_t>(static_cast<size_t>(Backbuffer::kWidth) * Backbuffer::kHeight, 0);
     mutable int m_IdWidth = Backbuffer::kWidth;

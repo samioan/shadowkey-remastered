@@ -161,6 +161,10 @@ bool Zone::Load(const std::string& scriptRoot, const std::string& zoneName) {
     }
 
     // --- .ztx: 1 header byte + N * 0x4000-byte 128x128 8bpp texture slots ---
+    {
+        static unsigned long long nextSerial = 0;  // M129: zones load on one thread
+        resourceSerial_ = ++nextSerial;
+    }
     ztxData_ = LoadCompressedZoneFile(base + ".ztx");
     if (ztxData_.size() < 1) {
         std::printf("Zone: %s.ztx missing/empty\n", zoneName.c_str());
@@ -518,6 +522,10 @@ void Zone::ApplyCornerNudge(float* worldX, float* worldY) const {
         case 8: *worldY -= kHalfTile; break;
         default: break;
     }
+}
+
+int Zone::textureSlotCount() const {
+    return ztxData_.size() > 1 ? static_cast<int>((ztxData_.size() - 1) / kZtxSlotSize) : 0;
 }
 
 uint8_t Zone::TexelAt(int surfaceTextureIndex, int x, int y) const {
