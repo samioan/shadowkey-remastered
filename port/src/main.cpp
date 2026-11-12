@@ -10064,8 +10064,18 @@ int main(int argc, char** argv) {
                         // found: casting is not rate-limited by the swing
                         // the way swinging is, only by the spell's own
                         // refire cooldown and by magicka.
+                        // M134: the caster's *body* height, not the eye.
+                        // The spell projectile's constructor (0x1005f1..)
+                        // takes `caster+0xa4 + 0x20` -- the entity's own z,
+                        // which for the player is its feet; only the arrow
+                        // reads the player's eye field (`+0x224`). Fired
+                        // from the camera, the fireball started a whole eye
+                        // height up and then climbed its 0x32 a tick from
+                        // there, which is why it flew far above a thrown
+                        // dagger. From the feet it rises through the view.
                         if (!runSpellCast(handItem, &stack.player(), gameCamera.x, gameCamera.y,
-                                          gameCamera.z, gameCamera.yaw, gameCamera.pitch)) {
+                                          gameCamera.z - sk::kEyeHeightOffset, gameCamera.yaw,
+                                          gameCamera.pitch)) {
                             return true;
                         }
                         sk_bindings::StartSpellSwing(gameWeaponViewmodel);

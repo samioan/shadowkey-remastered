@@ -586,7 +586,12 @@ private:
     bool m_Usable = false;
     int m_ArmorValue = 0;
     int m_ArmorType = 0;
-    int m_ArmorConstraint = 0;
+    // M134: AR_Light, not 0. Both armour constructors (`FUN_1002e954` and
+    // the shield's beside it) write `+0x1d4 = 2`, and the class gate
+    // (`FUN_1001f82c`) refuses a constraint the class row does not share --
+    // so with 0 every piece whose script never calls SetArmorConstraint
+    // (all the leather, cloth and the bracers) was unwearable by any class.
+    int m_ArmorConstraint = 2;
     std::vector<DamageBonus> m_DamageBonuses;  // M87
     int m_DamageMin = 0;
     int m_DamageMax = 0;

@@ -13172,11 +13172,44 @@ equipping a second helm takes the first one off. Arrows never read armour
 (their impact passes the roll straight to DoDamage), so this changes melee
 only.
 
+### Armour that would not equip, and weapons that offered "Equip" again
+
+Two inventory-row natives answered from the wrong thing:
+
+* **IsItemEnabledFor** on an owned item returned true unconditionally, and
+  the armour default behind it was wrong. Both armour constructors
+  (`FUN_1002e954` and the shield's) write `+0x1d4 = 2`, AR_Light; the port
+  defaulted the constraint to 0, which `FUN_1001f82c` refuses for every
+  class -- so all leather, cloth and bracers (no SetArmorConstraint in their
+  scripts) were unwearable, and the row still offered Equip. The row now
+  asks the class gate (`FUN_100450a0`) and the default is 2.
+* **IsInventoryEquipped** read the item's worn flag. The real item arm
+  (0x100a5210) is `FUN_100453e0` (a hand or an armour slot) **or** either
+  hand queue -- so a weapon queued behind another, or left queued with the
+  hand empty, offered "Equip", and pressing it took it out of the queue.
+
+### Blaze fired from too high
+
+The spell projectile spawns at `caster+0xa4 + 0x20` -- the caster's own z,
+the feet -- and climbs `sin(-pitch) + 0x32` a tick. Only the arrow reads the
+player's eye field (`+0x224`). The player's cast passed the camera height,
+so the fireball started a full eye height up and rose from there; it now
+starts at the feet, as a creature's cast always has.
+
+### Twilight Temple's invincible zombies at 1:1 (a port choice)
+
+`twilite/inv_zombie_dawn.s` and `inv_zombie_dusk.s` are authored at
+`SetScale(352)`, 1.375x -- nearly twice the height of the 192-scale NPCs
+around them -- and `twilite/loot1.s` carries the designers' own
+commented-out `SetScale(256)` for the pair. At the playtester's request the
+SetScale handler draws exactly those two scripts' 352 at 256. A deliberate
+departure from the shipped data, limited to those two files.
+
 ### One attribute point per level
 
 As shipped: `FUN_10044618` adds exactly 1 to `+0xf44`, and each of
 `levelup.s`'s eight choices spends it for +5 to one attribute.
 
 Tests: `m134_consumable_stack_smoke` (stacks, Rat's Eye, the GTA gate
-through the real Gate_Open_A, the armour rating and slots);
+through the real Gate_Open_A, the armour rating and slots, the AR_Light default, the zombie scale);
 `m10_inventory_smoke` now expects the fractional rating.

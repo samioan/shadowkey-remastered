@@ -27,6 +27,20 @@
 
 namespace sk_bindings {
 
+// M134: see the SetScale handler.
+bool MonsterExecutable::IsInvulnerableZombieScript() {
+    std::string path = ToStdString(getLocation());
+    for (char& c : path) {
+        if (c == '\\') c = '/';
+        if (c >= 'A' && c <= 'Z') c = static_cast<char>(c - 'A' + 'a');
+    }
+    auto endsWith = [&](const char* tail) {
+        const std::string t(tail);
+        return path.size() >= t.size() && path.compare(path.size() - t.size(), t.size(), t) == 0;
+    };
+    return endsWith("twilite/inv_zombie_dawn.s") || endsWith("twilite/inv_zombie_dusk.s");
+}
+
 sk::SoundArchive* MonsterExecutable::entitySounds() const { return m_Stack.sounds(); }
 sk::AudioEngine* MonsterExecutable::entityAudio() const { return m_Stack.audio(); }
 
@@ -1201,6 +1215,14 @@ bool MonsterExecutable::method(const skString& methodName, skRValueArray& args,
         // A value of exactly 256 being the identity is what makes that
         // range read as "0.8x to 1.2x".
         m_Scale = args[0].intValue();
+        // M134, a deliberate departure from the shipped data, asked for in
+        // playtesting: Twilight Temple's two invincible zombies
+        // (`twilite/inv_zombie_dawn.s` / `inv_zombie_dusk.s`) are authored
+        // at SetScale(352), 1.375x -- nearly twice the height of the
+        // 192-scale NPCs around them. `twilite/loot1.s` carries the
+        // designers' own commented-out `SetScale(256)` for the pair. They
+        // are drawn at 1:1 here; nothing else reads the scale.
+        if (m_Scale == kInvulnerableZombieScale && IsInvulnerableZombieScript()) m_Scale = 256;
         return true;
     }
     if (methodName == skString("GetPlayer") && args.entries() == 0) {

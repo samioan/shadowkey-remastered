@@ -56,7 +56,16 @@ bool TableRowHandle::method(const skString& methodName, skRValueArray& args,
         // no item to inspect it falls back to "does the player already own
         // one of these?" (FUN_10045474, by template id).
         if (cell->item) {
-            returnValue = skRValue(cell->item->equipped());
+            // M134: the row binding's item arm (0x100a5210): `FUN_100453e0`
+            // -- in either hand or any armour slot -- or a member of the
+            // right or the left hand queue. Reading the item's worn flag
+            // alone answered false for a weapon that is queued but not in
+            // the hand, so its row offered "Equip", and pressing that took
+            // it *out* of the queue.
+            PlayerExecutable& player = m_Table.owner().stackPlayer();
+            const ItemExecutable* item = cell->item;
+            returnValue = skRValue(item == player.leftItem() || item == player.rightItem() ||
+                                   item->equipped() || player.QueueHoldingItem(item) >= 0);
         } else if (cell->product) {
             returnValue = skRValue(m_Table.owner().PlayerOwnsTemplate(cell->product->templateId));
         }
@@ -71,9 +80,14 @@ bool TableRowHandle::method(const skString& methodName, skRValueArray& args,
         if (cell->product) {
             returnValue =
                 skRValue(cell->product->enabledForClass(m_Table.owner().PlayerCharacterClass()));
+        } else if (cell->item) {
+            // M134: an owned item asks the class gate itself
+            // (`FUN_100450a0` -> `FUN_1001f82c`, M74) -- `inventory.s` blanks
+            // the Equip row on a false. This answered true for every owned
+            // item, so armour the class may not wear offered "Equip" and
+            // the press did nothing.
+            returnValue = skRValue(m_Table.owner().stackPlayer().IsItemEnabledFor(*cell->item));
         } else {
-            // No per-item class-restriction data exists in this port (see
-            // M59's product_database.h) -- an owned item is always usable.
             returnValue = skRValue(true);
         }
         return true;

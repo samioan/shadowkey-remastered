@@ -18,6 +18,10 @@
 //         Gate_Open_A's OpenGate takes it out of the world
 // Part 5  FUN_10042490: the armour rating is a fraction of each worn
 //         slot's value, one piece per slot -- not the sum of every piece
+// Part 6  an armour script with no SetArmorConstraint is AR_Light (the
+//         constructors' default), not unwearable
+// Part 7  Twilight Temple's invincible zombies draw at 1:1, not their
+//         authored 1.375x (a deliberate port choice)
 #include <cstdio>
 #include <memory>
 #include <string>
@@ -31,10 +35,12 @@
 #include "simkin_bindings/item_executable.h"
 #include "simkin_bindings/level_executable.h"
 #include "simkin_bindings/menu_stack.h"
+#include "simkin_bindings/monster_executable.h"
 #include "simkin_bindings/menu_executable.h"
 #include "simkin_bindings/player_executable.h"
 #include "skExecutableContext.h"
 #include "skInterpreter.h"
+#include "skParseException.h"
 #include "skRValue.h"
 #include "skRValueArray.h"
 #include "skRuntimeException.h"
@@ -212,6 +218,51 @@ int main(int argc, char** argv) {
         if (c) player.UpdateEquipStatus(c, true);
         Check(c && c->equipped() && worn[2] && !worn[2]->equipped() && player.armorRating() == 6,
               "a second helm takes the helm slot: the first comes off, 4 + 1 + 1 = 6");
+    }
+
+    // ---------------------------------------------------------------
+    std::printf("\n== Part 6: armour with no SetArmorConstraint ==\n");
+    {
+        skRValueArray args;
+        args.append(skRValue(sk_b::kClassBattlemage));  // AR_Light only
+        skRValue ret;
+        skExecutableContext ctxt(&interpreter);
+        player.method(skString("ChooseCharacter"), args, ret, ctxt);
+        std::unique_ptr<Item> shirt = stack.level().CreateItem(606, false);  // leather_shirt.s
+        std::unique_ptr<Item> boots = stack.level().CreateItem(619, false);  // Bonemold_Boots.s
+        Check(shirt && shirt->armorConstraint() == 2 && player.IsItemEnabledFor(*shirt),
+              "leather_shirt.s sets no constraint: AR_Light by default, a Battlemage may wear it");
+        Check(boots && !player.IsItemEnabledFor(*boots),
+              "  while AR_Medium Bonemold Boots are still refused");
+    }
+
+    // ---------------------------------------------------------------
+    std::printf("\n== Part 7: the Twilight Temple zombies at 1:1 ==\n");
+    {
+        auto loadMonster = [&](const char* rel) {
+            std::unique_ptr<sk_b::MonsterExecutable> m;
+            try {
+                skExecutableContext ctxt(&interpreter);
+                const std::string path = root + "/" + rel;
+                m = std::make_unique<sk_b::MonsterExecutable>(skString(path.c_str()), ctxt,
+                                                               &strings, player, stack);
+                skRValueArray args;
+                args.append(skRValue(0));
+                skRValue ret;
+                m->method(skString("Init"), args, ret, ctxt);
+            } catch (skParseException& e) {
+                std::printf("   (PARSE ERROR: %s)\n", e.toString().ptr());
+            } catch (skRuntimeException& e) {
+                std::printf("   (RUNTIME ERROR: %s)\n", e.toString().ptr());
+            }
+            return m;
+        };
+        auto dawn = loadMonster("twilite/inv_zombie_dawn.s");
+        auto dusk = loadMonster("twilite/inv_zombie_dusk.s");
+        Check(dawn && dusk && dawn->scale() == 1.0f && dusk->scale() == 1.0f,
+              "inv_zombie_dawn/dusk's SetScale(352) draws at 1:1 (port choice)");
+        auto rat = loadMonster("monsters/azra_rat.s");
+        Check(rat && rat->scale() != 1.375f, "  and nothing else's scale is touched");
     }
 
     std::printf("\nm134_consumable_stack_smoke: %d/%d checks passed\n", g_checks - g_failures,
