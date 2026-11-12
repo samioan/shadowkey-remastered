@@ -16,11 +16,14 @@
 // Part 4  a named door-class placement with no script (delfhide's
 //         `!portcullis` GTA) is a live object Level.GetEntity finds, and
 //         Gate_Open_A's OpenGate takes it out of the world
+// Part 5  FUN_10042490: the armour rating is a fraction of each worn
+//         slot's value, one piece per slot -- not the sum of every piece
 #include <cstdio>
 #include <memory>
 #include <string>
 
 #include "assets/string_table.h"
+#include "simkin_bindings/character_progression.h"
 #include "simkin_bindings/door_executable.h"
 #include "simkin_bindings/entity_base_ref.h"
 #include "simkin_bindings/game_constants.h"
@@ -176,6 +179,39 @@ int main(int argc, char** argv) {
         Check(gate.entityRemoved(),
               "OpenGate: Level.GetEntity(\"GTA\").DestroyObjectMirror removes the gate");
         Check(flag.intValue() == 1, "  and runs on to Level.saved_GateA = 1");
+    }
+
+    // ---------------------------------------------------------------
+    std::printf("\n== Part 5: the armour rating a creature's hit subtracts ==\n");
+    {
+        {
+            skRValueArray args;
+            args.append(skRValue(0));  // an Argonian: no Nord roll in the rating
+            skRValue ret;
+            skExecutableContext ctxt(&interpreter);
+            player.method(skString("ChooseRace"), args, ret, ctxt);
+            skRValueArray classArgs;
+            classArgs.append(skRValue(sk_b::kClassKnight));  // may wear all three weights
+            player.method(skString("ChooseCharacter"), classArgs, ret, ctxt);
+        }
+        Item* worn[3] = {};
+        const int kit[3] = {605, 646, 630};  // iron cuirass, iron shield, Dragonstar helm
+        for (int i = 0; i < 3; ++i) {
+            std::unique_ptr<Item> a = stack.level().CreateItem(kit[i], false);
+            if (!a) continue;
+            worn[i] = a.get();
+            player.AddItem(std::move(a));
+            player.UpdateEquipStatus(worn[i], true);
+        }
+        // 12*0x6600>>16 = 4 (type 1) + 19*25>>8 = 1 + 22*25>>8 = 2
+        Check(worn[0] && worn[1] && worn[2] && player.armorRating() == 7,
+              "cuirass 12 + shield 19 + helm 22 rate 4 + 1 + 2 = 7, not their sum (53)");
+        std::unique_ptr<Item> coif = stack.level().CreateItem(614, false);  // chain coif, type 4
+        Item* c = coif.get();
+        if (coif) player.AddItem(std::move(coif));
+        if (c) player.UpdateEquipStatus(c, true);
+        Check(c && c->equipped() && worn[2] && !worn[2]->equipped() && player.armorRating() == 6,
+              "a second helm takes the helm slot: the first comes off, 4 + 1 + 1 = 6");
     }
 
     std::printf("\nm134_consumable_stack_smoke: %d/%d checks passed\n", g_checks - g_failures,

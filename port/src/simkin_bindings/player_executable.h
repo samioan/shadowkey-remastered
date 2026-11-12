@@ -393,10 +393,13 @@ public:
     // instead of faking a skRValueArray call into the dispatcher.
     int baseAttack() const { return m_BaseAttack; }
     int baseDefense() const { return m_BaseDefense; }
-    // Sum of every equipped armor item's real SetArmorValue() -- same
-    // loop GetArmorRating()'s native handler runs, factored out here so
-    // it isn't duplicated between the script-facing path and this one.
+    // M134: `FUN_10042490`, the rating a creature's melee hit subtracts --
+    // a fraction of each worn slot's armour value, not their sum. See the
+    // definition.
     int armorRating() const;
+    // The eight armour slots, `player+0xf8c`, indexed by SetArmorType.
+    static constexpr int kArmorSlots = 8;
+    const ItemExecutable* wornArmor(int slot) const;
     // Clamps m_Health at 0 -- mirrors MonsterExecutable::ApplyDamage().
     // M98: the attacker and the site's p5 (`ranged`) feed FUN_10049e78's
     // terms -- the Knight's halving, a creature's Strength (always 0), the

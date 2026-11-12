@@ -13151,5 +13151,32 @@ change has no record of them, so they come back already gone.
 puzzle opens the same door with the TRkey, but nothing in the corpus locks
 it. Kept as shipped.
 
+### Armour made the player immune to melee
+
+A creature's melee hit (`FUN_100835b8`) subtracts the player's armour
+rating, read through the stats block's vtable +0x3c -- a `this -= 0x3ac`
+thunk (0x100a4520) to `FUN_10042490`. The port subtracted the **sum of every
+worn piece's SetArmorValue**; with shipped values of 12..60 a piece and
+creature damage mostly 4..36, three pieces absorbed every blow. The real
+rating walks the eight armour slots (`player+0xf8c`, by SetArmorType) and
+takes a fraction of each:
+
+    type 1:          value * 0x6600 >> 16      (~40%)
+    types 0, 2..6:   value * 25 >> 8           (~10%)
+    + rand(1..race ability) for a Nord (+0xf3c == 5, +0xfb4)
+    + the stats block's own armour field (HarmArmor, AddEffect)
+
+An iron cuirass, iron shield and Dragonstar helm now rate 7, not 53. The
+slots are also exclusive, as `FUN_1003dbdc` writes one pointer per slot:
+equipping a second helm takes the first one off. Arrows never read armour
+(their impact passes the roll straight to DoDamage), so this changes melee
+only.
+
+### One attribute point per level
+
+As shipped: `FUN_10044618` adds exactly 1 to `+0xf44`, and each of
+`levelup.s`'s eight choices spends it for +5 to one attribute.
+
 Tests: `m134_consumable_stack_smoke` (stacks, Rat's Eye, the GTA gate
-through the real Gate_Open_A).
+through the real Gate_Open_A, the armour rating and slots);
+`m10_inventory_smoke` now expects the fractional rating.

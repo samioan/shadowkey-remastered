@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <cstdio>
+#include <cstdlib>
 
 #include "assets/sound_archive.h"
 #include "assets/string_table.h"
@@ -454,11 +455,36 @@ void PlayerExecutable::PurgeRemovedItems() {
 }
 
 int PlayerExecutable::armorRating() const {
-    int total = 0;
-    for (const auto& item : m_Inventory) {
-        if (item->itemType() == kItemTypeArmor && item->equipped()) {
-            total += item->armorValue();
+    // M134: `FUN_10042490`, reached as the stats block's vtable +0x3c
+    // (a this-adjusting thunk at 0x100a4520, `sub r0, r0, #0x3ac`) -- the
+    // number a creature's melee hit (`FUN_100835b8`) subtracts. It is not
+    // the sum of the worn armour values, which is what this was, and with
+    // shipped values of 20..60 a piece that made a few pieces of armour
+    // absorb every melee blow and arrow in the game. The real loop walks
+    // the eight armour slots (`player+0xf8c`, indexed by SetArmorType) and
+    // takes a *fraction* of each piece's value (`+0x1cc`):
+    //
+    //     type 1:              value * 0x6600 >> 16    (~40%)
+    //     types 0, 2..6:       value * 25 >> 8         (~10%)
+    //     anything else (7):   nothing
+    //
+    // then adds rand(1..raceAbility) for a Nord (`+0xf3c == 5`, the race
+    // ability rank at `+0xfb4`), then the stats block's own armour field.
+    unsigned total = 0;
+    for (int slot = 0; slot < kArmorSlots; ++slot) {
+        const ItemExecutable* item = wornArmor(slot);
+        if (!item) continue;
+        const unsigned value = static_cast<unsigned>(item->armorValue()) & 0xffff;
+        unsigned part = 0;
+        switch (slot) {
+            case 1: part = value * 0x6600 >> 16; break;
+            case 0: case 2: case 3: case 4: case 5: case 6: part = value * 0x19 >> 8; break;
+            default: break;
         }
+        total = (total + part) & 0xffff;
+    }
+    if (m_Race == kRaceNord && m_RaceAbility >= 1) {
+        total = (total + 1 + std::rand() % m_RaceAbility) & 0xffff;  // FUN_100730c8(1, rank)
     }
     // M43: a creature's HarmArmor lands here now (shadow_tentacle.s and
     // tunnel_wight.s both cast it), so the same timed modifier a creature
@@ -466,8 +492,21 @@ int PlayerExecutable::armorRating() const {
     // M58: it is the stats block's own armour field (stats+0x0c) that both
     // HarmArmor and AddEffect(ArmorValue, ...) write, so this reads the
     // field rather than re-deriving a modifier from the effect list.
-    total += m_ArmorValue;
-    return total < 0 ? 0 : total;
+    const int rating = static_cast<int>(total) + m_ArmorValue;
+    return rating < 0 ? 0 : rating;
+}
+
+// M134: `player+0xf8c[slot]` -- the one piece worn in each armour slot.
+// This port keeps the worn flag on the items rather than a slot array;
+// UpdateEquipStatus keeps it to one piece per slot, as FUN_1003dbdc does.
+const ItemExecutable* PlayerExecutable::wornArmor(int slot) const {
+    for (const auto& item : m_Inventory) {
+        if (item && !item->markedForRemoval() && item->itemType() == kItemTypeArmor &&
+            item->equipped() && item->armorType() == slot) {
+            return item.get();
+        }
+    }
+    return nullptr;
 }
 
 // ---- M59: the three trading verbs (store.h) ----
@@ -910,6 +949,18 @@ int PlayerExecutable::UpdateEquipStatus(ItemExecutable* item, bool equipping) {
         // applies/removes that specific item's stat bonuses. This port has
         // the toggle; the per-item bonus table is a separate, unmodelled
         // function (see armorRating(), which sums the worn items instead).
+        //
+        // M134: and the toggle is a *slot* -- `player+0xf8c[item+0x1d0]`
+        // is one pointer, so wearing a second helm puts it in the slot the
+        // first one occupied. The first is no longer worn.
+        if (equipping) {
+            for (const auto& other : m_Inventory) {
+                if (other && other.get() != item && other->itemType() == kItemTypeArmor &&
+                    other->equipped() && other->armorType() == item->armorType()) {
+                    other->SetEquipped(false);
+                }
+            }
+        }
         item->SetEquipped(equipping);
         return 1;
     }

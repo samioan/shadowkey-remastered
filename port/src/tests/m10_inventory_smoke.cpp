@@ -239,6 +239,11 @@ int main(int argc, char** argv) {
             skRValue classRet;
             skExecutableContext classCtxt(&interpreter);
             stack.player().method(skString("ChooseCharacter"), classArgs, classRet, classCtxt);
+            // M134: and not a Nord -- the real rating (FUN_10042490) adds a
+            // Nord's rand(1..race ability) to it, which this test is not about.
+            skRValueArray raceArgs;
+            raceArgs.append(skRValue(sk_bindings::kRaceArgonian));
+            stack.player().method(skString("ChooseRace"), raceArgs, classRet, classCtxt);
         }
         sk_bindings::ItemExecutable* armor = nullptr;
         for (const auto& item : stack.player().inventory()) {
@@ -269,7 +274,10 @@ int main(int argc, char** argv) {
                         ret.intValue());
             // M74: the real success code is 1, not 0 -- see
             // PlayerExecutable::UpdateEquipStatus()'s own comment.
-            if (ret2 != 1 || ret.intValue() != armor->armorValue()) {
+            // M134: a fraction of the value, by slot -- FUN_10042490.
+            const int expected = armor->armorType() == 1 ? armor->armorValue() * 0x6600 >> 16
+                                                          : armor->armorValue() * 25 >> 8;
+            if (ret2 != 1 || ret.intValue() != expected) {
                 std::printf("m10_inventory_smoke: FAILED equip didn't change armor rating\n");
                 return 1;
             }
