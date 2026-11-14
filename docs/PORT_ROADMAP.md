@@ -13273,3 +13273,45 @@ Heal Wound casts with slot 0x55, `NULL.wav` in all 22 sound tables -- it is
 silent on the device. The Fearfrost mushrooms' +50 MaxHealth lasts 300 s;
 health is not clamped when the maximum falls back, and a save made while it
 is up keeps it (timed effects are not saved), both as the engine does.
+
+## M136 -- paralysis, the Witch Tree, and Bled's desk
+
+### A paralysed player cannot walk
+
+A creature's Paralyze reaches the player through the stats block's vtable
++0x44, `VFUN_100a4598`: the countdown at `player+0x41c` and the byte at
+`player+0x398` (the same pair `SetParalyzed`, player dispatcher case 0x19,
+writes). FUN_10045294 counts it down and clears the byte. The think step
+reads the byte in two places: the four move buttons (0/1/6/7, vtable
++0x1cc..+0x1d8) and the jump (button 8) are inside `if (player+0x398 == 0)`;
+turning, looking and both use/attack buttons (0xe/0xf) are not. The port
+stored and counted the timer and read it nowhere, so a clawrunner's
+Paralyze did nothing. Forward/back/strafe and the jump now sit behind
+`!paralyzed()`; a paralysed player can still turn and swing, as on the
+device.
+
+### Scripted category-1 placements are usable objects
+
+Category 11's constructor (`FUN_1002e708`) is category 1's (`FUN_10067998`)
+plus a vtable swap -- same 0x160 object, same Drawable save record. The
+port only made category 11 live, so a category-1 placement with a script
+stayed scenery: no prompt, no OnUse. In the shipped data that is nine
+placements with a script that exists: the Witch Tree (`wthtree`,
+ghstpass\witchtree.s -- quests 14-16 and the Star Tooth), Sergeant Bled's
+desk (`loot1`, broken1\loot1.s -- the Bribery Papers, quest 47), broken1's
+two weapon racks (loot4/loot5), delfhide's four BarrelSwitch barrels and
+dstar_w's Crushed Scroll chair. (`teleporter.s`, the other scripted
+category-1 row, does not ship.) `IsUsableObjectCategory` now sends them
+down the door path. `m136_usable_object_smoke` drives the tree and the
+desk through Init, OnUse and the desk's Take.
+
+### Checked and left as shipped
+
+Skelos (erthcave/skelosteeth.s) offers "You expect me to give you the Star
+Teeth back?" on any visit after the first tooth once `QuestCompleted(24)`
+is true and the player still carries a tooth. Quest 24 is completed by
+Lakvan's pergan_killed.s (Pergan dies with Azra's quest assigned) or by
+ffarena's FailSafe0 -- both before Azra's Crossing, where azra_convo2.s
+explains why Skelos must not use five teeth. The script gates on the quest
+only, so the betrayal option comes up before that explanation on the
+device too.

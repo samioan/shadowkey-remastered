@@ -435,6 +435,16 @@ bool IsPickupCategory(int category) {
 // OnUse() rather than transferring themselves -- see PickupInstance.
 bool IsContainerCategory(int category) { return category == 8 || category == 12; }
 
+// M136: the door class and its base. Category 11's constructor
+// (FUN_1002e708) is category 1's (FUN_10067998) plus a vtable swap -- same
+// 0x160 object, same Drawable save record -- so category 1 is the plain
+// usable world object a door is built on. Scripted category-1 rows are
+// rare: `teleporter.s` (no such file ships) and `ghstpass\witchtree.s`,
+// the Witch Tree, whose OnUse opens the quest 14-16 conversation. Left as
+// scenery it had no prompt and no OnUse, and the Star Tooth quest chain
+// could never start.
+bool IsUsableObjectCategory(int category) { return category == 1 || category == 11; }
+
 bool HasRealScript(const std::string& entityTypeName) {
     return entityTypeName.size() > 2 &&
            entityTypeName.compare(entityTypeName.size() - 2, 2, ".s") == 0;
@@ -6817,7 +6827,7 @@ int main(int argc, char** argv) {
                                              const std::string& name) {
                     if (scriptlessNamedDoor(desc, scriptPath, name)) return true;
                     return !scriptPath.empty() &&
-                           (desc.category == 11 || IsPickupCategory(desc.category) ||
+                           (IsUsableObjectCategory(desc.category) || IsPickupCategory(desc.category) ||
                             desc.category == 2 || desc.category == 7);
                 };
                 std::vector<std::pair<sk::Zone::EntPlacement, const sk::SavedEntity*>> placements;
@@ -6835,7 +6845,7 @@ int main(int argc, char** argv) {
                         gameTrapCandidates.push_back(std::move(cand));
                         // The destroyed door's baked closed footprint (M67)
                         // goes with it; the restored door stamps its own.
-                        if (desc->category == 11 ||
+                        if (IsUsableObjectCategory(desc->category) ||
                             IsTrappedDoor(desc->category, placementScript(e, desc))) {
                             const sk::ModelCollision& dc =
                                 gameModelCollision.At(desc->modelArchiveIndex);
@@ -6920,7 +6930,8 @@ int main(int argc, char** argv) {
                         scriptlessNamedDoor(*desc, placementScriptPath, e.name);
                     // Post-M134: and a category-12 door (IsTrappedDoor).
                     const bool trappedDoor = IsTrappedDoor(desc->category, placementScriptPath);
-                    if ((desc->category == 11 || trappedDoor) &&
+                    // M136: category 1 too -- see IsUsableObjectCategory.
+                    if ((IsUsableObjectCategory(desc->category) || trappedDoor) &&
                         (!placementScriptPath.empty() || scriptlessDoor)) {
                         const std::string fullPath =
                             scriptlessDoor ? "(no script) " + e.name : placementScriptPath;
@@ -7739,10 +7750,21 @@ int main(int argc, char** argv) {
                 };
                 // M99: actions 0/1/6/7 through the bindings, in the engine's
                 // order (vtable +0x1cc, +0x1d0, +0x1d4, +0x1d8).
-                if (input.GetBoundButton(sk::Action::MoveForward)) thrust(sk_bindings::MoveDir::Forward);
-                if (input.GetBoundButton(sk::Action::MoveBackward)) thrust(sk_bindings::MoveDir::Backward);
-                if (input.GetBoundButton(sk::Action::SideStepLeft)) thrust(sk_bindings::MoveDir::StrafeLeft);
-                if (input.GetBoundButton(sk::Action::SideStepRight)) thrust(sk_bindings::MoveDir::StrafeRight);
+                //
+                // M136: all four sit inside the think step's
+                // `if (player+0x398 == 0)` -- the paralysis byte that the
+                // player's stats-block slot +0x44 (VFUN_100a4598) sets when
+                // a Paralyze lands, and FUN_10045294 clears when the
+                // +0x41c countdown runs out. Turning and looking are
+                // outside it, and so are both use/attack buttons: a
+                // paralysed player can still turn and swing, just not
+                // walk, strafe or jump.
+                if (!stack.player().paralyzed()) {
+                    if (input.GetBoundButton(sk::Action::MoveForward)) thrust(sk_bindings::MoveDir::Forward);
+                    if (input.GetBoundButton(sk::Action::MoveBackward)) thrust(sk_bindings::MoveDir::Backward);
+                    if (input.GetBoundButton(sk::Action::SideStepLeft)) thrust(sk_bindings::MoveDir::StrafeLeft);
+                    if (input.GetBoundButton(sk::Action::SideStepRight)) thrust(sk_bindings::MoveDir::StrafeRight);
+                }
                 // FUN_10000498's friction, then FUN_10000c64.
                 gameMotion.vx = sk_bindings::PlayerFriction(gameMotion.vx);
                 gameMotion.vy = sk_bindings::PlayerFriction(gameMotion.vy);
@@ -8206,7 +8228,11 @@ int main(int argc, char** argv) {
                 constexpr float kMaxFallSpeed = 200.0f;  // clamp, avoids tunneling through thin
                                                           // floors over one big tick step
                 constexpr float kHeadroom = 32.0f;    // 0x20, the engine's eye-to-ceiling gap
-                if (onGround && input.ConsumeBoundJustPressed(sk::Action::Jump)) {
+                // M136: the think step tests `player+0x398 == 0` first, so
+                // a paralysed player cannot jump either (the press is
+                // still consumed, not banked for when it wears off).
+                if (onGround && input.ConsumeBoundJustPressed(sk::Action::Jump) &&
+                    !stack.player().paralyzed()) {
                     // M51: the real jump (FUN_10044400) is not free. It
                     // refuses outright unless current fatigue is above 5,
                     // spends 5, and plays pl_jump_female.wav (slot 91) or

@@ -949,3 +949,9 @@ target_link_libraries(delfhide_smoke PRIVATE sk_bindings sk_world)
 # (FUN_100451ac). See src/tests/m134_consumable_stack_smoke.cpp.
 add_executable(consumable_stack_smoke src/tests/m134_consumable_stack_smoke.cpp)
 target_link_libraries(consumable_stack_smoke PRIVATE sk_bindings sk_world)
+
+# M136: scripted category-1 placements (the Witch Tree, Bled's desk) are
+# the usable-object class doors derive from, not scenery. See
+# src/tests/m136_usable_object_smoke.cpp.
+add_executable(usable_object_smoke src/tests/m136_usable_object_smoke.cpp)
+target_link_libraries(usable_object_smoke PRIVATE sk_bindings sk_world)
