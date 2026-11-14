@@ -900,8 +900,16 @@ void RasterizeModelTriangleT(Backbuffer& backbuffer, std::vector<float>& depthBu
                 u = (l0 * a.u + l1 * b.u + l2 * c.u) / invW;
                 v = (l0 * a.v + l1 * b.v + l2 * c.v) / invW;
             }
-            int tx = std::clamp(static_cast<int>(u), 0, model.width - 1);
-            int ty = std::clamp(static_cast<int>(v), 0, model.height - 1);
+            // Post-M134: wrapped, not clamped. Poly3D_RasterizeTextured
+            // addresses `(mask & u) + ((mask & v) << sizeClass)` with
+            // `mask = (1 << sizeClass) - 1` (RoomFace_RasterizeTextured
+            // does the same with a fixed 0xff), and the shipped UVs rely
+            // on it: sword.bin's 16x16 skin is addressed out to u=42,
+            // v=64. Clamping smeared the skin's last column -- blue on all
+            // five weapon models -- over every bandit's blade. Every
+            // texture is a square power of two.
+            int tx = static_cast<int>(u) & (model.width - 1);
+            int ty = static_cast<int>(v) & (model.height - 1);
 
             uint16_t raw444 = model.TexelAt(skinIndex, tx, ty);
             if (asSkybox) {

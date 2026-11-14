@@ -440,6 +440,44 @@ bool HasRealScript(const std::string& entityTypeName) {
            entityTypeName.compare(entityTypeName.size() - 2, 2, ".s") == 0;
 }
 
+// Post-M134: does the script file declare `<method>[` as a handler? Used to
+// tell a category-12 door from a category-12 chest -- see IsTrappedDoor.
+bool ScriptDeclaresMethod(const std::string& path, const std::string& method) {
+    std::ifstream in(path, std::ios::binary);
+    if (!in) return false;
+    const std::string text((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+    for (size_t at = text.find(method); at != std::string::npos;
+         at = text.find(method, at + method.size())) {
+        if (at > 0 && (std::isalnum(static_cast<unsigned char>(text[at - 1])) ||
+                       text[at - 1] == '_')) {
+            continue;  // the tail of a longer name
+        }
+        size_t i = at + method.size();
+        while (i < text.size() && (text[i] == ' ' || text[i] == '\t')) ++i;
+        if (i < text.size() && text[i] == '[') return true;
+    }
+    return false;
+}
+
+// Post-M134: category 12 is ONE engine class, `FUN_1002e678`, built on the
+// container (`FUN_10029044`, category 8) -- `!trapped_door`,
+// `!trapped_chest`, `!crate_lootTrapped` and `!lakvansdoor` all share it.
+// The engine has no door-specific code for it: a door is whatever its script
+// makes it, with base-entity natives (SetPassable, AddRotationTurn,
+// DoorOpened) and its own `OpenDoor[` handler. `OpenDoor` is in no native
+// trie a category-12 object reaches -- the only one is the trigger class's
+// (0x14ccc, dispatcher FUN_10090500), which no other dispatcher chains to.
+//
+// This port does split doors from containers, so a category-12 placement
+// whose script declares `OpenDoor` is a door. In the shipped data that is
+// exactly one placement, lakvan's `lakdoor` (`lockeddoor_bl.s`). Taking it
+// as a container meant no door object, no prompt, and a `GetEntity("lakdoor")`
+// that the EnterZone("lakvans_room") key check could never open.
+bool IsTrappedDoor(int category, const std::string& scriptPath) {
+    return category == 12 && !scriptPath.empty() &&
+           ScriptDeclaresMethod(scriptPath, "OpenDoor");
+}
+
 // "ChooseMale" -> "Male", "ChooseFemale" -> "Female" -- strips the
 // convention these callbacks use; falls back to the raw name otherwise.
 // Real portrait sprites are out of scope here (see
@@ -6370,6 +6408,17 @@ int main(int argc, char** argv) {
             // in this port has ever loaded it as a zone.
             spriteArchive.LoadCategory(scriptRoot, sk::kFrontEndLevelName);
             soundArchive.LoadCategory(scriptRoot, sk::kFrontEndLevelName);
+            // Post-M134: the music. FUN_1002707c stops it at stage 4
+            // (`FUN_100096b8(audio, 5)` + `FUN_100094ac(audio, 0)`) and, at
+            // stage 80 after the "menu" manifests are back, starts the
+            // front end's track: `FUN_1001b180(engine, 0x46, 100, 0xff)`,
+            // the same battle3.ogg call startup makes. The port did
+            // neither, so the level's track kept playing over MainMenu
+            // after a death or a Quit.
+            audioEngine.StopMusic();
+            if (const sk::Sound* menuMusic = soundArchive.GetSound(sk::kSoundMenuMusic)) {
+                audioEngine.PlayMusic(*menuMusic);
+            }
             std::printf("shadowkey-port: QuitToMenu -- session torn down, back to MainMenu\n");
             stack.OpenMenu("MainMenu");
             return;
@@ -6786,7 +6835,8 @@ int main(int argc, char** argv) {
                         gameTrapCandidates.push_back(std::move(cand));
                         // The destroyed door's baked closed footprint (M67)
                         // goes with it; the restored door stamps its own.
-                        if (desc->category == 11) {
+                        if (desc->category == 11 ||
+                            IsTrappedDoor(desc->category, placementScript(e, desc))) {
                             const sk::ModelCollision& dc =
                                 gameModelCollision.At(desc->modelArchiveIndex);
                             if (dc.tileStamped()) {
@@ -6868,7 +6918,10 @@ int main(int argc, char** argv) {
                     }
                     const bool scriptlessDoor =
                         scriptlessNamedDoor(*desc, placementScriptPath, e.name);
-                    if (desc->category == 11 && (!placementScriptPath.empty() || scriptlessDoor)) {
+                    // Post-M134: and a category-12 door (IsTrappedDoor).
+                    const bool trappedDoor = IsTrappedDoor(desc->category, placementScriptPath);
+                    if ((desc->category == 11 || trappedDoor) &&
+                        (!placementScriptPath.empty() || scriptlessDoor)) {
                         const std::string fullPath =
                             scriptlessDoor ? "(no script) " + e.name : placementScriptPath;
                         skExecutableContext loadCtxt(&interpreter);

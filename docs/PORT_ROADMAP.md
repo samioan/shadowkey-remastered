@@ -13230,3 +13230,46 @@ As shipped: `FUN_10044618` adds exactly 1 to `+0xf44`, and each of
 Tests: `m134_consumable_stack_smoke` (stacks, Rat's Eye, the GTA gate
 through the real Gate_Open_A, the armour rating and slots, the AR_Light default, the hand caption);
 `m10_inventory_smoke` now expects the fractional rating.
+
+## M135 -- blue swords, the menu music, and Lakvan's door
+
+### Model texels wrap
+
+`Poly3D_RasterizeTextured` addresses a texel as
+`(mask & u) + ((mask & v) << sizeClass)`, `mask = (1 << sizeClass) - 1` --
+it wraps. The port clamped. The shipped UVs depend on the wrap: `sword.bin`'s
+16x16 skin is addressed out to u=42, v=64 texels, and so are the other four
+weapon models, so clamping painted their last column -- blue -- over every
+creature's blade. Both renderers now wrap.
+
+### The front end's music after a death or a Quit
+
+`FUN_1002707c`, the quit thread, stops the music at stage 4 and plays menu
+slot 70 (`battle3.ogg`) at stage 80, the same call startup makes. The port's
+QuitToMenu did neither, so the level's track kept playing over MainMenu.
+
+### Lakvan's door
+
+`lakdoor` is `!lakvansdoor`, category 12, and its `.ent` record carries
+`lockeddoor_bl.s` after the name. Category 12 is one engine class
+(`FUN_1002e678`, built on the container's `FUN_10029044`) shared by
+`!trapped_door`, `!trapped_chest`, `!crate_lootTrapped` and `!lakvansdoor`.
+It has no door natives: `OpenDoor` is only in the trigger class's trie
+(0x14ccc, dispatcher `FUN_10090500`), which no other dispatcher chains to.
+A category-12 door is a door because its script is one -- `OpenDoor[`,
+SetPassable, AddRotationTurn, DoorOpened.
+
+The port loaded every scripted category 12 as a container, so `lakdoor` had
+no prompt and `lakvan.s`'s `EnterZone("lakvans_room")` found nothing to open
+with the bandit key. `IsTrappedDoor` now routes a category-12 placement whose
+script declares `OpenDoor[` to DoorExecutable. That is exactly one placement
+in the shipped data; crypt1's five trapped doors and delfhide's trapped
+chests have no script and are unchanged. Live: key + EnterZone leaves
+`saved_SeeLakvan = 1` and the door passable.
+
+### Checked and left as shipped
+
+Heal Wound casts with slot 0x55, `NULL.wav` in all 22 sound tables -- it is
+silent on the device. The Fearfrost mushrooms' +50 MaxHealth lasts 300 s;
+health is not clamped when the maximum falls back, and a save made while it
+is up keeps it (timed effects are not saved), both as the engine does.

@@ -142,7 +142,8 @@ float4 PSSurface(VSOut i) : SV_Target {
 }
 
 uint SkinAt(int2 t) {
-    t = clamp(t, int2(0, 0), int2((int)modelW - 1, (int)modelH - 1));
+    // Wrapped, as both engine rasterizers mask (see zone_renderer.cpp).
+    t = t & int2((int)modelW - 1, (int)modelH - 1);
     return skinTex.Load(int4(t, skin, 0));
 }
 
@@ -152,7 +153,7 @@ float3 ModelShade(uint c, float fog) {
 }
 
 float4 PSModel(VSOut i) : SV_Target {
-    uint cn = SkinAt(int2(i.uv));   // the engine truncates, then clamps
+    uint cn = SkinAt(int2(i.uv));   // the engine truncates, then wraps
     if (cn == 0x0f0f) discard;
     float3 nearest = ModelShade(cn, i.lf.y);
     if (smooth == 0) return float4(nearest, 1.0);
