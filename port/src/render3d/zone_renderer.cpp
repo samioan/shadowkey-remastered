@@ -1625,11 +1625,14 @@ void ZoneRenderer::RenderInternal(Backbuffer* backbufferPtr, GpuFrame* gpuFrame,
     // look-down limit the bottom corners of the view meet the floor about
     // 90 degrees to the side, a tile or two away -- and a wide window's
     // corners reach further round still -- so those floor polygons dropped
-    // out at the screen edges. Anything this adds is behind a wall or the
-    // near plane when it is not on screen, so the depth buffer and the clip
-    // keep the frame otherwise unchanged.
+    // out at the screen edges. Looking up is the same at the top corners,
+    // and reaches further: a ceiling h tiles above the eye meets a wide
+    // window's corner up to ~1.8h tiles to the side, hence five tiles
+    // rather than the two or three looking down needs. Anything this adds
+    // is behind a wall or the near plane when it is not on screen, so the
+    // depth buffer and the clip keep the frame otherwise unchanged.
     {
-        constexpr int kNearRing = 3;
+        constexpr int kNearRing = 5;
         const int ctx = static_cast<int>(std::floor(camera.x / kTileScale));
         const int cty = static_cast<int>(std::floor(camera.y / kTileScale));
         std::vector<uint8_t> have(static_cast<size_t>((2 * kNearRing + 1) * (2 * kNearRing + 1)), 0);
