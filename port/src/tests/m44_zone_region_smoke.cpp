@@ -92,15 +92,14 @@ int main(int argc, char** argv) {
             std::printf("   (region \"start\" = x %d..%d, y %d..%d; azra's .ent player start is "
                         "tile (%d, %d))\n",
                         start->x0, start->x1, start->y0, start->y1, ptx, pty);
-            Check(start->Contains(ptx, pty),
-                  "...and it contains the player start, which comes from a different file entirely");
-            // And it only does so because containment is inclusive at both
-            // ends: azra's spawn sits exactly on this rectangle's corner
-            // (x == x0 and y == y1). See Region::Contains for the
-            // all-21-zones survey that settles the convention, and for why
-            // Lock/UnlockRegion's own loops are half-open anyway.
+            // M139: azra's spawn sits exactly on this rectangle's far
+            // corner (x == x0 and y == y1), which the engine's half-open
+            // test (FUN_1001b260) leaves outside -- one step north and it
+            // is in.
             Check(ptx == start->x0 && pty == start->y1,
-                  "...on its very corner, which is why the bounds have to be inclusive");
+                  "...the player start sits on its far corner, from a different file entirely");
+            Check(!start->Contains(ptx, pty) && start->Contains(ptx, pty - 1),
+                  "...which the half-open test leaves out, and the next tile in is inside");
             // The stored fields are 118 / 82 / 121 / 86. Without the flip
             // the y range would be 82..86 and the check above would fail
             // by 40 tiles.
@@ -157,8 +156,30 @@ int main(int argc, char** argv) {
                     "those survive half-open bounds)\n",
                     loaded, inclusiveHits, halfOpenHits);
         Check(loaded == 21, "all 21 shipped zones load");
-        Check(inclusiveHits == 12 && halfOpenHits == 8,
-              "12 of 21 spawns land in an arrival region, and 4 of those need inclusive bounds");
+        // M139: Contains is now the engine's half-open test, so only the
+        // eight spawns strictly inside a region are found.
+        Check(inclusiveHits == 9 && halfOpenHits == 9,
+              "9 of 21 spawns land strictly inside an arrival region (FUN_1001b260 is half-open)");
+    }
+
+    // ---- 3c. M139: Stout's Trading Post's two teleport pads ----
+    //
+    // stouttp.s: EnterZone("FiveToSix") -> SetPosition(19859, 18660, ...),
+    // EnterZone("SixToFive") -> SetPosition(26313, 31018, ...). Under the
+    // old inclusive test the first landing tile was inside SixToFive, which
+    // fired on arrival and sent the player straight back.
+    {
+        sk::Zone stout;
+        Check(stout.Load(scriptRoot, "stouttp"), "stouttp loads");
+        const sk::Zone::Region* fiveToSix = FindRegion(stout, "FiveToSix");
+        const sk::Zone::Region* sixToFive = FindRegion(stout, "SixToFive");
+        Check(fiveToSix && sixToFive, "...with its FiveToSix and SixToFive pads");
+        if (fiveToSix && sixToFive) {
+            Check(!sixToFive->Contains(19859 >> 8, 18660 >> 8),
+                  "FiveToSix's landing tile is not on the SixToFive pad");
+            Check(!fiveToSix->Contains(26313 >> 8, 31018 >> 8),
+                  "...and SixToFive's is not on the FiveToSix pad");
+        }
     }
 
     // ---- 4. The names the roadmap bullet quotes are all there ----
@@ -427,21 +448,25 @@ int main(int argc, char** argv) {
         const int spawnX = azra.playerStartX >> 8;
         const int spawnY = azra.playerStartY >> 8;
         const sk::Zone::Region* start = FindRegion(azra, "start");
-        Check(start && start->Contains(spawnX, spawnY),
-              "azra's player start really is inside its own \"start\" region -- the case the gate "
-              "exists for");
+        // M139: under FUN_1001b260's half-open test azra's spawn, on the
+        // region's far corner, is just outside it; the tile north of it is
+        // inside. The gate still matters for the nine zones whose spawn is
+        // strictly inside a region.
+        Check(start && !start->Contains(spawnX, spawnY) && start->Contains(spawnX, spawnY - 1),
+              "azra's player start is on the far edge of its \"start\" region, one step out");
 
         std::vector<Tick> standing(100, Tick{spawnX, false});
         Check(fireCountGated(azra, standing, spawnY).empty(),
               "arriving inside a region and standing still fires nothing, however long you stand "
               "-- so a fresh azra no longer opens starthelp before the player has moved");
 
+        // The first step in -- one tile north, on the row inside the region.
         std::vector<Tick> oneStep = standing;
         oneStep.push_back(Tick{spawnX + 1, true});
-        std::map<std::string, int> afterStep = fireCountGated(azra, oneStep, spawnY);
+        std::map<std::string, int> afterStep = fireCountGated(azra, oneStep, spawnY - 1);
         Check(afterStep["start"] == 1,
-              "...and the very first step fires it exactly once, while still inside the region the "
-              "player spawned in -- the popup arrives a few paces in, as it does in the original");
+              "...and the first step into it fires it exactly once -- the popup arrives a few "
+              "paces in, as it does in the original");
     }
 
     std::printf("\nm44_zone_region_smoke: %s\n", g_failures ? "FAILED" : "PASSED (all checks)");

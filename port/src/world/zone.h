@@ -314,9 +314,25 @@ public:
         // `if (zone = "vig") Level.Vignette(n)` -- an arrival cutscene,
         // which only makes sense if standing at the spawn point counts as
         // being in the region.
+        //
+        // M139: **that was wrong, and the decompile says so directly.** The
+        // room test the actor tick runs (`FUN_1001b260`) is
+        //
+        //     room+0x30 <= tx && tx < room+0x38 &&
+        //     room+0x3c <= ty && ty < room+0x34
+        //
+        // -- x0 <= x < x1, y0 <= y < y1, half-open at both far edges, the
+        // same as LockRegion. The survey above was an inference, and a weak
+        // one since M91 found that standing at the spawn never fires
+        // EnterZone anyway. Inclusive bounds broke Stout's Trading Post:
+        // FiveToSix puts the player on tile (77, 72), one row inside
+        // SixToFive's inclusive edge and one row outside its real one, so
+        // the port fired SixToFive on landing and sent the player straight
+        // back. (Encounter spawning still draws inclusively -- that is
+        // FUN_1008ae94's own rule, below.)
         int x0 = 0, y0 = 0, x1 = 0, y1 = 0;
         bool Contains(int tileX, int tileY) const {
-            return tileX >= x0 && tileX <= x1 && tileY >= y0 && tileY <= y1;
+            return tileX >= x0 && tileX < x1 && tileY >= y0 && tileY < y1;
         }
     };
     const std::vector<Region>& regions() const { return regions_; }
