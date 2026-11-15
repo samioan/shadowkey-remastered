@@ -257,6 +257,12 @@ void PlayerExecutable::ApplySaveRecord(const sk::SavedEntity& record, MenuStack&
     if (m_BaseAttack >= 40) m_BaseAttack -= kPreM137Placeholder;
     if (m_BaseDefense >= 40) m_BaseDefense -= kPreM137Placeholder;
     m_Spellcast = st.spellcast;
+    // M138: a save from before M138 carries the old spellcast placeholder
+    // of 50 -- the engine's own value is 0 plus at most the gauntlets' 6,
+    // so 40 or more can only be that. Such a save also never had the worn
+    // items' bonuses applied; they are added once the armour is restored.
+    const bool preM138 = m_Spellcast >= 40;
+    if (preM138) m_Spellcast -= 50;
     m_MagicResistance = st.magicResistance;
     m_Strength = st.strength;
     m_StrengthBonus = st.strengthBonus;
@@ -354,7 +360,10 @@ void PlayerExecutable::ApplySaveRecord(const sk::SavedEntity& record, MenuStack&
         return nullptr;
     };
     for (uint16_t typeId : record.player.equipTypeIds) {
-        if (ItemExecutable* item = findByTemplate(typeId)) item->SetEquipped(true);
+        if (ItemExecutable* item = findByTemplate(typeId)) {
+            if (preM138 && !item->equipped()) ApplyWornItemDelta(item, +1);
+            item->SetEquipped(true);
+        }
     }
     // M105: rebuild both queues, then take the wielded item from each
     // list's own selection index. `findByTemplate` is how the format names

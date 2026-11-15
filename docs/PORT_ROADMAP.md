@@ -13409,3 +13409,28 @@ frame of whatever is on screen.
   `chaseRadius < d` test, no sight involved (see monster_ai.h).
 - **Arrows have no range.** `FUN_10007214` has no lifetime or distance
   counter; an arrow flies until a wall or an actor stops it.
+
+## M138 -- the player's spellcast, and what worn items change
+
+The player's spellcast (stats+0x04) is the stats constructor's 0, not the
+port's placeholder 50, so the player's spell to-hit is `0 + 2*Willpower`
+as on the device. The only thing that ever raises it is the Silver
+Gauntlets of Casting, through `FUN_1003dbdc` -- the armour-slot equip, whose
+per-item stat changes the port had never applied at all:
+
+| typeId | item | change while worn |
+|---|---|---|
+| 668 (0x29c) | Silver Gauntlets of Casting | spellcast +6 |
+| 4501 / 4503 | Ring of Warding / Ring of Stars | magic resistance +5 |
+| 4502 | Ring of Deflection | defense +5 |
+| 4504 / 4505 | Ring of Fangs / Ring of Thunderblows | attack +1 / +4 |
+| 721 (0x2d1) | Shaman Headdress | Intelligence +5, Endurance +5 |
+
+The piece leaving a slot gives its change back and the one entering adds
+its own (`PlayerExecutable::ApplyWornItemDelta`). The Malkav Ring, Grimli
+War Helm and Morticus Greaves (0x11f8/0x11fb/0x11fc) are tested against the
+*incoming* item in the removal block too, so on the device equipping them
+nets nothing and removing them subtracts -- a slip in the original, left
+out rather than reproduced. A save from before M138 (spellcast 40 or more,
+which only the placeholder can be) has the 50 removed and its worn items'
+changes applied on load. `to_hit_smoke` part 2b.

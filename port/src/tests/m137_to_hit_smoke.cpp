@@ -137,6 +137,33 @@ int main(int argc, char** argv) {
         Check(player.actorDodgeStats().khajiitRank == -1, "...and nobody else does");
     }
 
+    std::printf("\n-- 2b. spellcast (M138) and FUN_1003dbdc's worn-item deltas --\n");
+    {
+        Check(player.spellcast() == 0, "a fresh player's spellcast is the stats constructor's 0");
+        skRValueArray args;
+        args.append(skRValue(668));  // armor\Silver_Gauntlets_of_Casting.s
+        skRValue created;
+        skExecutableContext ctxt(&interpreter);
+        stack.level().method(skString("CreateEntity"), args, created, ctxt);
+        skRValueArray pickArgs;
+        pickArgs.append(created);
+        skRValue ignored;
+        player.method(skString("PickupItem"), pickArgs, ignored, ctxt);
+        sk_b::ItemExecutable* gauntlets = nullptr;
+        for (const auto& item : player.inventory()) {
+            if (item && item->templateId() == 668) gauntlets = item.get();
+        }
+        Check(gauntlets != nullptr, "Level.CreateEntity(668) + PickupItem gives the gauntlets");
+        if (gauntlets) {
+            player.UpdateEquipStatus(gauntlets, true);
+            Check(player.spellcast() == 6, "wearing the Silver Gauntlets of Casting: spellcast 6");
+            player.UpdateEquipStatus(gauntlets, true);
+            Check(player.spellcast() == 6, "...equipping them again does not stack");
+            player.UpdateEquipStatus(gauntlets, false);
+            Check(player.spellcast() == 0, "...and taking them off gives the 6 back");
+        }
+    }
+
     std::printf("\n-- 3. a creature's ratings --\n");
     {
         skExecutableContext ctxt(&interpreter);

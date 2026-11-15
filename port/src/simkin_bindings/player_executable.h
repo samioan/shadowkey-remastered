@@ -404,6 +404,9 @@ public:
     int armorRating() const;
     // The eight armour slots, `player+0xf8c`, indexed by SetArmorType.
     static constexpr int kArmorSlots = 8;
+    // M138: FUN_1003dbdc's per-item stat changes for a piece entering
+    // (sign +1) or leaving (sign -1) an armour slot. See the definition.
+    void ApplyWornItemDelta(const ItemExecutable* item, int sign);
     const ItemExecutable* wornArmor(int slot) const;
     // Clamps m_Health at 0 -- mirrors MonsterExecutable::ApplyDamage().
     // M98: the attacker and the site's p5 (`ranged`) feed FUN_10049e78's
@@ -547,6 +550,7 @@ public:
     int luck() const { return m_Luck; }
     int race() const { return m_Race; }
     int spellToHit() const;
+    int spellcast() const { return m_Spellcast; }  // M138: stats+0x04
     int spellResistance() const;
 
     // ---- M64: the level-up screen (`levelup.s`) ----
@@ -930,7 +934,13 @@ private:
     // spellToHit()/spellResistance() from these plus willpower, not a
     // stored number. Same fixed-placeholder footing as the rest of the
     // block (see the class comment); the *formulas* are recovered.
-    int m_Spellcast = 50, m_MagicResistance = 0;
+    //
+    // M138: spellcast is the stats constructor's 0 too (FUN_100477cc writes
+    // stats+0x04 = 1 and then 0). Nothing but the Silver Gauntlets of
+    // Casting (+6 while worn, ApplyWornItemDelta) and timed effects ever
+    // moves it, so the player's spell to-hit is 2 * Willpower, as on the
+    // device. The 50 was a placeholder.
+    int m_Spellcast = 0, m_MagicResistance = 0;
     // M58: the last four stats-block fields the effect table can reach that
     // this port had no storage for. `m_ArmorValue` is stats+0x0c, the
     // player's *own* armour number -- separate from the equipped-item sum

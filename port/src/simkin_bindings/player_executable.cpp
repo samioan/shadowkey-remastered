@@ -518,6 +518,43 @@ int PlayerExecutable::armorRating() const {
     return rating < 0 ? 0 : rating;
 }
 
+// M138: FUN_1003dbdc, the armour-slot equip, keyed on the typeId
+// (`item+200`) of the piece leaving the slot (subtract) and of the piece
+// entering it (add):
+//
+//     0x029c  668  Silver Gauntlets of Casting   stats+0x04 spellcast  6
+//     0x1195 4501  Ring of Warding               stats+0x06 magic res. 5
+//     0x1196 4502  Ring of Deflection            stats+0x02 defense    5
+//     0x1197 4503  Ring of Stars                 stats+0x06 magic res. 5
+//     0x1198 4504  Ring of Fangs                 stats+0x00 attack     1
+//     0x1199 4505  Ring of Thunderblows          stats+0x00 attack     4
+//     0x02d1  721  Shaman Headdress              Intelligence, Endurance 5
+//                                                 each, then FUN_10049698
+//
+// Three more -- 0x11f8 Malkav Ring, 0x11fb Grimli War Helm, 0x11fc Morticus
+// Greaves -- are tested against the *incoming* item in the removal block as
+// well as the adding one, so equipping them nets nothing and taking them
+// off subtracts: a slip in the original (the removal block should read the
+// slot's old item, as the other seven do). Left out rather than
+// reproduced, since reproducing it only ever costs the player stats.
+void PlayerExecutable::ApplyWornItemDelta(const ItemExecutable* item, int sign) {
+    if (!item) return;
+    switch (item->templateId()) {
+        case 0x29c: m_Spellcast += 6 * sign; break;
+        case 0x1195: m_MagicResistance += 5 * sign; break;
+        case 0x1196: m_BaseDefense += 5 * sign; break;
+        case 0x1197: m_MagicResistance += 5 * sign; break;
+        case 0x1198: m_BaseAttack += 1 * sign; break;
+        case 0x1199: m_BaseAttack += 4 * sign; break;
+        case 0x2d1:
+            m_Intelligence += 5 * sign;
+            m_Endurance += 5 * sign;
+            RecomputeDerivedStats(*this);
+            break;
+        default: break;
+    }
+}
+
 // M134: `player+0xf8c[slot]` -- the one piece worn in each armour slot.
 // This port keeps the worn flag on the items rather than a slot array;
 // UpdateEquipStatus keeps it to one piece per slot, as FUN_1003dbdc does.
@@ -1015,13 +1052,21 @@ int PlayerExecutable::UpdateEquipStatus(ItemExecutable* item, bool equipping) {
         // M134: and the toggle is a *slot* -- `player+0xf8c[item+0x1d0]`
         // is one pointer, so wearing a second helm puts it in the slot the
         // first one occupied. The first is no longer worn.
+        //
+        // M138: and the per-item bonuses are no longer unmodelled -- the
+        // piece leaving the slot gives its stats back, the one entering it
+        // adds its own (ApplyWornItemDelta).
         if (equipping) {
             for (const auto& other : m_Inventory) {
                 if (other && other.get() != item && other->itemType() == kItemTypeArmor &&
                     other->equipped() && other->armorType() == item->armorType()) {
+                    ApplyWornItemDelta(other.get(), -1);
                     other->SetEquipped(false);
                 }
             }
+            if (!item->equipped()) ApplyWornItemDelta(item, +1);
+        } else if (item->equipped()) {
+            ApplyWornItemDelta(item, -1);
         }
         item->SetEquipped(equipping);
         return 1;

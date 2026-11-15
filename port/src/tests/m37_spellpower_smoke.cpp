@@ -143,8 +143,9 @@ int main() {
                       lakvan->spellResistance() == lakvan->magicResistance(),
                   "a creature resists with its SetMagicResistance() alone -- no willpower term");
 
+            // M138: the player's spellcast is the stats constructor's 0, not 50.
             int power = stack.player().spellToHit();
-            Check(power == sk_bindings::SpellToHit(50, stack.player().willpower()),
+            Check(power == sk_bindings::SpellToHit(0, stack.player().willpower()),
                   "the player's own to-hit comes from the same formula, not a stored number");
 
             int vsRat = SpellHitChance(power, rat->spellResistance());
