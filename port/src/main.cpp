@@ -6830,9 +6830,34 @@ int main(int argc, char** argv) {
                            (IsUsableObjectCategory(desc.category) || IsPickupCategory(desc.category) ||
                             desc.category == 2 || desc.category == 7);
                 };
+                // Post-M136: save compatibility for the scripted category-1
+                // objects M136 made live. A level saved before then was
+                // written while they were still scenery, so its record has
+                // no entry for them, and taking the record as the whole
+                // truth made the Witch Tree and Bled's desk vanish from an
+                // existing save. No shipped script ever destroys one of
+                // these nine placements (none is reached by GetEntity
+                // except the tree, and witchtree_convo.s only reads it), so
+                // a category-1 placement with no saved record at its own
+                // typeId and position can only mean an older save: it is
+                // placed fresh from the .ent instead.
+                auto savedRecordAt = [&](const sk::Zone::EntPlacement& e) {
+                    for (const sk::SavedEntity& rec : savedLevel.entities) {
+                        if (rec.typeId == e.typeId && rec.entity.x == e.x && rec.entity.y == e.y) {
+                            return true;
+                        }
+                    }
+                    return false;
+                };
                 std::vector<std::pair<sk::Zone::EntPlacement, const sk::SavedEntity*>> placements;
                 for (const sk::Zone::EntPlacement& e : gameZone->entities()) {
                     const sk::EntityTypeDescriptor* desc = entityTypes.Lookup(e.typeId);
+                    if (restoringLevel && desc && desc->category == 1 &&
+                        becomesLiveObject(*desc, placementScript(e, desc), e.name) &&
+                        !savedRecordAt(e)) {
+                        placements.push_back({e, nullptr});
+                        continue;
+                    }
                     if (restoringLevel && desc && becomesLiveObject(*desc, placementScript(e, desc), e.name)) {
                         // M38's trigger candidates are the placements, not
                         // the live objects -- crypt1.s's trapped doors are
