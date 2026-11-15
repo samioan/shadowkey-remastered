@@ -1162,8 +1162,19 @@ bool MenuExecutable::method(const skString& methodName, skRValueArray& args,
         // opener's own SetDestroy(true) was set, which real scripts do
         // solely for *spawned* loot bags (monsters/arat.s's own
         // `Loot.SetDestroy(true)`), never for a placed chest.
+        //
+        // M139: **not only a loot bag.** Case 0x35 of the menu dispatcher is
+        // `if (menu->opener) FUN_1001b484(engine, opener)` -- the engine's
+        // deferred-destroy queue, the same one DestroyObject feeds -- for
+        // whatever opened the screen. crypt1\shadowkeygate.s's `Done` is
+        // the case that needs it: the opener is the Shadowkey gate's door
+        // (crypt1\shadowkeygatedoor.s, category 11), and destroying it is
+        // what lifts its tile stamp. The port destroyed only items, so the
+        // gate said "open" and stayed shut.
         if (auto* opener = dynamic_cast<ItemExecutable*>(m_Opener)) {
             opener->MarkForRemoval();
+        } else if (auto* entity = dynamic_cast<EntityBaseRef*>(m_Opener)) {
+            entity->RemoveFromWorld();
         }
         // Dropped immediately so nothing here can outlive the object it
         // just condemned -- main.cpp erases the world instance on its next

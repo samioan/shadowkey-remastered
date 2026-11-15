@@ -204,6 +204,24 @@ int main(int argc, char** argv) {
         }
     }
 
+    // ---------------------------------------------------------------
+    std::printf("\n== M139: the Crypt of Hearts Shadowkey gate opens ==\n");
+    // ---------------------------------------------------------------
+    {
+        // crypt1\shadowkeygate.s's Done ends in QuitAndDestroyOpener(); the
+        // opener is the gate's door, and case 0x35 destroys any opener.
+        std::unique_ptr<sk_b::DoorExecutable> gate = loadDoor("crypt1/shadowkeygatedoor.s");
+        Check(gate != nullptr && !gate->entityRemoved(), "crypt1/shadowkeygatedoor.s loads, standing");
+        if (gate) {
+            stack.OpenMenu("crypt1\\shadowkeygate", gate.get());
+            sk_b::MenuExecutable* lockMenu = stack.currentMenu();
+            Check(lockMenu != nullptr, "its screen opens with the gate door as the opener");
+            if (lockMenu) call(lockMenu, "Done", skRValueArray());
+            Check(gate->entityRemoved(),
+                  "Done's QuitAndDestroyOpener takes the door out of the world (its stamp with it)");
+        }
+    }
+
     std::printf("\nm133_delfhide_smoke: %d/%d checks passed\n", g_checks - g_failures, g_checks);
     return g_failures == 0 ? 0 : 1;
 }
