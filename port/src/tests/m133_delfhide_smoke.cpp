@@ -222,6 +222,48 @@ int main(int argc, char** argv) {
         }
     }
 
+    // ---------------------------------------------------------------
+    std::printf("\n== M139: the Shadowkey gate's reward chest gives one item ==\n");
+    // ---------------------------------------------------------------
+    {
+        auto countTemplate = [&](int id) {
+            int n = 0;
+            for (const auto& item : player.inventory()) {
+                if (item && !item->markedForRemoval() && item->templateId() == id) ++n;
+            }
+            return n;
+        };
+        skRValueArray spawnArgs;
+        spawnArgs.append(skRValue(301));
+        spawnArgs.append(skRValue(skString("crypt1\\\\skchest1a")));
+        spawnArgs.append(skRValue(8376));
+        spawnArgs.append(skRValue(3200));
+        spawnArgs.append(skRValue(300));
+        call(&stack.level(), "CreateEntityScript", spawnArgs);
+        sk_b::LevelExecutable::PendingPlacedItem placed;
+        std::unique_ptr<sk_b::ItemExecutable> chest;
+        const bool spawned = stack.level().TakePendingPlacedItem(placed, chest) && chest;
+        Check(spawned, "Done's CreateEntityScript(301, \"crypt1\\\\skchest1a\", ...) spawns the chest");
+        if (spawned) {
+            skRValueArray initArgs;
+            initArgs.append(skRValue(0));
+            call(chest.get(), "Init", initArgs);
+            const int before = countTemplate(666);
+            for (int visit = 0; visit < 2; ++visit) {
+                skRValueArray useArgs;
+                useArgs.append(skRValue(0));
+                call(chest.get(), "OnUse", useArgs);
+                // The second visit opens NoLoot (saved_SkChest1 is set), whose
+                // missing Take soft-fails -- which is the point.
+                sk_b::MenuExecutable* m = stack.currentMenu();
+                if (m) call(m, "Take", skRValueArray());
+            }
+            Check(countTemplate(666) - before == 1,
+                  "two visits and two Takes give ONE Shadow Weave (got " +
+                      std::to_string(countTemplate(666) - before) + ")");
+        }
+    }
+
     std::printf("\nm133_delfhide_smoke: %d/%d checks passed\n", g_checks - g_failures, g_checks);
     return g_failures == 0 ? 0 : 1;
 }
