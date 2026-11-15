@@ -147,8 +147,31 @@ public:
     int defense() const { return (std::max)(0, m_Defense); }
     // M49: SpellActor's ranged-combat ratings -- see spell_actor.h. A
     // creature's arrow and the player's are resolved by the same code.
-    int actorAttackRating() const override { return attack(); }
-    int actorDefenseRating() const override { return defense(); }
+    //
+    // M137: and they are not the bare script values. Every to-hit in the
+    // engine is FUN_1004b620, which takes the attacker's FUN_10047f64 and
+    // the defender's FUN_1004801c:
+    //
+    //   attack  = stats+0x00 + (Strength > 0 ? 2 * Strength : 0)
+    //   defense = stats+0x02 + (Agility  > 0 ? Agility / 5  : 0)
+    //
+    // (each with player-only terms a creature never meets). A creature's
+    // Strength and Agility are both 1 -- its constructor (FUN_10082b1c's
+    // tail) overwrites the stats constructor's 30s -- so this is +2 attack
+    // and +0 defense, for every creature in the game.
+    // The raw fields, so a debuff below zero still counts; only the
+    // rating itself is floored (see PlayerExecutable::actorAttackRating).
+    int actorAttackRating() const override {
+        return (std::max)(0, m_Attack + (m_Strength > 0 ? 2 * m_Strength : 0));
+    }
+    int actorDefenseRating() const override {
+        return (std::max)(0, m_Defense + (m_Agility > 0 ? m_Agility / 5 : 0));
+    }
+    DodgeStats actorDodgeStats() const override {
+        DodgeStats d;
+        d.luck = m_Luck;
+        return d;
+    }
     // The unmodified script values, for tests and UI that want the base.
     int baseAttack() const { return m_Attack; }
     int baseDefense() const { return m_Defense; }
@@ -953,7 +976,16 @@ private:
     int m_Defense = 0;
     int m_Spellcast = 0;
     int m_MagicResistance = 0;
-    int m_Will = 0;  // M37: stats+0x1a -- see spellResistance()
+    // M37: stats+0x1a -- see spellResistance(). M137: 1, not 0 -- the
+    // creature constructor writes 1 into Strength, Intelligence, Will and
+    // Agility (stats+0x14/+0x16/+0x1a/+0x18) after the stats constructor's
+    // defaults. SetMob overwrites Will; nothing overwrites the others.
+    int m_Will = 1;
+    int m_Strength = 1;   // M137: stats+0x14
+    int m_Agility = 1;    // M137: stats+0x18
+    // M137: stats+0x22, the stats constructor's 40 -- the creature
+    // constructor leaves it, so the Luck dodge (`luck > 40`) never fires.
+    int m_Luck = 40;
     // M122: stats+0x1c, Speed -- the stats constructor's 35, read by the
     // walk (monster_ai.h's CreatureThrust) and moved by timed effects.
     int m_Speed = kDefaultCreatureSpeed;

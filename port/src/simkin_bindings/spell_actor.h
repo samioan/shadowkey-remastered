@@ -34,6 +34,7 @@
 // below is FUN_1002fd30 itself.
 
 #include "simkin_bindings/actor_stats.h"
+#include "simkin_bindings/combat.h"
 
 class skiExecutable;
 
@@ -137,6 +138,8 @@ public:
     // player's; the concrete classes already compute them for melee.
     virtual int actorAttackRating() const { return 0; }
     virtual int actorDefenseRating() const { return 0; }
+    // M137: what the stats vtable's +0x14 dodge reads -- see combat.h.
+    virtual DodgeStats actorDodgeStats() const { return DodgeStats{}; }
 
     // FUN_1004bb88 (clamped into [0, max]) and the DoDamage vtable slot.
     //

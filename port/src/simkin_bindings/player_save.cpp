@@ -249,6 +249,13 @@ void PlayerExecutable::ApplySaveRecord(const sk::SavedEntity& record, MenuStack&
     const sk::SavedStats& st = record.stats;
     m_BaseAttack = st.attack;
     m_BaseDefense = st.defense;
+    // M137: a save written before M137 carries the port's old 50/50
+    // placeholder base. The engine's own base is 0 plus at most +5 of
+    // equipment (see m_BaseAttack), so anything at 40 or above can only be
+    // that placeholder -- take it back off, keeping the equipment delta.
+    constexpr int kPreM137Placeholder = 50;
+    if (m_BaseAttack >= 40) m_BaseAttack -= kPreM137Placeholder;
+    if (m_BaseDefense >= 40) m_BaseDefense -= kPreM137Placeholder;
     m_Spellcast = st.spellcast;
     m_MagicResistance = st.magicResistance;
     m_Strength = st.strength;

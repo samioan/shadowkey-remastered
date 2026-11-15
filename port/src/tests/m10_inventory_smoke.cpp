@@ -327,10 +327,13 @@ int main(int argc, char** argv) {
             attackBefore, attackAfter);
         // M74: 1 is the real "ok", and the hand a weapon lands in is its
         // own `+0x1c0` -- the right one -- not "whichever was free".
+        // M137: and GetAttack() does NOT move. It is FUN_10047f64 (base +
+        // 2*Strength), which no weapon's damage feeds; only four specific
+        // items nudge the base (FUN_1003dbdc), and the club is not one.
         if (ret3 != 1 || !handEmptyBefore || !handFilledAfter ||
-            stack.player().rightItem() != weapon || attackAfter <= attackBefore) {
+            stack.player().rightItem() != weapon || attackAfter != attackBefore) {
             std::printf(
-                "m10_inventory_smoke: FAILED weapon equip didn't fill a hand or change GetAttack()"
+                "m10_inventory_smoke: FAILED weapon equip didn't fill a hand, or moved GetAttack()"
                 "\n");
             return 1;
         }

@@ -51,13 +51,41 @@ int MeleeHitChance(int attackerAttack, int defenderDefense) {
     return (attackerAttack << 16) / (total << 8);
 }
 
-bool RollMeleeHit(int attackerAttack, int defenderDefense) {
-    return (std::rand() % 0x100) <= MeleeHitChance(attackerAttack, defenderDefense);
+// M137: FUN_1004b774, and FUN_100449f4's Khajiit arm -- see combat.h.
+// `FUN_100730c8(rng, lo, hi)` is `lo + rand % (hi - lo + 1)`.
+bool RollDodge(const DodgeStats& defender, int rollPlusChance) {
+    const int p = rollPlusChance;
+    int percent = 0;  // the caller's local, zeroed before the call
+    if (defender.luck > 0x28) {
+        const int scaled = (defender.luck - 0x28) * 0x10000;
+        const int v = static_cast<int>((static_cast<long long>(0x66666667) * scaled) >> 0x29) -
+                      (scaled >> 31);
+        const int denominator = v + p * 0x100;
+        const int chance = denominator != 0 ? (v * 0x100) / denominator : 0;
+        percent = chance * 100 >> 8;
+        if (std::rand() % 101 <= percent) return true;
+    }
+    if (defender.khajiitRank >= 0) {
+        const int rank = defender.khajiitRank < 100 ? defender.khajiitRank << 16 : 0x640000;
+        const int fraction =
+            static_cast<int>((static_cast<long long>(0x51eb851f) * rank) >> 0x2d) - (rank >> 31);
+        percent += (p * 0x100 * fraction) >> 16;
+        if (std::rand() % (p + 1) < percent) return true;
+    }
+    return false;
+}
+
+bool RollMeleeHit(int attackerAttack, int defenderDefense, const DodgeStats* dodge) {
+    const int roll = std::rand() % 0x100;
+    const int chance = MeleeHitChance(attackerAttack, defenderDefense);
+    if (roll > chance) return false;
+    // FUN_1004b620: `if (!defender->vtable[0x14](defender, roll + chance, ...)) hit`.
+    return !(dodge && RollDodge(*dodge, roll + chance));
 }
 
 int RollDamage(int attackerAttack, int defenderDefense, int defenderArmor, int dmgMin, int dmgMax,
-                bool halveRoll) {
-    if (!RollMeleeHit(attackerAttack, defenderDefense)) return 0;  // miss
+                bool halveRoll, const DodgeStats* dodge) {
+    if (!RollMeleeHit(attackerAttack, defenderDefense, dodge)) return 0;  // miss
 
     int lo = (std::min)(dmgMin, dmgMax);
     int hi = (std::max)(dmgMin, dmgMax);
@@ -83,13 +111,13 @@ PlayerMeleeResult RollPlayerMeleeDamage(int attackerAttack, int defenderDefense,
                                          int dmgMin, int dmgMax, bool halveRoll,
                                          bool targetIsSpider, int spiderBonusMin,
                                          int spiderBonusMax, bool weaponIsMagickaEdge,
-                                         int magicka) {
+                                         int magicka, const DodgeStats* dodge) {
     PlayerMeleeResult out;
     // The same gate the creature path uses -- `FUN_1004b71c` wraps
     // FUN_1004b620, and the extra dodge/block test inside it is the one
     // piece of the real to-hit this port still does not reproduce (see
     // RollMeleeHit).
-    if (!RollMeleeHit(attackerAttack, defenderDefense)) return out;
+    if (!RollMeleeHit(attackerAttack, defenderDefense, dodge)) return out;
     out.hit = true;
 
     const int lo = (std::min)(dmgMin, dmgMax);

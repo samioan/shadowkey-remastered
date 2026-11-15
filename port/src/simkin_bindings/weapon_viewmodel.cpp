@@ -198,6 +198,7 @@ ViewmodelDraw ResolveViewmodelDraw(const WeaponViewmodel& vm) {
     int base = vm.item->weaponSprite();
     if (base < 0) return draw;
     draw.spriteSlot = base;
+    draw.restSlot = base;
     draw.visible = true;
 
     if (vm.swingAccum != 0) {
@@ -257,6 +258,7 @@ ViewmodelDraw ResolveViewmodelDraw(const WeaponViewmodel& vm) {
         if (vm.swapTimer > kSwapShowOld) {
             // Still showing the weapon being put away.
             draw.spriteSlot = vm.prevSprite;
+            draw.restSlot = vm.prevSprite;  // M137: prevSprite is a base slot
             if (draw.spriteSlot < 0) draw.visible = false;
         } else {
             // The new weapon, held low -- the real code's only use of a

@@ -25,6 +25,23 @@ GdrFont& FontSlot(BitmapFont::Face face) {
     return face == BitmapFont::Face::Small ? small : ui;
 }
 
+// M137: the two string-table characters past Latin-1 -- U+2122 (TM, in
+// the copyright page's "Shadowkey(TM)") and U+2026 (the ellipsis closing
+// the intro's last caption). string_table.cpp carries them as their
+// Windows-1252 bytes, 0x99 and 0x85 (C1 controls no table uses), and they
+// go back to Unicode here, where the .gdr's own code sections are. A font
+// without the glyph falls back to the byte, i.e. draws nothing.
+const GdrGlyph* GlyphFor(const GdrFont& font, char c) {
+    const unsigned char byte = static_cast<unsigned char>(c);
+    char32_t code = byte;
+    if (byte == 0x99) code = 0x2122;
+    if (byte == 0x85) code = 0x2026;
+    if (code != byte) {
+        if (const GdrGlyph* glyph = font.GetGlyph(code)) return glyph;
+    }
+    return font.GetGlyph(byte);
+}
+
 // M132: SmallItalic with no Alpi12 loaded is the Small face, slanted.
 bool SlantedFallback(BitmapFont::Face face) {
     return face == BitmapFont::Face::SmallItalic && !FontSlot(face).IsLoaded();
@@ -362,7 +379,7 @@ void BitmapFont::DrawString(Backbuffer& bb, int x, int y, std::string_view text,
 
     for (char c : text) {
         const GdrGlyph* glyph =
-            font.GetGlyph(static_cast<char32_t>(static_cast<unsigned char>(c)));
+            GlyphFor(font, c);
         if (glyph) {
             int glyphX = cursorX + glyph->leftBearing;
             int glyphY = baselineY - glyph->ascentAboveBaseline;
@@ -399,7 +416,7 @@ int BitmapFont::TextWidth(std::string_view text, Face face) {
         int w = 0;
         for (char c : text) {
             const GdrGlyph* glyph =
-                font.GetGlyph(static_cast<char32_t>(static_cast<unsigned char>(c)));
+                GlyphFor(font, c);
             w += glyph ? glyph->advance : kAdvance;
         }
         return w;

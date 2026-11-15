@@ -13315,3 +13315,97 @@ ffarena's FailSafe0 -- both before Azra's Crossing, where azra_convo2.s
 explains why Skelos must not use five teeth. The script gates on the quest
 only, so the betrayal option comes up before that explanation on the
 device too.
+
+## M137 -- the boot sequence, the real to-hit, and reach through doors
+
+### Logos and the story intro before the main menu
+
+`GameEngine_FirstTickBootstrap` -> `FUN_100298a4`, the screen controller's
+one-time init: `FUN_10068d10` starts the front-end theme and arms a fade
+in, then the mode is set to 0x26 with `+0xe8 = 0x300`. Every arm after that
+is in `FUN_10068e0c`:
+
+| mode | art (global.spr) | text | next |
+|---|---|---|---|
+| 0x26 | 246 Vir2L | 4072 "Published and Developed by", y 0x28 | 0x25 |
+| 0x25 | 245 Bethesda | -- | 0x27 |
+| 0x27 | 247 TKO | 4073 at y 0x28, 4075 (trademark) at y 0x82 | 6 |
+| 6 | 20 parchment | 58, 2280, 60..68 centred, 12px apart from y 0x32 | 0xc |
+| 0xc..0xf | 213..216 at (0xe,5) | 3844..3847 under it (the vignette's box) | +1 |
+| 0x10 | 174 | 4074 "Press any key to Start", centred, y 0xb4 | 1 (menu) |
+
+A logo holds `+0xe8` (0x300) and moves on once no fade-out is running; mode
+6 times out or takes bound action 15; each story slide is 0xa00. The fade is
+`FUN_1004fc50`: 0x100 out (subtracting 0..15 from every RGB444 nibble),
+switch, 0x100 in -- the main menu fades in the same way. In the original
+only the story (any of buttons 0..0x14) skips, straight to the menu. **Port
+additions:** any key also cuts a logo or the copyright page short, Esc skips
+the whole sequence, `SK_SKIP_INTRO=1` turns it off and `SK_DUMP_BOOT=<dir>`
+writes each screen to a .ppm. A game started some other way (autoexec,
+multiplayer) ends it. `engine/boot_sequence.h`, `boot_sequence_smoke`.
+
+Strings 59/64 carry U+2122 and 3847 U+2026; the string table now carries
+them as their Windows-1252 bytes (0x99/0x85) and the font maps them back to
+the .gdr's own glyphs instead of drawing '?'.
+
+### The to-hit ratings
+
+Every to-hit is `FUN_1004b620(attacker FUN_10047f64, defender FUN_1004801c)`
+-- melee both ways, arrows both ways -- and the port fed it the bare base
+fields. The engine's pair (also stats binding cases 0x40/0x41, `GetAttack`/
+`GetDefense`):
+
+    attack  = stats+0x00 + 2*Strength            (Strength > 0)
+              + Dark Elf (race 2): classAbility/4, the sum floored at 1
+    defense = stats+0x02 + Agility/5             (Agility > 0)
+              + Rogue (class 5): classAbility
+              + 3 holding typeId 0x79e (Bled's Ebony Longsword) in either hand
+
+So **Strength** is what lands a blow -- an arrow included -- and Agility is
+what avoids one. The player's base is the stats constructor's 0
+(`FUN_100477cc`); only four items ever move it (`FUN_1003dbdc`). The port's
+50/50 was a placeholder standing in for the missing terms; it is gone, and a
+save made before M137 has the 50 taken back off on load (the engine's base
+can never reach 40). Creatures: their constructor writes Strength,
+Intelligence, Will and Agility to 1 after the stats constructor, so a
+creature's rating is `SetAttack + 2` and `SetDefense + 0`; its Will default
+is now 1, not 0.
+
+Then the dodge, the defender's stats vtable +0x14, which the port never
+had: `FUN_1004b774` -- with Luck above 40, `v = (luck-40)/5` and
+`percent = v*256/(v + (roll+chance)*256) * 100 >> 8`, dodged when
+`RandomRange(0,100) <= percent` -- and the player's `FUN_100449f4`, which
+adds a Khajiit's race-ability rank as an evasion percentage. Creatures keep
+Luck 40 and never dodge. `combat.h` `RollDodge`, `to_hit_smoke`.
+
+Still a placeholder of the same kind: the player's `m_Spellcast` 50 (the
+constructor's is 0). It feeds only the spell to-hit and was left alone.
+
+### Creatures attacking through doors and gates
+
+`FUN_10082004`'s cast (`FUN_100182d0`, mode 3) stops on **either** tile bit,
+`cell[0] & 2` or `cell[1] & 4`. The port's reach used `HasLineOfSight`,
+which tests only the first -- and closed doors, gates, portcullises,
+Glacial Crawl's ice walls and the cells baked under solid wall pieces carry
+only the second. `Zone::HasMeleeReach` tests both; sight (OnDetect) is
+unchanged.
+
+### The spell hands thrown sideways on a swap
+
+In a wide view the viewmodel's anchor (centre for spell hands, right edge
+for a weapon) came from the *new* item, while the first half of a swap
+still draws the old one -- so going from the hands to a weapon drew the
+hands at the weapon's anchor. `ViewmodelDraw::restSlot` is now the resting
+frame of whatever is on screen.
+
+### Checked and left as shipped
+
+- **Glacial Crawl's frozen keys.** Only the eight Blizzard Warriors
+  (`GlcrCrwl\Blizzard_Warrior.s`) and one Ice Bowman (`glcrcrwl\icebowman.s`)
+  carry `Loot_Key`, always; the other twelve bowmen drop gold one time in
+  three. Nine keys for nine gates -- and a used panel closes its gate and
+  hands the key back (`controlN.s`), so keys are meant to be carried on.
+- **Creatures give up beyond `SetChaseRadius`** -- the AI's one-line
+  `chaseRadius < d` test, no sight involved (see monster_ai.h).
+- **Arrows have no range.** `FUN_10007214` has no lifetime or distance
+  counter; an arrow flies until a wall or an actor stops it.

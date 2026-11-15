@@ -135,12 +135,13 @@ int main(int argc, char** argv) {
         Check(strengthBefore == 50, "the port's placeholder player starts at 50 strength");
 
         // Increment adds; the return is the value *before*.
+        // M137: the base attack is the stats constructor's 0, not 50.
         int previous = sk_b::ApplyEffectStat(player, sk_b::kEffectStatAttack, sk_b::kOpIncrement, 7);
-        Check(previous == 50 && player.attack() == 57,
+        Check(previous == 0 && player.attack() == 7,
               "Increment adds to the field and returns its previous value");
         // Set assigns.
         previous = sk_b::ApplyEffectStat(player, sk_b::kEffectStatAttack, sk_b::kOpSet, 12);
-        Check(previous == 57 && player.attack() == 12, "Set assigns, and returns the old value");
+        Check(previous == 7 && player.attack() == 12, "Set assigns, and returns the old value");
         // Decrement, as written: magnitude minus previous, not the reverse.
         previous = sk_b::ApplyEffectStat(player, sk_b::kEffectStatAttack, sk_b::kOpDecrement, 30);
         Check(previous == 12 && player.attack() == 18,

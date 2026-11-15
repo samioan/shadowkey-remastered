@@ -60,7 +60,8 @@ $skip = @('Shadowkey', 'shadowkey_port', 'render_at_smoke', 'scratch_check_rat')
 # for a reason that is not a bug. launcher_smoke belongs here because it
 # skips its own dump- and font-dependent checks when those are absent.
 $noDataTests = @('aspect_viewport_smoke', 'save_archive_smoke',
-                 'debug_suite_smoke', 'launcher_smoke')
+                 'debug_suite_smoke', 'launcher_smoke',
+                 'boot_sequence_smoke')
 
 if (-not (Test-Path $BuildDir)) {
     Write-Error "$BuildDir does not exist -- run port/build.bat first."

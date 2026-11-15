@@ -704,8 +704,25 @@ public:
     int defense() const { return (std::max)(0, m_BaseDefense); }
     // M49: SpellActor's ranged-combat ratings, which an arrow's impact
     // resolves through -- the same two numbers melee already uses.
-    int actorAttackRating() const override { return attack(); }
-    int actorDefenseRating() const override { return defense(); }
+    //
+    // M137: the engine's own pair, FUN_10047f64 and FUN_1004801c, which
+    // every to-hit roll in the game goes through (FUN_1004b620) -- melee
+    // both ways, arrows both ways. The port used the bare base values,
+    // which left out the player's Strength entirely:
+    //
+    //   attack  = base + 2 * Strength
+    //             + (Dark Elf: specialAbility / 4, the sum floored at 1)
+    //   defense = base + Agility / 5
+    //             + (Rogue: specialAbility)
+    //             + (3 while either hand holds typeId 0x79e, Bled's Ebony
+    //                Longsword)
+    //
+    // So Strength is what lands blows -- bows included -- and Agility is
+    // what avoids them.
+    int actorAttackRating() const override;
+    int actorDefenseRating() const override;
+    // M137: Luck, and a Khajiit's race ability -- FUN_100449f4.
+    DodgeStats actorDodgeStats() const override;
 
     // The stats block's own per-frame tick -- the poison/burn damage
     // channels and every timed expiry. main.cpp calls this once per game
@@ -898,7 +915,15 @@ private:
     // come from a character-creation stat system this port does not have --
     // but a placeholder that is at least the right order of magnitude for
     // the formula now consuming it.
-    int m_BaseDefense = 50, m_BaseAttack = 50;
+    //
+    // M137: retired. The 50s stood in for the terms the port's to-hit left
+    // out -- the engine's rating is FUN_10047f64/FUN_1004801c, base plus
+    // 2*Strength / Agility/5 (actorAttackRating()/actorDefenseRating()).
+    // The base itself is the stats constructor's 0 (FUN_100477cc writes
+    // stats+0x00 and +0x02 to 0), and nothing but four pieces of equipment
+    // ever moves it (FUN_1003dbdc: +1/+4 attack, +5 defense). A 40-Strength
+    // character's attack is 80 against a level-1 rat's 62 defense: 56%.
+    int m_BaseDefense = 0, m_BaseAttack = 0;
     // M37: the two *base* stats the real spell to-hit / resistance
     // formulas are built from (`+0x04` and `+0x06` of the stats block) --
     // what statsscreen.s shows is the derived value, computed in

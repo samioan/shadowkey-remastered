@@ -33,15 +33,35 @@ namespace sk_bindings {
 // so this is a deliberate substitution, not a guard against overflow.
 int MeleeHitChance(int attackerAttack, int defenderDefense);
 
+// M137: the defender's half of the dodge that follows a successful roll --
+// the stats vtable's +0x14 slot. `FUN_1004b774` for every actor:
+//
+//   if (luck > 40) {
+//       v = (luck - 40) / 5, in 8.8;                 // the 0x66666667 multiply
+//       percent = (v * 256 / (v + p * 256)) * 100 >> 8;
+//       if (RandomRange(0, 100) <= percent) dodged;
+//   }
+//
+// with `p` the caller's `roll + chance`; and `FUN_100449f4`, the player's
+// override, which runs that first and then, for a Khajiit (race 4), adds
+// `p * min(raceAbility, 100) / 100` to the percent and dodges when
+// `RandomRange(0, p) < percent` -- the race ability rank as a straight
+// evasion percentage. A creature's Luck is the stats constructor's 40 (its
+// own constructor never touches it), so no creature ever dodges.
+struct DodgeStats {
+    int luck = 40;          // stats+0x22
+    int khajiitRank = -1;   // player+0xfb4 when player+0xf3c == 4, else -1
+};
+bool RollDodge(const DodgeStats& defender, int rollPlusChance);
+
 // `rand % 0x100 <= chance` -- note the `<=`, and note the roll is over
 // [0, 255] against a chance that can reach 256, so a very lopsided matchup
 // really is a certainty even though the zero-defense case is not.
 //
-// The real function follows a successful roll with a second, separate
-// dodge/block test through the defender's own stats vtable (+0x14), which
-// is not decompiled and is not reproduced here -- so this port's melee
-// lands slightly more often than the shipped game's.
-bool RollMeleeHit(int attackerAttack, int defenderDefense);
+// M137: and then the dodge above, through the defender's own stats vtable
+// (+0x14). Omitted (null) it is the bare roll, which is what the port did
+// everywhere until M137.
+bool RollMeleeHit(int attackerAttack, int defenderDefense, const DodgeStats* dodge = nullptr);
 
 // The whole melee resolution: the gate above, then the damage tail of
 // FUN_100835b8:
@@ -63,7 +83,7 @@ bool RollMeleeHit(int attackerAttack, int defenderDefense);
 // passes true: the ranged branch has already returned by then, and a
 // creature has no fatigue pool to empty. See vitals.h.
 int RollDamage(int attackerAttack, int defenderDefense, int defenderArmor, int dmgMin, int dmgMax,
-                bool halveRoll = false);
+                bool halveRoll = false, const DodgeStats* dodge = nullptr);
 
 // ---- M85: the player's melee reach, and the height band around it ----
 //
@@ -158,7 +178,8 @@ struct PlayerMeleeResult {
 PlayerMeleeResult RollPlayerMeleeDamage(int attackerAttack, int defenderDefense, int defenderArmor,
                                          int dmgMin, int dmgMax, bool halveRoll,
                                          bool targetIsSpider, int spiderBonusMin,
-                                         int spiderBonusMax, bool weaponIsMagickaEdge, int magicka);
+                                         int spiderBonusMax, bool weaponIsMagickaEdge, int magicka,
+                                         const DodgeStats* dodge = nullptr);
 
 // entities.txt row `573 30 4 weapons\Magicka_edge_Axe.s` -- the one
 // template id `FUN_100425bc` names outright.

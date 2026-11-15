@@ -213,7 +213,7 @@ int main(int argc, char** argv) {
         // Weakness (4008), the first of the two branches M43 added, cast at
         // the player by the creature that is the only one in the game that
         // casts it. -10 attack for `magnitude + 8` = 17 seconds.
-        int attackBefore = player.attack();
+        int attackBefore = player.baseAttack();  // M137: raw -- 0 - 10 clamps in attack()
         {
             skRValueArray a;
             a.append(skRValue(static_cast<skiExecutable*>(&player), false));
@@ -224,7 +224,7 @@ int main(int argc, char** argv) {
         Check(wight->spellSlot(0).spell->statusEffect() == Item::kEffectWeakness,
               "typeId 4008 resolves to spells\\Weakness.s -- a branch only creatures cast");
         Check(player.actorStats().statModifier(Stats::kStatAttack) == -10 &&
-                  player.attack() == attackBefore - 10,
+                  player.baseAttack() == attackBefore - 10,
               "...and a creature's Weakness really takes 10 off the player's attack");
 
         // ...and it expires on the player's own tick, at the real
@@ -388,13 +388,15 @@ int main(int argc, char** argv) {
                   "a blinded creature takes the -10s but never the flag itself");
 
             sk_bindings::PlayerExecutable& player = stack.player();
-            int defenseBefore = player.defense();
+            // M137: the raw field -- from the constructor's 0 a -10 goes
+            // negative, which defense() clamps.
+            int defenseBefore = player.baseDefense();
             skRValueArray pa;
             pa.append(skRValue(static_cast<skiExecutable*>(&player), false));
             skRValue pr;
             skExecutableContext pc(&interpreter);
             blind->method(skString("DoAttackRoll"), pa, pr, pc);
-            Check(player.blinded() && player.defense() == defenseBefore - 10,
+            Check(player.blinded() && player.baseDefense() == defenseBefore - 10,
                   "...while the player takes both -- the flag is the player's alone");
         }
     }

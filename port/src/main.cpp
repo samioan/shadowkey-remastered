@@ -62,6 +62,7 @@
 #include "platform/win32/gamepad.h"
 #include "engine/mouse_look_keys.h"
 #include "engine/credits_roll.h"
+#include "engine/boot_sequence.h"
 #include "platform/win32/window.h"
 #include "render3d/camera.h"
 #include "render3d/zone_renderer.h"
@@ -2269,16 +2270,22 @@ void RenderWeaponViewmodel(sk::Backbuffer& backbuffer, const sk_bindings::Weapon
     const sk::Sprite* sprite = sprites.GetSprite(draw.spriteSlot);
     // A strip slot the per-zone sprite manifest didn't pull in falls back
     // to the weapon's own base frame rather than blinking out.
-    if (!sprite) sprite = sprites.GetSprite(vm.item->weaponSprite());
+    if (!sprite) sprite = sprites.GetSprite(draw.restSlot);
     if (!sprite) return;
     // M120: a weapon to the right edge of a wide view, anything else in its
     // middle. Decided from the item's own resting frame, not the frame on
     // screen, so a swing never jumps between the two mid-animation: a
     // weapon's resting canvas has its arm running off the right edge (every
     // shipped one does), a spell's two hands sit either side of the centre.
+    //
+    // M137: the resting frame of the art actually being drawn. It was the
+    // *new* item's, and for the first half of a swap the old item is still
+    // the one on screen -- so changing from the spell hands to a weapon
+    // threw the hands over to the weapon's right-edge anchor until the
+    // swap reached the new weapon.
     int x0 = layout.centreX();
     if (layout.wide()) {
-        const sk::Sprite* rest = sprites.GetSprite(vm.item->weaponSprite());
+        const sk::Sprite* rest = sprites.GetSprite(draw.restSlot);
         if (rest && rest->width == sk::Backbuffer::kWidth) {
             bool touchesRight = false;
             for (int y = 0; y < rest->height && !touchesRight; ++y) {
@@ -3678,6 +3685,89 @@ void RenderVignette(sk::Backbuffer& backbuffer, sk::SpriteArchive& sprites,
                     sk::BitmapFont::Face::SmallItalic);
 }
 
+// M137: `FUN_1004fc50`'s in-place step -- `amount` (0..15) off every
+// RGB444 nibble. On the port's RGB565 that is amount*17 off each 8-bit
+// channel.
+void FadeBackbuffer(sk::Backbuffer& bb, int amount) {
+    if (amount <= 0) return;
+    const int sub = amount * 17;
+    for (int y = 0; y < bb.height(); ++y) {
+        uint16_t* row = bb.Row(y);
+        for (int x = 0; x < bb.width(); ++x) {
+            const uint16_t p = row[x];
+            int r = (p >> 11) & 31, g = (p >> 5) & 63, b = p & 31;
+            r = (std::max)(0, ((r << 3) | (r >> 2)) - sub);
+            g = (std::max)(0, ((g << 2) | (g >> 4)) - sub);
+            b = (std::max)(0, ((b << 3) | (b >> 2)) - sub);
+            row[x] = sk::PackRGB565(static_cast<uint8_t>(r), static_cast<uint8_t>(g),
+                                    static_cast<uint8_t>(b));
+        }
+    }
+}
+
+// M137: the boot screens -- `FUN_10068e0c`'s arms for modes 0x25..0x27, 6
+// and 0xc..0x10. See engine/boot_sequence.h for the sequence itself.
+void RenderBootScreen(sk::Backbuffer& backbuffer, sk::SpriteArchive& sprites,
+                      const sk::StringTable& strings, sk::BootMode mode) {
+    constexpr uint16_t kWhite = MenuColor444(0xfff);
+    // Every arm draws over what the buffer already holds, and the only way
+    // in is through a fade that leaves it black.
+    backbuffer.Fill(sk::PackRGB565(0, 0, 0));
+    auto blit = [&](int slot, int x, int y) {
+        if (const sk::Sprite* art = sprites.GetSprite(slot)) backbuffer.Blit(x, y, *art);
+    };
+    // FUN_100231b4(ctx, text, 0, y, 0xb0, _, 0xff, 0xff, 0xff, 0, 0, 1, 0, 0x19):
+    // the legend face, white, left-aligned in the full width, 25 to a line.
+    auto legendBox = [&](int id, int y) {
+        sk::DrawTextBox(backbuffer, strings.Get(id), 0, y, 0xb0, kWhite, sk::TextBoxAlign::Left,
+                        0x19, sk::BitmapFont::Face::Ui);
+    };
+    const int m = static_cast<int>(mode);
+    switch (mode) {
+    case sk::BootMode::kLogoVir2L:
+        blit(sk::kBootSpriteVir2L, 0, 0);
+        legendBox(sk::kBootTextPublished, 0x28);
+        break;
+    case sk::BootMode::kLogoBethesda:
+        blit(sk::kBootSpriteBethesda, 0, 0);
+        break;
+    case sk::BootMode::kLogoTko:
+        blit(sk::kBootSpriteTko, 0, 0);
+        legendBox(sk::kBootTextAssociation, 0x28);
+        legendBox(sk::kBootTextTkoNotice, 0x82);
+        break;
+    case sk::BootMode::kCopyright: {
+        // FUN_1008f97c(gc, text, y, controller->+8 (0xfff), 1, 0, 0, 0):
+        // centred, shadowed, white.
+        blit(sk::kBootSpriteParchment, 0, 0);
+        int y = sk::kBootCopyrightFirstY;
+        for (int id : sk::kBootCopyrightLines) {
+            DrawCenteredWidgetLabel(backbuffer, y, strings.Get(id), kWhite);
+            y += sk::kBootCopyrightPitch;
+        }
+        break;
+    }
+    case sk::BootMode::kTitle:
+        // The splash, and FUN_100231b4(ctx, 4074, 0, 0xb4, 0xb0, _, white,
+        // 0, 0, 0, 1, 0x19): the small face, centred.
+        blit(sk::kBootSpriteTitle, 0, 0);
+        sk::DrawTextBox(backbuffer, strings.Get(sk::kBootTextPressAnyKey), 0, 0xb4, 0xb0, kWhite,
+                        sk::TextBoxAlign::Centre, 0x19, sk::BitmapFont::Face::Small);
+        break;
+    default:
+        if (m >= static_cast<int>(sk::BootMode::kIntroFirst) &&
+            m <= static_cast<int>(sk::BootMode::kIntroLast)) {
+            // The vignette's own layout: the slide at (0xe, 5), the caption
+            // in the italic small face under it.
+            sk::DrawTextBox(backbuffer, strings.Get(sk::kBootIntroTextBase + (m - 0xc)), 0xe, 0x73,
+                            0xab, kWhite, sk::TextBoxAlign::Left, 0x19,
+                            sk::BitmapFont::Face::SmallItalic);
+            blit(sk::kBootIntroSpriteBase + m, 0xe, 5);
+        }
+        break;
+    }
+}
+
 // M113: where this run's *writable* files go -- saves, `dragonstar.set`
 // and the log. Everything that follows used to put them beside the
 // executable, which is right for a build directory and wrong for a shipped
@@ -3977,6 +4067,24 @@ int main(int argc, char** argv) {
                     failed);
         return 0;
     }
+    // M137: `SK_DUMP_BOOT=<dir>` -- the same for the boot screens
+    // (engine/boot_sequence.h): one .ppm per mode, unfaded.
+    if (const char* dumpDir = std::getenv("SK_DUMP_BOOT")) {
+        sk::Backbuffer shot;
+        const sk::BootMode modes[] = {sk::BootMode::kLogoVir2L,    sk::BootMode::kLogoBethesda,
+                                      sk::BootMode::kLogoTko,      sk::BootMode::kCopyright,
+                                      static_cast<sk::BootMode>(0xc), static_cast<sk::BootMode>(0xd),
+                                      static_cast<sk::BootMode>(0xe), static_cast<sk::BootMode>(0xf),
+                                      sk::BootMode::kTitle};
+        for (sk::BootMode mode : modes) {
+            RenderBootScreen(shot, spriteArchive, strings, mode);
+            char name[32];
+            std::snprintf(name, sizeof(name), "/boot_%02x.ppm", static_cast<int>(mode));
+            WriteBackbufferPpm(shot, std::string(dumpDir) + name);
+        }
+        std::printf("SK_DUMP_BOOT: boot screens written to %s\n", dumpDir);
+        return 0;
+    }
 
     // M113: the scale was hardcoded 3x; `SK_SCALE` is how the launcher
     // offers 2x/3x/4x. The title is what a player sees in their taskbar,
@@ -4203,6 +4311,20 @@ int main(int argc, char** argv) {
     sk_bindings::MenuExecutable* lastMenu = nullptr;
     int creditsScroll = 0;
     bool creditsBackHeldPrev = false;  // M127: GetButtonPrev(0x11)
+
+    // M137: the logos, copyright page and story intro before the main menu
+    // (engine/boot_sequence.h). SK_SKIP_INTRO=1 goes straight to the menu,
+    // which is what every scripted test drive wants.
+    sk::BootSequence bootSequence;
+    sk::Backbuffer bootFadeScratch;
+    // A wide window's side bars are a softened copy of the frame; on the
+    // black logo and story screens that smears the logo into them, so those
+    // get plain black bars instead (a Backbuffer starts zeroed).
+    const sk::Backbuffer bootBlackBackdrop;
+    {
+        const char* skipIntro = std::getenv("SK_SKIP_INTRO");
+        if (!(skipIntro && *skipIntro && *skipIntro != '0')) bootSequence.Start();
+    }
 
     // M6: the 3D zone renderer, entered when a menu calls NewGame()/
     // LoadGame() (see MenuStack::RequestGameStart()). M7 added simple
@@ -4814,8 +4936,18 @@ int main(int argc, char** argv) {
         const int b = (c & 0x1f) * k256 >> 8;
         return static_cast<uint16_t>((r << 11) | (g << 5) | b);
     };
-    auto presentMenu = [&](const sk::Backbuffer& native, bool overGame,
+    auto presentMenu = [&](const sk::Backbuffer& nativeIn, bool overGame,
                            const sk::Backbuffer* backdrop = nullptr) {
+        // M137: the main menu fades in after the boot sequence, the same
+        // FUN_1004fc50 step every boot screen gets.
+        const sk::Backbuffer* nativePtr = &nativeIn;
+        if (!bootSequence.active() && bootSequence.frameFade() > 0 &&
+            nativeIn.width() == sk::Backbuffer::kWidth) {
+            bootFadeScratch = nativeIn;
+            FadeBackbuffer(bootFadeScratch, bootSequence.frameFade());
+            nativePtr = &bootFadeScratch;
+        }
+        const sk::Backbuffer& native = *nativePtr;
         const int width = currentViewWidth();
         if (width <= sk::Backbuffer::kWidth || native.width() != sk::Backbuffer::kWidth) {
             window.Present(native);
@@ -6172,6 +6304,39 @@ int main(int argc, char** argv) {
         // InputState::TickRepeats(). Must run before any Consume* call
         // this tick.
         input.TickRepeats();
+
+        // M137: the boot sequence owns the screen until it hands over to
+        // the main menu -- engine/boot_sequence.h. A game started some other
+        // way (the debug console's autoexec, a multiplayer join) ends it.
+        if (bootSequence.active() && (stack.gameStartRequested() || inGame || loadingScreenActive)) {
+            bootSequence.Finish();
+        }
+        {
+            bool anyButton = false;
+            bool skipAll = false;
+            if (bootSequence.active()) {
+                for (int slot = 0; slot < static_cast<int>(sk::ButtonSlot::kCount); ++slot) {
+                    if (input.ConsumeJustPressed(static_cast<sk::ButtonSlot>(slot))) {
+                        anyButton = true;
+                        if (slot == static_cast<int>(sk::ButtonSlot::RightSelectionKey)) {
+                            skipAll = true;
+                        }
+                    }
+                }
+            }
+            const bool wasActive = bootSequence.active();
+            if (bootSequence.Step(sk_bindings::kAiFrameDeltaUnits, anyButton, false, skipAll)) {
+                const sk::BootMode shown = bootSequence.drawnMode();
+                RenderBootScreen(backbuffer, spriteArchive, strings, shown);
+                FadeBackbuffer(backbuffer, bootSequence.frameFade());
+                const bool blackBars = shown != sk::BootMode::kCopyright &&
+                                       shown != sk::BootMode::kTitle;
+                presentMenu(backbuffer, false, blackBars ? &bootBlackBackdrop : nullptr);
+                if (!bootSequence.active()) input.ClearPendingEdges();
+                return;
+            }
+            if (wasActive) input.ClearPendingEdges();
+        }
 
         // M10: erase any inventory items marked for removal last tick
         // (UseItem/DropItem) -- safe here since any script call chain
@@ -9075,7 +9240,7 @@ int main(int argc, char** argv) {
                                 // Zone::HasLineOfSight.
                                 const bool reach =
                                     ranged || !gameZone ||
-                                    gameZone->HasLineOfSight(m.x, m.y, gameCamera.x, gameCamera.y);
+                                    gameZone->HasMeleeReach(m.x, m.y, gameCamera.x, gameCamera.y);  // M137
                                 // The boss throttle (monster+0x266 /
                                 // +0x2c8 / +0x2cc): at most one swing every
                                 // SetAttackSpeed seconds of game clock, on
@@ -9154,13 +9319,19 @@ int main(int argc, char** argv) {
                                             static_cast<int>(m.z), 0,
                                             sk_bindings::EngineYawFromPortYaw(m.facingYaw),
                                             /*pitch=*/0, sk_bindings::kBowProjectileTypeId,
-                                            std::rand() % dmgMax, m.script->attack()));
+                                            std::rand() % dmgMax,
+                                            m.script->actorAttackRating()));  // M137
                                         playWorldSound(m.script->attackNoiseId(), m.x, m.y);
                                     } else {
+                                        // M137: FUN_1004b620's own ratings
+                                        // and the player's dodge.
+                                        const sk_bindings::DodgeStats playerDodge =
+                                            stack.player().actorDodgeStats();
                                         int dmg = sk_bindings::RollDamage(
-                                            m.script->attack(), stack.player().defense(),
+                                            m.script->actorAttackRating(),
+                                            stack.player().actorDefenseRating(),
                                             stack.player().armorRating(), m.script->damageMin(),
-                                            m.script->damageMax());
+                                            m.script->damageMax(), false, &playerDodge);
                                         // M51: FUN_10044814 plays slot 80
                                         // on any positive incoming damage,
                                         // before it applies it -- the same
@@ -9967,7 +10138,7 @@ int main(int argc, char** argv) {
                             sk_bindings::EngineYawFromPortYaw(gameCamera.yaw),
                             sk_bindings::EngineAngleFromRadians(gameCamera.pitch),
                             weapon->projectileTypeId(), std::rand() % dmgMax,
-                            stack.player().attack()));
+                            stack.player().actorAttackRating()));  // M137: + 2*Strength
                         return;
                     }
                     // ---- M85: how a melee swing finds what it hits ----
@@ -10102,15 +10273,18 @@ int main(int argc, char** argv) {
                         const sk_bindings::ItemExecutable::DamageBonus* spiderBonus =
                             weapon->FindDamageBonus(
                                 sk_bindings::ItemExecutable::kSpiderBonusKey);
+                        const sk_bindings::DodgeStats targetDodge =
+                            target->script->actorDodgeStats();  // M137
                         sk_bindings::PlayerMeleeResult roll =
                             sk_bindings::RollPlayerMeleeDamage(
-                                stack.player().attack(), target->script->defense(),
+                                stack.player().actorAttackRating(),   // M137
+                                target->script->actorDefenseRating(),
                                 target->script->armorValue(), dmgMin, dmgMax, exhausted,
                                 target->script->spider() && spiderBonus != nullptr,
                                 spiderBonus ? spiderBonus->min : 0,
                                 spiderBonus ? spiderBonus->max : 0,
                                 weapon->templateId() == sk_bindings::kTemplateMagickaEdgeAxe,
-                                stack.player().magicka());
+                                stack.player().magicka(), &targetDodge);
                         if (roll.magickaSpent > 0) {
                             stack.player().SetActorMagicka(stack.player().magicka() -
                                                             roll.magickaSpent);

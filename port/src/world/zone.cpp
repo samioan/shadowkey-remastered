@@ -658,6 +658,56 @@ bool Zone::HasLineOfSight(float x0, float y0, float x1, float y1) const {
     return false;
 }
 
+// M137: see zone.h.
+bool Zone::HasMeleeReach(float x0, float y0, float x1, float y1) const {
+    // Amanatides-Woo grid traversal: visits exactly the tiles the segment
+    // crosses, no more, so a sightline that only clips a wall's corner
+    // isn't wrongly reported as blocked (and none is ever skipped, which a
+    // fixed-step march can do at glancing angles).
+    int tx = static_cast<int>(std::floor(x0 / kTileScale));
+    int ty = static_cast<int>(std::floor(y0 / kTileScale));
+    const int endTx = static_cast<int>(std::floor(x1 / kTileScale));
+    const int endTy = static_cast<int>(std::floor(y1 / kTileScale));
+    if (!InBounds(tx, ty) || !InBounds(endTx, endTy)) return false;
+
+    float dx = x1 - x0, dy = y1 - y0;
+    int stepX = dx > 0 ? 1 : (dx < 0 ? -1 : 0);
+    int stepY = dy > 0 ? 1 : (dy < 0 ? -1 : 0);
+    // Parametric distance (in [0,1] along the segment) to the next tile
+    // boundary on each axis, and the increment per whole tile crossed.
+    constexpr float kInf = 1e30f;
+    float tMaxX = kInf, tDeltaX = kInf;
+    if (stepX != 0) {
+        float nextBoundary = (stepX > 0 ? (tx + 1) : tx) * kTileScale;
+        tMaxX = (nextBoundary - x0) / dx;
+        tDeltaX = kTileScale / std::fabs(dx);
+    }
+    float tMaxY = kInf, tDeltaY = kInf;
+    if (stepY != 0) {
+        float nextBoundary = (stepY > 0 ? (ty + 1) : ty) * kTileScale;
+        tMaxY = (nextBoundary - y0) / dy;
+        tDeltaY = kTileScale / std::fabs(dy);
+    }
+
+    // Bounded so a degenerate input can never spin: the longest possible
+    // traversal of a w*h grid crosses at most w+h tiles.
+    const int maxSteps = width_ + height_ + 2;
+    for (int i = 0; i < maxSteps; ++i) {
+        if (tx == endTx && ty == endTy) return true;
+        if (tMaxX < tMaxY) {
+            tx += stepX;
+            tMaxX += tDeltaX;
+        } else {
+            ty += stepY;
+            tMaxY += tDeltaY;
+        }
+        if (!InBounds(tx, ty)) return false;
+        if (tx == endTx && ty == endTy) return true;  // the target's own tile
+        if (CellAt(tx, ty).IsWall() || CellAt(tx, ty).IsBlocked()) return false;
+    }
+    return false;
+}
+
 namespace {
 
 // Shared by FloorHeightAt/CeilingHeightAt: bilinear blend of a tile's 4

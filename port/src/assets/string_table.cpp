@@ -18,7 +18,16 @@ std::string Utf16LeToLatin1(const std::vector<uint16_t>& units) {
     out.reserve(units.size());
     for (uint16_t u : units) {
         if (u == 0) break;  // trailing NUL
-        out.push_back(u < 0x100 ? static_cast<char>(static_cast<unsigned char>(u)) : '?');
+        // M137: TM and the ellipsis travel as their Windows-1252 bytes --
+        // see bitmap_font.cpp's GlyphFor. Everything else past Latin-1 is
+        // still '?'.
+        if (u == 0x2122) {
+            out.push_back(static_cast<char>(0x99));
+        } else if (u == 0x2026) {
+            out.push_back(static_cast<char>(0x85));
+        } else {
+            out.push_back(u < 0x100 ? static_cast<char>(static_cast<unsigned char>(u)) : '?');
+        }
     }
     return out;
 }

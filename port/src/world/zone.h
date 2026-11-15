@@ -729,6 +729,21 @@ public:
     // creature can actually see", which is what this restores.
     bool HasLineOfSight(float x0, float y0, float x1, float y1) const;
 
+    // M137: the creature melee reach (`FUN_10082004`, through the cast
+    // `FUN_100182d0` with mode 3). The same walk as HasLineOfSight, but the
+    // cast's geometry stop is **either** tile bit -- `(cell[0] & 2) != 0`,
+    // IsWall(), or `cell[1] & 4`, IsBlocked() -- and the port tested only
+    // the first. Every closed door, gate and portcullis, Glacial Crawl's ice
+    // walls and the tens of thousands of cells the .zmp bakes under solid
+    // wall pieces carry only the second, so a creature on the far side of
+    // any of them could swing straight through it.
+    //
+    // The tile the target stands in is never tested: the cast's entity
+    // check runs before its geometry check on every step, so the march
+    // finds the target before it can be stopped in that tile. The start
+    // tile is skipped as HasLineOfSight skips it.
+    bool HasMeleeReach(float x0, float y0, float x1, float y1) const;
+
     // Bilinearly interpolated floor/ceiling height (raw world units, same
     // convention as playerStartZ/Camera::z -- NOT tile units) at a world
     // (x,y), read from the containing tile's own ZcpEntry::floorHeight/

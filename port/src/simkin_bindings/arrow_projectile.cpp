@@ -53,7 +53,8 @@ ProbeResult Probe(const ArrowProjectile& arrow, const ArrowCellQuery& cellAt, in
 // re-reads the owner's live rating. They only differ if the shooter's stats
 // changed mid-flight.
 bool RollArrowHit(int attackSkill, const ArrowTarget& target) {
-    return RollMeleeHit(attackSkill, target.actor->actorDefenseRating());
+    const DodgeStats dodge = target.actor->actorDodgeStats();  // M137
+    return RollMeleeHit(attackSkill, target.actor->actorDefenseRating(), &dodge);
 }
 
 }  // namespace

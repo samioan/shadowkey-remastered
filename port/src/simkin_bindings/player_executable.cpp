@@ -612,6 +612,46 @@ int PlayerExecutable::SellAllOfItem(ItemExecutable* item) {
     return SellItemToMerchant(item, count);
 }
 
+// M137: FUN_10047f64 for the player -- see the header. The stats block's
+// fields are signed shorts, and the arithmetic is kept in them.
+int PlayerExecutable::actorAttackRating() const {
+    int16_t bonus = 0;
+    if (static_cast<int16_t>(m_Strength) > 0) bonus = static_cast<int16_t>(m_Strength * 2);
+    if (m_Race == kRaceDarkElf) {
+        // `vtable[0x48]` on the player's stats is `ldr r0, [r0, #0xfb0]`.
+        int ability = m_SpecialAbility;
+        if (ability < 0) ability += 3;
+        const int sum = (ability >> 2) + bonus;
+        bonus = static_cast<int16_t>(sum) < 1 ? int16_t{1} : static_cast<int16_t>(sum);
+    }
+    // The raw base, not attack(): from the constructor's 0 a Weakness or
+    // Drain (-10) takes it negative, and that has to come off the rating.
+    // Only the result is floored -- a negative attack makes the ratio in
+    // MeleeHitChance meaningless, where the engine would simply never hit.
+    return (std::max)(0, static_cast<int>(static_cast<int16_t>(m_BaseAttack + bonus)));
+}
+
+// M137: FUN_1004801c for the player.
+int PlayerExecutable::actorDefenseRating() const {
+    int16_t bonus = 0;
+    if (static_cast<int16_t>(m_Agility) > 0) bonus = static_cast<int16_t>(m_Agility / 5);
+    if (m_CharacterClass == kClassRogue) bonus = static_cast<int16_t>(bonus + m_SpecialAbility);
+    static constexpr int kBledsEbonyLongsword = 0x79e;
+    const auto holds = [](const ItemExecutable* item) {
+        return item && item->templateId() == kBledsEbonyLongsword;
+    };
+    if (holds(m_LeftItem) || holds(m_RightItem)) bonus = static_cast<int16_t>(bonus + 3);
+    // Raw base for the same reason (Blind and Disease take 10 off it).
+    return (std::max)(0, static_cast<int>(static_cast<int16_t>(m_BaseDefense + bonus)));
+}
+
+DodgeStats PlayerExecutable::actorDodgeStats() const {
+    DodgeStats d;
+    d.luck = m_Luck;
+    d.khajiitRank = m_Race == kRaceKhajiit ? m_RaceAbility : -1;
+    return d;
+}
+
 // M58: FUN_1004ad40's field map for the player -- see spell_actor.h and
 // effects.h. The order is the stats block's own, and the four gaps are
 // stats the engine's switch has no case for either (26..29).
@@ -1797,23 +1837,17 @@ bool PlayerExecutable::method(const skString& methodName, skRValueArray& args,
             return true;
         }
     }
+    // M137: cases 0x41 and 0x40 of the stats binding (FUN_10048244) --
+    // FUN_1004801c and FUN_10047f64, the same ratings every to-hit uses.
+    // statsscreen.s's Defense and Attack rows. GetAttack used to be the
+    // base plus each hand's average weapon damage, which nothing in the
+    // engine computes.
     if (methodName == skString("GetDefense") && args.entries() == 0) {
-        returnValue = skRValue(m_BaseDefense);
+        returnValue = skRValue(actorDefenseRating());
         return true;
     }
     if (methodName == skString("GetAttack") && args.entries() == 0) {
-        // Real state: base attack plus each equipped hand's weapon average
-        // damage, if any -- UpdateEquipStatus() fills whichever hand is
-        // empty first (left, then right), not always the right hand, so
-        // both are checked here.
-        int total = m_BaseAttack;
-        if (m_LeftItem && m_LeftItem->itemType() == kItemTypeWeapon) {
-            total += (m_LeftItem->damageMin() + m_LeftItem->damageMax()) / 2;
-        }
-        if (m_RightItem && m_RightItem->itemType() == kItemTypeWeapon) {
-            total += (m_RightItem->damageMin() + m_RightItem->damageMax()) / 2;
-        }
-        returnValue = skRValue(total);
+        returnValue = skRValue(actorAttackRating());
         return true;
     }
     if (methodName == skString("GetArmorRating") && args.entries() == 0) {

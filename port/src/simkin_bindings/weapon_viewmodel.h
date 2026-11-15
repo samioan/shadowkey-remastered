@@ -211,6 +211,11 @@ struct ViewmodelDraw {
     bool visible = false;
     int spriteSlot = -1;
     int x = 0, y = 0;
+    // M137: the resting (base) frame of the item whose art this is -- the
+    // *previous* weapon's for the first half of a swap, which is still on
+    // screen then, and the current item's otherwise. Not the engine's (the
+    // device has one frame width); main.cpp's wide-view placement reads it.
+    int restSlot = -1;
 };
 ViewmodelDraw ResolveViewmodelDraw(const WeaponViewmodel& vm);
 

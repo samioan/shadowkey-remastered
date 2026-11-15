@@ -955,3 +955,13 @@ target_link_libraries(consumable_stack_smoke PRIVATE sk_bindings sk_world)
 # src/tests/m136_usable_object_smoke.cpp.
 add_executable(usable_object_smoke src/tests/m136_usable_object_smoke.cpp)
 target_link_libraries(usable_object_smoke PRIVATE sk_bindings sk_world)
+
+# M137: the boot sequence -- the publisher logos, the copyright page and
+# the story intro before the main menu. See src/tests/m137_boot_sequence_smoke.cpp.
+add_executable(boot_sequence_smoke src/tests/m137_boot_sequence_smoke.cpp)
+target_include_directories(boot_sequence_smoke PRIVATE src)
+
+# M137: the to-hit ratings (base + 2*Strength / Agility/5 and the class and
+# race terms) and the Luck/Khajiit dodge. See src/tests/m137_to_hit_smoke.cpp.
+add_executable(to_hit_smoke src/tests/m137_to_hit_smoke.cpp)
+target_link_libraries(to_hit_smoke PRIVATE sk_bindings sk_world)
