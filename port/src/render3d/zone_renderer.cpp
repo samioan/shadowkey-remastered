@@ -1618,6 +1618,35 @@ void ZoneRenderer::RenderInternal(Backbuffer* backbufferPtr, GpuFrame* gpuFrame,
         visibleTiles =
             zone.RaycastVisibleTiles(camera.x, camera.y, camera.yaw, tier, softCap, hardCap);
     }
+    // M139, a port addition: the tiles right around the camera, whatever
+    // their bearing. The engine's fan is 140 degrees wide and passes
+    // through the camera, so ground more than ~70 degrees off the facing is
+    // only ever in the set as the camera's own tile. At the 45-degree
+    // look-down limit the bottom corners of the view meet the floor about
+    // 90 degrees to the side, a tile or two away -- and a wide window's
+    // corners reach further round still -- so those floor polygons dropped
+    // out at the screen edges. Anything this adds is behind a wall or the
+    // near plane when it is not on screen, so the depth buffer and the clip
+    // keep the frame otherwise unchanged.
+    {
+        constexpr int kNearRing = 3;
+        const int ctx = static_cast<int>(std::floor(camera.x / kTileScale));
+        const int cty = static_cast<int>(std::floor(camera.y / kTileScale));
+        std::vector<uint8_t> have(static_cast<size_t>((2 * kNearRing + 1) * (2 * kNearRing + 1)), 0);
+        for (const std::pair<int, int>& t : visibleTiles) {
+            const int dx = t.first - ctx, dy = t.second - cty;
+            if (dx < -kNearRing || dx > kNearRing || dy < -kNearRing || dy > kNearRing) continue;
+            have[static_cast<size_t>((dy + kNearRing) * (2 * kNearRing + 1) + dx + kNearRing)] = 1;
+        }
+        for (int dy = -kNearRing; dy <= kNearRing; ++dy) {
+            for (int dx = -kNearRing; dx <= kNearRing; ++dx) {
+                if (have[static_cast<size_t>((dy + kNearRing) * (2 * kNearRing + 1) + dx + kNearRing)]) {
+                    continue;
+                }
+                if (zone.InBounds(ctx + dx, cty + dy)) visibleTiles.emplace_back(ctx + dx, cty + dy);
+            }
+        }
+    }
     std::vector<Face> faces = CollectFaces(zone, visibleTiles, camera.x, camera.y, camera.z);
 
     float camX = camera.x / kTileScale, camY = camera.y / kTileScale, camZ = camera.z / kTileScale;
