@@ -13434,3 +13434,44 @@ nets nothing and removing them subtracts -- a slip in the original, left
 out rather than reproduced. A save from before M138 (spellcast 40 or more,
 which only the placeholder can be) has the 50 removed and its worn items'
 changes applied on load. `to_hit_smoke` part 2b.
+
+## M139 -- Stout's teleporters, the Shadowkey gate, and the view's edges
+
+### Region containment is half-open
+
+`FUN_1001b260`, the actor tick's room test, is `x0 <= x < x1 && y0 <= y < y1`.
+M44 made `Region::Contains` inclusive on the strength of player starts that
+sit on a region's far edge -- an inference the decompile contradicts, and a
+weak one since M83 showed standing at the spawn never fires EnterZone. It
+broke Stout's Trading Post: `FiveToSix` lands the player on tile (77, 72),
+one row inside `SixToFive`'s inclusive edge and one outside its real one,
+so the port fired `SixToFive` on arrival and sent the player straight back.
+
+### QuitAndDestroyOpener destroys any opener
+
+Menu case 0x35 is `if (opener) FUN_1001b484(engine, opener)` -- the deferred
+destroy queue, for whatever opened the screen. The port destroyed only items
+(loot bags). crypt1\shadowkeygate.s's `Done` needs the door: the opener is
+the gate (crypt1\shadowkeygatedoor.s), and removing it lifts its tile stamp.
+The gate said "open" and stayed shut.
+
+### The floor and ceiling at the screen's edges
+
+The visible-tile fan (`FUN_1000f694`) is 140 degrees wide and passes through
+the camera, so surfaces more than ~70 degrees off the facing never enter the
+set. At the 45-degree look limit the view's corners reach them -- floor
+beside the player looking down, ceiling and wall tops looking up (up to
+~1.8x the ceiling's height away in a wide window) -- and showed sky or black.
+A port addition puts every tile within five of the camera into the set; the
+depth buffer keeps the rest of the frame unchanged. Checked by looking down
+in stouttp and up in Earth Cave and the Twilight Temple, with and without.
+
+### Checked and left as shipped
+
+- **Melee reach** is tile flags only: `FUN_100182d0` computes floor and
+  ceiling but the stop decision reads only `cell[0] & 2` and `cell[1] & 4`
+  (confirmed in the disassembly, which Ghidra had obscured).
+- **"Invisible" attackers in the Crypt of Hearts** are Arrow Shades:
+  `SetAttackRange(12000)` (~47 tiles), up to 50 damage, and a ranged creature
+  skips the reach test -- so they shoot from beyond the 25-step visible-tile
+  range. Their arrows still stop at walls.
