@@ -1618,35 +1618,107 @@ void ZoneRenderer::RenderInternal(Backbuffer* backbufferPtr, GpuFrame* gpuFrame,
         visibleTiles =
             zone.RaycastVisibleTiles(camera.x, camera.y, camera.yaw, tier, softCap, hardCap);
     }
-    // M139, a port addition: the tiles right around the camera, whatever
-    // their bearing. The engine's fan is 140 degrees wide and passes
-    // through the camera, so ground more than ~70 degrees off the facing is
-    // only ever in the set as the camera's own tile. At the 45-degree
-    // look-down limit the bottom corners of the view meet the floor about
-    // 90 degrees to the side, a tile or two away -- and a wide window's
-    // corners reach further round still -- so those floor polygons dropped
-    // out at the screen edges. Looking up is the same at the top corners,
-    // and reaches further: a ceiling h tiles above the eye meets a wide
-    // window's corner up to ~1.8h tiles to the side, hence five tiles
-    // rather than the two or three looking down needs. Anything this adds
-    // is behind a wall or the near plane when it is not on screen, so the
-    // depth buffer and the clip keep the frame otherwise unchanged.
+    // M139, a port addition: the tiles around the camera, whatever their
+    // bearing. The engine's fan is 140 degrees wide and passes through the
+    // camera, so a surface more than ~70 degrees off the facing never enters
+    // the set. Looking down, the bottom corners of the view meet the floor
+    // about 90 degrees to the side; looking up, the side edges meet the
+    // ceiling there -- and in a tall room much further off than the fixed
+    // five tiles M139 allowed: Loth'Na's caverns are 1536 units high, and
+    // in a wide window the view's side edge reaches that ceiling some fifteen
+    // tiles away at the look-up limit.
+    //
+    // M140: so the radius comes from the view itself -- the edge rays whose
+    // bearing is outside the fan, against the highest ceiling and lowest
+    // floor near the camera -- and every tile in that square is added,
+    // walls included: in a shaft or under a tall wall the geometry that
+    // should show over a wall top is on its far side, which a fill bounded
+    // by walls never reaches (an offline sweep of every Loth'Na tile found
+    // exactly those). Anything added is behind a wall or the near plane
+    // when it is not on screen, so the depth buffer and the clip keep the
+    // frame otherwise unchanged; at the ordinary pitch the radius stays at
+    // M139's five. Beyond five, only tiles outside the fan's bearing are
+    // added, so the draw distance ahead is still the original's.
     {
-        constexpr int kNearRing = 5;
         const int ctx = static_cast<int>(std::floor(camera.x / kTileScale));
         const int cty = static_cast<int>(std::floor(camera.y / kTileScale));
-        std::vector<uint8_t> have(static_cast<size_t>((2 * kNearRing + 1) * (2 * kNearRing + 1)), 0);
-        for (const std::pair<int, int>& t : visibleTiles) {
-            const int dx = t.first - ctx, dy = t.second - cty;
-            if (dx < -kNearRing || dx > kNearRing || dy < -kNearRing || dy > kNearRing) continue;
-            have[static_cast<size_t>((dy + kNearRing) * (2 * kNearRing + 1) + dx + kNearRing)] = 1;
-        }
-        for (int dy = -kNearRing; dy <= kNearRing; ++dy) {
-            for (int dx = -kNearRing; dx <= kNearRing; ++dx) {
-                if (have[static_cast<size_t>((dy + kNearRing) * (2 * kNearRing + 1) + dx + kNearRing)]) {
-                    continue;
+
+        // The vertical reach: highest ceiling and lowest floor corner within
+        // a few tiles.
+        constexpr int kHeightProbe = 4;
+        float maxCeiling = camera.z, minFloor = camera.z;
+        for (int dy = -kHeightProbe; dy <= kHeightProbe; ++dy) {
+            for (int dx = -kHeightProbe; dx <= kHeightProbe; ++dx) {
+                if (!zone.InBounds(ctx + dx, cty + dy)) continue;
+                const ZmpCell& cell = zone.CellAt(ctx + dx, cty + dy);
+                if (cell.IsWall()) continue;
+                const ZcpEntry& type = zone.TypeOf(cell);
+                for (int c = 0; c < 4; ++c) {
+                    maxCeiling = std::max(maxCeiling, static_cast<float>(type.ceilingHeight[c]));
+                    minFloor = std::min(minFloor, static_cast<float>(type.floorHeight[c]));
                 }
-                if (zone.InBounds(ctx + dx, cty + dy)) visibleTiles.emplace_back(ctx + dx, cty + dy);
+            }
+        }
+        const float up = maxCeiling - camera.z;
+        const float down = camera.z - minFloor;
+
+        // The view's edge rays, in camera space (x right, y up, z ahead),
+        // turned by the pitch (positive = looking down).
+        const float tanY = std::tan(camera.fovY * 0.5f);
+        const float tanX = tanY * static_cast<float>(targetWidth) / static_cast<float>(targetHeight);
+        const float lift = -camera.pitch;
+        const float cosL = std::cos(lift), sinL = std::sin(lift);
+        constexpr float kFanHalfTan = 1.7320508f;  // tan 60: inside that, the fan has it
+        float reach = 0.0f;
+        auto probe = [&](float x, float y) {
+            const float vertical = y * cosL + sinL;
+            const float ahead = cosL - y * sinL;
+            if (std::fabs(x) <= kFanHalfTan * ahead) return;  // within the fan
+            const float horizontal = std::sqrt(x * x + ahead * ahead);
+            if (vertical > 1e-3f && up > 0.0f) reach = std::max(reach, up * horizontal / vertical);
+            if (vertical < -1e-3f && down > 0.0f) {
+                reach = std::max(reach, down * horizontal / -vertical);
+            }
+        };
+        constexpr int kEdgeSamples = 24;
+        for (int i = 0; i <= kEdgeSamples; ++i) {
+            const float s = -1.0f + 2.0f * static_cast<float>(i) / kEdgeSamples;
+            probe(-tanX, s * tanY);
+            probe(tanX, s * tanY);
+            probe(s * tanX, tanY);
+            probe(s * tanX, -tanY);
+        }
+        constexpr int kMinRing = 5;   // M139's, for the floor right beside you
+        constexpr int kMaxRing = 24;  // past this it is fog, and a long way off
+        const int ring = std::clamp(static_cast<int>(std::ceil(reach / kTileScale)) + 1, kMinRing,
+                                    kMaxRing);
+
+        const int width = zone.width(), heightTiles = zone.height();
+        std::vector<uint8_t> have(static_cast<size_t>(width) * static_cast<size_t>(heightTiles), 0);
+        auto index = [&](int tx, int ty) {
+            return static_cast<size_t>(ty) * static_cast<size_t>(width) + static_cast<size_t>(tx);
+        };
+        for (const std::pair<int, int>& t : visibleTiles) {
+            if (zone.InBounds(t.first, t.second)) have[index(t.first, t.second)] = 1;
+        }
+        // Ahead, the fan already has every tile the original draws, and its
+        // reach is the game's draw distance -- so past M139's five tiles only
+        // what lies outside the fan's bearing is added. (Adding the square
+        // ahead too would draw further than the original at a wide aspect.)
+        const float facingX = std::cos(camera.yaw), facingY = std::sin(camera.yaw);
+        const float fanCos = std::cos(1.0471976f);  // 60 degrees either side
+        for (int dy = -ring; dy <= ring; ++dy) {
+            for (int dx = -ring; dx <= ring; ++dx) {
+                const int tx = ctx + dx, ty = cty + dy;
+                if (!zone.InBounds(tx, ty) || have[index(tx, ty)]) continue;
+                if (std::max(std::abs(dx), std::abs(dy)) > kMinRing) {
+                    const float vx = (tx + 0.5f) - camera.x / kTileScale;
+                    const float vy = (ty + 0.5f) - camera.y / kTileScale;
+                    const float len = std::sqrt(vx * vx + vy * vy);
+                    if (len > 0.0f && (vx * facingX + vy * facingY) / len > fanCos) continue;
+                }
+                have[index(tx, ty)] = 1;
+                visibleTiles.emplace_back(tx, ty);
             }
         }
     }

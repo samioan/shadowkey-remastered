@@ -195,6 +195,9 @@ public:
     // spell is the trap, not the player.
     void SetOwner(skiExecutable* owner) { m_Owner = owner; }
     bool scroll() const { return m_Scroll; }
+    // M140: the host's half of `SetScroll`, for a restored save (the flag is
+    // `spell+0x1d4`, which the Spell class's save function writes).
+    void SetScrollFlag(bool scroll) { m_Scroll = scroll; }
 
     // M48: the Spell class's fourth field, `SetRefireRate` (`+0x1d2`, the
     // sibling of SetLevel's `+0x1d0` in the same dispatcher). It is the
@@ -623,7 +626,14 @@ private:
     int m_Rating = 0;
     // M37: see spellType()/spellLevel()/scroll().
     int m_SpellType = 0;
-    int m_SpellLevel = 0;
+    // M140: the Spell constructor (FUN_10047740) writes `+0x1d0 = 1`. This
+    // was 0, so every creature spell whose script never calls
+    // Item.SetLevel (the Highway Mage's Ignite, Feeble and Blaze among
+    // them) cast at magnitude 0 -- and an IgniteFoe at magnitude 0 arms a
+    // zero-length burn, which sets the periodic kind and is never cleared
+    // (the expiry only runs while the timer is positive), so "-Health"
+    // stayed on the HUD for good.
+    int m_SpellLevel = 1;
     bool m_Scroll = false;
     int m_RefireRate = 0;  // M48, +0x1d2 -- see refireRate()
     SpellActor* m_SpellOwner = nullptr;  // M43: see SetSpellOwner()

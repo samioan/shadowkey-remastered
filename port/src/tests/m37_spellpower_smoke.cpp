@@ -178,8 +178,9 @@ int main() {
     // don't set it at all.
     {
         auto absorb = loadSpell("spells/Absorb.s");
-        Check(absorb->rating() == 1 && absorb->spellLevel() == 0,
-              "real spells/Absorb.s has SetRating(1) and no SetLevel at all");
+        Check(absorb->rating() == 1 && absorb->spellLevel() == 1,
+              "real spells/Absorb.s has SetRating(1) and no SetLevel at all -- so it keeps "
+              "the Spell constructor's own level, 1 (M140)");
 
         // Absorb is the branch with no variance (min == max == mag + 12),
         // which makes it the cleanest probe for what magnitude actually is.

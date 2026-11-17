@@ -34,6 +34,20 @@ namespace sk_bindings {
 
 namespace {
 
+// M140: a found scroll is an ordinary spell object with `spell+0x1d4` set
+// (`Scroll.SetScroll(true)` in the ~50 loot scripts), and the Spell class
+// saves exactly that byte (FUN_10047584 -- the same function as the
+// Wearable layer, whose +0x1d4 is the armour weight class). The port writes
+// every inventory child as a Stackable and rebuilds it by re-running its
+// script, so the flag was lost and a loaded scroll became the plain spell:
+// unusable by a class without magic (IsItemEnabledFor), and charged
+// magicka. Carried in the child's script-variable list under a name no
+// script can declare, so saves from before M140 still read -- they simply
+// have no entry. The spell's level (+0x1d0) is *not* in the real record
+// and is not carried either: a loaded scroll casts at the level its own
+// script gives it, as on the device.
+constexpr const char* kScrollFlagVar = "$scroll";
+
 // The three quest arrays and the kill counter are fixed 256-entry byte
 // arrays in the real record, so an id outside [0, 256) has nowhere to go.
 // Every shipped script's quest id is well inside that, but a port that
@@ -219,6 +233,7 @@ sk::SavedEntity PlayerExecutable::BuildSaveRecord(const std::string& levelName) 
         e.item.usesRangedPath = item->usesRangedPath() ? 1 : 0;
         e.entity.objectId = item->scriptPath();
         e.entity.artName = item->name();
+        if (item->scroll()) e.entity.scriptVars.push_back({kScrollFlagVar, "1"});  // M140
         rec.inventory.push_back(std::move(e));
     }
 
@@ -335,6 +350,9 @@ void PlayerExecutable::ApplySaveRecord(const sk::SavedEntity& record, MenuStack&
                                      ? child.weapon.quantity
                                      : child.stackable.quantity;
             if (quantity > 0) item->SetQuantity(quantity);
+            for (const sk::SavedScriptVar& var : child.entity.scriptVars) {  // M140
+                if (var.name == kScrollFlagVar) item->SetScrollFlag(var.value == "1");
+            }
             m_Inventory.push_back(std::move(item));
         } catch (skParseException& e) {
             std::printf("PlayerExecutable: PARSE ERROR restoring %s: %s\n", path.c_str(),

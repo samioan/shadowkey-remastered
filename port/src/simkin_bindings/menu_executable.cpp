@@ -5,6 +5,9 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <fstream>
+#include <iterator>
+#include <vector>
 
 #include "assets/string_table.h"
 #include "assets/zone_display_names.h"
@@ -908,6 +911,27 @@ void MenuExecutable::ApplySliderValue(const SliderExecutable& slider) {
 
 bool MenuExecutable::enterDelayed(std::time_t now) const { return now < m_EnterAllowedAt; }
 
+size_t MenuExecutable::NameLength() const { return m_Stack.player().charNameBuffer().size(); }
+
+void MenuExecutable::EditName(int ch, bool typed) {
+    PlayerExecutable& player = m_Stack.player();
+    m_TypedSinceNavigation = typed;
+    // `if (+0xa4 == 1) { free the name; +0xa4 = 0; }` -- ahead of the edit
+    // itself, so a DEL as the first key leaves an empty name.
+    if (m_NameFreshEdit) {
+        while (!player.charNameBuffer().empty()) player.BackspaceCharName();
+        m_NameFreshEdit = false;
+    }
+    if (ch == '-') {
+        player.BackspaceCharName();
+        return;
+    }
+    // The real append writes the character and then gives up if the result
+    // is longer than six, leaving the stored name as it was.
+    if (player.charNameBuffer().size() + 1 > kNameEditMaxChars) return;
+    player.AppendCharNameChar(static_cast<char>(ch));
+}
+
 void MenuExecutable::ActivateSelected() {
     // M104: `FUN_10032868`'s own first guard -- the row's callback does not
     // run while `time() < menu+0xc8`. See the DelayOnEnter handler.
@@ -919,6 +943,11 @@ void MenuExecutable::ActivateSelected() {
         // callback naming a native (`AddMenuItem(3747, "Quit")`) is
         // ordinary Simkin and the corpus is full of it.
         case RowKind::MenuItem:
+            // M140: a name-screen letter button (VFUN_1005ee6c).
+            if (row.editKey != 0) {
+                EditName(row.editKey, /*typed=*/false);
+                break;
+            }
             // M119: a PC settings row has no script callback -- Enter steps
             // it forward, the way Right does. See EnsurePcSettingRows().
             if (row.pcSetting > 0) {
@@ -1428,8 +1457,92 @@ bool MenuExecutable::method(const skString& methodName, skRValueArray& args,
         return true;
     }
     if (methodName == skString("OpenEditText") && args.entries() == 6) {
+        // M140: the real widget, menu case 0x1f -- `namechar.s`'s
+        // `OpenEditText("CharName", "Alpha.txt", 30, 160, 50, 150)`. It
+        // used to be a bare "NAME: ..._" line the keyboard filled.
+        //
+        // FUN_1005e54c reads the UTF-16 file one line at a time -- label,
+        // tab, the character it types, tab, width, tab, height -- and lays
+        // the labels out as buttons: from (x0, y + 0x11), each `width + 2`
+        // to the right, wrapping back to x0 a row (`height + 2`) further down
+        // whenever the next would pass `maxX`. Alpha.txt is A..Z at 15x15
+        // and "DEL" typing '-', so the grid is A-G / H-N / O-U / V-Z DEL.
+        // Then one more button, string 170 ("Done") calling "Done", at
+        // (maxX - 0x32, bottom - 0xf). The name itself is drawn by the edit
+        // widget, centred on maxX / 2 at y (FUN_1005eb94).
         m_TextEntryActive = true;
-        AddRow(RowKind::TextEntry, 0, "", true);
+        m_NameFreshEdit = true;  // the widget's own `+0xa4 = 1`
+        m_TypedSinceNavigation = false;
+        const std::string file = ToStdString(args[1].str());
+        const int x0 = args[2].intValue();
+        const int maxX = args[3].intValue();
+        const int y = args[4].intValue();
+        const int bottom = args[5].intValue();
+        m_NameCentreX = maxX / 2;
+        m_NameY = y;
+        {
+            MenuRow& name = AddRow(RowKind::TextEntry, 0, "", false);
+            name.x = m_NameCentreX;
+            name.y = y;
+        }
+
+        std::ifstream in(m_Stack.scriptRoot() + "/" + file, std::ios::binary);
+        std::string bytes((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+        // UTF-16LE, BOM first; every character in the shipped file is ASCII.
+        std::string text;
+        for (size_t i = 0; i + 1 < bytes.size(); i += 2) {
+            const unsigned c = static_cast<unsigned char>(bytes[i]) |
+                               (static_cast<unsigned char>(bytes[i + 1]) << 8);
+            if (c == 0xfeff) continue;
+            text.push_back(c < 0x80 ? static_cast<char>(c) : '?');
+        }
+        int cx = x0, cy = y + 0x11, rowHeight = 0;
+        size_t start = 0;
+        while (start < text.size()) {
+            size_t end = text.find('\n', start);
+            if (end == std::string::npos) end = text.size();
+            std::string line = text.substr(start, end - start);
+            start = end + 1;
+            if (!line.empty() && line.back() == '\r') line.pop_back();
+            if (line.empty()) continue;
+            std::vector<std::string> cols;
+            size_t from = 0;
+            for (;;) {
+                const size_t tab = line.find('\t', from);
+                cols.push_back(line.substr(from, tab == std::string::npos ? std::string::npos
+                                                                          : tab - from));
+                if (tab == std::string::npos) break;
+                from = tab + 1;
+            }
+            if (cols.size() < 4 || cols[1].empty()) continue;
+            const int w = std::atoi(cols[2].c_str());
+            const int h = std::atoi(cols[3].c_str());
+            if (cx + w + 2 > maxX) {
+                cy += rowHeight;
+                rowHeight = 0;
+                cx = x0;
+            }
+            MenuRow& key = AddRow(RowKind::MenuItem, -1, "", true);
+            key.literalText = cols[0];
+            key.editKey = static_cast<unsigned char>(cols[1][0]);
+            key.x = cx;
+            key.y = cy;
+            key.w = w;
+            key.h = h;
+            if (rowHeight < h) rowHeight = h + 2;
+            cx += w + 2;
+        }
+        constexpr int kDoneStringId = 170;  // "Done", the table's +0x2a8
+        MenuRow& done = AddRow(RowKind::MenuItem, kDoneStringId, "Done", true);
+        done.x = maxX - 0x32;
+        done.y = bottom - 0xf;
+        // Focus starts on the first letter, the first focusable widget.
+        for (size_t i = 0; i < m_Rows.size(); ++i) {
+            if (m_Rows[i].editKey != 0) {
+                m_SelectedItem = static_cast<int>(i) + 1;
+                break;
+            }
+        }
         return true;
     }
     if (methodName == skString("ClearMenu") && args.entries() == 0) {

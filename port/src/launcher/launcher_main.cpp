@@ -646,6 +646,39 @@ void Play(Impl& impl) {
     }
     CloseHandle(process.hThread);
 
+    // Hand the game the foreground before stepping aside. Windows only lets
+    // a process take the foreground if it was started by the one that has
+    // it; hiding the launcher straight away passed the foreground to
+    // whatever window was behind it, so the game's window could open
+    // inactive -- and mouse look, which only catches the mouse while the
+    // game is the foreground window, stayed off until it was clicked. So:
+    // allow it explicitly, and wait until the game's window is visible
+    // before hiding. (Not WaitForInputIdle: the game is a console-subsystem
+    // binary, for which it returns at once.)
+    AllowSetForegroundWindow(process.dwProcessId);
+    {
+        struct Search {
+            DWORD pid;
+            bool found;
+        } search{process.dwProcessId, false};
+        const DWORD start = GetTickCount();
+        while (!search.found && GetTickCount() - start < 10000 &&
+               WaitForSingleObject(process.hProcess, 50) == WAIT_TIMEOUT) {
+            EnumWindows(
+                [](HWND hwnd, LPARAM param) -> BOOL {
+                    auto* s = reinterpret_cast<Search*>(param);
+                    DWORD owner = 0;
+                    GetWindowThreadProcessId(hwnd, &owner);
+                    if (owner == s->pid && IsWindowVisible(hwnd)) {
+                        s->found = true;
+                        return FALSE;
+                    }
+                    return TRUE;
+                },
+                reinterpret_cast<LPARAM>(&search));
+        }
+    }
+
     // Out of the way while the game runs, back when it exits -- and the
     // wait pumps messages so the hidden window still answers the system
     // rather than going "not responding".

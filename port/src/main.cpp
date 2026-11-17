@@ -101,6 +101,7 @@
 #include "simkin_bindings/vitals.h"
 #include "simkin_bindings/weapon_viewmodel.h"
 #include "simkin_bindings/zone_script_executable.h"
+#include "simkin_bindings/trap_entity.h"
 #include "skExecutableContext.h"
 #include "skInterpreter.h"
 #include "skParseException.h"
@@ -675,6 +676,14 @@ struct MonsterInstance {
 int AdvanceMonsterAnimation(MonsterInstance& m, sk::ModelArchive& models) {
     const sk::Model* model = models.GetModel(m.modelArchiveIndex);
     if (!model || model->frameCount <= 1) return 0;
+    // M140: `StopAnimating(true)` (`+0x302 = 0`, the current clip -1). Every
+    // PlayAnimation in the creature tick and the attack -- the death clip's
+    // included -- is guarded by that byte, so such a creature never leaves
+    // frame 0. Its one user is Loth'Na's fortifying crystal, whose script
+    // sets idle, walk, swing *and* death to clip 0 -- the shattering -- so
+    // the port, which advanced it anyway, showed the crystal breaking apart
+    // on a loop from the moment the AI first ticked it.
+    if (!m.script->animating()) return 0;
     // Fall back to whatever pose the script's own PlayAnimation() asked
     // for at Init() before the AI has picked a clip.
     int clipIndex = m.animClip >= 0 ? m.animClip : m.script->currentAnimation();
@@ -778,6 +787,17 @@ struct TrapInstance {
     // player leaves the trap's box, so standing on a spike trap costs one
     // hit rather than one per tick.
     bool inside = false;
+};
+
+// M140: a live trap entity (entities.txt category 10) -- its script's
+// object, which holds the state FUN_1008ff14 ticks, and the static prop it
+// moves. See simkin_bindings/trap_entity.h.
+struct TrapEntityInstance {
+    std::unique_ptr<sk_bindings::TrapEntityExecutable> script;
+    float x = 0, y = 0;
+    int typeId = -1;
+    std::string name;
+    size_t propIndex = 0;  // into gameEntities
 };
 
 // M19: Action::Use interact binding's last remaining slice -- pickups.
@@ -3290,9 +3310,20 @@ void RenderMenu(sk::Backbuffer& backbuffer, sk_bindings::MenuExecutable& menu,
                 break;
             }
             case RowKind::TextEntry: {
-                std::string label = "NAME: " + player.charNameBuffer() + "_";
-                sk::BitmapFont::DrawString(backbuffer, 12, y, label, kSelectedTextColor);
-                y += lineHeight;
+                // M140: the edit widget's draw, FUN_1005eb94: the name at
+                // (`+0xa0`, `+0x7c`) -- recentred on every edit -- through
+                // the left-aligned arm in the standard colour, with a "_"
+                // after it that blinks every 30 frames (1.2 s at the 25Hz
+                // tick) while there is still room for a character.
+                std::string label = player.charNameBuffer();
+                if (label.size() < sk_bindings::MenuExecutable::kNameEditMaxChars) {
+                    const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                        std::chrono::steady_clock::now().time_since_epoch())
+                                        .count();
+                    if ((ms / 1200) % 2 == 0) label += "_";
+                }
+                DrawWidgetLabel(backbuffer, menu.nameTextX(), menu.nameTextY(), label,
+                                kUiStandardColor);
                 break;
             }
         }
@@ -4229,6 +4260,18 @@ int main(int argc, char** argv) {
                 return;
             }
             auto slot = sk::MapPcKeyToButtonSlot(vkCode);
+            // M140: on the name screen a letter key types (WM_CHAR, above)
+            // and must not also move the focus -- W/A/S/D are the menu's
+            // D-pad -- so letters reach no slot at all, and the arrow keys
+            // take over the grid navigation.
+            if (sk_bindings::MenuExecutable* m = stack.currentMenu();
+                m && m->textEntryActive() && stack.menuActive()) {
+                if (vkCode >= 'A' && vkCode <= 'Z') return;
+                if (vkCode == VK_LEFT) slot = sk::ButtonSlot::Left;
+                if (vkCode == VK_RIGHT) slot = sk::ButtonSlot::Right;
+                if (vkCode == VK_UP) slot = sk::ButtonSlot::Up;
+                if (vkCode == VK_DOWN) slot = sk::ButtonSlot::Down;
+            }
             if (!slot) return;
             const sk::ButtonSlot pressed =
                 sk::MouseLookKeySlot(*slot, window.MouseLookActive(), input);
@@ -4277,10 +4320,13 @@ int main(int argc, char** argv) {
         }
         sk_bindings::MenuExecutable* menu = stack.currentMenu();
         if (!menu || !menu->textEntryActive()) return;
+        // M140: the keyboard drives the same edit the on-screen letters do
+        // -- the original's alphabet is A..Z, so a typed letter goes in as
+        // its capital and anything else is ignored; Backspace is DEL.
         if (ch == 0x08) {
-            stack.player().BackspaceCharName();
-        } else if (ch >= 0x20 && ch < 0x7F && stack.player().charNameBuffer().size() < 20) {
-            stack.player().AppendCharNameChar(static_cast<char>(ch));
+            menu->EditName('-', /*typed=*/true);
+        } else if ((ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z')) {
+            menu->EditName(std::toupper(static_cast<int>(ch)), /*typed=*/true);
         }
         // 0x0D (Enter) is handled in the tick loop below, not here --
         // it needs to fire a script callback, which the char callback
@@ -4368,6 +4414,8 @@ int main(int argc, char** argv) {
     // triggers (which happens after the placement loop, because those
     // triggers' own Init() resolves Level.GetEntity() names).
     std::vector<TrapInstance> gameTrapCandidates;
+    // M140: the trap entities themselves, ticking.
+    std::vector<TrapEntityInstance> gameTrapEntities;
     // M19: live world pickups, pulled out of gameEntities the same way --
     // see PickupInstance's comment. Shrinks as items are actually picked
     // up (unlike gameDoors/gameMonsters, which stay fixed-size for a
@@ -6532,6 +6580,7 @@ int main(int argc, char** argv) {
             gamePickups.clear();
             gameTraps.clear();
             gameTrapCandidates.clear();
+            gameTrapEntities.clear();  // M140
             gameProjectiles.clear();
             gameArrows.clear();
             gameEntities.clear();
@@ -6698,6 +6747,18 @@ int main(int argc, char** argv) {
                 // (below), which is exactly where a real script's own
                 // Level.PlayAmbient(id, volume) call (e.g. azra.s) needs
                 // it already in place.
+                //
+                // M140: and the music stops first. `GameEngine_InitLevel`
+                // opens with `FUN_100096b8(audio, 5)` + `FUN_100094ac(audio,
+                // 0)` -- the same pair the quit-to-menu path uses -- before
+                // any manifest is reloaded, so whatever was playing ends at
+                // every level load, a saved game's included. The port kept
+                // it, which only showed where a level's own PlayAmbient
+                // names an empty slot: `drgnfld.s` asks for 78, and slot 78
+                // of `drgnfld_sounds.txt` is NULL.wav, so on the device
+                // Dragonfields is silent -- not still playing Loth'Na's or
+                // the main menu's track.
+                audioEngine.StopMusic();
                 soundArchive.LoadCategory(scriptRoot, stack.requestedZone());
                 // M55: same file the model manifest above comes from --
                 // columns 2-4 of every row are the model's collision box,
@@ -6823,6 +6884,7 @@ int main(int argc, char** argv) {
                 gameDoors.clear();
                 gameTraps.clear();
                 gameTrapCandidates.clear();
+                gameTrapEntities.clear();  // M140
                 gamePickups.clear();
                 // M48: a projectile holds raw pointers to its caster and to
                 // the spell script that owns its HitTarget handler, both of
@@ -7425,6 +7487,38 @@ int main(int argc, char** argv) {
                     prop.rotB = PlacementRotRadians(e.rotBRaw);
                     prop.scale = PlacementScale(e.scaleRaw);
                     gameEntities.push_back(prop);
+                    // M140: a category-10 placement is the trap class, not
+                    // scenery: its script runs (`SetTrapType`/`SetActive`)
+                    // and the prop is what its tick moves. It stays in
+                    // gameEntities so the steam vent keeps its collision box.
+                    if (desc->category == 10 && !placementScriptPath.empty()) {
+                        skExecutableContext loadCtxt(&interpreter);
+                        try {
+                            TrapEntityInstance trap;
+                            trap.script = std::make_unique<sk_bindings::TrapEntityExecutable>(
+                                skString(placementScriptPath.c_str()), loadCtxt);
+                            skRValueArray initArgs;
+                            skRValue initRet;
+                            skExecutableContext callCtxt(&interpreter);
+                            trap.script->method(skString("Init"), initArgs, initRet, callCtxt);
+                            trap.script->state().z = static_cast<int16_t>(e.z);
+                            trap.x = static_cast<float>(e.x);
+                            trap.y = static_cast<float>(e.y);
+                            trap.typeId = e.typeId;
+                            trap.name = e.name;
+                            trap.propIndex = gameEntities.size() - 1;
+                            gameTrapEntities.push_back(std::move(trap));
+                        } catch (skParseException& ex) {
+                            std::printf("shadowkey-port: PARSE ERROR loading trap %s: %s\n",
+                                        placementScriptPath.c_str(), ex.toString().ptr());
+                        } catch (skTreeNodeReaderException& ex) {
+                            std::printf("shadowkey-port: SCRIPT FILE ERROR loading trap %s: %s\n",
+                                        placementScriptPath.c_str(), ex.toString().ptr());
+                        } catch (skRuntimeException& ex) {
+                            std::printf("shadowkey-port: RUNTIME ERROR loading trap %s: %s\n",
+                                        placementScriptPath.c_str(), ex.toString().ptr());
+                        }
+                    }
                 }
                 // M36: opt-in test aid -- SK_DEBUG_EQUIP equips the first
                 // real weapon in the starting inventory, so the weapon
@@ -7566,6 +7660,8 @@ int main(int argc, char** argv) {
         }
 
         if (inGame && gameZone) {
+            // M140: see the hand-off at the bottom of the tick.
+            const unsigned tickMenuSerial = stack.openSerial();
             // M53: the engine's script timer. `FUN_1006410c` runs once per
             // frame per entity: if the entity's deadline has passed against
             // the engine's own clock, it clears the armed flag and calls
@@ -8085,31 +8181,39 @@ int main(int argc, char** argv) {
                 }
 
                 // M38: the real trap proximity check, once the player's
-                // position for this tick is settled.
-                //
-                // FUN_1008ff14 (the trap entity's own tick) builds a box of
-                // +/-0x100 around the trap's own x/y and the player's box
-                // from the player's SetRadius/SetRadius2 half-extents, then
-                // notifies the zone's trigger list with mode 2. Both
-                // numbers below are those: 256 world units is exactly one
-                // tile, and kPlayerRadius is this port's own collision
-                // radius standing in for the real half-extents.
-                if (gameZoneScript && !gameTraps.empty()) {
-                    constexpr float kTrapHalfExtent = 256.0f;  // the real +/-0x100
-                    for (TrapInstance& trap : gameTraps) {
-                        const float reach = kTrapHalfExtent + kPlayerRadius;
-                        const bool overlapping = std::fabs(gameCamera.x - trap.x) <= reach &&
-                                                  std::fabs(gameCamera.y - trap.y) <= reach;
-                        // Edge-triggered: the real trap latches itself
-                        // sprung (entity+0x225) and re-arms on a timer, so
-                        // standing on a spike trap must not bill the player
-                        // once per tick.
-                        if (overlapping && !trap.inside) {
-                            gameZoneScript->Notify(
+                // position for this tick is settled. M140: it is the trap
+                // entity's own tick now, FUN_1008ff14 (trap_entity.h) --
+                // range, cadence, re-arm countdown, the dodge roll and the
+                // spring -- in place of the box test that stood in for it.
+                if (!gameTrapEntities.empty()) {
+                    const int playerX = static_cast<int>(gameCamera.x);
+                    const int playerY = static_cast<int>(gameCamera.y);
+                    for (TrapEntityInstance& trap : gameTrapEntities) {
+                        sk_bindings::TrapEntityState& st = trap.script->state();
+                        sk_bindings::TrapTickHooks hooks;
+                        hooks.distanceToPlayer = [&]() {
+                            const long long dx = playerX - static_cast<int>(trap.x);
+                            const long long dy = playerY - static_cast<int>(trap.y);
+                            return static_cast<int>(((dy * dy) >> 8) + ((dx * dx) >> 8));
+                        };
+                        hooks.playerAvoids = [&]() { return stack.player().CanDisarmTrap(0x14); };
+                        hooks.notifyTriggers = [&]() {
+                            if (!gameZoneScript) return false;
+                            bool disarmed = false;
+                            const bool fired = gameZoneScript->Notify(
                                 sk_bindings::TriggerExecutable::kNotifyTrapProximity, trap.typeId,
-                                trap.name);
+                                trap.name, nullptr, &disarmed);
+                            // FUN_100902a8(trap, 0), from inside the trigger.
+                            if (disarmed) st.active = false;
+                            return fired;
+                        };
+                        hooks.playMasherSound = [&]() {
+                            playPlayerSound(sk_bindings::kTrapMasherSound);
+                        };
+                        sk_bindings::TickTrapEntity(st, sk_bindings::kAiFrameDeltaUnits, hooks);
+                        if (trap.propIndex < gameEntities.size()) {
+                            gameEntities[trap.propIndex].z = static_cast<float>(st.z);
                         }
-                        trap.inside = overlapping;
                     }
                 }
 
@@ -9115,34 +9219,40 @@ int main(int argc, char** argv) {
                     // `if (self->+0x2ee) { ... }` -- SetCanTeleport, above
                     // the package branch and so running in every package.
                     // A boss with it set takes the player as its target
-                    // when it has none, and jumps to a path node beside it
-                    // the moment it falls outside the chase radius.
-                    // FUN_10086a18's node search needs the zone's `.pth`
-                    // table, which is undecoded (docs/ZONE_FORMAT.md), so
-                    // the port lands the creature at the player's own
-                    // position offset by its stand-off distance -- the
-                    // same *effect* (you cannot outrun it) reached a
-                    // simpler way, and the one place in this block that is
-                    // not a transcription.
+                    // when it has none, and when the target is outside the
+                    // chase radius calls `FUN_10086a18(self, "UmbraKeth")`:
+                    //
+                    //   path = FUN_1001ada0(engine, "UmbraKeth");  // by name
+                    //   wp   = FUN_10086970(self, path, target);   // nearest
+                    //   vtable[0x14](self, wp.x, wp.y, 0);  FUN_100686e0(tile);
+                    //   self->z += 300;
+                    //
+                    // -- the same move FindPathNode makes, with the path name
+                    // a literal in the binary (DAT_1008252c). M140: the port
+                    // used to land the creature beside the player instead,
+                    // because `.pth` was undecoded when this was written;
+                    // M100 decoded it. No such path (every zone but the
+                    // three crypts) means no teleport at all. It fires on
+                    // every tick the target stays out of range, which holds
+                    // the creature on the nearest node rather than walking.
                     if (m.script->canTeleport() && gameZone) {
                         float tdx = gameCamera.x - m.x, tdy = gameCamera.y - m.y;
                         float tdist = std::sqrt(tdx * tdx + tdy * tdy);
-                        if (tdist > m.script->chaseRadius() && tdist > 1.0f) {
-                            // Two boxes' worth: as near as the tile rule
-                            // would ever let it walk.
-                            float back = (std::max)(m.script->attackRange(),
-                                                     2.0f * sk::kActorHalfExtent);
-                            float nx = gameCamera.x - (tdx / tdist) * back;
-                            float ny = gameCamera.y - (tdy / tdist) * back;
-                            if (!gameZone->CircleHitsWall(nx, ny, kMonsterRadius)) {
-                                m.x = nx;
-                                m.y = ny;
-                                m.z = gameZone->SnapActorToGround(
-                                    m.x, m.y, gameCamera.z - sk::kEyeHeightOffset);
+                        if (tdist > m.script->chaseRadius()) {
+                            if (const sk_bindings::PathNode* path = sk_bindings::FindPath(
+                                    stack.level().paths(), sk_bindings::kBossTeleportPathName)) {
+                                if (const sk_bindings::PathWaypoint* wp =
+                                        sk_bindings::NearestWaypoint(
+                                            *path, static_cast<int>(gameCamera.x),
+                                            static_cast<int>(gameCamera.y))) {
+                                    m.script->RequestSurfaceMove(wp->x, wp->y,
+                                                                 sk_bindings::kPathNodeSurfaceLift);
+                                    applyTeleport(*m.script, m.x, m.y, m.z);
 #if SK_DEBUG_SUITE
-                                // SK_DEBUG_SUITE (M68)
-                                sk_debug::Count("npc.teleported");
+                                    // SK_DEBUG_SUITE (M68)
+                                    sk_debug::Count("npc.teleported");
 #endif
+                                }
                             }
                         }
                     }
@@ -10602,19 +10712,28 @@ int main(int argc, char** argv) {
                         candidates.push_back({static_cast<int>(x) >> 8, static_cast<int>(y) >> 8,
                                               kind, index});
                     };
+                    // M140: **removed, not hidden.** `ShowEntity(false)` is
+                    // a draw flag only (`+0x60` bit 0, VFUN_100a2148): it
+                    // leaves the entity in its tile list, and FUN_1001dd40
+                    // tests nothing but `+0xd8` and the height window. So a
+                    // hidden, usable entity answers Use on the device --
+                    // `lothna\loot_pilgrim.s` is exactly that (it hides
+                    // itself, then SetUsable(true)), and it is the only way
+                    // to get the ghostly ring. DestroyObject does take an
+                    // entity out of the tile list, so removal still counts.
                     for (size_t i = 0; i < gamePickups.size(); ++i) {
                         const PickupInstance& p = gamePickups[i];
-                        if (p.script->entityOutOfWorld() || !p.script->usable()) continue;  // M92/M101
+                        if (p.script->entityRemoved() || !p.script->usable()) continue;
                         consider(p.x, p.y, p.z, 0, i);
                     }
                     for (size_t i = 0; i < gameMonsters.size(); ++i) {
                         const MonsterInstance& m = gameMonsters[i];
-                        if (m.script->outOfWorld() || !m.script->usable()) continue;
+                        if (m.script->entityRemoved() || !m.script->usable()) continue;
                         consider(m.x, m.y, m.z, 1, i);
                     }
                     for (size_t i = 0; i < gameDoors.size(); ++i) {
                         const DoorInstance& d = gameDoors[i];
-                        if (d.script->entityOutOfWorld() || !d.script->usable()) continue;
+                        if (d.script->entityRemoved() || !d.script->usable()) continue;
                         consider(d.x, d.y, d.z, 2, i);
                     }
                     UseTarget target;
@@ -11101,6 +11220,25 @@ int main(int argc, char** argv) {
                         }
                     }
                 }
+                // M140: **any screen this tick opened pauses the world.**
+                // The hand-off was written per call site -- Use, a region,
+                // OnDetect, OnKilled, OnDecay -- and the player's own hits
+                // never got one, though a creature's `OnHit` runs inside
+                // every one of them (FUN_10081844, before the damage).
+                // Umbra Keth's is the one that matters: under 375 health it
+                // fakes its death and opens `cryptsh3\umbra_disappear`
+                // ("Umbra' Keth melts into the shadows..."), which the port
+                // opened and never showed; chef, Devron and Wulfbris open
+                // screens the same way. Melee, a spell's impact, an arrow
+                // and an area blast all reach OnHit at different points of
+                // the tick, so the check is made once, here, where the
+                // engine's own frame-granular pause would land too.
+                if (inGame && stack.openSerial() != tickMenuSerial && stack.currentMenu() &&
+                    stack.menuActive()) {
+                    inGame = false;
+                    gamePausedForMenu = true;
+                    input.ClearPendingEdges();  // M90: the swing's key is still an edge
+                }
                 // M119: what this tick draws, handed to the frame loop. At the
                 // original frame rate it is drawn right here, the same frame
                 // the same tick always drew; above it, the loop draws it --
@@ -11245,7 +11383,6 @@ int main(int argc, char** argv) {
             // already on left it with nothing highlighted and Enter doing
             // nothing. See MenuExecutable::EnsureValidSelection().
             menu->EnsureValidSelection();
-            sk_bindings::MenuExecutable* before = menu;
             try {
                 if (menu->awaitingKey()) {
                     // M99: FUN_10075bdc's first branch, ahead of popups and
@@ -11271,13 +11408,34 @@ int main(int argc, char** argv) {
                         popup->GoBack();
                     }
                 } else if (menu->textEntryActive()) {
-                    // Typed characters land via SetCharCallback above; here
-                    // just the two control actions matter -- confirm and
-                    // back. MenuExecutable::GoBack() handles both real
-                    // spellings of the back handler plus the SetPrevMenu()
-                    // fallback (see its comment).
+                    // Typed characters land via SetCharCallback above.
+                    // M140: the original's letter grid is navigated and
+                    // pressed like any laid-out screen (arrow keys or the
+                    // pad's D-pad -- letters type instead, see the key
+                    // callback); Enter presses the focused letter or Done,
+                    // except straight after typing, when it is Done --
+                    // so type-a-name-then-Enter keeps working.
+                    // MenuExecutable::GoBack() handles both real spellings
+                    // of the back handler plus the SetPrevMenu() fallback.
+                    auto gridMove = [&](int dx, int dy) {
+                        const int was = menu->selectedItem();
+                        if (!menu->NavigateDirectional(dx, dy)) menu->MoveSelection(dx + dy);
+                        if (menu->selectedItem() != was) {
+                            menu->NoteNameNavigation();
+                            playPlayerSound(kMenuMoveSound);
+                        }
+                    };
+                    if (input.ConsumeJustPressedOrRepeat(sk::ButtonSlot::Up)) gridMove(0, -1);
+                    if (input.ConsumeJustPressedOrRepeat(sk::ButtonSlot::Down)) gridMove(0, 1);
+                    if (input.ConsumeJustPressedOrRepeat(sk::ButtonSlot::Left)) gridMove(-1, 0);
+                    if (input.ConsumeJustPressedOrRepeat(sk::ButtonSlot::Right)) gridMove(1, 0);
                     if (input.ConsumeJustPressed(sk::ButtonSlot::LeftSelectionKey)) {
-                        menu->TryInvoke("Done");
+                        playPlayerSound(kMenuSelectSound);
+                        if (menu->typedSinceNavigation()) {
+                            menu->TryInvoke("Done");
+                        } else {
+                            menu->ActivateSelected();
+                        }
                     }
                     if (input.ConsumeJustPressed(sk::ButtonSlot::RightSelectionKey)) {
                         menu->GoBack();
@@ -11376,9 +11534,16 @@ int main(int argc, char** argv) {
             // a handler that does `Quit(); OpenMenu(...)` -- which several
             // real screens do -- still ends up on the menu it asked for
             // rather than being closed out from under itself.
+            //
+            // M140: that case no longer reaches here at all -- an open
+            // cancels the request (MenuStack::OpenMenu) -- so a request
+            // still standing came *after* the last open and closes whatever
+            // is current, the engine's Quit. Keying on "the screen did not
+            // change" dropped the Quit a screen makes in its own Init(),
+            // which is the arena's whole fight start.
             if (stack.closeMenuRequested()) {
                 stack.ClearCloseMenuRequest();
-                if (menu == before && menu) {
+                if (menu) {
                     // Nothing else navigated: close for real. Back to
                     // gameplay if this screen was opened from the 3D view
                     // (an NPC conversation's "Goodbye"), otherwise to the

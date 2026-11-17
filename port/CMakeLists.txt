@@ -188,6 +188,7 @@ add_library(sk_bindings STATIC
   src/simkin_bindings/script_vars.cpp
   src/simkin_bindings/table_executable.cpp
   src/simkin_bindings/trap_ref.cpp
+  src/simkin_bindings/trap_entity.cpp
   src/simkin_bindings/test_armor_executable.cpp
   src/simkin_bindings/text_area_executable.cpp
   src/simkin_bindings/weapon_viewmodel.cpp
@@ -502,6 +503,11 @@ target_link_libraries(spellpower_smoke PRIVATE sk_bindings)
 # Physical trap/door zone triggers -- see src/tests/m38_trap_trigger_smoke.cpp.
 add_executable(trap_trigger_smoke src/tests/m38_trap_trigger_smoke.cpp)
 target_link_libraries(trap_trigger_smoke PRIVATE sk_bindings sk_world)
+
+# M140: the playtest bug list -- spell level default, scroll save round
+# trip, Quit/OpenMenu ordering, trap saving throws and the trap entity.
+add_executable(bug_triage_smoke src/tests/m140_bug_triage_smoke.cpp)
+target_link_libraries(bug_triage_smoke PRIVATE sk_bindings sk_world)
 
 # Small documented loose ends (SetLoot chance, SetZone XP, SummonMe,
 # CountInventory, Level.Log) -- see src/tests/m39_loose_ends_smoke.cpp.

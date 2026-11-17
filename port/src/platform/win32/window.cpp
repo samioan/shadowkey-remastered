@@ -380,6 +380,13 @@ Window::Window(int clientWidth, int clientHeight, const std::wstring& title) {
     RegisterRawInputDevices(&mouse, 1, sizeof(mouse));
     ShowWindow(impl_->hwnd, SW_SHOWNORMAL);
     UpdateWindow(impl_->hwnd);
+    // Ask for the foreground outright rather than relying on ShowWindow's
+    // activation: mouse look (SetMouseLook) only engages while this is the
+    // foreground window, and a window that opened behind another stayed
+    // without it until clicked. The launcher grants the right first
+    // (AllowSetForegroundWindow); started any other way it is a harmless
+    // no-op when Windows declines.
+    SetForegroundWindow(impl_->hwnd);
 }
 
 Window::~Window() {

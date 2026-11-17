@@ -552,6 +552,10 @@ public:
         // reason, which this port gets for free by excluding them from
         // navigation.
         bool visible = true;
+        // M140: an OpenEditText letter button -- the character it types
+        // (`button+0xa4`, the second column of Alpha.txt), '-' for DEL.
+        // 0 on every other row.
+        int editKey = 0;
         // M80: `AddStaticItem`'s own second argument, which decides how
         // the engine draws the row -- **not** whether it can be selected.
         // `FUN_10076b64`'s case 0 passes it, inverted, to `FUN_1007f49c`
@@ -638,6 +642,22 @@ public:
     int selectedItem() const { return m_SelectedItem; }  // 1-based, 0 = none
     bool useHoriz() const { return m_UseHoriz; }
     bool textEntryActive() const { return m_TextEntryActive; }
+    // M140: the name screen's edits, FUN_1005ee6c / FUN_1005ecb0: the first
+    // edit after the screen is (re)built clears the old name (`+0xa4`), DEL
+    // ('-') takes the last character off, anything else is appended -- and
+    // refused once the name would pass kNameEditMaxChars. `typed` marks an
+    // edit that came from the PC keyboard (see typedSinceNavigation()).
+    void EditName(int ch, bool typed);
+    // M140: true when the last thing done on the name screen was typing on
+    // the keyboard, so Enter commits the name (Done) instead of pressing the
+    // letter that happens to be focused. Cleared by moving the focus.
+    bool typedSinceNavigation() const { return m_TypedSinceNavigation; }
+    void NoteNameNavigation() { m_TypedSinceNavigation = false; }
+    // Where FUN_1005eb94 draws the name: `+0xa0` (left edge, recentred on
+    // every edit as `+0x78 - (len >> 1) * 4`) and `+0x7c`.
+    int nameTextX() const { return m_NameCentreX - (static_cast<int>(NameLength()) >> 1) * 4; }
+    int nameTextY() const { return m_NameY; }
+    static constexpr size_t kNameEditMaxChars = 6;
     // The current screen's modal confirmation popup (myPopup, savePopup,
     // ...), if any of the ones it's created is currently visible -- popups
     // live in m_NativeFields (see setValue()'s comment), keyed by
@@ -812,6 +832,12 @@ private:
     TitleHandle m_TitleHandle{*this};
     bool m_UseHoriz = false;
     bool m_TextEntryActive = false;
+    // M140: see EditName() and nameTextX().
+    bool m_NameFreshEdit = false;
+    bool m_TypedSinceNavigation = false;
+    int m_NameCentreX = 0;
+    int m_NameY = 0;
+    size_t NameLength() const;
     // Real SetPrevMenu() target -- see GoBack(). Survives ClearMenu()
     // (which every screen's OnDisplay runs), since the real call site is
     // Init(), which runs only once per screen.

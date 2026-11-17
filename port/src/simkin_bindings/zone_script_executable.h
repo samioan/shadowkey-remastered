@@ -69,9 +69,11 @@
 // SetRadius/SetRadius2 half-extents).
 //
 // So everything a physical trap needs is placement data this port
-// already parses. What is *not* reproduced is the pair of saving throws
-// in front of the damage -- see TriggerExecutable::FireResult.
+// already parses. M140 added the pair of saving throws in front of the
+// damage and the screens they open -- see TriggerExecutable::FireResult --
+// and the trap entity's own tick (trap_entity.h).
 
+#include <functional>
 #include <memory>
 #include <string>
 #include <vector>
@@ -132,33 +134,48 @@ public:
     // list per notification), so this is an optimisation, not a rule.
     bool WatchesEntity(int typeId, const std::string& entityName) const;
 
+    // M140: what the trap half decided -- the two saving throws M38 left
+    // out are in now (FUN_10090818, in order):
+    //
+    //   if (FUN_1003e438(player, saveId))   -> Disarmed: "Menus\TrapDisarmed",
+    //                                          and the trap entity is
+    //                                          switched off for good;
+    //   else if (FUN_10044e58(player, id))  -> Avoided:  "Menus\TrapAvoided";
+    //   else                                -> Damaged:  rand(min..max) to
+    //                                          the player, and only with
+    //                                          ShowDamageMessage(true)
+    //                                          "Menus\TrapDamaged".
+    //
+    // FUN_1003e438 is PlayerExecutable::CanDisarmTrap, FUN_10044e58 its
+    // CanAvoidTrap; `saveId` is SetTrap's third argument. Only Damaged
+    // counts as the trigger firing -- the return value the trap entity
+    // springs on, and the only outcome that runs the callback.
+    enum class TrapOutcome { None, Disarmed, Avoided, Damaged };
+
     struct FireResult {
         // The trigger's SetCallback() handler should run now.
         bool runCallback = false;
-        // Rolled trap damage to apply to the player, 0 for none. The real
-        // roll is `rand(dmgMin, dmgMax)` with no mitigation of any kind --
-        // it goes straight into the player's stats-block DoDamage.
+        // FUN_10090818's own return: the kill limit was reached, or a trap
+        // dealt its damage. FUN_1007307c stops walking the list at the
+        // first trigger that returns it.
+        bool fired = false;
+        TrapOutcome outcome = TrapOutcome::None;
+        // Rolled trap damage (Damaged only), `rand % (max - min + 1) + min`.
         int damage = 0;
-        // The trap fired at all (so a "you were hit by a trap" message is
-        // due, when showDamageMessage() is set).
+        // Kept for the M38 callers: the trap branch matched at all.
         bool trapFired = false;
     };
 
-    // M38: FUN_10090818, transcribed.
-    //
-    // **Not reproduced**: the two saving throws the real code puts in
-    // front of the damage, both keyed on SetTrap's third argument (10 in
-    // lothcav.s's three traps, 25 in crypt1.s's five doors).
-    // `FUN_1003e438` is a full avoid -- it reads the player's stance
-    // (`+0xf38`), an 8-slot equipped-effect array (`+0xf8c`, scanned for
-    // typeIds 618 and 4500), both weapon hands and a stat at `+0x3c4`, and
-    // rolls against `rand(0, 0x100)`; `FUN_10044e58` is a second, cheaper
-    // roll that blocks the damage without cancelling the trap. Neither has
-    // an equivalent here (this port has no stance model and no equipped-
-    // effect array), so a trap in this port always connects. That is a
-    // missing *mitigation*, not a wrong formula -- and it is why the
-    // damage numbers may feel heavier here than on the device.
-    FireResult Fire(int mode, int typeId, const std::string& entityName);
+    // The two rolls, supplied by the zone (it owns the player). Either may
+    // be empty, which reads as "failed" -- the M38 behaviour.
+    struct TrapSaves {
+        std::function<bool(int)> disarm;
+        std::function<bool(int)> avoid;
+    };
+
+    // M38: FUN_10090818, transcribed. M140: with the saving throws.
+    FireResult Fire(int mode, int typeId, const std::string& entityName,
+                    const TrapSaves* saves = nullptr);
 
     // The kill-count variant, kept as its own entry point because
     // main.cpp's combat loop already calls it and it needs no entity name.
@@ -397,8 +414,11 @@ public:
     // runs any callback that came due. Returns true if any trigger fired
     // (the real function's own return, which the trap entity's tick uses
     // to mark itself sprung).
+    //
+    // M140: `disarmed`, when given, reports whether a trigger disarmed the
+    // notifying entity -- the trap entity's cue to switch itself off.
     bool Notify(int mode, int typeId, const std::string& entityName,
-                skiExecutable* entity = nullptr);
+                skiExecutable* entity = nullptr, bool* disarmed = nullptr);
 
     // True if any registered trigger watches this entity -- lets main.cpp
     // build the per-zone trap candidate list once at load. See

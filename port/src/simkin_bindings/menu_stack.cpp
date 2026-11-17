@@ -196,8 +196,20 @@ void MenuStack::OpenMenu(const std::string& simkinPath, skiExecutable* opener) {
     // real setter's one-shot "set it, then hand the screen over" shape.
     const int pendingMode = m_PendingScreenMode;
     m_PendingScreenMode = 0;
+    // M140: an open cancels any Quit() made before it, and it does so
+    // *before* the new screen's Init() runs. That is the engine's order:
+    // FUN_100779b8 parses the script, raises the open flag (`+0x48 = 1`)
+    // and only then calls "Init" -- so `Quit(); OpenMenu(x)` ends on x, but
+    // a Quit() from inside x's own Init() closes x. dstar_e's
+    // pit_boss_battle.s is built on the second: its Init() is `Quit()` and
+    // a teleport into the arena, and the port, which dropped any Quit
+    // followed by a change of screen, left the empty battle screen up.
+    // A failed open puts the earlier request back, as nothing was opened.
+    const bool closeWasRequested = m_CloseMenuRequested;
+    m_CloseMenuRequested = false;
     MenuExecutable* menu = GetOrCreateMenu(simkinPath, opener, pendingMode);
     if (!menu) {
+        m_CloseMenuRequested = closeWasRequested;
         std::printf("  [MenuStack] OpenMenu(\"%s\") -- could not resolve, staying on current menu\n",
                     simkinPath.c_str());
         return;

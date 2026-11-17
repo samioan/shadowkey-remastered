@@ -77,8 +77,6 @@ namespace {
 // M100: entities.txt `1015 140 2 lothna\fortifyingcrystal.s`, the one typeId
 // FUN_10081844 tests.
 constexpr int kFortifyingCrystalTypeId = 0x3f7;
-// M100: FindPathNode's `monster->z += 300` after the surface snap.
-constexpr int kPathNodeSurfaceLift = 300;
 }  // namespace
 
 int MonsterExecutable::ApplyDamage(int amount, SpellActor* attacker, bool ranged) {

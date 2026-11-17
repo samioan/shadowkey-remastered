@@ -96,7 +96,8 @@ bool TriggerExecutable::WatchesEntity(int typeId, const std::string& entityName)
 }
 
 TriggerExecutable::FireResult TriggerExecutable::Fire(int mode, int typeId,
-                                                       const std::string& entityName) {
+                                                       const std::string& entityName,
+                                                       const TrapSaves* saves) {
     FireResult result;
     // The real function's very first test.
     if (!m_Active) return result;
@@ -118,7 +119,7 @@ TriggerExecutable::FireResult TriggerExecutable::Fire(int mode, int typeId,
     // --- the kill-count half: only on mode 0, only with SetLimit ---
     if ((m_Flags & kFlagLimit) && mode == kNotifyEntityKilled && listMatch()) {
         ++m_KillCount;
-        result.runCallback = m_Limit <= m_KillCount;
+        result.fired = m_Limit <= m_KillCount;
     }
 
     // --- the trap half: SetTrap, and mode 1 or 2 ---
@@ -130,26 +131,36 @@ TriggerExecutable::FireResult TriggerExecutable::Fire(int mode, int typeId,
         const bool matched = (typeId < 0 && entityName.empty()) ? nameMatch
                                                                  : (listMatch() || nameMatch);
         if (matched) {
-            // The saving throws go here in the real code -- see
-            // FireResult's comment for what they read and why neither is
-            // reproduced. Without them the damage always lands.
-            int lo = (std::min)(m_TrapDamageMin, m_TrapDamageMax);
-            int hi = (std::max)(m_TrapDamageMin, m_TrapDamageMax);
-            result.damage = hi > lo ? lo + std::rand() % (hi - lo + 1) : lo;
             result.trapFired = true;
-            result.runCallback = true;
-            // `if ((flags & kFlagOneShot) == 0) active = 1;` -- literally
-            // what the decompile says, i.e. a trap never deactivates
-            // itself either way. Left as-is rather than "corrected" to a
-            // one-shot: every trap trigger in the shipped corpus calls
-            // RemainActive() anyway (lothcav.s x3, broken1.s x1,
-            // crypt1.s x5), so no real zone exercises the other path.
+            // M140: the two saving throws, both against SetTrap's third
+            // argument (`+0x38`). See FireResult.
+            if (saves && saves->disarm && saves->disarm(m_TrapSaveId)) {
+                result.outcome = TrapOutcome::Disarmed;
+                result.fired = false;  // the disarm arm's explicit `bVar1 = false`
+            } else if (saves && saves->avoid && saves->avoid(m_TrapSaveId)) {
+                result.outcome = TrapOutcome::Avoided;
+            } else {
+                // FUN_100730c8(level, min, max): `rand % (max - min + 1) +
+                // min`. Kept order-safe for a script that wrote them the
+                // other way round.
+                int lo = (std::min)(m_TrapDamageMin, m_TrapDamageMax);
+                int hi = (std::max)(m_TrapDamageMin, m_TrapDamageMax);
+                result.damage = hi > lo ? lo + std::rand() % (hi - lo + 1) : lo;
+                result.outcome = TrapOutcome::Damaged;
+                result.fired = true;
+            }
+            // LAB_10090d60: `if ((flags & kFlagOneShot) == 0) active = 1;`
             if (!(m_Flags & kFlagOneShot)) m_Active = true;
         }
     }
 
-    // The callback only runs when the trigger actually has one.
-    if (!(m_Flags & kFlagCallback)) result.runCallback = false;
+    // The callback runs only on a fire, and only when there is one.
+    result.runCallback = result.fired && (m_Flags & kFlagCallback) != 0;
+    // The function's last test: a one-shot trigger that fired is spent.
+    // Every trap trigger in the corpus calls RemainActive(), so this bites
+    // only the kill-count triggers, which the engine retires after their
+    // limit just the same.
+    if (result.fired && (m_Flags & kFlagOneShot)) m_Active = false;
     return result;
 }
 
@@ -408,26 +419,41 @@ void ZoneScriptExecutable::NotifyKilled(int typeId) {
 }
 
 bool ZoneScriptExecutable::Notify(int mode, int typeId, const std::string& entityName,
-                                   skiExecutable* entity) {
-    bool anyFired = false;
+                                   skiExecutable* entity, bool* disarmed) {
+    if (disarmed) *disarmed = false;
+    // M140: the two rolls are the player's (FUN_1003e438 / FUN_10044e58).
+    TriggerExecutable::TrapSaves saves;
+    saves.disarm = [this](int id) { return m_Stack.player().CanDisarmTrap(id); };
+    saves.avoid = [this](int id) { return m_Stack.player().CanAvoidTrap(id); };
+    // The screen each outcome opens, by name through the menu manager, with
+    // the notifying entity as the opener -- `Trap*Back` re-runs its OnUse.
+    // A trap entity is never an opener (its vtable+0xb4 answers 0), which
+    // is the null this port passes for one.
+    auto openScreen = [&](const char* path) { m_Stack.ReopenMenu(path, entity); };
     for (auto& trigger : m_Triggers) {
-        TriggerExecutable::FireResult r = trigger->Fire(mode, typeId, entityName);
-        if (r.trapFired) {
-            anyFired = true;
-            if (r.damage > 0) m_Stack.player().ApplyDamage(r.damage);
-            if (trigger->showDamageMessage()) {
-                // The real code routes this through the on-screen message
-                // system with one of four strings (avoided / avoided-by-a-
-                // creature / hit / hit-a-creature). This port has no
-                // floating combat-message channel to put it on, so it goes
-                // where every other host-side combat trace already goes.
+        TriggerExecutable::FireResult r = trigger->Fire(mode, typeId, entityName, &saves);
+        switch (r.outcome) {
+            case TriggerExecutable::TrapOutcome::Disarmed:
+                if (disarmed) *disarmed = true;
+                openScreen("Menus\\TrapDisarmed");
+                break;
+            case TriggerExecutable::TrapOutcome::Avoided:
+                openScreen("Menus\\TrapAvoided");
+                break;
+            case TriggerExecutable::TrapOutcome::Damaged:
+                if (r.damage > 0) m_Stack.player().ApplyDamage(r.damage);
                 std::printf("Trap \"%s\" hit the player for %d\n", trigger->name().c_str(),
                             r.damage);
-            }
+                if (trigger->showDamageMessage()) openScreen("Menus\\TrapDamaged");
+                break;
+            case TriggerExecutable::TrapOutcome::None:
+                break;
         }
         if (r.runCallback) RunCallback(trigger->callback(), trigger.get(), entity);
+        // FUN_1007307c returns at the first trigger that fired.
+        if (r.fired) return true;
     }
-    return anyFired;
+    return false;
 }
 
 // ---- M44: entering a named region. See the header for FUN_1002ef44. ----

@@ -45,6 +45,14 @@ struct PathNode {
 constexpr size_t kMaxPaths = 0x30;
 constexpr size_t kMaxWaypointsPerPath = 0x20;
 
+// M100: FindPathNode's `monster->z += 300` after the surface snap -- and
+// (M140) the creature tick's chase teleport, which is the same move.
+constexpr int kPathNodeSurfaceLift = 300;
+// M140: the path the chase teleport (`FUN_10086a18`) looks up, a literal in
+// the binary (DAT_1008252c) rather than anything a script names. It exists
+// in crypt1, crypt2 and crypt3 only.
+constexpr const char* kBossTeleportPathName = "UmbraKeth";
+
 // Parses a whole `.pth` file. A truncated file keeps the paths read so far.
 std::vector<PathNode> ParsePathTable(const std::vector<uint8_t>& bytes);
 // Reads and parses `path`; empty for a missing file, as the engine (which
