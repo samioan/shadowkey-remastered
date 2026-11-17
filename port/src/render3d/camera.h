@@ -142,6 +142,28 @@ constexpr float kMaxCameraPitch = 0.78539816f;  // 0x2000 heading units, 45 degr
 // `CMap+0x1a` has never been found and this milestone did not find it
 // either -- but it is no longer calibrated by eye. Two independent
 // consequences of the shipped code both land on 0x200.
-constexpr float kEyeHeightOffset = 512.0f;
+//
+// M141 -- MEASURED, and the search is now closed. The eye is recomputed
+// every tick (FUN_1001c9c0: `+0x224 = vtable[0x238](self)`, clamped to the
+// ceiling minus 0x20), and for the player that virtual (FUN_1001f6f0) is
+// `feet + CMap+0x1a` for the standing stances -- the player's feet sitting
+// exactly on the floor, no 0x80 lift (FUN_10000c64's ground clamp). Nothing
+// in the image writes `CMap+0x18..+0x1d`: not a halfword, word or byte
+// store, not through an address, not a block copy, not code Ghidra failed
+// to disassemble. (The 2026-11-11 audit's two "dead loaders",
+// FUN_1000e6cc and FUN_1001baf8, fill 0x24-byte `.zcp` tile-type records,
+// not the engine.) So the value is settled by the device instead: an EKA2L1
+// screenshot of Gravel Trothgar against the port's, both reduced to 176x208,
+// puts the screen's centre row -- the eye, at level pitch -- at his mouth on
+// the device and at his belt here. Against model 23's own geometry (head
+// top 658, shoulders 565, belt ~400) both the head/shoulder and the
+// head/belt ratios put the device's eye 172..195 units above the port's
+// old 512, and the same measurement taken on the port's screenshot
+// recovered its own known eye to within ~30. 0x2b0.
+//
+// The body-size uses that rode on this constant (the player's collision
+// height, the floor-separation tolerances) stay 512 -- kPlayerBodyHeight.
+constexpr float kEyeHeightOffset = 688.0f;
+constexpr float kPlayerBodyHeight = 512.0f;
 
 }  // namespace sk

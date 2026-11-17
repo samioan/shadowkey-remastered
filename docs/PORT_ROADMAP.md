@@ -13677,3 +13677,48 @@ Windows, on the original data and by the original rules.
 other renderers, mod support -- and any bug report is still welcome
 (`user\shadowkey_port.log` says what the game did). None of it is needed for
 a full playthrough, so for now the port is done.
+
+## M141 -- the eye height, measured
+
+The last number the port could not read out of the binary. Settled.
+
+### What the code says
+
+The eye is recomputed every tick: FUN_1001c9c0 sets `+0x224 =
+vtable[0x238](self)` and clamps it to `ceiling - 0x20`. For the player that
+virtual is FUN_1001f6f0, `feet + CMap+0x1a` (`+0x18` / `+0x1c` for the other
+two stances), and the feet sit exactly on the floor -- FUN_10000c64's ground
+clamp lifts every actor 0x80 except the player. So the eye is one stored
+height above the floor, and **nothing in the image stores it**: no halfword,
+word or byte store, no store through an address, no packed or block copy,
+and none in bytes Ghidra left undisassembled (a raw scan of every ARM and
+Thumb encoding of a store to +0x18..+0x1c found 764 real instructions, none
+on that block, and 23 misaligned halves of ARM words).
+
+**Correction to the 2026-11-11 audit**: its two "dead loaders" of the block,
+`FUN_1000e6cc` and `FUN_1001baf8`, do not write the engine at all. They fill
+0x24-byte `.zcp` tile-type records -- the same `+2` / `+4` copies as
+`Bullseye_LoadZmpCells` -- and nothing references them anywhere in the
+image, not even as a data word.
+
+### What the device says
+
+An EKA2L1 screenshot of Gravel Trothgar in Azra against the port's, both
+cropped to the game screen and reduced to 176x208: at level pitch the centre
+row is the eye, and it crossed Gravel at his mouth on the device and at his
+belt in the port. Two distance-independent ratios against model 23's own
+geometry (head top 658, shoulders 565) put the device's eye 172..195 units
+above the port's 512; run on the port's own screenshot, the same measurement
+recovered its known eye to within ~30. **`kEyeHeightOffset` = 0x2b0 (688).**
+Checked the other way round in the running game: from Gravel's street, the
+background's horizontal edges now line up with the device's to one native
+pixel.
+
+The constant's body-size uses -- the player's collision height and the
+floor-separation tolerances -- keep 512 as `kPlayerBodyHeight`. The
+engine's eye clamp (`ceiling - 0x20`) was already ported; it now engages on
+a few hundred walkable tiles with under 720 units of headroom, most of them
+in the Earth Cave, as it does on the device.
+
+`melee_reach_smoke` now stands its test creatures at the 0x80 actor lift, as
+the game does, and checks both constants. Suite **118/118**.

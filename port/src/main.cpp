@@ -7919,7 +7919,7 @@ int main(int argc, char** argv) {
                 const int moveStep = sk_bindings::PlayerMoveStep(stack.player().speed(),
                                                                  stack.player().actorFatigue());
                 const int moveHeading = CameraHeadingUnits(gameCamera.yaw);
-                constexpr float kBlockHeightDelta = sk::kEyeHeightOffset * 2.0f;
+                constexpr float kBlockHeightDelta = sk::kPlayerBodyHeight * 2.0f;
                 // M55: real per-model collision boxes from
                 // `<zone>_models.txt` columns 2-4. A candidate must be solid
                 // with both extents non-zero and not `SetPassable(true)`
@@ -7966,7 +7966,7 @@ int main(int argc, char** argv) {
                 // M84 pinned it at 0x200. Nothing in the image writes it
                 // (its loader is dead code -- the 2026-11-11 audit), so it
                 // is still the derived value.
-                constexpr float kPlayerCollisionHeight = sk::kEyeHeightOffset;
+                constexpr float kPlayerCollisionHeight = sk::kPlayerBodyHeight;
                 const float feetZ = gameCamera.z - sk::kEyeHeightOffset;
                 const int startX = static_cast<int>(std::floor(gameCamera.x));
                 const int startY = static_cast<int>(std::floor(gameCamera.y));
@@ -8763,7 +8763,7 @@ int main(int argc, char** argv) {
                             if (other.script->entityPassable()) continue;
                             // Another floor of the same column: the port's
                             // own allowance, as for the player.
-                            if (std::fabs(other.z - m.z) > sk::kEyeHeightOffset * 2.0f) continue;
+                            if (std::fabs(other.z - m.z) > sk::kPlayerBodyHeight * 2.0f) continue;
                             add(other.x, other.y, other.modelArchiveIndex);
                         }
                         for (const sk::PlacedEntity& e : gameEntities) {
@@ -8771,7 +8771,7 @@ int main(int argc, char** argv) {
                         }
                         if (!stack.player().ghost() &&
                             std::fabs((gameCamera.z - sk::kEyeHeightOffset) - m.z) <=
-                                sk::kEyeHeightOffset * 2.0f) {
+                                sk::kPlayerBodyHeight * 2.0f) {
                             solids.push_back({static_cast<int>(std::floor(gameCamera.x)),
                                               static_cast<int>(std::floor(gameCamera.y)),
                                               sk_bindings::kPlayerRadiusUnits,

@@ -193,8 +193,12 @@ int main(int argc, char** argv) {
     Check(sk::MonsterCollisionHeight(22) == 0x200, "Skelos_Undriel's is 0x200");
     Check(sk::MonsterCollisionHeight(20) == 0x200, "Tanyin Aldwyr's is 0x200");
     Check(sk::MonsterCollisionHeight(18) == 0x100, "and a rat's is 0x100, so the table discriminates");
-    Check(static_cast<int>(sk::kEyeHeightOffset) == 0x200,
-          "so the player's own standing height, and its eye offset, is 0x200 == 512");
+    Check(static_cast<int>(sk::kPlayerBodyHeight) == 0x200,
+          "so the player's own standing (collision) height is 0x200 == 512");
+    // M141: the eye is not that height. `CMap+0x1a` has no writer in the
+    // image; measured on the device it is 0x2b0 (render3d/camera.h).
+    Check(static_cast<int>(sk::kEyeHeightOffset) == 0x2b0,
+          "and the eye, measured against the device, is 0x2b0 == 688");
 
     // ---------------------------------------------------------------
     std::printf("\n4. M84, second derivation: what the probe layout wants\n");
@@ -324,7 +328,10 @@ int main(int argc, char** argv) {
     sk::PlacedEntity subject;
     subject.x = camera.x + 400.0f;
     subject.y = camera.y;
-    subject.z = zone.playerStartZ;
+    // A creature stands 0x80 above the floor -- the actor ground clamp's
+    // lift (FUN_10000c64), and where 1479 of the 1541 placed creatures are
+    // authored -- while the player's feet are on it.
+    subject.z = zone.playerStartZ + 0x80;
     subject.modelArchiveIndex = 23;  // Bandit_Thug
     subject.objectId = 7;
     std::vector<sk::PlacedEntity> list{subject};
