@@ -24,18 +24,58 @@ Page settings that matter:
 
 ## The Elder Scrolls Travels: Shadowkey — Remastered
 
-**Shadowkey on PC, rebuilt from the original game's own code.**
+**Shadowkey on PC, rebuilt from the original game's own code. Version 1.0.0 —
+the complete game.**
 
 In 2004 Bethesda put an Elder Scrolls game on the Nokia N-Gage. It ran at
 176x208, at 25 frames a second, on a phone you held sideways against your
 ear. It was also a real Elder Scrolls game — a first-person RPG with
-spellcasting, a stat system, quests, shops and a world you could get lost
-in — and it has been effectively unplayable for twenty years unless you
-still own the hardware.
+spellcasting, a stat system, quests, guilds, shops and a world you could
+get lost in — and it has been effectively unplayable for twenty years unless
+you still own the hardware.
 
 This is that game, running natively on Windows: not an emulator, but a
 re-implementation written by reading the original ARM binary and rebuilding
-what it does, piece by piece.
+what it does, piece by piece, against the game's own scripts and data.
+
+### The whole game
+
+Every zone from Azra to the Crypt of Hearts, every quest, the Fighters',
+Mages' and Thieves' guilds and their trainers, the merchants, the arena, the
+traps and their saving throws, the spells and scrolls, the boss and the
+ending — with the original's rules, numbers and quirks, not approximations of
+them. Character creation is the original's, down to the on-screen letter
+grid for your name (or just type it). Saves use the N-Gage's own format.
+
+### What the PC adds
+
+All of it optional — every setting starts on *Original*, which is the game
+exactly as the N-Gage drew it.
+
+- **Widescreen without stretching** — 4:3, 16:10, 16:9, 21:9 or fill the
+  screen. The view widens at the same height, so you see more to each side;
+  the HUD keeps its original pixels and its original places.
+- **Sharper 3D** — the world drawn at up to 6x the original resolution, or
+  matched to your window, while menus and sprites keep their pixel art.
+- **Smooth frame rates** — 30 to 240 fps, V-Sync or unlimited. The game
+  still runs at its original 25 steps a second, so nothing plays
+  differently; the frames in between are interpolated.
+- **Direct3D renderer** — high resolutions on the graphics card, with an
+  optional texture-filtered look; the original software rasterizer is still
+  there.
+- **Mouse look** — turn and look up and down with the mouse, with the
+  sensitivity you like, on top of the N-Gage's own keyboard-mapped controls.
+- **Controller support** — any XInput pad, Xbox-style or others through
+  Steam Input.
+- **Rebindable controls** — the original's own Customize Controls screen.
+- **Fog** — thicker, thinner (which also draws further), or off.
+- **Two-player co-op** — the N-Gage's Bluetooth multiplayer, over your local
+  network: host, join by discovery or by address, and play the campaign
+  together.
+- **Borderless fullscreen or a window** — 2x, 3x or 4x, switched any time
+  with F11 or Alt+Enter.
+- **Five languages** — English, French, German, Spanish and Italian, from
+  the original's own string tables.
 
 ### What you need
 
@@ -57,14 +97,15 @@ lettering. Without it everything still works, just with stand-in letters.
 - **Portable.** No installer, no registry keys, nothing in AppData, no
   Visual C++ redistributable. Your game files are copied into `data\`, your
   saves and settings live in `user\`. Uninstalling is deleting the folder.
-- **Pick your window size** — 2x, 3x or 4x the original 176x208.
 - **It updates itself** from the GitHub releases, and asks first.
+- If anything goes wrong, `user\shadowkey_port.log` records what the game
+  did — attach it to a bug report.
 
-### This is a work in progress
+### 1.0.0
 
-It is playable, and it is not finished. Some things the original does are
-not implemented yet; the game logs them as it goes, so
-`user\shadowkey_port.log` is the right thing to attach to a bug report.
+This is a complete release: the game as the N-Gage shipped it, start to
+finish, plus the PC options above. More PC features are possible later, but
+nothing is missing for a full playthrough.
 
 Source, the full milestone-by-milestone record of how it was reverse
 engineered, and the issue tracker:

@@ -4,6 +4,8 @@ Shadowkey Remastered
 A PC port of The Elder Scrolls Travels: Shadowkey (N-Gage, 2004), rebuilt
 from the original game's own code.
 
+Version 1.0.0: the complete game, start to finish.
+
 
 WHAT YOU NEED
 -------------
@@ -88,9 +90,9 @@ the keys stand in for the number keys.
 DISPLAY SETTINGS
 ----------------
 
-Options (from the main menu or the in-game menu) has three rows under the
-volume sliders. All start on Original, which is the game exactly as the
-N-Gage drew it. Enter or Right steps a row forward, Left steps it back.
+Options (from the main menu or the in-game menu) has a Port Settings page.
+Every row starts on Original, which is the game exactly as the N-Gage drew
+it. Enter or Right steps a row forward, Left steps it back.
 
   Resolution     Original (176x208), Auto (match the window), or 2x to 6x.
                  Sharpens the 3D view; the HUD, menus and sprites keep their
@@ -111,8 +113,20 @@ N-Gage drew it. Enter or Right steps a row forward, Left steps it back.
                  pointer is hidden and held in the window until a menu, the
                  map or a conversation opens. Off leaves the mouse as just
                  the attack button.
+  Renderer       Original (the software rasterizer), Direct3D, or D3D
+                 Smooth (filtered textures). Direct3D does the high
+                 resolutions on the graphics card.
 
 They are kept in user\pc_settings.cfg.
+
+
+MULTIPLAYER
+-----------
+
+The N-Gage's two-player co-op over Bluetooth, carried over a local network.
+One player hosts from the Multiplayer menu; the other joins, finding the
+game on the network or typing the host's address. Each brings their own
+character, and both play through the host's campaign together.
 
 
 WHERE YOUR FILES GO

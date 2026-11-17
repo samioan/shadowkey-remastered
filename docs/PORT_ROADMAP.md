@@ -1,5 +1,9 @@
 # Port Roadmap
 
+> **v1.0.0 — complete.** M0 through M140 below take the port from an empty
+> window to the whole game. See [v1.0.0](#v100----the-complete-release) at
+> the end.
+
 Tracks `port/`, the actual PC port -- as opposed to [`ROADMAP.md`](ROADMAP.md),
 which tracks the reverse-engineering work that feeds it. Phase 2's decision
 there (behavioral RE, not byte-exact recompilation) applies here too: the
@@ -13475,3 +13479,201 @@ in stouttp and up in Earth Cave and the Twilight Temple, with and without.
   `SetAttackRange(12000)` (~47 tiles), up to 50 damage, and a ranged creature
   skips the reach test -- so they shoot from beyond the 25-step visible-tile
   range. Their arrows still stop at walls.
+
+## M140 -- the playtest bug list
+
+A playtest list of 19 items was checked against the decompile. Eight were
+port bugs and are fixed here; the rest are the original's behaviour or need
+more information (listed at the end).
+
+### A hidden entity is still usable
+
+`ShowEntity(false)` is a draw flag (`+0x60` bit 0, VFUN_100a2148) and nothing
+else: the entity stays in its tile list, and the use search (FUN_1001dd40)
+tests only `+0xd8` and the height window. The port skipped hidden entities,
+so Loth'Na's bone pile -- `lothna\loot_pilgrim.s`, which hides itself and then
+calls `SetUsable(true)` -- could not be looted, and the ghostly ring it holds
+was unobtainable. The search now skips removed entities only. Every shipped
+script that hides something it wants unusable says `SetUsable(false)` too.
+
+### A spell's level defaults to 1
+
+FUN_10047740, the Spell constructor, writes `+0x1d0 = 1`; the port had 0. Every
+creature spell whose script never calls `Item.SetLevel` (the Highway Mage's
+Ignite, Feeble and Blaze) cast at magnitude 0, and an IgniteFoe at 0 arms a
+zero-length burn: the periodic kind is set, the timer is 0, and the expiry
+only runs while the timer is positive -- so "-Health" stayed on the HUD for
+good. (The "-Health" text itself is the engine's: kind 8 is `"-" + "Health"`
+as one string at x=15, where a timed effect draws its sign apart at x=7.)
+
+### The music stops at every level load
+
+`GameEngine_InitLevel` opens with `FUN_100096b8(audio, 5)` and
+`FUN_100094ac(audio, 0)`. The port kept the previous track playing, which
+showed in Dragonfields: `drgnfld.s` calls `PlayAmbient(78, 100)` and slot 78 of
+`drgnfld_sounds.txt` is NULL.wav, so on the device the level is silent.
+
+### A Quit() in a screen's own Init closes it
+
+FUN_100779b8 parses a screen, raises the open flag and only then calls
+`Init` -- so `Quit(); OpenMenu(x)` ends on x, but a Quit() inside x's Init
+closes x. The port dropped any Quit followed by a change of screen, and the
+Dragonstar East arena (`pit_boss_battle.s`, whose Init is `Quit()` and the
+teleport into the pit) left an empty screen up. `MenuStack::OpenMenu` now
+cancels an earlier request before Init runs, and a request still standing at
+the end of the menu tick closes whatever is current.
+
+### Any screen a tick opens pauses the world
+
+The hand-off from gameplay to a screen was per call site, and the player's
+own hits never had one -- though a creature's `OnHit` runs inside every one of
+them. Umbra Keth's opens `cryptsh3\umbra_disappear` ("Umbra' Keth melts into
+the shadows to heal his wounds...") under 375 health; the port opened it and
+never showed it. One check at the bottom of the gameplay tick now covers
+melee, spells, arrows and blasts (and chef, Devron and Wulfbris).
+
+### The boss teleport goes to a path node
+
+The creature tick's SetCanTeleport arm calls `FUN_10086a18(self, "UmbraKeth")`
+-- the path name is a literal in the binary -- and lands on the waypoint
+nearest its target, 300 units above the surface, every tick the target is out
+of the chase radius. The port, written before `.pth` was decoded (M100),
+landed the creature beside the player instead.
+
+### Scrolls survive a save
+
+The Spell class saves `+0x1d4` -- the scroll flag -- through the Wearable save
+function (FUN_10047584). The port writes inventory children as Stackables and
+rebuilds them from their scripts, so a loaded scroll became the plain spell,
+unusable by a class without magic. The flag now travels in the child's
+script-variable list as `$scroll`, which older saves simply lack. The level
+(`+0x1d0`) is not in the real record and is not carried either.
+
+### Trap entities, and the trap trigger's saving throws
+
+Category 10 is its own class (FUN_1009037c), and the port drew all 39 trap
+placements (lothcav, broken1) as scenery without running their scripts. Its
+three natives are `wcscmp`'d by FUN_1008fd28 -- `SetTrapType`,
+`SetAttackRange` (default 0x9b), `SetActive` -- and its tick, FUN_1008ff14, is
+`simkin_bindings/trap_entity.h`:
+
+- every 0x40 units, an unsprung, re-armed trap with the player inside its
+  range (scaled-squared, ~199 units) rolls FUN_1003e438(player, 20) and, if
+  that fails, notifies the trigger list (mode 2); a firing trigger springs it.
+  The re-arm countdown restarts at `7 << 8` either way, and counts down one
+  frame's delta per 0x40 window -- slowly;
+- a sprung trap animates its own height on the same cadence: spikes (type 2)
+  rise for half a 1000-unit cycle and snap back, the masher (type 1, direction
+  -1, two steps a window, sound 0x3d each) falls and climbs back. The steam
+  vent (type 3) never steps and so never re-arms -- one hit per visit.
+
+The trigger's own fire (FUN_10090818) now has the two saving throws M38 left
+out, each with its screen: CanDisarmTrap(saveId) -> `Menus\TrapDisarmed` (and
+the trap entity is switched off); else CanAvoidTrap(saveId) ->
+`Menus\TrapAvoided`; else the damage, and `Menus\TrapDamaged` when
+`ShowDamageMessage(true)`. Only the damage counts as firing: it is what
+springs a trap, runs a callback and stops the list walk (FUN_1007307c returns
+at the first). A one-shot trigger that fires is spent. `lothcav.s` calls
+`ShowDamageMessage` on the masher twice and never on the steam vents, so a
+vent hits without a screen.
+
+`bug_triage_smoke` covers the spell level, the scroll round trip, the
+Quit/open order, both saving throws and their screens on the real lothcav.s,
+and the trap tick and natives on the real scripts. The use search, the music
+stop, the end-of-tick hand-off and the teleport are in the game loop.
+
+### Checked and left as shipped
+
+- **The spikes look untextured.** Their texture is ~66% colour key and the
+  spike faces map to the grate columns, not the shaft strip; the actor
+  rasterizer samples raw UVs with a wrap, as the port does.
+- **Raider's Nest patrols stand still.** The AI tick has no wander arm; "patrol
+  beasts" is the amulet's story text. **Its music is quiet**: `PlayAmbient(69,
+  12)`, as Dragonstar's 12.
+- **Training has a limit**: a guild trains while its counter is below the
+  player's level + 5, one class-ability rank a session.
+- **Small Crypt of Hearts ghosts**: 15 placements are authored at scale 128,
+  and the placement scale wins over the script's SetScale(256).
+- **The shop**: Sell All is commented out in `buysell.s`; an empty stock line
+  is skipped by the engine's lookup (FUN_10035ecc), so it reads as "Not Enough
+  Gold!"; and the room check is the player's own 100 carried objects.
+- **Not yet explained**: Geldwyn manor's overlapping textures (possibly float
+  vs the engine's 16-bit integer depth ties) and the store's scroll position.
+
+### The fortifying crystal never animates
+
+Reported as "plays its destroyed animation by itself". `fortifyingcrystal.s`
+sets idle, walk, swing and death all to clip 0 -- the shattering -- and calls
+`StopAnimating(true)`: `+0x302 = 0`, and every PlayAnimation in the creature
+tick and the attack (the death clip's too) is guarded by that byte. The port
+recorded it and advanced the frames anyway, so the crystal broke apart on a
+loop from its first AI tick -- which is also why it seemed missing.
+`AdvanceMonsterAnimation` now holds such a creature on frame 0.
+
+### The name screen is the original's
+
+`OpenEditText("CharName", "Alpha.txt", 30, 160, 50, 150)` (menu case 0x1f,
+FUN_1005e54c) is an on-screen keyboard, not a text field: one button per
+`Alpha.txt` line (label, typed character, width, height), laid out from
+(30, 67), 17px apart, wrapping at x 160 -- A-G / H-N / O-U / V-Z DEL -- and
+a "Done" (string 170) at (110, 135). The edit widget (FUN_1005eb94) draws the
+name recentred on x 80 at y 50 with a "_" blinking every 30 frames; the first
+edit after the screen is built clears the old name, DEL removes one, and a
+name is at most **six** characters. The port drew "NAME: ..._" and took any
+20 characters. The keyboard still types: letters go in as capitals and do not
+move the focus (W/A/S/D are the menu D-pad), Backspace is DEL, the arrow keys
+and the pad's D-pad walk the grid, and Enter presses the focused button --
+or Done, straight after typing.
+
+### Mouse look and the foreground
+
+Mouse look only catches the mouse while the game is the foreground window --
+and it works windowed (checked by injecting raw mouse motion, both into the
+window class alone and into the running game, windowed and after F11). What
+can leave it off is the launch: the launcher hid itself the moment the game
+started, before the game had a window, so the foreground went elsewhere and
+the game's window could open inactive until clicked. The launcher now grants
+the game the foreground (`AllowSetForegroundWindow`) and waits for its window
+before hiding; the game asks for the foreground when it shows its window.
+
+### Looking up and down: the extra tiles are sized from the view
+
+M139's fixed five-tile square around the camera is now as large as the view
+needs: the frustum's edge rays outside the fan are intersected with the
+highest ceiling and lowest floor within four tiles, and every tile in the
+resulting square (5 to 24) is added -- walls included, since what shows over
+a wall top lies beyond it. An offline sweep of Loth'Na (every fourth tile,
+eight headings, both look limits, at 21:9) compared each frame against one
+drawn with every tile within 16, so only pixels the culling lost counted.
+
+### The map's colours are the engine's
+
+Walls `0x868` (`0x863 + 5`, a grey-purple), floor `0xdb5`, steps `0xa85`,
+unexplored `0xca5` -- FUN_1002b430 writes them straight to the framebuffer,
+and the port's are the same words.
+
+## v1.0.0 -- the complete release
+
+M140 closed the last playtest list, and with it the port reaches what it set
+out to do: *The Elder Scrolls Travels: Shadowkey* played start to finish on
+Windows, on the original data and by the original rules.
+
+- **The game**: every zone and transition, every quest in the engine's
+  50-quest table, merchants, guilds and trainers, the arena, traps and their
+  saving throws, spells and scrolls, the creature AI, Umbra Keth and the
+  ending, the credits; character creation including the original name
+  screen; the original save format; the original five languages.
+- **The PC layer**: widescreen (4:3 to 21:9) without stretching, up to 6x
+  resolution, interpolated frame rates to 240 or unlimited, Direct3D 11,
+  fog density, mouse look, XInput controllers, rebindable keys, borderless
+  fullscreen or a window, and two-player co-op over a local network.
+- **The package**: a portable, self-updating download (Shadowkey.exe), built
+  and published by `.github/workflows/release.yml` from a version tag; 1.x
+  tags publish as full releases.
+- **The tests**: 118 smoke tests, run against the real game data locally and
+  without it in CI.
+
+**What could still come.** More PC features are possible -- other platforms,
+other renderers, mod support -- and any bug report is still welcome
+(`user\shadowkey_port.log` says what the game did). None of it is needed for
+a full playthrough, so for now the port is done.

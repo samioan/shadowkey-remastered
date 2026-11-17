@@ -1,5 +1,10 @@
 # Roadmap
 
+> **Status: v1.0.0 — complete.** The reverse engineering below fed a PC port
+> that plays the whole game (see [`PORT_ROADMAP.md`](PORT_ROADMAP.md), M0
+> through M140). The phases here are done as far as the port needs them;
+> any further work is optional.
+
 ## Phase 0 — setup (done)
 
 - [x] Identify the target: `6r51.app`, a Symbian EKA1 E32Image ARM binary

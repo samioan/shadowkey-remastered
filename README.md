@@ -4,6 +4,11 @@ A decompilation project for **The Elder Scrolls Travels: Shadowkey**
 (Vir2L Studios, 2004), targeting the retail Nokia N-Gage release — and a
 playable PC port built from what it found.
 
+> **Version 1.0.0 — complete.** The whole game is playable from the opening
+> in Azra to the end of the Crypt of Hearts, on its original data and its
+> original rules, with the PC extras below. More is possible and may come
+> later, but this is a finished release.
+
 ## Playing it
 
 Grab the latest zip from [Releases](../../releases), unzip it anywhere, and
@@ -50,8 +55,8 @@ in menus), Y jumps, RT / LT attack with the right / left hand, RB / LB cycle
 the hands, X is the character manager, Back is the map. The buttons follow
 whatever you set in Customize Controls.
 
-**Display settings** — three rows under the volume sliders in **Options**,
-reached from both the main menu and the in-game menu. All default to *Original*, which is the
+**Display settings** — the **Port Settings** page in **Options**, reached
+from both the main menu and the in-game menu. All default to *Original*, which is the
 game exactly as the N-Gage drew it:
 
 - **Resolution** — the 3D view drawn at 2× to 6× the original 176×208, or
@@ -70,6 +75,12 @@ game exactly as the N-Gage drew it:
   default: the mouse turns and tilts the view during play, with the pointer
   hidden and held in the window until a menu, the map or a conversation
   opens.
+- **Renderer** — the original software rasterizer, *Direct3D*, or
+  *D3D Smooth* (filtered textures) for high resolutions on the graphics card.
+
+**Multiplayer** — the N-Gage's two-player Bluetooth co-op, carried over a
+local network: one player hosts, the other finds the game or types its
+address, and both play through the campaign together.
 
 Building it yourself: `port\build.bat` for the everyday build (then
 `port\run_tests.ps1` from the repository root), or `port\build_dist.bat` for
@@ -116,28 +127,30 @@ Everything else in the image is either:
 
 ## Status
 
-Phase 1 (static analysis) is done: the E32Image format is fully parsed,
-the code section imports cleanly into Ghidra with clean auto-analysis,
-every one of the 415 import call sites is resolved to its `(dll,
-ordinal)` — 319 of those to real function names — and the compiler
-toolchain is identified (GCC for the main codebase, one small
-statically-linked ARM RVCT/ADS-built library). All of it is live in the
-Ghidra project's decompiler output, not just written down in docs.
+**v1.0.0 — complete.** The port runs the whole game: every zone, every
+quest, the shops, guilds and trainers, the traps and their saving throws,
+the boss fight and the ending, character creation through to the credits,
+saving and loading in the original save format, and two-player co-op. It
+was built over 140 milestones, each recorded in
+[`docs/PORT_ROADMAP.md`](docs/PORT_ROADMAP.md) with the decompiled function
+it came from; [`docs/ROADMAP.md`](docs/ROADMAP.md) tracks the
+reverse-engineering behind it.
 
-Phase 2 is decided: **behavioral reverse-engineering**, not byte-exact
-recompilation — the project's actual goal is a PC port, and the compiler
-finding (GCC main codebase + one vendored ARM RVCT/ADS library) makes
-byte-exact matching meaningfully harder than a single-toolchain target
-for no benefit that goal needs. See
-[`docs/ROADMAP.md`](docs/ROADMAP.md#phase-2--decompilation-strategy-decided--behavioral-re-not-byte-exact)
-for the full rationale.
+How it got here:
 
-Phase 3 has its first concrete finding: the main game loop is a
-`CPeriodic` OS timer with a **hardcoded 40ms (25Hz) interval**, driving a
-single tick callback that does both simulation update and frame present
-together. This directly explains the porting discussion's "low fps"
-symptom — likely a fixed-tick-rate design decision rather than a raw
-performance ceiling, meaning the port fix is probably decoupling
-update-rate from present-rate. See
-[`docs/RENDER_LOOP.md`](docs/RENDER_LOOP.md) for the full call chain and
-evidence.
+- **Phase 1 — static analysis.** The E32Image format fully parsed, the code
+  section in Ghidra with clean auto-analysis, all 415 import call sites
+  resolved (319 to real names), and the toolchain identified (GCC, plus one
+  vendored ARM RVCT/ADS library).
+- **Phase 2 — decided: behavioral reverse-engineering**, not byte-exact
+  recompilation. The goal is a PC port, and matching two period compilers
+  byte for byte buys that goal nothing. See
+  [`docs/ROADMAP.md`](docs/ROADMAP.md#phase-2--decompilation-strategy-decided--behavioral-re-not-byte-exact).
+- **Phase 3 — the port.** Starting from the 40ms `CPeriodic` game loop
+  ([`docs/RENDER_LOOP.md`](docs/RENDER_LOOP.md)), every system the game uses
+  was decompiled and rebuilt as ordinary C++ around the real SimKin scripts,
+  checked against the shipped data by a suite of 118 tests.
+
+**What could still come.** The game is finished as the N-Gage shipped it;
+further PC extras (more renderers, platforms beyond Windows, mod support)
+are possible, but nothing is required for a full playthrough.
