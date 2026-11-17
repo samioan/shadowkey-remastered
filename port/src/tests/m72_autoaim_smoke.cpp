@@ -249,11 +249,14 @@ int main(int argc, char** argv) {
         // assist is engaged, cleared only on a tick where the player moved
         // with no target, and the pitch decays by `v -= v * 20/256` only
         // while it is clear.
-        auto settle = [](float startPitch, bool moving, int ticks) {
+        // M142: "no target" is `engine+0x624 == 0`, and that field survives
+        // gate 5 (crosshair already on the creature) and the 45-degree
+        // window rejection -- so walking around a held target holds.
+        auto settle = [](float startPitch, bool moving, int ticks, bool targetKept = false) {
             float p = startPitch;
             bool pitchHeld = true;  // as if the assist had just let go
             for (int i = 0; i < ticks; ++i) {
-                if (moving) pitchHeld = false;
+                if (moving && !targetKept) pitchHeld = false;
                 if (!pitchHeld) p -= p * (20.0f / 256.0f);
             }
             return p;
@@ -262,6 +265,9 @@ int main(int argc, char** argv) {
               "moving with no target levels the camera off");
         Check(settle(0.7f, /*moving=*/false, 100) == 0.7f,
               "standing still holds the pan exactly where the assist left it");
+        Check(settle(0.7f, /*moving=*/true, 100, /*targetKept=*/true) == 0.7f,
+              "moving with the target kept (on the crosshair, or out of the window) "
+              "holds the pan too -- no decay-and-reaim bounce");
     }
 
     std::printf("\n%d checks, %d failures\n", gChecks, gFailures);

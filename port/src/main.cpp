@@ -4445,6 +4445,13 @@ int main(int argc, char** argv) {
     // decay toward the horizon. So a pan held after a fight stays held
     // until the player walks.
     bool gamePitchHeld = false;
+    // M142: the real `engine+0x624`, the auto-aim target, kept across
+    // frames as the engine keeps it (objectId; 0 = none). Only the forward
+    // ray (gate 6) and its follow-up gates rewrite it -- gate 5's "already
+    // on the crosshair" bail and the 45-degree window rejection both leave
+    // it as it was -- and the actor tick releases the pitch hold only while
+    // it is empty. See the auto-aim block.
+    int gameAimTargetId = 0;
     // M125: mouse look. `gameMouseLookWanted` is set by every tick that
     // reaches the free-movement branch -- the one place the turn and look
     // keys are read -- and the loop captures the mouse only while it is.
@@ -6576,6 +6583,7 @@ int main(int argc, char** argv) {
             gameLoadedZoneName.clear();
             gameZoneScript.reset();
             gameMonsters.clear();
+            gameAimTargetId = 0;
             gameDoors.clear();
             gamePickups.clear();
             gameTraps.clear();
@@ -6881,6 +6889,7 @@ int main(int argc, char** argv) {
                 // unchanged.
                 gameEntities.clear();
                 gameMonsters.clear();
+                gameAimTargetId = 0;
                 gameDoors.clear();
                 gameTraps.clear();
                 gameTrapCandidates.clear();
@@ -9793,6 +9802,28 @@ int main(int argc, char** argv) {
                                          kAutoAimMaxTargetHeight) {
                         aimTarget = nullptr;
                     }
+                    // M142: `engine+0x624` is written only on this path.
+                    // When gate 5 bailed (the crosshair is already on a
+                    // live creature) the engine skips the search and keeps
+                    // last frame's target, so the hold below survives the
+                    // moment the pan lands on it. The port used to drop it
+                    // there, which let the pitch decay off the creature,
+                    // re-aim, land, decay... -- the bounce while circling.
+                    if (!crosshairOnCreature) {
+                        gameAimTargetId = aimTarget ? aimTarget->objectId : 0;
+                    }
+                    // The engine also clears it when that creature dies or
+                    // leaves the world (0x10084xxx / 0x1011xxxx callers).
+                    if (gameAimTargetId != 0) {
+                        bool live = false;
+                        for (const MonsterInstance& m : gameMonsters) {
+                            if (m.objectId == gameAimTargetId) {
+                                live = m.script->alive() && !m.script->outOfWorld();
+                                break;
+                            }
+                        }
+                        if (!live) gameAimTargetId = 0;
+                    }
 
                     bool engaged = false;
                     if (aimTarget) {
@@ -9818,9 +9849,14 @@ int main(int argc, char** argv) {
 
                     if (engaged) {
                         gamePitchHeld = true;
-                    } else if (gameCamera.x != preMoveCamX || gameCamera.y != preMoveCamY) {
-                        // Moving with no target: release the hold, then let
-                        // the pitch bleed back to level.
+                    } else if ((gameCamera.x != preMoveCamX || gameCamera.y != preMoveCamY) &&
+                               gameAimTargetId == 0) {
+                        // Moving with no target -- FUN_10000c64's
+                        // `velocity != 0 && engine+0x624 == 0` -- releases
+                        // the hold, then the pitch bleeds back to level. A
+                        // target that is merely outside the 45-degree
+                        // window (nose-to-nose inside one tile) or already
+                        // under the crosshair still holds it.
                         gamePitchHeld = false;
                     }
                     if (!gamePitchHeld) {

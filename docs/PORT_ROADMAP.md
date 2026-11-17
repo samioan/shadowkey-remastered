@@ -13722,3 +13722,24 @@ in the Earth Cave, as it does on the device.
 
 `melee_reach_smoke` now stands its test creatures at the 0x80 actor lift, as
 the game does, and checks both constants. Suite **118/118**.
+
+## M142 -- the aim-assist target is kept, as the engine keeps it
+
+Reported after M141: around a small creature the camera bounced and snapped.
+The auto-aim block (0x10017b7c..0x10017e20) writes its target to
+`engine+0x624` only on the forward-ray path. Gate 5's bail (a live creature
+already under the centre pixel) skips that path and leaves last frame's
+target in place, and the 45-degree window rejection clears only
+`player+0xc3`, not the target. The actor tick (FUN_10000c64) releases the
+pitch hold only when the player moves **and** `engine+0x624 == 0`.
+
+The port treated both cases as "no target", so whenever it moved it let
+go. Once the pan landed on the creature, the pitch decayed off it, the
+assist aimed at it again, landed, and let go again. M141's taller eye made
+it worse: a rat one tile away now needs 59 degrees, outside the window,
+where 512 gave exactly 45.
+
+`gameAimTargetId` now stands in for `engine+0x624`. It is written only where
+the engine writes it, and it is cleared when its creature dies or leaves the
+world (the engine's own clears) and on level load. `autoaim_smoke` checks
+that a kept target holds the pan while moving. Suite **118/118**.
