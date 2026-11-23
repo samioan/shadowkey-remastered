@@ -13743,3 +13743,21 @@ where 512 gave exactly 45.
 the engine writes it, and it is cleared when its creature dies or leaves the
 world (the engine's own clears) and on level load. `autoaim_smoke` checks
 that a kept target holds the pan while moving. Suite **118/118**.
+
+## M143 -- the multiplayer avatar's body, by sex
+
+Reported after M142: a male character showed up as female to the other
+player. Tag 0x22's receiver (FUN_100395a4) takes the avatar's model straight
+from the engine's model cache, `engine+0x6b38[index]`: `+0x6b8c` is slot
+**21**, the female body, for sex 0, and `+0x6b90` is slot **22**, the male
+body, otherwise. Sex is `SetSex`'s value, and the male portrait sets 1. Tag
+0x01 creates the avatar on 22 before tag 0x22 arrives. The race is only the
+skin on that body (`raceSkin[race] + (sex ? 11 : 8)`, unchanged), which is
+how two models give the 16 race/sex looks UESP's multiplayer gallery shows.
+
+The port picked type 90's model (20, Tanyin's) plus 2 when sex was 0, which
+put a male character on a female NPC body and a female one on the male body.
+It now uses 21 / 22, and the avatar starts as sex 1 (model 22) as the
+original's does. The receiver also sets the hit noise `+0x2b4` (0x5b female,
+5 male). The port's avatar plays no hit sound, so that one is recorded in
+MULTIPLAYER_PROTOCOL.md only. Suite **118/118**.

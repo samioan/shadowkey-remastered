@@ -5332,7 +5332,8 @@ int main(int argc, char** argv) {
         float x = 0, y = 0, z = 0;
         int vx = 0, vy = 0, vz = 0;  // engine units: position moves by v * delta >> 8
         int heading = 0;             // engine heading, 0x10000 to the turn
-        int race = 0, sex = 0, classId = 0;
+        int race = 0, classId = 0;
+        int sex = 1;                 // model 22 until tag 0x22, as tag 0x01 creates it
         std::string name;
         int weapon = 0;
         int clip = 8;                // 5 moving, 8 still, 1/2 attacking, 6 dead
@@ -6081,11 +6082,13 @@ int main(int argc, char** argv) {
     auto mpAppendAvatar = [&](std::vector<sk::PlacedEntity>& frame) {
         if (!mpSession.inGame() || !mpAvatar.present) return;
         static const int kRaceSkin[8] = {3, 2, 7, 5, 4, 1, 0, 6};
-        // entities.txt 90 is the type the engine creates for an avatar; its
-        // model is the female body, and the male one is two rows on.
-        const sk::EntityTypeDescriptor* desc = entityTypes.Lookup(90);
-        if (!desc) return;
-        const int modelIndex = desc->modelArchiveIndex + (mpAvatar.sex == 0 ? 2 : 0);
+        // FUN_100395a4 sets the body straight from the engine's model cache
+        // (engine+0x6b38[index]): +0x6b8c = model 21 (the female body) for
+        // sex 0, +0x6b90 = model 22 (the male body) otherwise -- sex is
+        // SetSex's value, 1 for the male portrait. Tag 0x01 creates the
+        // avatar on model 22 before tag 0x22 says otherwise. The race is the
+        // skin on that body, so all 16 race/sex looks come from two models.
+        const int modelIndex = mpAvatar.sex != 0 ? 22 : 21;
         const sk::Model* model = modelArchive.GetModel(modelIndex);
         if (!model) return;
         sk::PlacedEntity pe;
